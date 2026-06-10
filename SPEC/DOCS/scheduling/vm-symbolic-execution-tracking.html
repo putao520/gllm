@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="vm-symbolic-execution-tracking" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"vm-symbolic-execution-tracking", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>半VM 编译时符号执行跟踪系统 — 维度增强 SPEC</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>vm-symbolic-execution-tracking</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-半vm-编译时符号执行跟踪系统-维度增强-spec" data-section="null">
+      <h2>半VM 编译时符号执行跟踪系统 — 维度增强 SPEC</h2>
+      <p>&gt; <strong>SSOT</strong>: 半虚拟化 REGISTER-VM 的编译时符号执行能力完整规格。</p>
+      <p>&gt; <strong>原则</strong>: 每个 BUG 都暴露一个跟踪维度缺失。补齐维度 = 系统性消灭整类 BUG。</p>
+      <p>&gt; <strong>关联</strong>: <code>vm-state-tracking.md</code> (VmState ABI 跟踪), <code>instr.rs</code> (VmInstr 定义), <code>reg_alloc.rs</code> (寄存器分配)</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>0. 现状：已实现的跟踪维度</h3>
+      <strong>能捕获的 BUG</strong>: 寄存器冲突复用、spill 写前读、VReg 未声明、ABI 偏移错误。
+      <strong>不能捕获的 BUG</strong>: SIGSEGV(指针无效)、类型混淆(标量当指针)、宽度不一致、内存越界、scratch 冲突。
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>实现位置</td>
+        </tr>
+        <tr>
+          <td>跟踪内容</td>
+        </tr>
+        <tr>
+          <td>D0a: 寄存器活跃性</td>
+        </tr>
+        <tr>
+          <td>reg_alloc.rs</td>
+          <td> compute_intervals</td>
+        </tr>
+        <tr>
+          <td>VRegId → (def_point, last_use) 活跃区间</td>
+        </tr>
+        <tr>
+          <td>D0b: 寄存器干涉</td>
+        </tr>
+        <tr>
+          <td>reg_alloc.rs</td>
+          <td> InterferenceGraph</td>
+        </tr>
+        <tr>
+          <td>同类物理寄存器活跃区间重叠检测</td>
+        </tr>
+        <tr>
+          <td>D0c: 循环变量延展</td>
+        </tr>
+        <tr>
+          <td>reg_alloc.rs</td>
+          <td> Pass 2/3</td>
+        </tr>
+        <tr>
+          <td>Counter/ByteOffset 活跃到 LoopEnd + loop-invariant 检测</td>
+        </tr>
+        <tr>
+          <td>D0d: Spill 写前读</td>
+        </tr>
+        <tr>
+          <td>reg_alloc.rs</td>
+          <td> validate_spill_safety</td>
+        </tr>
+        <tr>
+          <td>spilled VReg 首写位置 &lt; 首读位置</td>
+        </tr>
+        <tr>
+          <td>D0e: VReg 声明序</td>
+        </tr>
+        <tr>
+          <td>instr.rs</td>
+          <td> validate_declares_before_uses</td>
+        </tr>
+        <tr>
+          <td>DeclareVReg 在引用之前</td>
+        </tr>
+        <tr>
+          <td>D0f: ABI 参数位置</td>
+        </tr>
+        <tr>
+          <td>vm_state.rs</td>
+          <td> VmState</td>
+        </tr>
+        <tr>
+          <td>参数名 → ArgLocation(Register/Stack) 映射</td>
+        </tr>
+        <tr>
+          <td>D0g: 栈帧布局</td>
+        </tr>
+        <tr>
+          <td>stack_frame.rs</td>
+          <td> StackFrame</td>
+        </tr>
+        <tr>
+          <td>callee_save + spill + scratchpad 总大小</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 缺失维度清单</h3>
+    </section>
+    <section id="s1" data-section="1">
+      <h4>D1: 值溯源 (Value Provenance Tracking)</h4>
+      <strong>问题</strong>: 不知道一个 VReg 在运行时到底"是什么"。VRegKind(Ptr/Vec/Scalar) 只声明了寄存器类型，没有跟踪值的来源和传播路径。
+      <strong>CPU 需要知道</strong>: 每条指令执行后，每个 GPR 里存的是什么值——是指针(哪个 buffer 的基址?)、偏移量(字节还是元素?)、计数器值、还是立即数?
+      <strong>运行时等价</strong>: CPU 硬件通过地址翻译 (CR3 → page table → physical frame) 验证每个内存访问的合法性。半VM 应该在编译时做等价验证。
+      <strong>追踪内容</strong>:
+      <p>```</p>
+      <p>ValueProvenance {</p>
+      <p>    origin: ProvenanceRoot,        // 值的最初来源</p>
+      <p>    transforms: Vec<valuetransform>, // 经过的一系列变换</valuetransform></p>
+      <p>    current_domain: ValueDomain,    // 当前的值域</p>
+      <p>}</p>
+      <p>ProvenanceRoot:</p>
+      <li>AbiLoad { name: "weight_blob_ptr" }     // 从 ABI 参数加载</li>
+      <li>StackLoad { offset: 24 }                 // 从栈参数加载</li>
+      <li>ConstImm { value: 0x1800 }              // 立即数加载</li>
+      <li>LoopCounter { loop_id: 0 }              // 循环计数器</li>
+      <li>LoopByteOffset { loop_id: 0 }           // 循环字节偏移</li>
+      <li>Computed { desc: "lea rax, [rbx + rcx]" } // 运行时计算结果</li>
+      <p>ValueTransform:</p>
+      <li>AddConst { bytes: 144 }         // 加了常量偏移</li>
+      <li>AddVReg { vreg: VRegId }        // 加了另一个 VReg</li>
+      <li>LoadFromMemory                  // 从内存加载了新值 (指针解引用)</li>
+      <li>IntToFloat                      // 整数转浮点</li>
+      <li>FloatToInt                      // 浮点转整数</li>
+      <li>Broadcast                       // 标量广播到向量</li>
+      <li>ExtractLane0                    // 提取向量 lane 0</li>
+      <p>ValueDomain:</p>
+      <li>Ptr { target: BufferTarget }    // 指向已知 buffer 的指针</li>
+      <li>ByteOffset { relative_to: VRegId } // 相对于某指针的字节偏移</li>
+      <li>ElemOffset { stride: usize }     // 元素偏移 (×stride = 字节偏移)</li>
+      <li>ScalarFloat                      // f32 标量值</li>
+      <li>ScalarInt                        // 整数值</li>
+      <li>CounterValue                     // 循环计数器值</li>
+      <li>VecData { lanes: usize }         // SIMD 向量数据</li>
+      <li>Unknown                          // 无法推导</li>
+      <p>BufferTarget:</p>
+      <li>InputIds</li>
+      <li>WeightBlob</li>
+      <li>Scratchpad</li>
+      <li>OutputBuffer</li>
+      <li>KVCache</li>
+      <li>Telemetry</li>
+      <li>HookContext</li>
+      <li>StackLocal { offset: i32 }       // 栈上临时变量</li>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li><code>fault_addr=0x8</code> — 用偏移量(0x8)当指针 → Ptr domain 不匹配</li>
+      <li>指针 + 偏移搞反 (base=offset, offset=ptr) → ByteOffset 被用作 VecLoad base</li>
+      <li>悬空指针 (已 ReleaseVReg 的指针被引用) → ProvenanceRoot 指向已释放 VReg</li>
+      <li>权重指针退化 (SIGSEGV 中 weight_ptr = input_ptr 副本) → 两个 VReg 有相同 ProvenanceRoot 但语义不同</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h4>D2: 类型一致性 (Type Consistency Checking)</h4>
+      <strong>问题</strong>: VmInstr 的操作数只通过 VRegId 引用，不检查 VRegKind 是否匹配指令语义。VecLoad 的 base 可以是 Vec 类型(应该是 Ptr)，Fma 的 dst 可以是 GPR(应该是 Vec)。
+      <strong>CPU 需要知道</strong>: 每条指令的操作数类型约束。<code>vmovups ymm, [ptr]</code> 要求 ymm 是向量寄存器、ptr 是整数/指针寄存器。
+      <strong>追踪内容</strong>:
+      <p>```</p>
+      <p>每条 VmInstr 定义操作数类型约束:</p>
+      <p>  VecLoad { dst: Vec, base: Ptr, offset: _, width: _ }</p>
+      <p>  VecStore { base: Ptr, offset: _, src: Vec, width: _ }</p>
+      <p>  LoadPtr { dst: Ptr, src: PtrExpr }</p>
+      <p>  Broadcast { dst: Vec, src: ScalarExpr, width: _ }</p>
+      <p>  Fma { dst: Vec, acc: Vec, a: Vec, b: Vec }</p>
+      <p>  HReduce { dst: Vec, src: Vec, op: _ }</p>
+      <p>  Accumulate { acc: Vec, src: Vec }</p>
+      <p>  LoopBegin { counter: Counter, byte_offset: ByteOffset, bound: _, step: _ }</p>
+      <p>  Argmax { dst: Scalar, logits_ptr: Ptr, vocab_bytes: _, width: _ }</p>
+      <p>  StoreToken { token_id: Scalar, output_buf: Ptr, counter: Counter, input_ids_ptr: Ptr, prompt_len_bytes: Scalar }</p>
+      <p>  AddPtr { dst: Ptr, base: Ptr, offset: _ }</p>
+      <p>  IntMulStride { dst: Ptr, src: Scalar, stride: _ }</p>
+      <p>  ScalarToIndex { dst: Ptr, src: Scalar, stride: _ }</p>
+      <p>  ScalarLoad { dst: Scalar, base: Ptr, offset: _ }</p>
+      <p>  ScalarStore { base: Ptr, src: Scalar, offset: _ }</p>
+      <p>```</p>
+      <strong>验证规则</strong>:
+      <p>1. 操作数 VRegId 的 VRegKind 必须匹配约束</p>
+      <p>2. VRegKind::Ptr ≈ VRegKind::Scalar ≈ VRegKind::Counter ≈ VRegKind::ByteOffset (都是 GPR 类)</p>
+      <p>3. 宽约束: Ptr/Scalar/Counter/ByteOffset 可以互换(都是 GPR)，但需要 WARNING</p>
+      <p>4. 窄约束: Vec 和 GPR 类绝对不能互换 → 编译错误</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>Vec 被当作 base 指针用于 VecLoad → 类型不匹配</li>
+      <li>Ptr 被当作 Fma 输入 → 类型不匹配</li>
+      <li>Counter 被当作 VecStore base → 可能的意图错误</li>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>D3: 宽度一致性 (Width Consistency Checking)</h4>
+      <strong>问题</strong>: VmInstr 携带 SimdWidth，但不验证 dst/src 的 VReg width 是否一致。Fma { dst=W256, a=W256, b=W128 } 会生成错误的 vmulps ymm, ymm, xmm 指令。
+      <strong>CPU 需要知道</strong>: SIMD 指令的操作数宽度必须匹配。<code>vaddps ymm0, ymm1, ymm2</code> 三个操作数都是 256-bit。
+      <strong>验证规则</strong>:
+      <p>1. 二元 VecBinOp: dst.width == a.width == b.width</p>
+      <p>2. Fma: dst.width == acc.width == a.width == b.width</p>
+      <p>3. Broadcast: dst.width == 参数 width</p>
+      <p>4. VecLoad: dst.width == 参数 width</p>
+      <p>5. HReduce: dst.width == src.width (归约结果仍以同宽度广播)</p>
+      <p>6. Accumulate: acc.width == src.width</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>AVX-512 zmm 和 AVX2 ymm 混用在同一指令 → SIGILL 或数据截断</li>
+      <li>Scalar width 用于 VecBinOp → vmovss 用于需要 ymm 的操作</li>
+    </section>
+    <section id="s4" data-section="4">
+      <h4>D4: 内存访问安全 (Memory Access Validation)</h4>
+      <strong>问题</strong>: VecLoad/VecStore 的 <code>base + offset</code> 不验证是否在已知 buffer 范围内。offset 可以是任意 OffsetExpr，包括运行时值，但编译时仍可推导上界。
+      <strong>CPU 需要知道</strong>: 每个内存访问的目标地址是否在已分配的 buffer 内。硬件通过 page fault 检测越界，半VM 应在编译时静态检测。
+      <strong>追踪内容</strong>:
+      <p>```</p>
+      <p>BufferDescriptor {</p>
+      <p>    name: String,              // "scratchpad", "weight_blob", ...</p>
+      <p>    base_vreg: VRegId,         // 基址寄存器</p>
+      <p>    size_bytes: usize,         // buffer 总大小</p>
+      <p>    element_size: usize,       // 元素大小 (f32=4, bf16=2)</p>
+      <p>    layout: BufferLayout,      // 行主序/列主序/分块</p>
+      <p>}</p>
+      <p>每次 VecLoad/VecStore:</p>
+      <p>  1. 解析 base VReg → 找到关联的 BufferDescriptor</p>
+      <p>  2. 估算 offset 上界 (OffsetExpr::eval_upper_bound)</p>
+      <p>  3. 验证: offset_upper_bound + access_size &lt;= buffer_size</p>
+      <p>  4. 对齐验证: offset % alignment == 0 (vmovups 放松，但 AMX/Tensor Core 有严格对齐)</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>GEMM 输出写入超出 scratchpad 大小 → 段错误</li>
+      <li>RoPE 越界访问 (seq_len &gt; max_seq_len) → 覆盖相邻 buffer</li>
+      <li>权重访问超出 weight_blob 范围 → 读到垃圾数据</li>
+    </section>
+    <section id="s5" data-section="5">
+      <h4>D5: Scratch 寄存器冲突检测 (Scratch Conflict Detection)</h4>
+      <strong>问题</strong>: ISA Lower 使用 scratch_gprs[0..2] (rax, r10, r11) 作为临时寄存器，但多个 resolve_gpr_read 在同一 VmInstr 内可能争抢同一 scratch slot。当前通过 slot 参数区分(0/1/2)，但不验证 slot 分配的正确性。
+      <strong>CPU 需要知道</strong>: 在一条指令的 micro-op 序列中，临时寄存器不能被覆盖直到使用完毕。
+      <strong>验证规则</strong>:
+      <p>```</p>
+      <p>对每条 VmInstr，跟踪 scratch 寄存器使用:</p>
+      <p>VecLoad { dst, base, offset, width }:</p>
+      <p>  slot 2 = base (resolve_gpr_read)</p>
+      <p>  slot 0/1 = eval_offset_to_rax (内部 s0/s1)</p>
+      <p>  slot 2 = base (加到 rax 后不再需要)</p>
+      <p>  → 约束: slot 2 和 slot 0/1 不冲突 ✓</p>
+      <p>Fma { dst, acc, a, b } (全 spilled):</p>
+      <p>  slot 0 = a load</p>
+      <p>  slot 1 = b load</p>
+      <p>  slot 2 = dst (acc 先 load, 写回 dst)</p>
+      <p>  → 约束: 三个 slot 互不冲突 ✓</p>
+      <p>自定义验证: 对于任意 VmInstr，跟踪 scratch slot 分配,</p>
+      <p>  如果同一 slot 被分配两次且中间没有 commit → 报错</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>resolve_gpr_read slot 冲突导致 base 指针被覆盖 → VecLoad 基址错误 → SIGSEGV</li>
+      <li>eval_offset_to_rax 内部递归覆盖 scratch[1] → 偏移量计算错误</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h4>D6: Spill 槽重叠检测 (Spill Overlap Detection)</h4>
+      <strong>问题</strong>: RegAllocator 分配 spill slots 时按顺序排列 (offset 递增)，但同一时刻多个 live VReg 的 spill slot 可能因 offset 计算错误而重叠。特别是 GPR(8B) 和 Vec(32B) 混合分配时。
+      <strong>CPU 需要知道</strong>: 每个栈帧位置的唯一拥有者。两个同时活跃的值不能驻留在重叠的内存位置。
+      <strong>验证规则</strong>:
+      <p>```</p>
+      <p>1. 遍历 spill slots，验证 offset 严格递增且无重叠:</p>
+      <p>   for i in 1..spills.len():</p>
+      <p>     spills[i].offset &gt;= spills[i-1].offset + spills[i-1].size</p>
+      <p>2. 验证同活跃区间内的 VReg spill slots 不重叠:</p>
+      <p>   for each pair (a, b) where both live at same point:</p>
+      <p>     if a.spill.offset &lt; b.spill.offset + b.spill.size</p>
+      <p>     &amp;&amp; b.spill.offset &lt; a.spill.offset + a.spill.size:</p>
+      <p>       error!("spill overlap: v{} [{}, {}) vs v{} [{}, {})",</p>
+               <a href="http://a.id">a.id</a>, a.offset, a.offset+a.size, <a href="http://b.id">b.id</a>, b.offset, b.offset+b.size)
+      <p>3. 验证 spill_offset() 和 gpr_spill_rbp_offset() 计算一致性:</p>
+      <p>   对每个 GPR spill: 两种公式给出的地址必须相同</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>Vec spill(32B) 覆盖相邻 GPR spill(8B) → 寄存器值损坏</li>
+      <li>Spill 区域计算与 stack_frame 不一致 → 栈溢出</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h4>D7: 指针算术正确性 (Pointer Arithmetic Validation)</h4>
+      <strong>问题</strong>: OffsetExpr 可以是任意嵌套的 Add/Mul/LoopOffset/Const，但不验证语义正确性。<code>Add(LoopOffset(counter), Const(0x1800))</code> 是否正确取决于 counter 的单位和 0x1800 是否是合法的字节偏移。
+      <strong>CPU 需要知道</strong>: LEA/MOV 地址计算的操作数必须是字节偏移。元素索引 × element_size = 字节偏移。
+      <strong>验证规则</strong>:
+      <p>```</p>
+      <p>OffsetExpr 语义约束:</p>
+      <p>  Const(c):     c 必须是字节偏移，且 c % element_size == 0 (对齐)</p>
+      <p>  LoopOffset(v): v 是 ByteOffset VReg → 已是字节偏移 ✓</p>
+      <p>  Add(a, b):    a 和 b 都必须是字节偏移</p>
+      <p>  Mul(e, s):    e 可以是元素偏移，s = element_size → 结果是字节偏移 ✓</p>
+      <p>  ScalarVReg(v): v 的 domain 必须是 ByteOffset (不能是 ElemOffset)</p>
+      <p>Pointer 算术约束:</p>
+      <p>  AddPtr { dst, base, offset }: base 必须是 Ptr domain, offset 必须是字节常量</p>
+      <p>  VRegPlusConst(base, off): base 必须是 Ptr domain</p>
+      <p>  VRegPlusVReg(base, offset): base 必须是 Ptr, offset 必须是 ByteOffset</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>元素偏移未乘 stride 直接用作字节偏移 → 越界访问</li>
+      <li>LoopOffset 的 step_bytes 不匹配实际 stride → 地址错位</li>
+      <li>两层循环的偏移量加错顺序 → 跨层访问</li>
+    </section>
+    <section id="s8" data-section="8">
+      <h4>D8: 控制流完整性 (Control Flow Integrity)</h4>
+      <strong>问题</strong>: LoopBegin/LoopEnd 只做基本的配对检查，不验证循环语义的正确性。
+      <strong>CPU 需要知道</strong>: 每个条件跳转的目标地址是有效的指令边界，back-edge 不跳过活跃 VReg 的初始化。
+      <strong>验证规则</strong>:
+      <p>```</p>
+      <p>1. LoopBegin/LoopEnd 严格嵌套 (已实现 ✓)</p>
+      <p>2. LoopBegin 的 counter 和 byte_offset 在 LoopEnd 之前不被覆盖写</p>
+      <p>   (除非是 LoopEnd 自动的 counter++/byte_offset += step)</p>
+      <p>3. BreakLoop 只出现在循环体内</p>
+      <p>4. ConditionalSkip skip_count 精确匹配跳过的指令数</p>
+      <p>5. <s>OutputModeDispatch</s> 的 paths 覆盖所有声明的模式 [已删除, SPEC/39 §7] — Head Routing 通过图拓扑推导输出模式</p>
+      <p>6. ScopeBegin/ScopeEnd 内不包含跨越边界的 VReg 引用</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>LoopEnd 被错误跳过 → 无限循环</li>
+      <li>ConditionalSkip skip_count 偏差 → 跳到指令中间</li>
+      <li>BreakLoop 在循环外 → 跳到随机地址</li>
+    </section>
+    <section id="s9" data-section="9">
+      <h4>D9: 数值域追踪 (Numerical Domain Tracking)</h4>
+      <strong>问题</strong>: 不跟踪 VReg 的数值范围。counter 从 0 开始递增到 bound，byte_offset = counter × step_bytes，但编译时不知道 counter 当前值是否可能导致溢出。
+      <strong>CPU 需要知道</strong>: 整数溢出导致地址回绕 → 访问到非法内存。
+      <strong>追踪内容</strong>:
+      <p>```</p>
+      <p>NumericalDomain:</p>
+      <p>  Range { min: usize, max: usize }       // 确知范围</p>
+      <p>  NonNegative                            // ≥ 0 (计数器)</p>
+      <p>  ByteAligned { alignment: usize }       // 对齐约束</p>
+      <p>  PowerOfTwo                             // 2 的幂 (stride, tile size)</p>
+      <p>对每个循环:</p>
+      <p>  counter ∈ [0, bound.max_alloc)</p>
+      <p>  byte_offset = counter × step_bytes ∈ [0, bound.max_alloc × step_bytes)</p>
+      <p>  验证: byte_offset.max + access_size ≤ buffer_size</p>
+      <p>对每个算术操作:</p>
+      <p>  Add: result.range = [a.min + b.min, a.max + b.max]</p>
+      <p>  Mul: result.range = [a.min * b.min, a.max * b.max]</p>
+      <p>  溢出检测: result.max &gt; i64::MAX → 报错</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>GEMM 大矩阵的偏移量溢出 32-bit → 地址截断 → 段错误</li>
+      <li>循环 bound × step_bytes 超过 buffer 大小 → 越界访问</li>
+    </section>
+    <section id="s10" data-section="10">
+      <h4>D10: ABI 契约完整验证 (ABI Contract Validation)</h4>
+      <strong>问题</strong>: VmState 追踪了参数位置，但不验证:
+      <p>1. 所有需要的 ABI 参数是否已被加载</p>
+      <p>2. Callee-saved 寄存器是否在 epilogue 正确恢复</p>
+      <p>3. 栈对齐在 CALL 指令前是否满足 16B 约束</p>
+      <p>4. 返回值(rax)是否在 BreakLoop/epilogue 前被设置</p>
+      <strong>CPU 需要知道</strong>: SysV ABI 的完整契约——哪些寄存器必须保存、栈如何对齐、参数如何传递。
+      <strong>验证规则</strong>:
+      <p>```</p>
+      <p>1. ABI 参数使用完整性:</p>
+      <p>   对 MegaKernelFn 的 17 个参数，验证每个都被 LoadPtr 引用过</p>
+      <p>   (未使用的参数 = 可能的遗漏)</p>
+      <p>2. Callee-saved 恢复对称性:</p>
+      <p>   prologue push 的 callee-saved 序列 = epilogue pop 的逆序列</p>
+      <p>   顺序不一致 → 寄存器值互换 → 指针损坏</p>
+      <p>3. 栈对齐:</p>
+      <p>   在每个 CALL 指令前 (如果有), RSP 必须 16B 对齐</p>
+      <p>   prologue 后: RSP = RBP - frame_size</p>
+      <p>   frame_size 必须是 16 的倍数 (已在 stack_frame.rs 实现 ✓)</p>
+      <p>4. 返回值设置:</p>
+      <p>   在 epilogue 前, rax 必须被赋值 (通过 BreakLoop { return_value } 或显式 mov)</p>
+      <p>5. SysV 入参保存区完整性:</p>
+      <p>   abi_save_top_off 覆盖所有 6 个 SysV 寄存器</p>
+      <p>   LoadPtr { AbiArg(idx) } 的 idx ∈ 0..=5</p>
+      <p>```</p>
+      <strong>能捕获的 BUG</strong>:
+      <li>callee-saved push/pop 不对称 → 寄存器值错乱</li>
+      <li>栈参数偏移 off-by-one → 读取错误参数</li>
+      <li>忘记设置返回值 → 返回垃圾值</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 优先级排序</h3>
+      <p>按"捕获 BUG 数量 × 实现难度"排序:</p>
+      <table>
+        <tr>
+          <th>优先级</th>
+        </tr>
+        <tr>
+          <td>维度</td>
+        </tr>
+        <tr>
+          <td>预期捕获 BUG</td>
+        </tr>
+        <tr>
+          <td>实现难度</td>
+        </tr>
+        <tr>
+          <td>依赖</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>D2 类型一致性</td>
+        </tr>
+        <tr>
+          <td>3-5</td>
+        </tr>
+        <tr>
+          <td>★☆☆ 低</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>D3 宽度一致性</td>
+        </tr>
+        <tr>
+          <td>2-3</td>
+        </tr>
+        <tr>
+          <td>★☆☆ 低</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>D6 Spill 重叠</td>
+        </tr>
+        <tr>
+          <td>1-2</td>
+        </tr>
+        <tr>
+          <td>★☆☆ 低</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>D1 值溯源</td>
+        </tr>
+        <tr>
+          <td>5-10</td>
+        </tr>
+        <tr>
+          <td>★★★ 高</td>
+        </tr>
+        <tr>
+          <td>D2</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>D5 Scratch 冲突</td>
+        </tr>
+        <tr>
+          <td>2-3</td>
+        </tr>
+        <tr>
+          <td>★★☆ 中</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>D7 指针算术</td>
+        </tr>
+        <tr>
+          <td>2-3</td>
+        </tr>
+        <tr>
+          <td>★★☆ 中</td>
+        </tr>
+        <tr>
+          <td>D1</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <tr>
+          <td>D4 内存安全</td>
+        </tr>
+        <tr>
+          <td>3-5</td>
+        </tr>
+        <tr>
+          <td>★★★ 高</td>
+        </tr>
+        <tr>
+          <td>D1</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <tr>
+          <td>D9 数值域</td>
+        </tr>
+        <tr>
+          <td>1-2</td>
+        </tr>
+        <tr>
+          <td>★★☆ 中</td>
+        </tr>
+        <tr>
+          <td>D1</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <tr>
+          <td>D8 控制流</td>
+        </tr>
+        <tr>
+          <td>1-2</td>
+        </tr>
+        <tr>
+          <td>★★☆ 中</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <tr>
+          <td>D10 ABI 契约</td>
+        </tr>
+        <tr>
+          <td>1-2</td>
+        </tr>
+        <tr>
+          <td>★☆☆ 低</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 实施路线图</h3>
+    </section>
+    <section id="s1" data-section="1">
+      <h4>Phase 1: 零依赖快速增益 (P0 — 立即实施)</h4>
+      <strong>D2 + D3 + D6</strong>: 三个维度互不依赖，全部在 <code>VmProgram</code> 上做静态分析 pass，不修改任何运行时代码。
+      <p>实现方式:</p>
+      <p>1. 新增 <code>VmProgram::validate_type_consistency()</code> — 遍历所有 VmInstr，检查操作数 VRegKind</p>
+      <p>2. 新增 <code>VmProgram::validate_width_consistency()</code> — 遍历所有 VmInstr，检查 SimdWidth</p>
+      <p>3. 扩展 <code>RegAllocation::validate_spill_safety()</code> — 增加 spill 槽重叠检测</p>
+      <p>插入位置: <code>compile()</code> 的 RegAlloc 之后、StackFrame 之前。</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h4>Phase 2: 值溯源核心 (P1 — 核心能力)</h4>
+      <strong>D1</strong>: 构建编译时值溯源图 (Value Provenance Graph)。
+      <p>实现方式:</p>
+      <p>1. 新增 <code>ValueProvenanceTracker</code> struct — 维护 VRegId → ValueProvenance 映射</p>
+      <p>2. 遍历 VmProgram，对每条 VmInstr 更新值溯源:</p>
+      <li>LoadPtr: dst 的 origin = PtrExpr 解析的 ABI 参数</li>
+      <li>VecLoad: 验证 base 是 Ptr domain</li>
+      <li>AddPtr: dst 的 origin = base 的 origin, transform += AddConst(offset)</li>
+      <li>Fma: dst 的 domain = VecData</li>
+      <p>3. 在 VecLoad/VecStore 遇到 base 非 Ptr domain 时报错</p>
+      <p>4. 在 VecLoad 遇到 base = ProvenanceRoot::ConstImm{0} 时报错 (null pointer)</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>Phase 3: 指针安全与算术验证 (P1 — 依赖 D1)</h4>
+      <strong>D7 + D5</strong>: 基于 D1 的值溯源信息，验证指针运算和 scratch 使用。
+    </section>
+    <section id="s4" data-section="4">
+      <h4>Phase 4: 完整内存安全 (P2 — 依赖 D1)</h4>
+      <strong>D4 + D9</strong>: 基于 D1 的 buffer 归属信息，做边界检查和数值域分析。
+    </section>
+    <section id="s5" data-section="5">
+      <h4>Phase 5: 控制流与 ABI (P2 — 独立)</h4>
+      <strong>D8 + D10</strong>: 不依赖 D1，可以并行实施。
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 预期收益</h3>
+      <p>完成所有 10 个维度后，半VM 编译时应能自动捕获:</p>
+      <li><strong>所有 SIGSEGV</strong>: null pointer、偏移量当指针、越界访问、spill 损坏</li>
+      <li><strong>所有 SIGILL</strong>: 类型混淆、宽度不匹配、非法指令编码</li>
+      <li><strong>所有数值错误</strong>: 整数溢出、精度丢失、对齐违反</li>
+      <li><strong>所有控制流错误</strong>: 无限循环、跳转错位、返回值缺失</li>
+      <p>推理管线从"编译通过但运行时崩溃"变为"编译时捕获所有静态可检测错误"。</p>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：vm-symbolic-execution-tracking.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2>
+</html>

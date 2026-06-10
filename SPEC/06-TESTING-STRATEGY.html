@@ -1,0 +1,1731 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="06-TESTING-STRATEGY" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"06-TESTING-STRATEGY", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>gllm 测试策略</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>06-TESTING-STRATEGY</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-gllm-测试策略" data-section="null">
+      <h2>gllm 测试策略</h2>
+      <p>&gt; <strong>关联需求</strong>: REQ-TEST-001 ~ REQ-TEST-010</p>
+      <p>&gt; 本文档定义 gllm 项目的测试规范、测试类型、用例格式和执行规则。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. TEST-XXX 规范</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 命名规则</h4>
+      <table>
+        <tr>
+          <th>格式</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>示例</td>
+        </tr>
+        <tr>
+          <td>TEST-{类型}-{序号}</td>
+        </tr>
+        <tr>
+          <td>测试用例标识</td>
+        </tr>
+        <tr>
+          <td>TEST-BACKEND-001</td>
+        </tr>
+        <tr>
+          <td>类型取值</td>
+        </tr>
+        <tr>
+          <td>BACKEND, LOADER, INFERENCE, SCHEDULER, QUANT, E2E, PERF</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 文档格式</h4>
+      <p>每个测试用例必须包含以下注释：</p>
+      <p>```rust</p>
+      <p>/// TEST-{类型}-{序号}: {测试名称}</p>
+      <p>///</p>
+      <p>/// <strong>关联需求</strong>: REQ-TEST-XXX</p>
+      <p>/// <strong>测试类型</strong>: 正向/负向/边界/安全</p>
+      <p>/// <strong>前置条件</strong>: {条件描述}</p>
+      <p>///</p>
+      <p>/// <strong>测试步骤</strong>:</p>
+      <p>/// 1. {步骤1}</p>
+      <p>/// 2. {步骤2}</p>
+      <p>/// 3. {步骤3}</p>
+      <p>///</p>
+      <p>/// <strong>期望结果</strong>: {预期结果}</p>
+      <p>#[test]</p>
+      <p>fn test_name() {</p>
+      <p>    // ...</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 REQ 关联要求</h4>
+      <table>
+        <tr>
+          <th>规则</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>每个 TEST-XXX 必须关联至少一个 REQ-XXX</td>
+        </tr>
+        <tr>
+          <td>追溯需求来源</td>
+        </tr>
+        <tr>
+          <td>每个 REQ-TEST-XXX 必须有对应的 TEST-XXX</td>
+        </tr>
+        <tr>
+          <td>确保需求被测试覆盖</td>
+        </tr>
+        <tr>
+          <td>关联格式</td>
+        </tr>
+        <tr>
+          <td>**关联需求**: REQ-TEST-XXX</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 测试类型定义</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 正向测试</h4>
+      <strong>定义</strong>: 验证功能在正常输入下正确工作
+      <strong>示例</strong>: CPU 后端生成文本成功
+      <table>
+        <tr>
+          <th>要素</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>目的</td>
+        </tr>
+        <tr>
+          <td>验证核心功能正常执行</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>合法、有效的输入数据</td>
+        </tr>
+        <tr>
+          <td>验证</td>
+        </tr>
+        <tr>
+          <td>输出符合预期，无错误或警告</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 负向测试</h4>
+      <strong>定义</strong>: 验证功能对异常输入的错误处理
+      <strong>示例</strong>: 无效模型 ID 返回错误
+      <table>
+        <tr>
+          <th>要素</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>目的</td>
+        </tr>
+        <tr>
+          <td>验证错误场景被正确处理</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>非法、无效、边界外输入</td>
+        </tr>
+        <tr>
+          <td>验证</td>
+        </tr>
+        <tr>
+          <td>返回明确错误信息，不崩溃</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 边界测试</h4>
+      <strong>定义</strong>: 验证功能在边界条件下的行为
+      <strong>示例</strong>: 空输入文本的处理
+      <table>
+        <tr>
+          <th>要素</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>目的</td>
+        </tr>
+        <tr>
+          <td>验证极限值、空值、临界值</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>空字符串、0、最大值、最小值</td>
+        </tr>
+        <tr>
+          <td>验证</td>
+        </tr>
+        <tr>
+          <td>行为符合规范，无未定义行为</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>2.4 安全测试</h4>
+      <strong>定义</strong>: 验证安全性相关场景
+      <table>
+        <tr>
+          <th>要素</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>目的</td>
+        </tr>
+        <tr>
+          <td>验证安全机制正确工作</td>
+        </tr>
+        <tr>
+          <td>场景</td>
+        </tr>
+        <tr>
+          <td>权限控制、注入防护、数据验证</td>
+        </tr>
+        <tr>
+          <td>验证</td>
+        </tr>
+        <tr>
+          <td>拒绝非法访问，数据安全</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. REQ-TEST → TEST-XXX 映射</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ-TEST</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>TEST-XXX</td>
+        </tr>
+        <tr>
+          <td>测试文件</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    
+<section data-req-api="POST /internal/test/validate" id="req-test-002" data-req="REQ-TEST-002" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-002</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-003" data-req="REQ-TEST-003" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-003</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-004" data-req="REQ-TEST-004" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-004</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-005" data-req="REQ-TEST-005" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-005</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-006" data-req="REQ-TEST-006" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-006</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-007" data-req="REQ-TEST-007" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-007</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-008" data-req="REQ-TEST-008" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-008</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-009" data-req="REQ-TEST-009" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-009</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-010" data-req="REQ-TEST-010" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-010</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /internal/test/validate" id="req-test-011" data-req="REQ-TEST-011" data-req-status="implemented" data-req-domain="test" data-req-category="business" data-req-entity="ENT-TEST-FRAMEWORK"><h3>REQ-TEST-011</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+
+<section id="test-test-001" data-test="TEST-TEST-001" data-req-ref="REQ-TEST-011" data-test-categories="unit" <h3="">TEST-TEST-001: 测试策略验证<p>验证REQ-TEST-001相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>后端覆盖测试</td>
+        </tr>
+        <tr>
+          <td>TEST-BACKEND-001 ~ -003</td>
+        </tr>
+        <tr>
+          <td>test_e2e_embedding.rs</td>
+          <td>, </td>
+          <td>test_e2e_generator.rs</td>
+          <td>, </td>
+          <td>test_e2e_reranker.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-002" data-test="TEST-TEST-002" data-req-ref="REQ-TEST-002" data-test-categories="unit" <h3="">TEST-TEST-002: 测试策略验证<p>验证REQ-TEST-002相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>Generator 模型矩阵</td>
+        </tr>
+        <tr>
+          <td>TEST-MATRIX-GEN-001 ~ -007</td>
+        </tr>
+        <tr>
+          <td>test_e2e_generator.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-003" data-test="TEST-TEST-003" data-req-ref="REQ-TEST-003" data-test-categories="unit" <h3="">TEST-TEST-003: 测试策略验证<p>验证REQ-TEST-003相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>Embedding 模型矩阵</td>
+        </tr>
+        <tr>
+          <td>TEST-MATRIX-EMB-001 ~ -010</td>
+        </tr>
+        <tr>
+          <td>test_e2e_embedding.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-004" data-test="TEST-TEST-004" data-req-ref="REQ-TEST-004" data-test-categories="unit" <h3="">TEST-TEST-004: 测试策略验证<p>验证REQ-TEST-004相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>Reranker 模型矩阵</td>
+        </tr>
+        <tr>
+          <td>TEST-MATRIX-RERANK-001 ~ -003</td>
+        </tr>
+        <tr>
+          <td>test_e2e_reranker.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-005" data-test="TEST-TEST-005" data-req-ref="REQ-TEST-005" data-test-categories="unit" <h3="">TEST-TEST-005: 测试策略验证<p>验证REQ-TEST-005相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>功能模块覆盖</td>
+        </tr>
+        <tr>
+          <td>TEST-LOADER-</td>
+          <td>, TEST-INFERENCE-</td>
+          <td>, TEST-SCHED-*</td>
+        </tr>
+        <tr>
+          <td>test_gguf_parser.rs</td>
+          <td>, </td>
+          <td>test_kv_cache.rs</td>
+          <td>, </td>
+          <td>test_paged_attention.rs</td>
+          <td>, </td>
+          <td>test_vllm2024.rs</td>
+          <td> 等</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-006" data-test="TEST-TEST-006" data-req-ref="REQ-TEST-006" data-test-categories="unit" <h3="">TEST-TEST-006: 测试策略验证<p>验证REQ-TEST-006相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>量化格式测试</td>
+        </tr>
+        <tr>
+          <td>TEST-QUANT-001 ~ -004</td>
+        </tr>
+        <tr>
+          <td>quantization_metadata.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-007" data-test="TEST-TEST-007" data-req-ref="REQ-TEST-007" data-test-categories="unit" <h3="">TEST-TEST-007: 测试策略验证<p>验证REQ-TEST-007相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>错误处理测试</td>
+        </tr>
+        <tr>
+          <td>TEST-ERROR-001 ~ -004</td>
+        </tr>
+        <tr>
+          <td>test_error_handling.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-008" data-test="TEST-TEST-008" data-req-ref="REQ-TEST-008" data-test-categories="unit" <h3="">TEST-TEST-008: 测试策略验证<p>验证REQ-TEST-008相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>性能基准测试</td>
+        </tr>
+        <tr>
+          <td>TEST-PERF-001 ~ -004</td>
+        </tr>
+        <tr>
+          <td>test_performance.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-009" data-test="TEST-TEST-009" data-req-ref="REQ-TEST-009" data-test-categories="unit" <h3="">TEST-TEST-009: 测试策略验证<p>验证REQ-TEST-009相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>MoE 专项测试</td>
+        </tr>
+        <tr>
+          <td>TEST-MOE-001 ~ -003</td>
+        </tr>
+        <tr>
+          <td>test_moe_routing.rs</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">测试策略实现完整且符合 SPEC 描述</li><li id="2" data-criterion="2">编译通过: cargo check</li><li id="3" data-criterion="3">单元测试覆盖核心路径</li><li id="4" data-criterion="4">E2E 测试验证正确性</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      
+      </div>
+        
+    <section id="test-test-010" data-test="TEST-TEST-010" data-req-ref="REQ-TEST-010" data-test-categories="unit" <h3="">TEST-TEST-010: 测试策略验证<p>验证REQ-TEST-010相关功能正确性</p>
+      <div id="测试策略实现完整且符合-spec-描述" data-criterion="测试策略实现完整且符合 SPEC 描述">测试策略实现完整且符合 SPEC 描述</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+        <tr>
+          <td>后端一致性测试</td>
+        </tr>
+        <tr>
+          <td>TEST-BACKEND-001</td>
+        </tr>
+        <tr>
+          <td>test_backend_compat.rs</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 真实测试铁律</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 禁止 Mock (TEST-REAL-001)</h4>
+      <p>&gt; <strong>违反 Ω1.2</strong>: 禁止虚假测试</p>
+      <strong>正确做法</strong>:
+      <li>✅ 使用真实模型文件 (safetensors/GGUF/ONNX)</li>
+      <li>✅ 执行真实推理验证输出正确性</li>
+      <li>✅ 验证生成的文本有意义（非空、非乱码）</li>
+      <table>
+        <tr>
+          <th>禁止行为</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>❌ Mock 权重</td>
+        </tr>
+        <tr>
+          <td>使用假权重无法验证真实推理</td>
+        </tr>
+        <tr>
+          <td>❌ Mock 模型</td>
+        </tr>
+        <tr>
+          <td>必须使用真实模型文件</td>
+        </tr>
+        <tr>
+          <td>❌ 硬编码输出</td>
+        </tr>
+        <tr>
+          <td>输出必须来自真实推理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 真实推理验证</h4>
+      <table>
+        <tr>
+          <th>验证项</th>
+        </tr>
+        <tr>
+          <td>方法</td>
+        </tr>
+        <tr>
+          <td>生成模型</td>
+        </tr>
+        <tr>
+          <td>验证输出非空、长度合理、内容有意义</td>
+        </tr>
+        <tr>
+          <td>Embedding</td>
+        </tr>
+        <tr>
+          <td>验证向量维度正确、值域合理</td>
+        </tr>
+        <tr>
+          <td>Reranker</td>
+        </tr>
+        <tr>
+          <td>验证分数为有限浮点数、排序合理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. Skip 清零规则</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 禁止 #[ignore] 标记</h4>
+      <p>&gt; <strong>违反 Ω1.6</strong>: 禁止跳过测试</p>
+      <table>
+        <tr>
+          <th>场景</th>
+        </tr>
+        <tr>
+          <td>规则</td>
+        </tr>
+        <tr>
+          <td>处理方式</td>
+        </tr>
+        <tr>
+          <td>网络相关测试</td>
+        </tr>
+        <tr>
+          <td>❌ 禁止 #[ignore] "需要网络"</td>
+        </tr>
+        <tr>
+          <td>必须执行，网络故障是失败</td>
+        </tr>
+        <tr>
+          <td>CUDA 测试</td>
+        </tr>
+        <tr>
+          <td>⚠️ 允许 #[ignore] "需要 CUDA"</td>
+        </tr>
+        <tr>
+          <td>条件忽略，CUDA 不可用时跳过</td>
+        </tr>
+        <tr>
+          <td>暂未实现</td>
+        </tr>
+        <tr>
+          <td>❌ 禁止 #[ignore] "TODO"</td>
+        </tr>
+        <tr>
+          <td>未实现 = 失败，必须修复</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 条件忽略格式</h4>
+      <p>```rust</p>
+      <p>#[test]</p>
+      <p>#[cfg_attr(not(feature = "jit-cuda"), ignore = "Requires CUDA backend")]</p>
+      <p>fn cuda_test() {</p>
+      <p>    // ...</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 测试执行规则</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 单元测试 vs E2E 测试</h4>
+      <table>
+        <tr>
+          <th>测试类型</th>
+        </tr>
+        <tr>
+          <td>位置</td>
+        </tr>
+        <tr>
+          <td>执行方式</td>
+        </tr>
+        <tr>
+          <td>并发</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>src/</td>
+          <td> 内 </td>
+          <td>#[cfg(test)]</td>
+        </tr>
+        <tr>
+          <td>cargo test --lib</td>
+        </tr>
+        <tr>
+          <td>✅ 允许并发</td>
+        </tr>
+        <tr>
+          <td>集成测试</td>
+        </tr>
+        <tr>
+          <td>tests/</td>
+          <td> 目录</td>
+        </tr>
+        <tr>
+          <td>cargo test --test xxx</td>
+        </tr>
+        <tr>
+          <td>⚠️ 取决于 I/O</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e.rs</td>
+          <td> 等</td>
+        </tr>
+        <tr>
+          <td>cargo test --test xxx -- --test-threads=1</td>
+        </tr>
+        <tr>
+          <td>❌ 禁止并发</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 E2E 测试单线程要求</h4>
+      <p>&gt; <strong>已在 <a href="http://CLAUDE.md">CLAUDE.md</a> 定义</strong>: E2E 测试涉及真实模型下载、文件 I/O，必须串行执行</p>
+      <p>```bash</p>
+      <p>cargo test --test test_e2e -- --test-threads=1</p>
+      <p>cargo test --test test_complete_matrix -- --test-threads=1</p>
+      <p>```</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 测试文件清单</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>关联 REQ</td>
+        </tr>
+        <tr>
+          <td>测试类型</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>test_e2e_embedding.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-001, REQ-TEST-003</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_e2e_generator.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-001, REQ-TEST-002</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_e2e_reranker.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-001, REQ-TEST-004</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_gguf_parser.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Loader)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_model_config_gguf.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Loader)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_metadata_config_loading.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Loader)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_kv_cache.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Scheduler)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_paged_attention.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Scheduler)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_vllm2024.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Scheduler)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_continuous_batching_flow.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Scheduler)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_swap_correctness.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-005 (Scheduler)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_moe_routing.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-009</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_error_handling.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-007</td>
+        </tr>
+        <tr>
+          <td>负向/边界测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_performance.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-008</td>
+        </tr>
+        <tr>
+          <td>性能测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_dag_refactor.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-REFACTOR (08-LOADER-REFACTOR)</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_client_lifecycle.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-018</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_executor_swap_flow.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-018</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>quantization_metadata.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-006</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>common.rs</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>测试工具模块</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>debug_download.rs</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>调试工具</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>test_aux_files_debug.rs</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>调试工具</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 测试用例模板</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 正向测试模板</h4>
+      <p>```rust</p>
+      <p>/// TEST-{TYPE}-{NUM}: {测试名称}</p>
+      <p>///</p>
+      <p>/// <strong>关联需求</strong>: REQ-TEST-XXX</p>
+      <p>/// <strong>测试类型</strong>: 正向测试</p>
+      <p>/// <strong>前置条件</strong>: {模型已缓存/服务可用}</p>
+      <p>///</p>
+      <p>/// <strong>测试步骤</strong>:</p>
+      <p>/// 1. {准备操作}</p>
+      <p>/// 2. {执行操作}</p>
+      <p>/// 3. {验证结果}</p>
+      <p>///</p>
+      <p>/// <strong>期望结果</strong>: {具体期望值}</p>
+      <p>#[test]</p>
+      <p>fn test_name() {</p>
+      <p>    // Given</p>
+      <p>    let input = "valid input";</p>
+      <p>    // When</p>
+      <p>    let result = operation(input);</p>
+      <p>    // Then</p>
+      <p>    assert!(!result.is_empty(), "结果不应为空");</p>
+      <p>    assert!(result.len() &gt; MIN_LENGTH, "结果长度应合理");</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 负向测试模板</h4>
+      <p>```rust</p>
+      <p>/// TEST-{TYPE}-{NUM}: {测试名称}</p>
+      <p>///</p>
+      <p>/// <strong>关联需求</strong>: REQ-TEST-XXX</p>
+      <p>/// <strong>测试类型</strong>: 负向测试</p>
+      <p>///</p>
+      <p>/// <strong>测试步骤</strong>:</p>
+      <p>/// 1. 提供无效输入</p>
+      <p>/// 2. 验证返回错误</p>
+      <p>///</p>
+      <p>/// <strong>期望结果</strong>: 返回明确的错误类型</p>
+      <p>#[test]</p>
+      <p>fn test_invalid_input() {</p>
+      <p>    let invalid_input = "";</p>
+      <p>    let result = operation(invalid_input);</p>
+      <p>    assert!(result.is_err(), "应返回错误");</p>
+      <p>    assert!(matches!(result, Err(Error::InvalidInput)), "错误类型正确");</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 边界测试模板</h4>
+      <p>```rust</p>
+      <p>/// TEST-{TYPE}-{NUM}: {测试名称}</p>
+      <p>///</p>
+      <p>/// <strong>关联需求</strong>: REQ-TEST-XXX</p>
+      <p>/// <strong>测试类型</strong>: 边界测试</p>
+      <p>///</p>
+      <p>/// <strong>测试步骤</strong>:</p>
+      <p>/// 1. 提供边界值输入 (空/0/最大值)</p>
+      <p>/// 2. 验证处理正确</p>
+      <p>///</p>
+      <p>/// <strong>期望结果</strong>: 行为符合规范</p>
+      <p>#[test]</p>
+      <p>fn test_empty_input() {</p>
+      <p>    let empty = "";</p>
+      <p>    let result = operation(empty);</p>
+      <p>    // 边界情况：空输入应有明确定义的行为</p>
+      <p>    assert!(result.is_ok() || matches!(result.unwrap_err(), Error::EmptyInput));</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 测试质量标准</h3>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 覆盖率要求</h4>
+      <table>
+        <tr>
+          <th>覆盖类型</th>
+        </tr>
+        <tr>
+          <td>要求</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST 覆盖</td>
+        </tr>
+        <tr>
+          <td>100% (每个 REQ-TEST-XXX 都有对应 TEST)</td>
+        </tr>
+        <tr>
+          <td>测试类型覆盖</td>
+        </tr>
+        <tr>
+          <td>正向 + 负向 + 边界</td>
+        </tr>
+        <tr>
+          <td>关键功能</td>
+        </tr>
+        <tr>
+          <td>四类全覆盖 (正向/负向/边界/安全)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 断言要求</h4>
+      <table>
+        <tr>
+          <th>要求</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>明确断言</td>
+        </tr>
+        <tr>
+          <td>每个测试有明确的断言验证</td>
+        </tr>
+        <tr>
+          <td>有意义断言</td>
+        </tr>
+        <tr>
+          <td>不使用 </td>
+          <td>assert!(true)</td>
+        </tr>
+        <tr>
+          <td>错误信息</td>
+        </tr>
+        <tr>
+          <td>断言失败时提供有用信息</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 真实测试要求 (TEST-REAL-002)</h4>
+      <table>
+        <tr>
+          <th>检查项</th>
+        </tr>
+        <tr>
+          <td>验证方法</td>
+        </tr>
+        <tr>
+          <td>生成模型</td>
+        </tr>
+        <tr>
+          <td>输出非空 + 长度合理 + 内容有意义</td>
+        </tr>
+        <tr>
+          <td>Embedding</td>
+        </tr>
+        <tr>
+          <td>维度正确 + 值域合理 (非全零)</td>
+        </tr>
+        <tr>
+          <td>Reranker</td>
+        </tr>
+        <tr>
+          <td>分数为有限浮点数</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 待改进项</h3>
+      <p>基于审计发现，以下测试需要改进：</p>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>问题</td>
+        </tr>
+        <tr>
+          <td>优先级</td>
+        </tr>
+        <tr>
+          <td>所有测试文件</td>
+        </tr>
+        <tr>
+          <td>缺少 TEST-XXX 注释</td>
+        </tr>
+        <tr>
+          <td>P1 - 补充文档</td>
+        </tr>
+        <tr>
+          <td>所有测试文件</td>
+        </tr>
+        <tr>
+          <td>缺少负向/边界测试</td>
+        </tr>
+        <tr>
+          <td>P2 - 补充覆盖</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-010 (后端一致性)</td>
+        </tr>
+        <tr>
+          <td>缺少独立测试文件</td>
+        </tr>
+        <tr>
+          <td>P2 - 新增 </td>
+          <td>test_backend_compat.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-TEST-006 (量化格式)</td>
+        </tr>
+        <tr>
+          <td>缺少独立测试文件</td>
+        </tr>
+        <tr>
+          <td>P2 - 新增 </td>
+          <td>test_quantization.rs</td>
+        </tr>
+      </table>
+    </section>
+    
+    
+
+    <section id="s10.1" data-section="10.1">
+      <h4>10.1 测试流程</h4>
+      <p>1. <strong>生成基准 (Python)</strong>: 使用 <code>tests/e2e_alignment/generate_golden.py</code> 运行 HF Transformers 模型，保存中间层(Embedding/Attention)和最终输出到 <code>.safetensors</code>。</p>
+      <p>2. <strong>执行比对 (Rust)</strong>: 使用 <code>tests/e2e_alignment/test_alignment.rs</code> 加载相同模型和基准数据，执行推理。</p>
+      <p>3. <strong>断言验证</strong>: 逐元素比对数值差异，确保在容差范围内。</p>
+    </section>
+    <section id="s10.2" data-section="10.2">
+      <h4>10.2 目录结构</h4>
+      <p>```</p>
+      <p>tests/e2e_alignment/</p>
+      <p>├── <a href="http://README.md">README.md</a>               # 操作指南</p>
+      <p>├── generate_golden.py      # PyTorch 基准生成脚本</p>
+      <p>├── requirements.txt        # Python 依赖</p>
+      <p>├── data/                   # .gitignore (不提交)</p>
+      <p>│   └── golden_e5_small.safetensors</p>
+      <p>└── test_alignment.rs       # Rust 对齐测试</p>
+      <p>```</p>
+    </section>
+    <section id="s10.3" data-section="10.3">
+      <h4>10.3 容差标准</h4>
+      <table>
+        <tr>
+          <th>精度</th>
+        </tr>
+        <tr>
+          <td>允许误差 (Abs Diff)</td>
+        </tr>
+        <tr>
+          <td>FP32</td>
+        </tr>
+        <tr>
+          <td>&lt; 1e-5</td>
+        </tr>
+        <tr>
+          <td>FP16</td>
+        </tr>
+        <tr>
+          <td>&lt; 1e-3</td>
+        </tr>
+        <tr>
+          <td>INT8</td>
+        </tr>
+        <tr>
+          <td>&lt; 1 (整数位一致)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>11. GGUF Loader 测试策略 (TEST-GGUF)</h3>
+      <p>&gt; <strong>关联需求</strong>: REQ-LOADER-011, REQ-LOADER-014, REQ-LOADER-019</p>
+      <p>&gt; <strong>关联架构</strong>: ARCH-GGUF-PARSER</p>
+      <p>&gt; <strong>核心目标</strong>: 验证 ARRAY[STRING] bug 修复</p>
+    </section>
+    <section id="s11.1" data-section="11.1">
+      <h4>11.1 测试用例清单</h4>
+      <table>
+        <tr>
+          <th>TEST-ID</th>
+        </tr>
+        <tr>
+          <td>测试名称</td>
+        </tr>
+        <tr>
+          <td>测试类型</td>
+        </tr>
+        <tr>
+          <td>关联 REQ</td>
+        </tr>
+        <tr>
+          <td>重要性</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-001</td>
+        </tr>
+        <tr>
+          <td>头部解析 (magic, version)</td>
+        </tr>
+        <tr>
+          <td>正向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-011</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-002</td>
+        </tr>
+        <tr>
+          <td>ARRAY[STRING] 解析</td>
+        </tr>
+        <tr>
+          <td>正向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-011</td>
+        </tr>
+        <tr>
+          <td>🟢 P0</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-003</td>
+        </tr>
+        <tr>
+          <td>Tensor info 解析</td>
+        </tr>
+        <tr>
+          <td>正向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-011</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-004</td>
+        </tr>
+        <tr>
+          <td>Ω1: 元数据读取（禁止默认值）</td>
+        </tr>
+        <tr>
+          <td>正向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-019</td>
+        </tr>
+        <tr>
+          <td>🟢 P0</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-005</td>
+        </tr>
+        <tr>
+          <td>量化类型识别 (28 种)</td>
+        </tr>
+        <tr>
+          <td>正向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-014</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-006</td>
+        </tr>
+        <tr>
+          <td>TensorSlice 零拷贝</td>
+        </tr>
+        <tr>
+          <td>正向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-011</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-007</td>
+        </tr>
+        <tr>
+          <td>无效 magic 检测</td>
+        </tr>
+        <tr>
+          <td>负向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-011</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-008</td>
+        </tr>
+        <tr>
+          <td>缺失元数据处理</td>
+        </tr>
+        <tr>
+          <td>负向</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-019</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>TEST-GGUF-009</td>
+        </tr>
+        <tr>
+          <td>Tensor 边界检查</td>
+        </tr>
+        <tr>
+          <td>边界</td>
+        </tr>
+        <tr>
+          <td>REQ-LOADER-011</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.2" data-section="11.2">
+      <h4>11.2 TEST-GGUF-002: ARRAY[STRING] 解析</h4>
+      <strong>关联需求</strong>: REQ-LOADER-011
+      <strong>测试类型</strong>: 正向测试
+      <strong>重要性</strong>: 🔴 P0 (gguf-rs bug 根源)
+      <strong>测试步骤</strong>:
+      <p>1. 加载包含完整 tokenizer 的 GGUF 文件</p>
+      <p>2. 读取 <code>tokenizer.ggml.tokens</code></p>
+      <p>3. 验证 token 数量正确 (49152 个，不是 3 个)</p>
+      <strong>期望结果</strong>:
+      <p>```rust</p>
+      <p>let reader = GgufReader::open("model.gguf")?;</p>
+      <p>let tokens = reader.tokenizer_tokens()?;</p>
+      <p>// 修复 bug: 应该返回 49152 个 token，而不是 3 个</p>
+      <p>assert_eq!(tokens.len(), 49152);</p>
+      <p>assert_eq!(tokens[0], "<unk>");</unk></p>
+      <p>assert_eq!(tokens[1], "<s>");</s></p>
+      <p>```</p>
+    </section>
+    <section id="s11.3" data-section="11.3">
+      <h4>11.3 TEST-GGUF-004: Ω1 真实性原则</h4>
+      <strong>关联需求</strong>: REQ-LOADER-019
+      <strong>测试类型</strong>: 正向测试
+      <strong>重要性</strong>: 🔴 P0
+      <strong>测试步骤</strong>:
+      <p>1. 打开 GGUF 文件</p>
+      <p>2. 验证 <code>architecture()</code> 从 <code>general.architecture</code> 读取</p>
+      <p>3. 验证缺少元数据时返回错误（不使用默认值）</p>
+      <strong>期望结果</strong>:
+      <p>```rust</p>
+      <p>let reader = GgufReader::open("model.gguf")?;</p>
+      <p>// Ω1: 必须从元数据读取</p>
+      <p>let arch = reader.architecture()?;</p>
+      <p>assert_eq!(arch, "llama");</p>
+      <p>// Ω1: 缺失元数据必须报错，不能使用默认值</p>
+      <p>let result = reader.get_metadata_u64("nonexistent.key");</p>
+      <p>assert!(result.is_none());</p>
+      <p>```</p>
+    </section>
+    <section id="s11.4" data-section="11.4">
+      <h4>11.4 测试数据</h4>
+      <table>
+        <tr>
+          <th>模型</th>
+        </tr>
+        <tr>
+          <td>格式</td>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>SmolLM2-135M-Instruct-GGUF</td>
+        </tr>
+        <tr>
+          <td>GGUF (BF16)</td>
+        </tr>
+        <tr>
+          <td>ARRAY[STRING] 完整测试</td>
+        </tr>
+        <tr>
+          <td>Mistral-7B-Instruct-GGUF</td>
+        </tr>
+        <tr>
+          <td>GGUF (Q4_K_M)</td>
+        </tr>
+        <tr>
+          <td>量化类型测试</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.5" data-section="11.5">
+      <h4>11.5 测试文件</h4>
+      <p>```</p>
+      <p>tests/</p>
+      <p>└── test_gguf_parser.rs         # GGUF loader 单元测试</p>
+      <p>```</p>
+    </section>
+    <section id="s11.6" data-section="11.6">
+      <h4>11.6 TEST-GGUF-010: 量化类型映射测试</h4>
+      <strong>关联需求</strong>: REQ-LOADER-014
+      <strong>关联架构</strong>: ARCH-GGUF-PARSER (3.4 节), gllm-kernels ARCH-QUANT-GENERIC
+      <strong>测试类型</strong>: 正向测试
+      <strong>重要性</strong>: P0
+      <strong>测试步骤</strong>:
+      <p>1. 加载包含多种量化类型的 GGUF 文件</p>
+      <p>2. 验证每个 Tensor 的 GgmlDType 正确识别</p>
+      <p>3. 验证适配层类型映射正确 (GgmlDType -&gt; gllm-kernels 类型)</p>
+      <strong>期望结果</strong>:
+      <p>```rust</p>
+      <p>let adapter = GgufAdapter::open("model.gguf")?;</p>
+      <p>// 验证量化类型识别</p>
+      <p>let token_embd = adapter.tensor_info("token_embd.weight")?;</p>
+      <p>assert_eq!(token_embd.dtype, GgmlDType::Q4_0);</p>
+      <p>// 验证类型映射到 gllm-kernels</p>
+      <p>let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;</p>
+      <p>assert!(matches!(kernel_tensor.storage_format, gllm_kernels::StorageFormat::Q4_0));</p>
+      <p>```</p>
+      <strong>覆盖类型</strong>:
+      <li>P0 类型 (已实现): Q4_0, Q8_0, Q5_K, F32, F16, BF16</li>
+      <li>P1 类型 (已实现): Q4_K, Q8_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_S, IQ1_M</li>
+      <li>P2 类型 (已实现): Q2_K, TQ2_0, TQ1_0, MXFP4</li>
+      <li>不支持类型 (返回 Err): Q5_0, Q5_1, Q6_K, Q3_K, Q5_K(5-bit), IQ3_XXS, IQ3_S, I16, I32, I64, F64</li>
+    </section>
+    <section id="s11.7" data-section="11.7">
+      <h4>11.7 TEST-GGUF-011: 泛型约束验证</h4>
+      <strong>关联需求</strong>: REQ-LOADER-014
+      <strong>关联架构</strong>: gllm-kernels ARCH-QUANT-GENERIC
+      <strong>测试类型</strong>: 边界测试
+      <strong>重要性</strong>: P0
+      <strong>测试目的</strong>: 确保适配层不违反 gllm-kernels 泛型约束
+      <strong>测试步骤</strong>:
+      <p>1. 验证 GGUF 解析器返回原始字节 + 类型标识符</p>
+      <p>2. 验证适配层负责类型映射</p>
+      <p>3. 验证 gllm-kernels 只通过泛型参数接收数据</p>
+      <strong>期望结果</strong>:
+      <p>```rust</p>
+      <p>// GGUF 解析器接口 (返回原始数据)</p>
+      <p>let slice = reader.tensor("token_embd.weight")?;</p>
+      <p>assert_eq!(slice.dtype(), GgmlDType::Q4_0);</p>
+      <p>assert!(!slice.data().is_empty()); // 原始字节</p>
+      <p>// 适配层转换</p>
+      <p>let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;</p>
+      <p>// gllm-kernels 只接收泛型参数，不依赖 GGUF 类型</p>
+      <p>```</p>
+    </section>
+    <section id="s-观测与调度测试-test-obs" data-section="null">
+      <h3>观测与调度测试 (TEST-OBS)</h3>
+    </section>
+    <section id="s001" data-section="001">
+      <h4>TEST-OBS-001: Epilogue 物理页头写入完整性</h4>
+      <strong>关联需求</strong>: REQ-OBS-001
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 构造小语言模型的单次 Forward</p>
+      <p>2. 执行 Mega-Kernel</p>
+      <p>3. 抽出刚刚写入完成的尾部 KV Physical Page</p>
+      <strong>期望结果</strong>: <code>KvPageHeader</code> 中的 <code>fragmentation_metric</code> 与 <code>logits_entropy</code> = 正确计算出的正浮点数
+    </section>
+    <section id="s002" data-section="002">
+      <h4>TEST-OBS-002: AbsolutePolicy 极限压力直通决策</h4>
+      <strong>关联需求</strong>: REQ-OBS-002
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 构造 <code>SystemState { memory_pressure: 0.95, .. }</code></p>
+      <p>2. 调用 <code>AbsolutePolicy.decide()</code></p>
+      <strong>期望结果</strong>: <code>admit_new_prefill == false</code>, <code>force_swap_out_count &gt; 0</code>
+    </section>
+    <section id="s003" data-section="003">
+      <h4>TEST-OBS-003: 静态内核路径不可更改性</h4>
+      <strong>关联需求</strong>: REQ-OBS-003
+      <strong>测试类型</strong>: 反向测试 (结构验证)
+      <strong>测试步骤</strong>:
+      <p>1. 拦截调度器送入 Executor 的 Config</p>
+      <strong>期望结果</strong>: 配置中严格不存在类似旧时代的 <code>kernel_strategy</code> 字段，确保只下发拓扑属性。
+    </section>
+    <section id="s-错误处理测试-test-err" data-section="null">
+      <h3>错误处理测试 (TEST-ERR)</h3>
+    </section>
+    <section id="s001" data-section="001">
+      <h4>TEST-ERR-001: 内存压力采集失败传播</h4>
+      <strong>关联需求</strong>: REQ-ERR-001
+      <strong>测试类型</strong>: 负向测试
+      <strong>测试步骤</strong>:
+      <p>1. 构造 backend 使 <code>get_memory_pressure()</code> 返回 <code>Err</code></p>
+      <p>2. 调用 <code>observer.capture()</code></p>
+      <strong>期望结果</strong>: 返回 <code>Err(ObserverError::BackendUnavailable)</code>，不返回 <code>memory_pressure = 0.0</code>
+    </section>
+    <section id="s002" data-section="002">
+      <h4>TEST-ERR-002: OOM Halt 验证 (ARCH-ZERO-FALLBACK)</h4>
+      <strong>关联需求</strong>: REQ-ERR-002
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 触发 GPU OOM（模拟超过 Dual-Track 块容量）</p>
+      <p>2. 检查系统行为</p>
+      <strong>期望结果</strong>: 当场崩溃 (Halt) 并返回硬件越界错误，禁止任何降级或 <code>fallback</code> 发生
+    </section>
+    <section id="s003" data-section="003">
+      <h4>TEST-ERR-003: Backend Detection 不 panic</h4>
+      <strong>关联需求</strong>: REQ-ERR-003
+      <strong>测试类型</strong>: 负向测试
+      <strong>测试步骤</strong>:
+      <p>1. 在无 GPU 环境下调用 <code>detect_backend()</code></p>
+      <strong>期望结果</strong>: 返回 <code>Ok(CpuBackend)</code> 或 <code>Err</code>，不 panic
+    </section>
+    <section id="s004" data-section="004">
+      <h4>TEST-ARCH-004: KV Cache Scatter Kernel 正确性</h4>
+      <strong>关联需求</strong>: REQ-ARCH-004
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 构造 GQA 配置 (num_kv_heads=8, head_dim=64, seq_len=16)</p>
+      <p>2. 生成随机 K/V projection 输出 [seq_len, kv_dim]</p>
+      <p>3. 通过 KvScatterWrite kernel 写入 KV cache</p>
+      <p>4. 通过逐 head 逐 token DtoD 写入参考 KV cache</p>
+      <strong>期望结果</strong>: 两种写入方式的 KV cache 内容 bit-exact 一致
+    </section>
+    <section id="s005" data-section="005">
+      <h4>TEST-ARCH-005: GPU 权重缓存命中</h4>
+      <strong>关联需求</strong>: REQ-ARCH-005
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 首次 forward: 验证 GpuWeightCache 初始化（htod 上传）</p>
+      <p>2. 第二次 forward: 验证权重从缓存 DtoD 复制（无 htod 调用）</p>
+      <p>3. 两次 forward 输出 bit-exact 一致</p>
+      <strong>期望结果</strong>: 缓存命中后零 htod 调用，输出不变
+    </section>
+    <section id="s006" data-section="006">
+      <h4>TEST-ARCH-006: Metal KV 直写正确性</h4>
+      <strong>关联需求</strong>: REQ-ARCH-006
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 构造 Metal shared memory KV cache</p>
+      <p>2. 通过 metal_write_kv_direct 直接写入</p>
+      <p>3. 通过 dtoh→repack→htod 参考路径写入</p>
+      <strong>期望结果</strong>: 两种写入方式的 KV cache 内容 bit-exact 一致
+    </section>
+    <section id="s007" data-section="007">
+      <h4>TEST-ARCH-007: Paged Attention 三后端一致性</h4>
+      <strong>关联需求</strong>: REQ-ARCH-007
+      <strong>测试类型</strong>: 正向测试
+      <strong>测试步骤</strong>:
+      <p>1. 构造相同的 paged KV cache 配置和 page table</p>
+      <p>2. 分别在 CUDA/HIP/Metal 后端执行 paged attention</p>
+      <p>3. 比较三后端输出</p>
+      <strong>期望结果</strong>: 三后端 attention 输出数值一致（容差 &lt; 1e-5）
+    </section>
+    <section id="s12" data-section="12">
+      <h3>12. 极致物理调度的系统级大考 (TEST-PHYSICAL-JIT)</h3>
+      <p>&gt; <strong>关联架构</strong>: <a href="http://unified-jit-architecture-master.md">unified-jit-architecture-master.md</a></p>
+      <p>&gt; <strong>要求</strong>: 在极高硬件并发下验证核内路由与热修复的铁律。严禁 Mock 底层物理信号。</p>
+    </section>
+    <section id="s001" data-section="001">
+      <h4>TEST-JIT-DISPATCH-001: 图异构块调度并行对抗测试</h4>
+      <strong>关联需求</strong>: REQ-DYNA-BLOCK-GRAPHS
+      <strong>测试类型</strong>: 负向/系统测试
+      <strong>测试步骤</strong>:
+      <p>1. 锁定一组 GPU SM 块，故意喂入极不均匀的负载（Batch 内含极致稀疏与全密请求）。</p>
+      <p>2. <code>Request_State_Table</code> 同时向不同的 Thread Block 发送计算块。</p>
+      <p>3. 验证没有因为同步屏障挂起整个 <code>__syncthreads()</code>。</p>
+      <strong>期望结果</strong>: JIT 在编译期成功切分并解耦了高频/低频处理段，各个 SM 中的流完全去耦，不发生死锁或显著长尾（执行时差 &lt; 5%）。
+    </section>
+    <section id="s001" data-section="001">
+      <h4>TEST-JIT-HOTPATCH-001: 5-Byte 原子指令擦写断点生存挑战</h4>
+      <strong>关联需求</strong>: REQ-JIT-HOT-REPAIR
+      <strong>测试类型</strong>: 边界/安全测试
+      <strong>测试步骤</strong>:
+      <p>1. 设置一个具有长前缀共享且长时间无人访问的冷门 MoE 专家状态节点。</p>
+      <p>2. JIT Director 发起坍缩，使用 5-byte <code>.text</code> 热覆写强行置入 <code>jmp</code>。</p>
+      <p>3. 在同一微秒内，产生一个从该专家取数据的竞争请求。</p>
+      <strong>期望结果</strong>: 并发指令不会引发 SIGILL（非法指令），硬件以原子级完成覆盖，竞争请求被平滑流转 (Uncommon Trap Bailout) 或通过 OSR 回退 (On-Stack Replacement) 转推重建。
+    </section>
+    <section id="s002" data-section="002">
+      <h4>TEST-HGAL-THRASH-002: HGAL 高并发抗抖测试</h4>
+      <strong>关联需求</strong>: REQ-SCHED-001, REQ-SCHED-005
+      <strong>测试类型</strong>: 压力测试
+      <strong>测试步骤</strong>:
+      <p>1. 创造极端显存过载（并发 150 个超长上下文连接，强迫换入换出率超 80%）。</p>
+      <p>2. 在同一时间发射带有 Chunked Prefill 分片的乱序批次。</p>
+      <strong>期望结果</strong>: 必须触发由 <code>LIRS 队列</code> 驱动的 Thrasing 熔断保护。换页率应立刻呈现衰减收敛，绝不能无限制双边颠簸导致 GPU &lt;-&gt; CPU PCIe 拥堵（验证点：PCIe 实际吞吐不得封顶）。
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-COMPILER-GRAPH" id="ent-compiler-graph">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-MEGA-KERNEL-FN" id="ent-mega-kernel-fn">
+        <h4>ENT-MEGA-KERNEL-FN</h4>
+        <p>MegaKernelFn — 唯一编译产物 ABI (23+参数函数指针)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="entry_fn" data-type="string" data-required="true" <td="">entry_fn<td>string</td><td>是</td><td>MegaKernelFn = unsafe extern "C" fn(*const u8) -&gt; u32</td><td>JIT编译产物函数指针</td></tr><tr data-field="weight_layout" data-type="string" data-required="true" <td="">weight_layout<td>string</td><td>是</td><td>WeightLayout</td><td>
+权重blob中每个tensor的偏移布局</td></tr><tr data-field="buffer_layout" data-type="string" data-required="true" <td="">buffer_layout<td>string</td><td>是</td><td>BufferLayout</td><td>运行时缓冲布局 (activation/logits/sampling)</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小 (logits每行元素数)</td></tr><tr data-field="hidden" data-type="number" data-required="true" <td="">hidden<td>number</td><td>是</td><td>usize</td><td>
+隐藏维度 (SG scratchpad需要)</td></tr><tr data-field="elem_bytes" data-type="number" data-required="true" <td="">elem_bytes<td>number</td><td>是</td><td>usize</td><td>每元素字节数 (compute dtype)</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>编译时max_seq_len (KV cache层步长)</td></tr><tr data-field="mtp_depth" data-type="number" data-required="true" <td="">mtp_depth<td>number</td><td>是</td><td>usize</td><td>
+MTP预测深度 (0=禁用)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-MODEL-CONFIG" id="ent-model-config">
+        <h4>ENT-MODEL-CONFIG</h4>
+        <p>ModelConfig — 模型配置 (tensor-driven Ω1)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hidden_size" data-type="number" data-required="true" <td="">hidden_size<td>number</td><td>是</td><td>usize</td><td>隐藏层维度</td></tr><tr data-field="num_attention_heads" data-type="number" data-required="true" <td="">num_attention_heads<td>number</td><td>是</td><td>usize</td><td>注意力头数</td></tr>
+<tr data-field="num_key_value_heads" data-type="number" data-required="true" <td="">num_key_value_heads<td>number</td><td>是</td><td>usize</td><td>KV头数 (GQA)</td></tr><tr data-field="num_hidden_layers" data-type="number" data-required="true" <td="">num_hidden_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小</td></tr>
+<tr data-field="max_position_embeddings" data-type="number" data-required="true" <td="">max_position_embeddings<td>number</td><td>是</td><td>usize</td><td>最大位置编码数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>模型权重dtype (F32/F16/BF16)</td></tr><tr data-required="false" data-type="boolean" data-field="qk_norm"><td>qk_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="boolean" data-field="value_norm"><td>value_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="number" data-field="embedding_scale_factor"><td>embedding_scale_factor</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="number" data-field="rope_partial_ratio_global"><td>rope_partial_ratio_global</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="boolean" data-field="mla_use_unabsorbed"><td>mla_use_unabsorbed</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="number" data-field="unabsorbed_threshold"><td>unabsorbed_threshold</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="string" data-field="hidden_act"><td>hidden_act</td><td>string</td><td>否</td><td>(synced)</td></tr></table>
+      </section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+      
+    </section>
+<section data-entity-model-type="relational" data-entity="ENT-TEST-FRAMEWORK" id="ent-test-framework"><h3>ENT-TEST-FRAMEWORK Test Framework</h3><table data-entity-table="ENT-TEST-FRAMEWORK"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-required="true" data-type="string" data-field="test_type"><td>test_type</td><td>string</td><td>是</td><td></td><td>测试类型（e2e/unit/benchmark/alignment）</td></tr><tr data-required="true" data-type="number" data-field="test_id"><td>test_id</td><td>number</td><td>是</td><td></td><td>测试 ID</td></tr><tr data-required="true" data-type="string" data-field="target_req"><td>target_req</td><td>string</td><td>是</td><td></td><td>测试目标 REQ ID</td></tr><tr data-required="false" data-type="number" data-field="tolerance_bits"><td>tolerance_bits</td><td>number</td><td>否</td><td></td><td>容忍误差位数</td></tr><tr data-required="false" data-type="boolean" data-field="single_thread"><td>single_thread</td><td>boolean</td><td>否</td><td></td><td>是否单线程执行</td></tr><tr data-required="false" data-type="string" data-field="model_id"><td>model_id</td><td>string</td><td>否</td><td></td><td>测试模型标识</td></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：06-TESTING-STRATEGY.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2></section></body>
+</html>

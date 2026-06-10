@@ -21,8 +21,7 @@ test_models/
 CLAUDE.md
 .claude/
 
-# Internal design docs
-SPEC/
+# Internal design docs (SPEC is SSOT, tracked in git)
 SPEC-archive/
 
 # Internal status docs

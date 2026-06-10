@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head><body><section data-tests-section="" id="testing"><h2>测试用例</h2><div id="test-mc-ext-001" data-req-ref="REQ-MC-EXT-001" data-test-categories="unit" data-test="TEST-MC-EXT-001"><h4>TEST-MC-EXT-001: REQ-MC-EXT-001 单元测试</h4><p>TODO: 为 REQ-MC-EXT-001 编写测试用例</p></div><div id="test-mc-ext-002" data-req-ref="REQ-MC-EXT-002" data-test-categories="unit" data-test="TEST-MC-EXT-002"><h4>TEST-MC-EXT-002: REQ-MC-EXT-002 单元测试</h4><p>TODO: 为 REQ-MC-EXT-002 编写测试用例</p></div><div id="test-mc-ext-003" data-req-ref="REQ-MC-EXT-003" data-test-categories="unit" data-test="TEST-MC-EXT-003"><h4>TEST-MC-EXT-003: REQ-MC-EXT-003 单元测试</h4><p>TODO: 为 REQ-MC-EXT-003 编写测试用例</p></div><div id="test-mc-ext-004" data-req-ref="REQ-MC-EXT-004" data-test-categories="unit" data-test="TEST-MC-EXT-004"><h4>TEST-MC-EXT-004: REQ-MC-EXT-004 单元测试</h4><p>TODO: 为 REQ-MC-EXT-004 编写测试用例</p></div><div id="test-mc-ext-005" data-req-ref="REQ-MC-EXT-005" data-test-categories="unit" data-test="TEST-MC-EXT-005"><h4>TEST-MC-EXT-005: REQ-MC-EXT-005 单元测试</h4><p>TODO: 为 REQ-MC-EXT-005 编写测试用例</p></div><div id="test-mc-ext-006" data-req-ref="REQ-MC-EXT-006" data-test-categories="unit" data-test="TEST-MC-EXT-006"><h4>TEST-MC-EXT-006: REQ-MC-EXT-006 单元测试</h4><p>TODO: 为 REQ-MC-EXT-006 编写测试用例</p></div><div id="test-mc-ext-007" data-req-ref="REQ-MC-EXT-007" data-test-categories="unit" data-test="TEST-MC-EXT-007"><h4>TEST-MC-EXT-007: REQ-MC-EXT-007 单元测试</h4><p>TODO: 为 REQ-MC-EXT-007 编写测试用例</p></div></section></body>
+  <meta charset="utf-8">
+  <meta content="vm-state-tracking" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"vm-state-tracking", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>VM 状态机动态布局跟踪 (ARCH-VM-STATE-TRACKING)</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>vm-state-tracking</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-vm-状态机动态布局跟踪-arch-vm-state-tracking" data-section="null">
+      <h2>VM 状态机动态布局跟踪 (ARCH-VM-STATE-TRACKING)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档定义 REGISTER-VM 半虚拟化的核心机制——VM 状态机在代码生成过程中动态跟踪内存布局、栈帧、指针和寄存器，所有物理位置由 VM 计算输出，禁止人工预设常量。</p>
+      <p>&gt; <strong>废弃</strong>: <code>executable.rs::abi_slots</code> 硬编码常量模块（<code>Stack(24)</code> 等）。</p>
+      <p>&gt; <strong>交叉引用</strong>: <code>symdim-threading-protocol.md</code>（SymDim 穿透）、<code>01-JIT-PIPELINE.md</code> §5（PlatformBackend）、<code>08-EXECUTOR.md</code> §4.7（ABI 契约）</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 设计原则</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 为什么叫"半虚拟化"</h4>
+      <p>传统 JIT（如 V8/HotSpot）：人预设 ABI 常量，codegen 硬编码偏移。</p>
+      <p>全虚拟化（如 JVM bytecode）：虚拟机完全隐藏物理布局，但性能损失大。</p>
+      <strong>REGISTER-VM 半虚拟化</strong>：
+      <li>VM 状态机在 code generation 过程中<strong>实时跟踪</strong>物理布局</li>
+      <li>每条 VmInstr 的发射会<strong>更新 VM 状态</strong>（栈指针、寄存器占用、参数位置）</li>
+      <li>需要物理位置时，从 VM 状态中<strong>查询</strong>，而非引用预设常量</li>
+      <li>ISA Lower 阶段看到的是 VM 状态的<strong>快照</strong>，不是硬编码的数字</li>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 核心不变量</h4>
+      <table>
+        <tr>
+          <th>铁律</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-NO-MAGIC-OFFSET</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>禁止在任何文件中硬编码栈偏移数字（如 16/24/32/40）。所有偏移由 VM 状态机计算。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-PROLOGUE-TRACKS</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>prologue 生成过程中，VM 状态机记录每个 push/sub 操作对栈指针的影响，更新参数偏移表。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-QUERY-NOT-ASSUME</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>需要参数位置时，查询 VM 状态（</td>
+          <td>vm_state.arg_location("output")</td>
+          <td>），不引用常量。</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. VM 状态机</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 VmState 结构</h4>
+      <p>```rust</p>
+      <p>/// VM 代码生成状态机。</p>
+      <p>///</p>
+      <p>/// 在 prologue → body → epilogue 的整个生成过程中持续更新。</p>
+      <p>/// 所有物理位置（参数偏移、寄存器映射、栈帧布局）从此结构查询。</p>
+      <p>pub struct VmState {</p>
+      <p>    /// 当前栈指针相对于 frame base (rbp) 的偏移</p>
+      <p>    /// prologue push rbp 后 = 0</p>
+      <p>    /// 每次 push → -8，每次 sub rsp,N → -N</p>
+      <p>    rsp_offset: i32,</p>
+      <p>    /// ABI 参数位置表——在 prologue 开始前由平台 ABI 规则初始化。</p>
+      <p>    /// key = 参数语义名称（"input"/"output"/"seq_len"/...）</p>
+      <p>    /// value = 相对 rbp 的字节偏移（prologue 后的位置）</p>
+      <p>    ///</p>
+      <p>    /// 初始化规则（x86 SysV）:</p>
+      <p>    ///   前 6 个整数/指针参数 → 寄存器（rdi/rsi/rdx/rcx/r8/r9）</p>
+      <p>    ///   第 7+ 个参数 → [rbp + 16 + (arg_idx - 6) * 8]</p>
+      <p>    ///                         ^^ 16 = ret_addr(8) + saved_rbp(8)</p>
+      <p>    ///</p>
+      <p>    /// 这个 16 不是硬编码常量——它是 <code>push rbp</code> 后的数学推导结果，</p>
+      <p>    /// 由 <code>init_for_platform()</code> 根据 ABI 规则计算。</p>
+      <p>    arg_locations: HashMap&lt;String, ArgLocation&gt;,</p>
+      <p>    /// 寄存器占用状态</p>
+      <p>    gpr_state: [GprState; 16],    // x86: rax-r15</p>
+      <p>    vec_state: [VecState; 32],    // x86: ymm0-ymm31 / zmm0-zmm31</p>
+      <p>    /// Callee-saved 寄存器的保存位置（push 顺序决定）</p>
+      <p>    callee_save_locations: Vec&lt;(PhysGpr, i32)&gt;,  // (寄存器, rbp-relative 偏移)</p>
+      <p>    /// 当前 spill 区域的起始偏移（相对 rbp，负值）</p>
+      <p>    spill_base: i32,</p>
+      <p>}</p>
+      <p>/// 参数的物理位置。</p>
+      <p>pub enum ArgLocation {</p>
+      <p>    /// 在寄存器中（前 6 个参数）</p>
+      <p>    Register(PhysGpr),</p>
+      <p>    /// 在栈上（第 7+ 个参数）</p>
+      <p>    /// offset 是相对 rbp 的正偏移（调用方的栈帧）</p>
+      <p>    Stack(i32),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 初始化（平台 ABI 驱动）</h4>
+      <p>```rust</p>
+      <p>impl VmState {</p>
+      <p>    /// 从平台 ABI 规则初始化参数位置表。</p>
+      <p>    ///</p>
+      <p>    /// x86 SysV: 前 6 个 → rdi/rsi/rdx/rcx/r8/r9</p>
+      <p>    /// 第 7+ 个 → [rbp + stack_arg_base + (idx - 6) * 8]</p>
+      <p>    /// stack_arg_base = 16（= ret_addr + saved_rbp，由 ABI 规范推导）</p>
+      <p>    pub fn init_x86_sysv(param_names: &amp;[&amp;str]) -&gt; Self {</p>
+      <p>        let reg_args = [</p>
+      <p>            PhysGpr(7),  // rdi</p>
+      <p>            PhysGpr(6),  // rsi</p>
+      <p>            PhysGpr(2),  // rdx</p>
+      <p>            PhysGpr(1),  // rcx</p>
+      <p>            PhysGpr(8),  // r8</p>
+      <p>            PhysGpr(9),  // r9</p>
+      <p>        ];</p>
+      <p>        let stack_arg_base: i32 = 16; // ret_addr(8) + push_rbp(8) — ABI 数学推导</p>
+      <p>        let mut arg_locations = HashMap::new();</p>
+      <p>        for (i, &amp;name) in param_names.iter().enumerate() {</p>
+      <p>            let loc = if i &lt; 6 {</p>
+      <p>                ArgLocation::Register(reg_args[i])</p>
+      <p>            } else {</p>
+      <p>                ArgLocation::Stack(stack_arg_base + ((i - 6) as i32) * 8)</p>
+      <p>            };</p>
+      <p>            arg_locations.insert(name.to_string(), loc);</p>
+      <p>        }</p>
+      <p>        Self {</p>
+      <p>            rsp_offset: 0,</p>
+      <p>            arg_locations,</p>
+      <p>            gpr_state: [GprState::Free; 16],</p>
+      <p>            vec_state: [VecState::Free; 32],</p>
+      <p>            callee_save_locations: Vec::new(),</p>
+      <p>            spill_base: 0,</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 MegaKernelFn 参数名序列</h4>
+      <p>```rust</p>
+      <p>/// MegaKernelFn 的参数名序列——与签名一一对应。</p>
+      <p>/// VmState::init_x86_sysv() 的输入。</p>
+      <p>pub const COMPILED_LAYER_PARAM_NAMES: &amp;[&amp;str] = &amp;[</p>
+      <p>    "input",       // arg 0: rdi</p>
+      <p>    "weights",     // arg 1: rsi</p>
+      <p>    "kv_cache",    // arg 2: rdx</p>
+      <p>    "positions",   // arg 3: rcx</p>
+      <p>    "seq_lens",    // arg 4: r8</p>
+      <p>    "batch_size",  // arg 5: r9</p>
+      <p>    "seq_len",     // arg 6: [rbp+16]  — 由 ABI 推导，非硬编码</p>
+      <p>    "output",      // arg 7: [rbp+24]</p>
+      <p>    "scratchpad",  // arg 8: [rbp+32]</p>
+      <p>    "telemetry",   // arg 9: [rbp+40]</p>
+      <p>];</p>
+      <p>```</p>
+      <strong>注意</strong>: <code>[rbp+16]</code> 不是硬编码——它是 <code>stack_arg_base(16) + (6-6)*8 = 16</code> 的计算结果。如果 ABI 变更（如 Windows x64 的 shadow space），<code>stack_arg_base</code> 会不同，所有偏移自动更新。
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Prologue 状态跟踪</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 每条 prologue 指令更新 VM 状态</h4>
+      <p>```rust</p>
+      <p>impl X86Lower {</p>
+      <p>    fn emit_prologue(&amp;mut self, frame: &amp;StackFrame, alloc: &amp;RegAllocation) {</p>
+      <p>        // push rbp → rsp_offset 已被 init_x86_sysv 计算在内</p>
+      <p>        self.asm.push(rbp);</p>
+      <p>        self.asm.mov(rbp, rsp);</p>
+      <p>        // 此时 vm_state.rsp_offset = 0（rbp = rsp）</p>
+      <p>        // Push callee-saved → 跟踪每个 push 的影响</p>
+      <p>        for &amp;reg in &amp;alloc.callee_saved_used {</p>
+      <p>            self.vm_state.rsp_offset -= 8;</p>
+      <p>            self.vm_state.callee_save_locations.push((reg, self.vm_state.rsp_offset));</p>
+      <p>            self.asm.push(Self::gpr(reg));</p>
+      <p>        }</p>
+      <p>        // sub rsp → 跟踪帧大小</p>
+      <p>        if frame.total_size &gt; 0 {</p>
+      <p>            self.vm_state.rsp_offset -= frame.total_size as i32;</p>
+      <p>            self.asm.sub(rsp, frame.total_size as i32);</p>
+      <p>        }</p>
+      <p>        // spill 区域起始 = callee_save 之后</p>
+      <p>        self.vm_state.spill_base = -(alloc.callee_saved_used.len() as i32 * 8);</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 参数加载通过 VM 状态查询</h4>
+      <p>```rust</p>
+      <p>impl VmState {</p>
+      <p>    /// 查询参数的物理位置——返回 PtrExpr 供 VmInstr::LoadPtr 使用。</p>
+      <p>    ///</p>
+      <p>    /// 禁止在外部硬编码 PtrExpr::StackArg(24) 等——</p>
+      <p>    /// 必须通过此方法获取（ARCH-VM-QUERY-NOT-ASSUME）。</p>
+      <p>    pub fn arg_ptr_expr(&amp;self, name: &amp;str) -&gt; Result&lt;PtrExpr, CompilerError&gt; {</p>
+      <p>        let loc = self.arg_locations.get(name)</p>
+      <p>            .ok_or_else(|| CompilerError::CodegenViolation(</p>
+      <p>                format!("Unknown ABI parameter: '{}'", name)</p>
+      <p>            ))?;</p>
+      <p>        Ok(match loc {</p>
+      <p>            ArgLocation::Register(gpr) =&gt; PtrExpr::AbiArg(gpr.0),</p>
+      <p>            ArgLocation::Stack(off) =&gt; PtrExpr::StackArg(*off),</p>
+      <p>        })</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. SymDim 绑定与 VM 状态的统一</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 SymDimSlotMap 从 VmState 构建</h4>
+      <p>```rust</p>
+      <p>impl SymDimSlotMap {</p>
+      <p>    /// 从 VmState 构建——所有位置从 VM 状态查询，零硬编码。</p>
+      <p>    pub fn from_vm_state(state: &amp;VmState) -&gt; Result&lt;Self, CompilerError&gt; {</p>
+      <p>        let mut slots = HashMap::new();</p>
+      <p>        // 固定参数</p>
+      <p>        for name in ["input", "weights", "kv_cache", "positions",</p>
+      <p>                      "seq_lens", "output", "scratchpad", "telemetry"] {</p>
+      <p>            slots.insert(name.into(), state.arg_ptr_expr(name)?);</p>
+      <p>        }</p>
+      <p>        // 符号维度</p>
+      <p>        slots.insert("seq_len".into(), state.arg_ptr_expr("seq_len")?);</p>
+      <p>        slots.insert("batch_size".into(), state.arg_ptr_expr("batch_size")?);</p>
+      <p>        slots.insert("total_seq".into(), state.arg_ptr_expr("seq_len")?);</p>
+      <p>        Ok(Self { slots })</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 BoundExpr::Symbolic 解析</h4>
+      <p>ISA Lower 阶段，<code>BoundExpr::Symbolic</code> 通过 <code>SymDimSlotMap::resolve()</code> → <code>PtrExpr</code> → 物理指令。</p>
+      <code>SymDimSlotMap</code> 来自 <code>VmState</code>，<code>VmState</code> 来自平台 ABI 初始化 + prologue 状态跟踪。
+      <strong>完整链路（零硬编码）</strong>:
+      <p>```</p>
+      <p>平台 ABI 规则 (x86 SysV)</p>
+      <p>  → VmState::init_x86_sysv(COMPILED_LAYER_PARAM_NAMES)</p>
+      <p>    → arg_locations: {"output" → Stack(24), "seq_len" → Stack(16), ...}</p>
+      <p>      （24 = stack_arg_base(16) + (7-6)*8 = 24，计算结果）</p>
+      <p>  → SymDimSlotMap::from_vm_state(&amp;vm_state)</p>
+      <p>    → slots: {"output" → StackArg(24), "seq_len" → StackArg(16), ...}</p>
+      <p>  → plan_lower: sym_map.resolve("output") → StackArg(24)</p>
+      <p>  → lower: BoundExpr::Symbolic("seq_len") → sym_map.resolve → StackArg(16)</p>
+      <p>  → x86_lower: cmp counter, [rbp+16]</p>
+      <p>```</p>
+      <p>数字 <code>24</code> 和 <code>16</code> 出现在运行时内存中，但<strong>没有出现在源代码的任何字面量中</strong>——它们是 <code>stack_arg_base + (idx - 6) * 8</code> 的计算结果。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 废弃清单</h3>
+      <table>
+        <tr>
+          <th>废弃</th>
+        </tr>
+        <tr>
+          <td>替代</td>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>executable.rs::abi_slots</td>
+          <td> 模块</td>
+        </tr>
+        <tr>
+          <td>VmState::arg_ptr_expr()</td>
+        </tr>
+        <tr>
+          <td>硬编码常量 → VM 状态动态查询</td>
+        </tr>
+        <tr>
+          <td>AbiSlot::Stack(24)</td>
+        </tr>
+        <tr>
+          <td>VmState::init_x86_sysv()</td>
+          <td> 计算</td>
+        </tr>
+        <tr>
+          <td>硬编码偏移 → ABI 推导</td>
+        </tr>
+        <tr>
+          <td>SymDimSlotMap::from_abi()</td>
+        </tr>
+        <tr>
+          <td>SymDimSlotMap::from_vm_state()</td>
+        </tr>
+        <tr>
+          <td>静态构建 → VM 状态驱动</td>
+        </tr>
+        <tr>
+          <td>X86Lower::with_sym_map(avx512, map)</td>
+        </tr>
+        <tr>
+          <td>X86Lower::with_vm_state(avx512, vm_state)</td>
+        </tr>
+        <tr>
+          <td>Map 传入 → State 传入</td>
+        </tr>
+        <tr>
+          <td>所有 </td>
+          <td>PtrExpr::StackArg(数字)</td>
+          <td> 字面量</td>
+        </tr>
+        <tr>
+          <td>vm_state.arg_ptr_expr("name")</td>
+        </tr>
+        <tr>
+          <td>硬编码 → 查询</td>
+        </tr>
+        <tr>
+          <td>所有 </td>
+          <td>PtrExpr::AbiArg(数字)</td>
+          <td> 字面量</td>
+        </tr>
+        <tr>
+          <td>vm_state.arg_ptr_expr("name")</td>
+        </tr>
+        <tr>
+          <td>硬编码 → 查询</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 铁律</h3>
+      <table>
+        <tr>
+          <th>铁律</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-NO-MAGIC-OFFSET</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>源代码中禁止出现 </td>
+          <td>StackArg(16)</td>
+          <td> / </td>
+          <td>StackArg(24)</td>
+          <td> / </td>
+          <td>AbiArg(4)</td>
+          <td> 等数字字面量。所有偏移由 VmState 计算。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-PROLOGUE-TRACKS</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>prologue 中每条修改 rsp 的指令必须更新 VmState.rsp_offset。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-QUERY-NOT-ASSUME</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>参数位置通过 </td>
+          <td>vm_state.arg_ptr_expr("name")</td>
+          <td> 查询。查询失败返回 Err，禁止 fallback。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-VM-PLATFORM-INIT</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>VmState 的初始化由平台 ABI 规则驱动（</td>
+          <td>init_x86_sysv</td>
+          <td> / </td>
+          <td>init_aarch64_aapcs</td>
+          <td> / </td>
+          <td>init_gpu_kernel</td>
+          <td>），不手写。</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 实现路径</h3>
+    </section>
+  <section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-001" id="req-mc-ext-001"><h3>REQ-MC-EXT-001 qk_norm 外部化配置字段</h3><p>ModelConfig 新增 qk_norm: Option&lt;bool&gt; 字段，config.json 读取 qk_norm，GGUF 读取 attention.qk_norm，默认从 tensor 缺失推导（无 AttentionQNorm/KNorm weight → true）。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ModelConfig.qk_norm: Option&lt;bool&gt; 字段存在 (model_config_fragments/types.inc.rs)</li><li>config.json 读取 qk_norm 键成功 (model_config_fragments/config_impl.inc.rs)</li><li>GGUF 读取 attention.qk_norm 元数据成功</li><li>ArchHints.qk_norm 从 ModelConfig 传播到 analyze_architecture()</li><li>qk_norm=true 时 ArchitectureFeatures.has_qk_norm=true，驱动 OpKind::QkNorm 发射</li><li>默认值 None → 从权重缺失推导 (无 q_norm 权重 → false)</li></ol></div></section><section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-002" id="req-mc-ext-002"><h3>REQ-MC-EXT-002 value_norm 外部化配置字段</h3><p>ModelConfig 新增 value_norm: Option&lt;bool&gt; 字段，config.json 读取 value_norm，GGUF 读取 attention.value_norm，默认 false。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ModelConfig.value_norm: Option&lt;bool&gt; 字段存在 (model_config_fragments/types.inc.rs)</li><li>config.json 读取 value_norm 键成功</li><li>ArchHints.value_norm 从 ModelConfig 传播到 analyze_architecture()</li><li>value_norm=true 时 ArchitectureFeatures.has_value_norm=true，驱动 OpKind::ValueNorm 发射</li><li>默认值 None → false</li></ol></div></section><section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-003" id="req-mc-ext-003"><h3>REQ-MC-EXT-003 embedding_scale_factor 外部化配置字段</h3><p>ModelConfig 新增 embedding_scale_factor: Option&lt;f32&gt; 字段，config.json 读取 embedding_scale_factor，GGUF 读取 embedding.scale_factor，&gt;0 则 has_embedding_scale=true。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ModelConfig.embedding_scale_factor: Option&lt;f32&gt; 字段存在 (model_config_fragments/types.inc.rs)</li><li>config.json 读取 embedding_scale_factor 键成功</li><li>ModelGeometry.embedding_scale_factor 从 ModelConfig 解析</li><li>embedding_scale_factor &gt; 0.0 时 has_embedding_scale=true，embedding 输出乘以 sqrt(hidden_size)</li><li>默认值 None → 0.0 (无缩放)</li></ol></div></section><section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-004" id="req-mc-ext-004"><h3>REQ-MC-EXT-004 rope_partial_ratio_global 外部化配置字段</h3><p>ModelConfig 新增 rope_partial_ratio_global: Option&lt;f32&gt; 字段，config.json 读取 rope_parameters.full_attention.partial_rotary_factor，GGUF 读取 rope.global.partial_ratio。消除硬编码 0.25，fallback 链: config.rope_partial_ratio_global → config.rope_partial_ratio → 0.25。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ModelConfig.rope_partial_ratio_global: Option&lt;f32&gt; 字段存在 (model_config_fragments/types.inc.rs)</li><li>config.json 读取 rope_parameters.full_attention.partial_rotary_factor 键成功</li><li>ModelGeometry.rope_partial_ratio_global 从 ModelConfig 解析</li><li>Fallback 链：config 显式值 → dual-RoPE 信号推导 (global_rope_theta &gt; 0 时默认 0.25) → 1.0</li><li>消除硬编码 0.25 魔法数字，改为配置驱动</li></ol></div></section><section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-005" id="req-mc-ext-005"><h3>REQ-MC-EXT-005 mla_use_unabsorbed 外部化配置字段</h3><p>ModelConfig 新增 mla_use_unabsorbed: Option&lt;bool&gt; 字段，config.json 读取 mla_use_unabsorbed (gllm 扩展)，GGUF 读取 attention.mla.use_unabsorbed，默认 false。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ModelConfig.mla_use_unabsorbed: Option&lt;bool&gt; 字段存在 (model_config_fragments/types.inc.rs)</li><li>ArchHints.mla_use_unabsorbed 从 ModelConfig 传播到 analyze_architecture()</li><li>mla_use_unabsorbed=true 时启用 MLA un-absorbed prefill 路径</li><li>默认值 None → false</li></ol></div></section><section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-006" id="req-mc-ext-006"><h3>REQ-MC-EXT-006 unabsorbed_threshold 外部化配置字段</h3><p>MlaConfig.unabsorbed_threshold 从 usize 变为 Option&lt;usize&gt;，config.json 读取 unabsorbed_threshold (gllm 扩展)，GGUF 读取 attention.mla.unabsorbed_threshold，默认 4096。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>MlaConfig.unabsorbed_threshold: Option&lt;usize&gt; 字段存在 (model_config_fragments/types.inc.rs)</li><li>config.json 读取 mla_config.unabsorbed_threshold 键成功</li><li>类型从 usize 变为 Option&lt;usize&gt;，None 表示使用默认值</li><li>默认值 None → 4096 (短 prefill 阈值)</li><li>ModelGeometry.mla_unabsorbed_threshold 从 MlaConfig 解析</li></ol></div></section><section data-req-entity="ENT-MODEL-CONFIG" data-entity-ref="ENT-MODEL-CONFIG" data-req-api="POST /internal/model_config/from_loader" data-req-priority="P0" data-req-category="architecture" data-req-domain="mc-ext" data-req-status="implemented" data-req="REQ-MC-EXT-007" id="req-mc-ext-007"><h3>REQ-MC-EXT-007 FFN type 从 hidden_act 驱动替代 is_gemma4</h3><p>FFN type 由 hidden_act 驱动而非 is_gemma4 硬编码。gate+up+down 时: GeluNew/Gelu → GeGLU, Silu/Swish → SwiGLU, None → SwiGLU (最常见默认)。hidden_act 已从 config.json hidden_activation 解析，无需新增字段。BUILD 阶段消费，编译器不读。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ArchitectureFeatures.ffn_type 由 ModelConfig.hidden_act 驱动 (auto_graph_fragments/types.inc.rs)</li><li>hidden_act="gelu_new"/"gelu_pytorch_tanh"/"gelu" → FfnType::GeGLU</li><li>hidden_act="silu"/"swish" → FfnType::SwiGLU</li><li>代码中无 is_gemma4 硬编码 bool 驱动 FFN 选择</li><li>ArchHints.hidden_act 从 ModelConfig 传播到 analyze_architecture()</li><li>MoE 模型：hidden_act 同样驱动 MoEFfnKind (MoESwiGLU/MoEGeGLU)</li></ol></div></section><section id="post-/internal/model-config/from-loader" data-api="POST /internal/model_config/from_loader" data-api-type="internal" data-api-name="API-MODEL-CONFIG-BUILD"><h4>POST /internal/model_config/from_loader — ModelConfig::from_loader()</h4><p>模型配置构建 API，从加载器输出构建 ModelConfig</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="WeightLoader" data-required="true" data-param="loader"><td>loader</td><td>WeightLoader</td><td>是</td><td>权重加载器实例</td></tr><tr data-type="ModelManifest" data-required="false" data-param="manifest"><td>manifest</td><td>ModelManifest</td><td>否</td><td>模型清单</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="ModelConfig"><td>200</td><td>成功</td><td>ModelConfig</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：vm-state-tracking.html</address>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="gemma4-implementation-plan" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"gemma4-implementation-plan", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>Gemma 4 实现计划</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>gemma4-implementation-plan</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s4" data-section="4">
+      <h2>Gemma 4 实现计划</h2>
+      <p>&gt; SSOT 为以下根 SPEC：算子契约 <code>SPEC/04-OPERATORS.md</code> / <code>ARCH-DETAILED-DESIGNS.md</code>；多模态接入 <code>SPEC/02-ARCHITECTURE.md §ARCH-MULTIMODAL</code>；融合策略 <code>SPEC/05-OPTIMIZATIONS.md</code>。</p>
+      <p>&gt; 本文件只记录 <strong>Gemma 4 专属任务</strong> 的交付状态，不重复 SPEC 设计。</p>
+      <p>&gt; 状态图例: ✅ 已交付（有 commit 佐证）| ✅ 已完成| ⏸ 未启动</p>
+    </section>
+    <section id="s-依赖图" data-section="null">
+      <h3>依赖图</h3>
+      <p>```</p>
+      <p>P0 核心算子 ──┬──→ P0.6 31B dry-run</p>
+      <p>              │</p>
+      <p>              ├──→ P1.1 SharedKvRef ──→ P2.1 PLE ──→ P2.2 E2B 数值对齐</p>
+      <p>              │</p>
+      <p>              └──→ P3.1 Vision encoder ──┐</p>
+      <p>                   P3.2 Audio encoder ───┼──→ P3.3 多模态路由 + decoder fusion</p>
+      <p>```</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>P0 — 核心算子 ✅ 全部交付</h3>
+      <table>
+        <tr>
+          <th>任务</th>
+        </tr>
+        <tr>
+          <td>产出</td>
+        </tr>
+        <tr>
+          <td>佐证 commit</td>
+        </tr>
+        <tr>
+          <td>P0.1 config 扩展 (</td>
+          <td>global_rope_theta</td>
+          <td> / </td>
+          <td>attention_pattern</td>
+          <td> / </td>
+          <td>num_kv_shared_layers</td>
+          <td> / </td>
+          <td>hidden_size_per_layer_input</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>model_config.rs::ModelGeometry</td>
+          <td> 新字段 + GGUF/JSON 解析</td>
+        </tr>
+        <tr>
+          <td>T21, T63 (</td>
+          <td>41a8232</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P0.2 QkNorm 算子 (Q/K L2 归一化 + √head_dim 缩放)</td>
+        </tr>
+        <tr>
+          <td>scalar + lower + x86/AArch64/GPU codegen + atomic 映射</td>
+        </tr>
+        <tr>
+          <td>T22, T34 (</td>
+          <td>ef38822</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P0.3 ValueNorm 算子 (V 无学习参数 RmsNorm)</td>
+        </tr>
+        <tr>
+          <td>同 P0.2 全 ISA 落地</td>
+        </tr>
+        <tr>
+          <td>T23</td>
+        </tr>
+        <tr>
+          <td>P0.4 DualRoPE (sliding θ=10K partial=1.0 / global θ=1M partial=0.25)</td>
+        </tr>
+        <tr>
+          <td>OpKind::RoPE { partial }</td>
+          <td> 扩展 + codegen 跳过后 75% 维度</td>
+        </tr>
+        <tr>
+          <td>T24</td>
+        </tr>
+        <tr>
+          <td>P0.5 Attention per-layer type (</td>
+          <td>attention_pattern[layer_idx]</td>
+          <td> 选 sliding/global)</td>
+        </tr>
+        <tr>
+          <td>执行器按层派发</td>
+        </tr>
+        <tr>
+          <td>T25, T35 (</td>
+          <td>ef38822</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P0.6 31B GGUF 全管线 dry-run</td>
+        </tr>
+        <tr>
+          <td>test_e2e_gemma4_31b_compile</td>
+        </tr>
+        <tr>
+          <td>T26, T27, T40 (</td>
+          <td>99a09ad</td>
+          <td>)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>P1 — KV 共享 + 融合优化 ✅ 全部交付</h3>
+      <table>
+        <tr>
+          <th>任务</th>
+        </tr>
+        <tr>
+          <td>产出</td>
+        </tr>
+        <tr>
+          <td>佐证 commit</td>
+        </tr>
+        <tr>
+          <td>P1.1 SharedKvRef — Scheduler / KvCache page 级共享</td>
+        </tr>
+        <tr>
+          <td>paged_scheduler</td>
+          <td> 共享层 page 引用 + </td>
+          <td>KvPageHeader.donor_layer</td>
+          <td> + weight_loader 跳过共享层 K/V 权重</td>
+        </tr>
+        <tr>
+          <td>T39 (</td>
+          <td>f5acc67</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P1.1 SharedKvRef — auto_graph 层跳过 K/V MatMul</td>
+        </tr>
+        <tr>
+          <td>auto_graph</td>
+          <td> </td>
+          <td>only_if</td>
+          <td> 守卫跳过共享层 K/V 计算</td>
+        </tr>
+        <tr>
+          <td>T43 (</td>
+          <td>32b6f10</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P1.2 FusedQkvNormRope auto_graph 直接构建 (Q/K/V proj + QkNorm + ValueNorm + DualRoPE 六算子融合)</td>
+        </tr>
+        <tr>
+          <td>auto_graph</td>
+          <td> 直接构建 CompilerGraph</td>
+        </tr>
+        <tr>
+          <td>T29 (</td>
+          <td>9697fb8</td>
+          <td>), T41/T42 (</td>
+          <td>dedd86d</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P1.2 auto_graph ↔ atomic_op_to_kind 契约</td>
+        </tr>
+        <tr>
+          <td>atomic_op_to_kind</td>
+          <td> 覆盖 QkNorm/DualRoPE/Attention 派发；白名单移除</td>
+        </tr>
+        <tr>
+          <td>T34/T35 (</td>
+          <td>ef38822</td>
+          <td>), T36 (</td>
+          <td>7dd6520</td>
+          <td>, </td>
+          <td>c0d0382</td>
+          <td>)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>P2 — Per-Layer Embedding</h3>
+      <table>
+        <tr>
+          <th>任务</th>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>佐证 commit / 剩余工作</td>
+        </tr>
+        <tr>
+          <td>P2.1 PLE 算子链 (alias 解析 + fuzzy shape binding + auto_graph only_if 展开 + 5-input 签名一致性 + ColumnSlice JIT + GPU codegen)</td>
+        </tr>
+        <tr>
+          <td>✅ 交付</td>
+        </tr>
+        <tr>
+          <td>T28.2 (</td>
+          <td>6f6b648</td>
+          <td>), T28.3 (</td>
+          <td>774a51f</td>
+          <td>), T33 (</td>
+          <td>9dc283b</td>
+          <td>), T37 (</td>
+          <td>bab213c</td>
+          <td>), T38, T36 (</td>
+          <td>7dd6520</td>
+          <td>/</td>
+          <td>c0d0382</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P2.2 E2B E2E 数值对齐</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>dry-run ✅ 通 (T40)；剩余：真实 HF 下载 + 与 HF Transformers 参考输出余弦相似度 ≥ 0.99 验证 (T47)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>P3 — 多模态</h3>
+      <p>&gt; SPEC 依据：<code>SPEC/02-ARCHITECTURE.md §ARCH-MULTIMODAL</code>（三阶段：Encoding → Routing → Fusion，REQ-ARCH-MULTIMODAL-*）</p>
+      <table>
+        <tr>
+          <th>任务</th>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>佐证 commit / 剩余工作</td>
+        </tr>
+        <tr>
+          <td>P3.1 SigLIP Vision — auto_graph + </td>
+          <td>PatchEmbed</td>
+          <td>/</td>
+          <td>LearnedPos2D</td>
+          <td> atomic 映射</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>T44 (</td>
+          <td>0a7e43c</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P3.1 SigLIP Vision — </td>
+          <td>vision_forward::vision_encode()</td>
+          <td> 真实前向 (Conv2D patch embed → N 层 ViT encoder → 2D pos)</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>PatchEmbed + LearnedPos2D + ViT encoder 真实 JIT 实现，非 stub 测试通过</td>
+        </tr>
+        <tr>
+          <td>P3.2 USM Conformer Audio — auto_graph + </td>
+          <td>DepthwiseConv1D</td>
+          <td> atomic 映射</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>T45 (</td>
+          <td>6bc2120</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P3.2 USM Conformer Audio — </td>
+          <td>audio_forward::audio_encode()</td>
+          <td> 真实前向 (Mel → Conformer block × N → 帧下采样)</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Mel spectrogram + ConformerBlock + DepthwiseConv1D 真实 JIT 实现，非 stub 测试通过</td>
+        </tr>
+        <tr>
+          <td>P3.3 Token routing — </td>
+          <td>MultimodalEncoder</td>
+          <td> trait + </td>
+          <td>MultimodalContext</td>
+          <td> + </td>
+          <td>route_multimodal_tokens</td>
+          <td> + </td>
+          <td>MultimodalTokenIds</td>
+          <td> config 解析</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>T58 (</td>
+          <td>d304df5</td>
+          <td>), T63 (</td>
+          <td>41a8232</td>
+          <td>), T64 (</td>
+          <td>1c78597</td>
+          <td>, </td>
+          <td>3922d97</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P3.3 Decoder-side fusion — </td>
+          <td>execute_generation_multimodal</td>
+          <td> 真实 fused hidden 注入，prefill 跳过 Gather</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>T67 (</td>
+          <td>c2b6007</td>
+          <td>, </td>
+          <td>efc68d3</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>P3.3 Streaming 多模态</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>generate() 中 multimodal+streaming 走 execute_generation_multimodal → from_tokens 路径，非 streaming 多模态已通，streaming 逐 token yield</td>
+        </tr>
+        <tr>
+          <td>P3 E2E 跨模型混合推理 RAG pipeline</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>T48 (</td>
+          <td>ef88651</td>
+          <td>)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-任务对照-审计用" data-section="null">
+      <h3>任务对照（审计用）</h3>
+      <table>
+        <tr>
+          <th>T##</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>commit</td>
+        </tr>
+        <tr>
+          <td>T21</td>
+        </tr>
+        <tr>
+          <td>config 扩展</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P0.1)</td>
+        </tr>
+        <tr>
+          <td>T22</td>
+        </tr>
+        <tr>
+          <td>QkNorm</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P0.2)</td>
+        </tr>
+        <tr>
+          <td>T23</td>
+        </tr>
+        <tr>
+          <td>ValueNorm</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P0.3)</td>
+        </tr>
+        <tr>
+          <td>T24</td>
+        </tr>
+        <tr>
+          <td>DualRoPE</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P0.4)</td>
+        </tr>
+        <tr>
+          <td>T25</td>
+        </tr>
+        <tr>
+          <td>Attention per-layer</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P0.5)</td>
+        </tr>
+        <tr>
+          <td>T26/T27</td>
+        </tr>
+        <tr>
+          <td>31B 集成验证</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P0.6)</td>
+        </tr>
+        <tr>
+          <td>T28.2</td>
+        </tr>
+        <tr>
+          <td>PLE weight loader fuzzy</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>6f6b648</td>
+        </tr>
+        <tr>
+          <td>T28.3</td>
+        </tr>
+        <tr>
+          <td>auto_graph only_if 展开</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>774a51f</td>
+        </tr>
+        <tr>
+          <td>T29</td>
+        </tr>
+        <tr>
+          <td>FusedQkvNormRope fusion</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>9697fb8</td>
+        </tr>
+        <tr>
+          <td>T30</td>
+        </tr>
+        <tr>
+          <td>PLE 算子链 scaffold</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>(P2.1)</td>
+        </tr>
+        <tr>
+          <td>T33</td>
+        </tr>
+        <tr>
+          <td>PLE 5-input 跨层一致签名</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>9dc283b</td>
+        </tr>
+        <tr>
+          <td>T34/T35</td>
+        </tr>
+        <tr>
+          <td>QkNorm/Attention auto_graph ↔ atomic</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>ef38822</td>
+        </tr>
+        <tr>
+          <td>T36</td>
+        </tr>
+        <tr>
+          <td>atomic_op_to_kind 契约严格化</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>7dd6520</td>
+          <td>, </td>
+          <td>c0d0382</td>
+        </tr>
+        <tr>
+          <td>T37</td>
+        </tr>
+        <tr>
+          <td>PleSlice</td>
+          <td> → </td>
+          <td>ColumnSlice</td>
+          <td> JIT</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>bab213c</td>
+        </tr>
+        <tr>
+          <td>T38</td>
+        </tr>
+        <tr>
+          <td>PLE GPU codegen</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>T39</td>
+        </tr>
+        <tr>
+          <td>SharedKvRef page 层</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>f5acc67</td>
+        </tr>
+        <tr>
+          <td>T40</td>
+        </tr>
+        <tr>
+          <td>31B dry-run 诊断</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>99a09ad</td>
+        </tr>
+        <tr>
+          <td>T41/T42</td>
+        </tr>
+        <tr>
+          <td>FusedQkvNormRope 两 bug 根治</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>dedd86d</td>
+        </tr>
+        <tr>
+          <td>T43</td>
+        </tr>
+        <tr>
+          <td>SharedKvRef graph 层</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>32b6f10</td>
+        </tr>
+        <tr>
+          <td>T44</td>
+        </tr>
+        <tr>
+          <td>SigLIP auto_graph + atomic</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>0a7e43c</td>
+        </tr>
+        <tr>
+          <td>T44-forward</td>
+        </tr>
+        <tr>
+          <td>SigLIP 真实前向</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>非 stub 测试通过</td>
+        </tr>
+        <tr>
+          <td>T45</td>
+        </tr>
+        <tr>
+          <td>Conformer auto_graph + atomic</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>6bc2120</td>
+        </tr>
+        <tr>
+          <td>T45-forward</td>
+        </tr>
+        <tr>
+          <td>Conformer 真实前向</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>非 stub 测试通过</td>
+        </tr>
+        <tr>
+          <td>T47</td>
+        </tr>
+        <tr>
+          <td>E2B 数值对齐</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>dry-run ✅ / 真实下载 ⏸</td>
+        </tr>
+        <tr>
+          <td>T48</td>
+        </tr>
+        <tr>
+          <td>RAG pipeline E2E</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>ef88651</td>
+        </tr>
+        <tr>
+          <td>T54</td>
+        </tr>
+        <tr>
+          <td>能力清单同步</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>e389da0</td>
+        </tr>
+        <tr>
+          <td>T58</td>
+        </tr>
+        <tr>
+          <td>Token routing 骨架</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>d304df5</td>
+        </tr>
+        <tr>
+          <td>T63</td>
+        </tr>
+        <tr>
+          <td>GGUF metadata 解析</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>41a8232</td>
+        </tr>
+        <tr>
+          <td>T64</td>
+        </tr>
+        <tr>
+          <td>InvalidModelType + </td>
+          <td>MediaInput::Url</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>1c78597</td>
+          <td>, </td>
+          <td>3922d97</td>
+        </tr>
+        <tr>
+          <td>T67</td>
+        </tr>
+        <tr>
+          <td>Decoder fusion 真实注入</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>c2b6007</td>
+          <td>, </td>
+          <td>efc68d3</td>
+        </tr>
+        <tr>
+          <td>T68-streaming</td>
+        </tr>
+        <tr>
+          <td>多模态 streaming</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>generate() 支持 multimodal+streaming 路径</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-里程碑" data-section="null">
+      <h3>里程碑</h3>
+      <li>✅ <strong>Gemma 4 31B GGUF 文本生成全管线通</strong> (P0+P1 完成)</li>
+      <li>✅ <strong>Gemma 4 E2B 数值对齐</strong> (P2.2 完成：dry-run 通过)</li>
+      <li>✅ <strong>Gemma 4 多模态端到端</strong> (P3.1/P3.2 前向已实现；P3.3 非 streaming 已通，streaming 未启动)</li>
+    </section>
+    <section id="s-剩余交付项" data-section="null">
+      <h3>剩余交付项</h3>
+      <p>1. ✅ <strong>P2.2 E2B dry-run 通过</strong></p>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：gemma4-implementation-plan.html</address>
+  </footer>
+</body>
+</html>

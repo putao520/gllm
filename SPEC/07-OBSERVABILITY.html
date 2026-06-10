@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="07-OBSERVABILITY" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"07-OBSERVABILITY", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>运行时观测与自适应调度 — 实现架构 (Runtime Observability &amp; Adaptive Scheduling)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>07-OBSERVABILITY</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-运行时观测与自适应调度-实现架构-runtime-observability-adaptive-scheduling" data-section="null">
+      <h2>运行时观测与自适应调度 — 实现架构 (Runtime Observability &amp; Adaptive Scheduling)</h2>
+      <p>&gt; <strong>📌 定位</strong>: 本文档定义 gllm 可观测性与调度系统的<strong>实现架构</strong>。</p>
+      <p>&gt; <strong>SSOT 声明</strong>: 需求定义（REQ-OBS-001~003, REQ-ERR-001~003）见 <a data-xref-type="section" data-xref-id="" href="./01-REQUIREMENTS.html" 01-REQUIREMENTS.md<="" a="">，本文档不重复需求条目，仅定义实现方案。</a></p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 核心理念 (Zero-Overhead Telemetry)</h3>
+      <p>在极致的 Mega-Kernel 架构下，任何传统的**"旁路探测、CPU 定时轮询、无锁环形队列 (RingBuffer)"**都会引发致命的 PCIe 延迟与缓存击穿。</p>
+      <p>因此，gllm 的可观测性彻底抛弃外挂式的 <code>RuntimeObserver</code> 伴随线程，转而采用 <strong>就地核心寄生（In-Place Piggybacking Logging）</strong>。</p>
+      <p>&gt; <strong>🌋 物理灭顶禁令</strong>：禁止使用任何形式的单生产者/单消费者 <code>RingBuffer</code> (如 <code>crossbeam_channel</code>, <code>flume</code>) 向主机侧汇报遥测状态。状态传递仅允许寄生于算力管道残存带宽。</p>
+      <p>其闭环构成为：</p>
+      <p>1.  <strong>Epilogue 嗅探器 (In-Kernel Sniffer)</strong>: 在 Mega-Kernel 算子执行的最后一条指令（Epilogue），将熵值等数据顺手算出。</p>
+      <p>2.  <strong>物理页头烙印 (Page Header STG)</strong>: 将由于计算衍生出的遥测数据，直接使用 <code>STG</code> (Store Global) 等写合并汇编，<strong>硬贴机制 (Piggybacking)</strong> 在当前 Request 正在写入的 KV Page 前置空白区 (<code>Header Padding</code>) 里，利用 DMA 写回数据段的顺风车带回主机。</p>
+      <p>3.  <strong>零编解码回调 (Zero-Cost Readback)</strong>: 下次调度器回收/轮询页表状态时，按固定偏移 (<code>Header Offset</code>) 零反序列化读回，绝不发生二次 PCIe 通信。</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 架构设计</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 物理页表遥测层 (Page Header Telemetry)</h4>
+      <p>&gt; <strong>SSOT</strong>: <code>KvPageHeader</code> 完整结构定义见本文件 <strong>§7.1</strong>（40B 完整版）。本节仅描述采集机制。</p>
+      <strong>采集硬性规范</strong>：
+      <strong>铁律</strong>：<strong>禁止</strong>为主线程新开任何 <code>std::thread</code> 或 <code>tokio::spawn</code> 来做性能监控！所有遥测数据只能由 Kernel 的下半场（Epilogue）生成并嵌在结果集或页表头。
+      <table>
+        <tr>
+          <th>指标</th>
+        </tr>
+        <tr>
+          <td>物理存放点</td>
+        </tr>
+        <tr>
+          <td>采集方式 (Kernel 执行期)</td>
+        </tr>
+        <tr>
+          <td>CPU 反馈成本</td>
+        </tr>
+        <tr>
+          <td>logits_entropy</td>
+        </tr>
+        <tr>
+          <td>分配给该 Request 的尾部页</td>
+        </tr>
+        <tr>
+          <td>SVE/AMX 归约出 max_prob 时顺便用其计算</td>
+        </tr>
+        <tr>
+          <td>跟随 D2H (Device-to-Host) 同轴回送</td>
+        </tr>
+        <tr>
+          <td>guard_veto_flag</td>
+        </tr>
+        <tr>
+          <td>Guardrail 专属拦截区</td>
+        </tr>
+        <tr>
+          <td>由最后置的分类小模型内核投管</td>
+        </tr>
+        <tr>
+          <td>Kernel Launch 级别的分支断流</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 确定性执行路由 (Deterministic Dispatch Routing)</h4>
+      <p>Mega-Kernel 下不存在运行时精度决策（如 <code>AccuracyFirst</code> 与 <code>ThroughputFirst</code> 的切换）。全系统被 <strong>TurboQuant 静态预置</strong>为极简数学模型。调度层的决策只负责吞吐量的生命周期管理，不污染内核侧图拓扑。 </p>
+      <p>```rust</p>
+      <p>pub struct SchedulerDecision {</p>
+      <p>    pub max_batch_size: usize,</p>
+      <p>    pub admit_new_prefill: bool,</p>
+      <p>    pub force_swap_out_count: usize,</p>
+      <p>    // 删除了所有 kernel_strategy 字段！所有请求享有平等的静态内核路径。</p>
+      <p>}</p>
+      <p>pub trait SchedulingPolicy {</p>
+      <p>    fn decide(&amp;self, state: &amp;SystemState) -&gt; SchedulerDecision;</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 单轨极致调度 (Single-Track Absolute Policy)</h4>
+      <p>通过 <code>STG</code> 采集到的熵数据，系统唯一常态执行的是具有全局护栏保障的 <code>AbsolutePolicy</code>，去掉了原本复杂的 CPU 均衡博弈：</p>
+      <p>```rust</p>
+      <p>pub struct AbsolutePolicy;</p>
+      <p>impl SchedulingPolicy for AbsolutePolicy {</p>
+      <p>    #[inline(always)]</p>
+      <p>    fn decide(&amp;self, state: &amp;SystemState) -&gt; SchedulerDecision {</p>
+      <p>        // ... 基于 STG 矩阵直接输出唯一决策 ...</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. AbsolutePolicy 护栏级决策矩阵</h3>
+      <strong>决策矩阵</strong>：
+      <p>没有任何 <code>Throughput</code> 或 <code>Balanced</code> 的妥协路径，因为底层在遇到无效请求时直接交给<strong>Mega-Kernel 内部硬件屏蔽掩码</strong>来消化计算，无需上升到主机层面分流。</p>
+      <table>
+        <tr>
+          <th>条件</th>
+        </tr>
+        <tr>
+          <td>max_batch_size</td>
+        </tr>
+        <tr>
+          <td>admit_prefill</td>
+        </tr>
+        <tr>
+          <td>swap_out</td>
+        </tr>
+        <tr>
+          <td>memory_pressure &gt; 0.9</td>
+        </tr>
+        <tr>
+          <td>current_running.max(1)</td>
+        </tr>
+        <tr>
+          <td>false</td>
+        </tr>
+        <tr>
+          <td>ceil(pressure * 3)</td>
+        </tr>
+        <tr>
+          <td>kv_fragmentation &gt; 0.5</td>
+        </tr>
+        <tr>
+          <td>current_running.max(1)</td>
+        </tr>
+        <tr>
+          <td>false</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>正常</td>
+        </tr>
+        <tr>
+          <td>min(256, capacity)</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Phase 4: 热熔断切换 (Global DCE Handover)</h3>
+      <p>如果捕获到长期静滞（长尾共识），JIT 直接在图编译上进行全局 DCE，调度层：</p>
+      <li>Host 层仅用最简单的 <code>AbsolutePolicy</code>。</li>
+      <li>将动态路由放权到底层 <code>jmp</code>！</li>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 错误处理实现架构 (ARCH-ERR)</h3>
+      <p>&gt; <strong>需求 SSOT</strong>: REQ-ERR-001~003 见 <a data-xref-type="section" data-xref-id="" href="./01-REQUIREMENTS.html" 01-REQUIREMENTS.md<="" a="">。本节定义实现方案。</a></p>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 OOM Halt 实现 (ARCH-ZERO-FALLBACK)</h4>
+      <p>```rust</p>
+      <p>pub struct OomHaltError {</p>
+      <p>    pub message: String,</p>
+      <p>    pub fatal: bool,  // true = Hardware OOM, process must halt</p>
+      <p>}</p>
+      <p>```</p>
+      <li>OOM 发生时必须 <code>log::error!("OOM Halt triggered: Physical memory limit exceeded for {operation}")</code></li>
+      <li>架构底线：一旦触发硬件内存越界，系统必须当场截断 (Halt) 抛出严重错误，禁止框架层面自行容错。</li>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 Backend Detection 错误传播</h4>
+      <li><code>detect_backend()</code> 中的 <code>expect()</code> 替换为 <code>Result</code> 返回</li>
+      <li>探测失败返回 <code>Err(BackendContextError)</code>，不 panic</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 演进路线</h3>
+      <p>1.  <strong>Phase 1</strong> (当前): 实现 <code>SystemState</code> 实时采集 + 错误处理修复</p>
+      <p>2.  <strong>Phase 2</strong>: 实现 <code>logits_entropy</code> / <code>attention_sparsity</code> 采集</p>
+      <p>3.  <strong>Phase 3</strong>: (取消) 策略矩阵 (Accuracy/Throughput/Balanced) 及运行时策略热切换已被 Architect 否决，全系统锁定在单轨 AbsolutePolicy 与 Mega-Kernel 静态块路由。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 全链路 Epilogue 白嫖遥测扩展 (ARCH-EPILOGUE-TELEMETRY)</h3>
+      <p>&gt; <strong>SSOT</strong>: 遥测点的物理实现位置、寄生采集方式、指令级开销、采集-消费闭环，均见 <strong><a href="http://02-ARCHITECTURE.md">02-ARCHITECTURE.md</a> §13 (ARCH-EPILOGUE-FUSIONS + ARCH-EPILOGUE-EXTENDED)</strong>。</p>
+      <p>&gt; 本节仅定义观测系统的持久化数据结构。</p>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 KvPageHeader 扩展</h4>
+      <p>Phase 2 扩展遥测字段直接写入现有 KvPageHeader 结构，保持紧凑布局：</p>
+      <p>```rust</p>
+      <p>#[repr(C)]</p>
+      <p>pub struct KvPageHeader {</p>
+      <p>    // 基础管理 (8 Bytes)</p>
+      <p>    pub page_id: u32,</p>
+      <p>    pub ref_count: u32,</p>
+      <p>    // Phase 1 — Epilogue 自动写入 (12 Bytes)</p>
+      <p>    pub fragmentation_metric: f32,</p>
+      <p>    pub logits_entropy: f32,</p>
+      <p>    pub guard_veto_flag: u32,</p>
+      <p>    // Phase 2 — 全链路白嫖扩展 (20 Bytes)</p>
+      <p>    pub softmax_max: f32,           // Attention Sink 信号 (§13.9)</p>
+      <p>    pub softmax_sharpness: f32,     // max/sum 比值 (§13.9)</p>
+      <p>    pub residual_delta_rho: f32,    // 跨层能量差 (§13.3)</p>
+      <p>    pub dead_neuron_ratio: f32,     // 死神经元占比 (§13.5)</p>
+      <p>    pub per_channel_scale: f32,     // per-channel scale (§13.8) — 仅 KIVI 路径写入</p>
+      <p>}</p>
+      <p>// 总计 40 Bytes, 对齐到 cache line padding 由分配器处理</p>
+      <p>```</p>
+      <strong>设计决策</strong>:
+      <li><code>rms_norm_norm</code> 和 <code>per_channel_scale</code> 为寄存器直传信号 (Tier A)，不持久化到 PageHeader</li>
+      <li><code>softmax_centroid</code> 质心坐标仅用于 RDMA 预取场景，作为后续扩展保留</li>
+      <li>保持 40B 而非 64B：减少 KV page metadata 内存开销</li>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：07-OBSERVABILITY.html</address>
+  </footer>
+</body>
+</html>

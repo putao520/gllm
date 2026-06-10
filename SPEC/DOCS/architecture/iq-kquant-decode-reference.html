@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="iq-kquant-decode-reference" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"iq-kquant-decode-reference", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>IQ 系列 + K-Quant 低比特解码技术参考</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>iq-kquant-decode-reference</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-iq-系列-k-quant-低比特解码技术参考" data-section="null">
+      <h2>IQ 系列 + K-Quant 低比特解码技术参考</h2>
+      <p>&gt; <strong>用途</strong>: 本文档为 gllm JIT codegen 实现 IQ1/IQ2/IQ3/Q2K/Q3K 的解码提供底层位域定义和解码算法。</p>
+      <p>&gt; 涵盖代数格点 (Algebraic Lattice) 查找、多级位域缝合、分层缩放等底层细节。</p>
+      <p>&gt; 实现规范见 <code>SPEC/23-QUANT-CODEGEN-ALGO.md</code>。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 核心概念: 代数格点 (Algebraic Lattice)</h3>
+      <p>IQ 系列量化 (Importance-matrix Quantization) 的核心区别于传统整数量化:</p>
+      <li><strong>传统量化</strong> (Q4_0/Q4K): 线性均匀量化, <code>value = (integer - bias) × scale</code></li>
+      <li><strong>IQ 量化</strong>: 非均匀格点量化, <code>value = grid[index] × d × scale</code></li>
+      <p>格点 (Lattice/Grid) 是预计算的离散值集合, 硬编码在算子中, 不需要运行时分配内存。</p>
+      <p>不同 IQ 变体使用不同的格点结构:</p>
+      <p>格点幅值典型分布: ±0.5, ±1.0, ±1.5 等由格点基底线性组合的值。</p>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>格点类型</td>
+        </tr>
+        <tr>
+          <td>每元素比特</td>
+        </tr>
+        <tr>
+          <td>格点来源</td>
+        </tr>
+        <tr>
+          <td>IQ1_S / IQ1_M</td>
+        </tr>
+        <tr>
+          <td>A8/E8 经典格点变体</td>
+        </tr>
+        <tr>
+          <td>~1 bit</td>
+        </tr>
+        <tr>
+          <td>固定代数集合 ({-1, 0, 1} 加权组合)</td>
+        </tr>
+        <tr>
+          <td>IQ2_XXS / IQ2_XS / IQ2_S</td>
+        </tr>
+        <tr>
+          <td>8 维格点</td>
+        </tr>
+        <tr>
+          <td>~2 bit</td>
+        </tr>
+        <tr>
+          <td>硬编码常量向量 (如 </td>
+          <td>iq2xxs_grid</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>IQ3_XXS / IQ3_S</td>
+        </tr>
+        <tr>
+          <td>3 维格点</td>
+        </tr>
+        <tr>
+          <td>~3 bit</td>
+        </tr>
+        <tr>
+          <td>符号位 + 幅值的离散格点点集</td>
+        </tr>
+        <tr>
+          <td>IQ4_NL</td>
+        </tr>
+        <tr>
+          <td>显式非线性查找表</td>
+        </tr>
+        <tr>
+          <td>4 bit</td>
+        </tr>
+        <tr>
+          <td>16 元素 codebook (</td>
+          <td>IQ4_NL_CODEBOOK</td>
+          <td>)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 IQ1_S 解码 (1-bit, block_size=256, 50 bytes)</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 数据结构</h4>
+      <p>```</p>
+      <p>BlockIQ1S (50 bytes):</p>
+      <p>  d:     f16          [offset 0, 2 bytes]  — 超级块全局缩放</p>
+      <p>  qs:    [u8; 32]     [offset 2, 32 bytes] — 256 bits, 每元素 1-bit 基础索引</p>
+      <p>  qh:    [u16; 8]     [offset 34, 16 bytes] — 高位额外信息 / 符号选取</p>
+      <p>  scales: [u8; 16]    [offset 50, 16 bytes] — 16 子块缩放 (4-bit packed)</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 解码步骤</h4>
+      <p>```</p>
+      <p>对每个元素 n (0..255):</p>
+      <p>  1. group = n / 16                        // 16 个子块</p>
+      <p>  2. qs_bit = (qs[n/8] &gt;&gt; (n%8)) &amp; 1       // 基础 1-bit 索引</p>
+      <p>  3. qh_bit = (qh[...] &gt;&gt; ...) &amp; 1         // 高位扩展 (A8/E8 格点坐标)</p>
+      <p>  4. index = combine(qs_bit, qh_bit)        // 组合为格点索引</p>
+      <p>  5. grid_value = a8_e8_grid[index]         // 格点查找</p>
+      <p>  6. scale = decode_scales(scales, group)   // 子块缩放</p>
+      <p>  7. value = grid_value × d × scale         // 最终值</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 IQ2_S 解码 (2-bit, block_size=256, 82 bytes)</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 数据结构</h4>
+      <p>```</p>
+      <p>BlockIQ2S (82 bytes):</p>
+      <p>  d:      f16          [offset 0, 2 bytes]  — 超级块缩放</p>
+      <p>  qs:     [u8; 64]     [offset 2, 64 bytes] — 低 2-bit (每元素 4 状态)</p>
+      <p>  qh:     [u8; 8]      [offset 66, 8 bytes] — 高位 (每元素 0.25 bit)</p>
+      <p>  scales: [u8; 8]      [offset 74, 8 bytes] — 4-bit packed 子块缩放</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 解码步骤</h4>
+      <p>```</p>
+      <p>对每个元素 n (0..255):</p>
+      <p>  1. qs_low2 = (qs[n<em>2/8] &gt;&gt; (n</em>2%8)) &amp; 3   // 低 2-bit 基础索引</p>
+      <p>  2. qh_bit = (qh[n/32] &gt;&gt; (n%32)) &amp; 1      // 高位 0.25-bit 扩展</p>
+      <p>  3. index = (qh_bit &lt;&lt; 2) | qs_low2        // 组合为格点查找键</p>
+      <p>  4. grid_value = iq2s_grid[index]           // 格点查找</p>
+      <p>  5. group = n / 32                          // 子块分组</p>
+      <p>  6. scale = decode_4bit_scale(scales, group)</p>
+      <p>  7. value = grid_value × d × scale</p>
+      <p>```</p>
+      <strong>反量化公式</strong>: <code>Value = grid_value × d × scale</code>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 IQ3_XXS 解码 (3-bit, block_size=256, 98 bytes)</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 数据结构</h4>
+      <p>```</p>
+      <p>BlockIQ3XXS (98 bytes):</p>
+      <p>  d:  f16          [offset 0, 2 bytes]  — 超级块缩放</p>
+      <p>  qs: [u8; 96]     [offset 2, 96 bytes] — 768 bits = 256 × 3 bits</p>
+      <p>```</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 3-bit packed 位域解包</h4>
+      <p>qs[96] 中每 3 个 bit 表示一个元素。解包方式:</p>
+      <p>```c</p>
+      <p>// 每次从 uint32_t 中提取 4 个元素 (4 × 3 = 12 bits)</p>
+      <p>uint32_t packed = <em>(uint32_t</em>)(qs + byte_offset);</p>
+      <p>int q0 =  packed        &amp; 0x7;</p>
+      <p>int q1 = (packed &gt;&gt;  3) &amp; 0x7;</p>
+      <p>int q2 = (packed &gt;&gt;  6) &amp; 0x7;</p>
+      <p>int q3 = (packed &gt;&gt;  9) &amp; 0x7;</p>
+      <p>```</p>
+      <p>SIMD 优化版本: 并行算术移位直接解包为字节数组, 然后映射到小型对称代数格点空间。</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>§4.3 解码步骤</h4>
+      <p>```</p>
+      <p>对每个元素 n (0..255):</p>
+      <p>  1. 3bit_index = extract_3bit(qs, n)        // 3-bit 格点索引</p>
+      <p>  2. grid_value = iq3xxs_grid[3bit_index]    // 格点查找</p>
+      <p>  3. value = grid_value × d</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 K-Quant 6-bit Packed Scales 解码 (Q4K/Q5K 共用)</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 概述</h4>
+      <code>scales[12]</code> (96 bits) 存储 8 个 (scale, min) 对, 每个对占 6+6=12 bits。
+      <p>核心函数: <code>get_scale_min_k4</code>。</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 位域缝合算法</h4>
+      <p>```c</p>
+      <p>// 输入: q[12] 字节数组 (scales[12])</p>
+      <p>// 输出: d[8] (scales) + m[8] (mins)</p>
+      <p>// 块 0-3: 直接取低 6 位</p>
+      <p>d[0] = q[0]  &amp; 0x3F;   // bits [5:0]  of q[0]</p>
+      <p>m[0] = q[4]  &amp; 0x3F;   // bits [5:0]  of q[4]</p>
+      <p>d[1] = q[1]  &amp; 0x3F;</p>
+      <p>m[1] = q[5]  &amp; 0x3F;</p>
+      <p>d[2] = q[2]  &amp; 0x3F;</p>
+      <p>m[2] = q[6]  &amp; 0x3F;</p>
+      <p>d[3] = q[3]  &amp; 0x3F;</p>
+      <p>m[3] = q[7]  &amp; 0x3F;</p>
+      <p>// 块 4-7: 跨字节缝合</p>
+      <p>// 低 4 位来自 q[j+4], 高 2 位来自 q[j-4] 的高 2 位</p>
+      <p>d[4] = (q[4] &amp; 0x0F) | ((q[0] &gt;&gt; 6) &lt;&lt; 4);   // q[4] 低4 + q[0] 高2</p>
+      <p>m[4] = (q[8] &amp; 0x0F) | ((q[4] &gt;&gt; 6) &lt;&lt; 4);   // q[8] 低4 + q[4] 高2</p>
+      <p>d[5] = (q[5] &amp; 0x0F) | ((q[1] &gt;&gt; 6) &lt;&lt; 4);</p>
+      <p>m[5] = (q[9] &amp; 0x0F) | ((q[5] &gt;&gt; 6) &lt;&lt; 4);</p>
+      <p>d[6] = (q[6] &amp; 0x0F) | ((q[2] &gt;&gt; 6) &lt;&lt; 4);</p>
+      <p>m[6] = (q[10] &amp; 0x0F) | ((q[6] &gt;&gt; 6) &lt;&lt; 4);</p>
+      <p>d[7] = (q[7] &amp; 0x0F) | ((q[3] &gt;&gt; 6) &lt;&lt; 4);</p>
+      <p>m[7] = (q[11] &amp; 0x0F) | ((q[7] &gt;&gt; 6) &lt;&lt; 4);</p>
+      <p>```</p>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>§5.3 最终缩放</h4>
+      <p>```</p>
+      <p>对 Q4_K: 每个 sub-block i (32 elements):</p>
+      <p>  effective_scale = d_block × d[i]</p>
+      <p>  effective_min   = dmin_block × m[i]</p>
+      <p>  value = (nibble × effective_scale) - effective_min</p>
+      <p>```</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 Q2_K 解码 (2-bit, block_size=256, 84 bytes)</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 数据结构</h4>
+      <p>```</p>
+      <p>BlockQ2K (84 bytes):</p>
+      <p>  scales: [u8; 16]  [offset 0, 16 bytes]  — 16 对 4-bit (scale, min)</p>
+      <p>  qs:     [u8; 64]  [offset 16, 64 bytes] — 512 bits = 256 × 2 bits</p>
+      <p>  d:      f16       [offset 80, 2 bytes]  — 超级块 scale</p>
+      <p>  dmin:   f16       [offset 82, 2 bytes]  — 超级块 min scale</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 scales[16] 的 4-bit 对</h4>
+      <p>每个 byte 存储一对 (scale_index, min_index):</p>
+      <p>```</p>
+      <p>scales[i]:</p>
+      <p>  低 4 位 (sc &amp; 0x0F): 小块 scale 索引</p>
+      <p>  高 4 位 (sc &gt;&gt; 4):   小块 min 索引</p>
+      <p>```</p>
+      <p>分层缩放:</p>
+      <p>```</p>
+      <p>dl = d × (scales[i] &amp; 0x0F)    // 子块 scale</p>
+      <p>ml = dmin × (scales[i] &gt;&gt; 4)   // 子块 min</p>
+      <p>```</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>§6.3 qs[64] 的 2-bit 解包</h4>
+      <p>64 bytes × 8 bits = 512 bits = 256 × 2-bit 元素。</p>
+      <p>解包使用跨步复用: 超级块分为两组 (0~127 和 128~255), 位移步长每次增加 2:</p>
+      <p>```c</p>
+      <p>int shift = 0;</p>
+      <p>for (int j = 0; j &lt; 4; ++j) {</p>
+      <p>    uint8_t sc = scales[is++];</p>
+      <p>    float dl = d * (sc &amp; 0xF);</p>
+      <p>    float ml = dmin * (sc &gt;&gt; 4);</p>
+      <p>    // 处理 16 个元素:</p>
+      <p>    for (int i = 0; i &lt; 16; ++i) {</p>
+      <p>        int qval = (qs[qs_idx] &gt;&gt; shift) &amp; 0x3;</p>
+      <p>        value = dl * qval - ml;</p>
+      <p>    }</p>
+      <p>    shift += 2;</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>§6.4 最终反量化</h4>
+      <p>```</p>
+      <p>value = dl × (2-bit unsigned) - ml</p>
+      <p>      = d × (sc &amp; 0xF) × qs_val - dmin × (sc &gt;&gt; 4)</p>
+      <p>```</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 Q3_K 解码 (3-bit, block_size=256, 110 bytes)</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>§7.1 数据结构</h4>
+      <p>```</p>
+      <p>BlockQ3K (110 bytes):</p>
+      <p>  hmask:  [u8; 32]   [offset 0, 32 bytes]  — 1-bit/elem 掩码</p>
+      <p>  qs:     [u8; 64]   [offset 32, 64 bytes]  — 2-bit/elem 低 bit</p>
+      <p>  scales: [u8; 12]   [offset 96, 12 bytes]  — Q3KExtended 缩放因子</p>
+      <p>  d:      f16        [offset 108, 2 bytes]  — 超级块 scale</p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>§7.2 位域组合</h4>
+      <p>```</p>
+      <p>3-bit value = (qs 的 2-bit) | (hmask 的 1-bit 作为符号/高位)</p>
+      <p>```</p>
+      <p>hmask[32] 每字节服务 32 个元素中的 8 个 (1 bit/element)。</p>
+      <p>qs[64] 每字节服务 4 个元素 (2 bits/element)。</p>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>§7.3 Q3KExtended 缩放因子解码</h4>
+      <p>scales[12] (96 bits) 解码为 16 个 6-bit 缩放因子:</p>
+      <strong>低 4 位来源</strong>:
+      <li>前 8 块: scales[0..7] 的低 4 位</li>
+      <li>后 8 块: scales[0..7] 的高 4 位</li>
+      <strong>高 2 位来源</strong>:
+      <li>scales[8..11] 每字节提取 4 个块的高 2 位 (4 × 2 = 8 bits/byte)</li>
+      <strong>组合</strong>:
+      <p>```</p>
+      <p>scale_6bit = low_4bit | (high_2bit &lt;&lt; 4)</p>
+      <p>```</p>
+    </section>
+    <section id="s7.4" data-section="7.4">
+      <h4>§7.4 最终反量化</h4>
+      <p>```</p>
+      <p>value = (3-bit_value - 4) × d × scale_6bit</p>
+      <p>```</p>
+      <p>StaticBias = 4 (已在注册中设置 <code>ZeroLayout::StaticBias { value: 4 }</code>)。</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 B 类精确结论与代码修正指引</h3>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>§8.1 MXFP4 E8M0 Scale — 必须修正注册</h4>
+      <strong>结论</strong>: 当前注册 <code>ScaleDType::F8E4M3</code> <strong>错误</strong>。MXFP4 使用 OCP MX 标准的 E8M0 格式。
+      <p>E8M0 编码: 8-bit 纯指数, 无尾数 (M0 = 0 mantissa bits)。</p>
+      <p>```</p>
+      <p>scale = 2^(byte - 127)</p>
+      <p>```</p>
+      <strong>代码修正</strong>: <code>quant_format.rs</code> MXFP4 注册中 <code>ScaleDType::F8E4M3</code> → 需要新增 <code>ScaleDType::E8M0</code> 并使用。
+      <table>
+        <tr>
+          <th>示例 byte</th>
+        </tr>
+        <tr>
+          <td>计算</td>
+        </tr>
+        <tr>
+          <td>scale</td>
+        </tr>
+        <tr>
+          <td>127</td>
+        </tr>
+        <tr>
+          <td>2^(127-127)</td>
+        </tr>
+        <tr>
+          <td>1.0</td>
+        </tr>
+        <tr>
+          <td>130</td>
+        </tr>
+        <tr>
+          <td>2^(130-127)</td>
+        </tr>
+        <tr>
+          <td>8.0</td>
+        </tr>
+        <tr>
+          <td>120</td>
+        </tr>
+        <tr>
+          <td>2^(120-127)</td>
+        </tr>
+        <tr>
+          <td>0.0078125</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>§8.2 Q8_K bsums — JIT GEMM 核心优化</h4>
+      <strong>结论</strong>: 强烈建议在 JIT 中利用 <code>bsums[16]</code>。
+      <p>在 <code>Y = X · W</code> 中, 若权重 W 有非对称偏置 (形如 <code>q × d + m</code>), 展开乘法产生:</p>
+      <p>```</p>
+      <p>Σ(X_i × m) = m × Σ(X_i)</p>
+      <p>```</p>
+      <p>Q8_K 在量化阶段预计算每个 16 元素子块的和, 存入 <code>bsums[16]</code>。</p>
+      <strong>JIT 优化</strong>: 读取 Q8_K 的 bsums 可将偏置乘法从 O(N) 循环降为 O(1) 查表乘法:
+      <p>```</p>
+      <p>// 无 bsums: 每次乘法都要遍历激活值求和</p>
+      <p>for i in 0..N { acc += x[i] * m; }</p>
+      <p>// 有 bsums: 直接查表</p>
+      <p>bias = m * bsums[sub_block_idx];  // 一条乘法指令</p>
+      <p>```</p>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>§8.3 Q4_1/Q5_1 — 显式 Min 无 StaticBias</h4>
+      <strong>结论</strong>: _1 系列有显式 min (m), 无 StaticBias。nibble/uint5 直接作为纯正整数参与计算。
+      <strong>关键</strong>: nibble/uint5 不减任何静态偏移, m 自动充当零点角色。
+      <p>当前注册中 Q4_1/Q5_1 的 <code>ZeroLayout</code> 已经是正确的 (<code>BlockScalarWithMin</code> 无 <code>StaticBias</code>)。</p>
+      <table>
+        <tr>
+          <th>格式</th>
+        </tr>
+        <tr>
+          <td>公式</td>
+        </tr>
+        <tr>
+          <td>ZeroLayout</td>
+        </tr>
+        <tr>
+          <td>Q4_0</td>
+        </tr>
+        <tr>
+          <td>value = (nibble - 8) × d</td>
+        </tr>
+        <tr>
+          <td>StaticBias { value: 8 }</td>
+        </tr>
+        <tr>
+          <td>Q4_1</td>
+        </tr>
+        <tr>
+          <td>value = nibble × d + m</td>
+        </tr>
+        <tr>
+          <td>BlockScalarWithMin { d, m }</td>
+          <td> (m 通常为负数)</td>
+        </tr>
+        <tr>
+          <td>Q5_0</td>
+        </tr>
+        <tr>
+          <td>value = (uint5 - 16) × d</td>
+        </tr>
+        <tr>
+          <td>StaticBias { value: 16 }</td>
+        </tr>
+        <tr>
+          <td>Q5_1</td>
+        </tr>
+        <tr>
+          <td>value = uint5 × d + m</td>
+        </tr>
+        <tr>
+          <td>BlockScalarWithMin { d, m }</td>
+          <td> (m 通常为负数)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>§8.4 SqueezeLLM — 必须加 Codebook</h4>
+      <strong>结论</strong>: SqueezeLLM 论文是 3-bit 非均匀聚类量化, GGUF 工程实现用 4-bit nibble 对齐存储, 但 <strong>必须使用 Lookup Table (LUT)</strong>。
+      <li>论文核心: 3-bit 聚类 → 8 个聚类中心值</li>
+      <li>工程存储: 3-bit 填充到 4-bit nibble (避免跨字节 3-bit 移位的访存惩罚), 高位补 0</li>
+      <li>Block 结构: 128 bytes data (4-bit aligned, 256 elements) + 2 bytes f16 scale = 130 bytes</li>
+      <li>反量化: <code>value = LUT[packed_val] × scale</code></li>
+      <strong>代码修正</strong>: 当前注册 <code>codebook: None</code> + <code>data_kind: PackedInt4</code> 需要修正:
+      <li><code>data_kind</code> 应改为 <code>SuperLowBit</code> (非均匀 codebook 查找, 不是线性 INT4)</li>
+      <li><code>data_layout</code> 应改为 <code>CodebookIndex { offset: 2, index_bits: 4 }</code></li>
+      <li><code>codebook</code> 应填入 8 个聚类中心的 LUT (3-bit 有效索引, 高位为 0)</li>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>§9 参考</h3>
+      <li>llama.cpp <code>ggml/src/ggml.c</code>: IQ 系列 grid 定义 + Q2K/Q3K 解码实现</li>
+      <li>llama.cpp <code>ggml/src/ggml-quants.c</code>: <code>get_scale_min_k4</code> 位域缝合</li>
+      <li>A8/E8 Lattice: Conway &amp; Sloane "Sphere Packings, Lattices and Groups"</li>
+      <li>SqueezeLLM 论文: "SqueezeLLM: Dense-and-Sparse Quantization" (Kim et al., 2023)</li>
+      <li>SPEC/23-QUANT-CODEGEN-ALGO.md: 量化 GEMM 微核三阶段 (Prologue + Compute + Epilogue)</li>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：iq-kquant-decode-reference.html</address>
+  </footer>
+</body>
+</html>

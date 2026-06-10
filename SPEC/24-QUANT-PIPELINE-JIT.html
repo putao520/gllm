@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="24-QUANT-PIPELINE-JIT" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"24-QUANT-PIPELINE-JIT", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>量化算子 JIT 管线化 (QUANT-PIPELINE-JIT)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>24-QUANT-PIPELINE-JIT</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-量化算子-jit-管线化-quant-pipeline-jit" data-section="null">
+      <h2>量化算子 JIT 管线化 (QUANT-PIPELINE-JIT)</h2>
+      <p>&gt; <strong>SSOT</strong>: 本文件定义 QuantGather/QuantGemm 从"直接发射 VmInstr"迁移到"标量实现 → SymExec trace → auto_select → VmInstr → ISA lowering"完整 JIT 管线的架构。</p>
+      <p>&gt; <strong>核心铁律</strong>: 禁止在 plan_lower.rs 中按 OpKind/QuantType 手写 VmInstr 发射函数。所有量化算子必须走完整 JIT 管线。</p>
+      <p>&gt; <strong>替代关系</strong>: 本文件替代 plan_lower.rs 中 <code>emit_quant_gather_classic</code> / <code>emit_quant_gather_complex</code> / <code>emit_quant_gemm_tiled</code> 的直接 VmInstr 发射。</p>
+      <p>&gt; <strong>与 23-QUANT-CODEGEN-ALGO 的关系</strong>: 23 定义量化算法与微核体系（QuantFormatDescriptor、三级路径、参数化微核模板、5 ISA × N 格式矩阵）；本文件定义如何将这些算子迁移到完整 JIT 管线（TraceOp 管线化）。23 管"算法设计"，本文件管"管线集成"。</p>
+      <p>&gt; <strong>状态</strong>: ✅ 全部实现 — DecodeTraceBuilder 统一所有格式的解量化 trace 生成; auto_lower_trace_raw 驱动 VmInstr → ISA lowering; emit_quant_gather_trace_driven 替代手写 VmInstr 发射; REQ-QPJ-001~005 全部完成。</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 问题根因</h3>
+    </section>
+    <section id="s0.1" data-section="0.1">
+      <h4>§0.1 当前架构的系统性缺陷</h4>
+      <p>```</p>
+      <p>当前（半参数化，SPEC 23 已建立微核体系但 lowering 仍手写）:</p>
+      <p>  plan_lower.rs::emit_quant_gather_classic()</p>
+      <p>    → 直接构造 VmInstr::GgufInt4Load / GgufF16ScaleLoad / VecStore</p>
+      <p>    → elem = dtype.elem_bytes() 写死 4 (F32)</p>
+      <p>    → offset 计算假设 F32 布局</p>
+      <p>    → 每种量化格式需要单独手写 lowering</p>
+      <p>    → 人脑计算 offset/dtype → 系统性 NaN 根源</p>
+      <p>  plan_lower.rs::emit_quant_gemm_tiled()</p>
+      <p>    → 外层 M/N/K tiling 合理（保留）</p>
+      <p>    → 微核 prologue 仍手写 VmInstr 发射（需迁移到 trace 模板）</p>
+      <p>应该（JIT 铁律）:</p>
+      <p>  Scalar(Q4_0 dequant) → 参数化 trace 模板 → auto_select → VmInstr → ISA Lowering</p>
+      <p>    → dtype 从 QuantFormatDescriptor 自然传播</p>
+      <p>    → offset 按实际字节大小计算</p>
+      <p>    → 硬件差异由 ISA lowering 层处理</p>
+      <p>    → QuantGemm 外层 tiling 保留，微核 prologue 改为 trace 模板驱动</p>
+      <p>```</p>
+    </section>
+    <section id="s0.2" data-section="0.2">
+      <h4>§0.2 直接发射导致的具体 BUG</h4>
+      <table>
+        <tr>
+          <th>BUG</th>
+        </tr>
+        <tr>
+          <td>根因</td>
+        </tr>
+        <tr>
+          <td>Q4_0 QuantGather 全 NaN</td>
+        </tr>
+        <tr>
+          <td>offset/stride 计算假设 F32 字节大小</td>
+        </tr>
+        <tr>
+          <td>Q3_K/Q4_K/Q5_K/Q6_K 全失败</td>
+        </tr>
+        <tr>
+          <td>每种格式的 decode 逻辑各自手写，无法保证正确性</td>
+        </tr>
+        <tr>
+          <td>AWQ4/GPTQ4 zero-point 偏移错</td>
+        </tr>
+        <tr>
+          <td>QuantFormatDescriptor 元数据未被 trace 管线消费</td>
+        </tr>
+        <tr>
+          <td>19GB scratchpad 过度分配</td>
+        </tr>
+        <tr>
+          <td>buffer_alloc 中间张量写死 F32 elem_bytes</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s0.3" data-section="0.3">
+      <h4>§0.3 违反的 CLAUDE.md 铁律</h4>
+      <p>1. ❌ <strong>禁止跳过 Lifting 阶段直接手写 ISA 汇编</strong> — QuantGather/QuantGemm 直接写 VmInstr</p>
+      <p>2. ❌ <strong>禁止创建 per-OpKind 手写函数</strong> — <code>emit_quant_gather_classic</code> / <code>emit_quant_gather_complex</code> / <code>emit_quant_gemm_tiled</code> 都是 per-OpKind</p>
+      <p>3. ❌ <strong>禁止以"结构型算子"为由绕过 auto_select</strong> — QuantGather 被标记为 structural 绕过管线</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 架构设计</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 管线总览</h4>
+      <p>```</p>
+      <p>QuantGather / QuantGemm</p>
+      <p>    │</p>
+      <p>    ▼</p>
+      <p>Phase 0: 标量实现 (scalar-ops/src/)</p>
+      <p>    scalar_q4_0_gather() / scalar_q8_0_gather() / ...</p>
+      <p>    scalar_q4_0_gemm() / scalar_q8_0_gemm() / ...</p>
+      <p>    → 正确的 block 解包 + scale + dequant，dtype 感知</p>
+      <p>    │</p>
+      <p>    ▼</p>
+      <p>Phase 0.5: 手动 trace 注入 (<a href="http://registry.rs">registry.rs</a>)</p>
+      <p>    QuantFormatDescriptor 驱动的参数化 trace 模板</p>
+      <p>    → 不是全量 SymExec（GGUF block 结构太复杂），</p>
+      <p>      而是参数化 trace 模板（每族量化格式一个模板）</p>
+      <p>    │</p>
+      <p>    ▼</p>
+      <p>Phase 1: ComputePattern 分类 (semantic_dag.rs)</p>
+      <p>    QuantGather → Injective (多输入逐元素)</p>
+      <p>    QuantGemm → Gemm (矩阵乘)</p>
+      <p>    │</p>
+      <p>    ▼</p>
+      <p>Phase 2: auto_select (auto_select.rs)</p>
+      <p>    TraceOp::QuantBlockLoad → VmInstr::GgufF16ScaleLoad / GgufInt4Load / ...</p>
+      <p>    TraceOp::QuantDequant → VmInstr::GgufInt4Load + VecBinOp::Mul</p>
+      <p>    TraceOp::QuantStore → VmInstr::VecStore</p>
+      <p>    → dtype 自然传播，offset 正确计算</p>
+      <p>    │</p>
+      <p>    ▼</p>
+      <p>Phase 3: ISA Lowering (x86_lower.rs / aarch64_dynasm.rs / gpu_lower.rs)</p>
+      <p>    VmInstr::GgufInt4Load → vmovq + vpmovzxbd + vpand + vcvtdq2ps + vsubps</p>
+      <p>    VmInstr::GgufF16ScaleLoad → vmovd + vcvtph2ps + vbroadcastss</p>
+      <p>    → 硬件特化指令选择</p>
+      <p>```</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 关键设计决策</h4>
+      <strong>Q: 为什么不全量 SymExec？</strong>
+      <p>A: GGUF block 解码涉及复杂的内存寻址（block_ptr + offset + nibble split），SymExec 无法追踪。解决方案：<strong>参数化 trace 模板</strong>。每族量化格式定义一个 trace 生成函数，参数化于 <code>QuantFormatDescriptor</code> 的元数据（block_size, block_bytes, data_kind, scale_layout 等）。这保留了管线的核心优势（dtype 传播、offset 正确、硬件特化），同时绕过 SymExec 的限制。</p>
+      <strong>Q: 参数化 trace 模板 vs 直接 VmInstr 发射的区别？</strong>
+      <p>A: 核心区别在于<strong>抽象层级</strong>：</p>
+      <li>直接发射：plan_lower.rs 手动管理寄存器分配、地址计算、内存布局 → 每种格式 × 每种硬件 × 每种 dtype 组合都要手写</li>
+      <li>参数化 trace：trace 模板描述"做什么"（load scale、unpack nibbles、multiply），auto_select 根据 hardware profile 选择"怎么做" → N 种格式 × M 种硬件 = N 个模板 + M 个 auto_select 规则，不是 N×M 个手写函数</li>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 新增 TraceOp 变体</h4>
+      <p>```rust</p>
+      <p>// ── GGUF 量化块加载 ──</p>
+      <p>/// 加载量化 block 的 scale（f16/bf16 → broadcast compute_dtype）。</p>
+      <p>/// 参数: block_ptr slot, block 内偏移, QuantType（决定 scale 格式）</p>
+      <p>/// 映射: x86 GgufF16ScaleLoad / ARM scalar f16→compute_dtype / GPU ld.global.b16</p>
+      <p>TraceOp::QuantScaleLoad {</p>
+      <p>    block_ptr: u32,        // 指向当前 block 的指针 slot</p>
+      <p>    byte_offset: usize,    // scale 在 block 内的字节偏移</p>
+      <p>    quant_type: QuantType, // 决定 scale 的格式 (f16/bf16/f32/8bit)</p>
+      <p>},</p>
+      <p>/// 加载量化 block 的 packed data 并解包为 compute_dtype 向量。</p>
+      <p>/// 参数: block_ptr slot, data 在 block 内偏移, data_kind 决定解包方式</p>
+      <p>/// 映射: x86 GgufInt4Load/GgufInt4HighLoad/GgufInt8Load /</p>
+      <p>///       ARM scalar byte unpack / GPU ld.global + bit manipulation</p>
+      <p>TraceOp::QuantDataLoad {</p>
+      <p>    block_ptr: u32,          // 指向当前 block 的指针 slot</p>
+      <p>    byte_offset: usize,      // packed data 在 block 内的字节偏移</p>
+      <p>    data_kind: QuantDataKind, // PackedInt4/SignedPackedInt4/Int8/PackedInt5/PackedInt6/...</p>
+      <p>    pass: QuantLoadPass,     // LowNibble / HighNibble / Single (4-bit split layout)</p>
+      <p>},</p>
+      <p>/// 加载量化 block 的 zero-point / min / bias。</p>
+      <p>/// 参数: block_ptr slot, zp 在 block 内偏移, zero_layout 决定格式</p>
+      <p>TraceOp::QuantZeroLoad {</p>
+      <p>    block_ptr: u32,</p>
+      <p>    byte_offset: usize,</p>
+      <p>    zero_layout: ZeroLayout, // None/StaticBias(i32)/PackedInt4/PerChannelF16</p>
+      <p>},</p>
+      <p>/// 加载子块 scale（K-Quant 层级化 scale）。</p>
+      <p>TraceOp::QuantSubScaleLoad {</p>
+      <p>    block_ptr: u32,</p>
+      <p>    byte_offset: usize,</p>
+      <p>    bits: usize,         // 6-bit packed / 8-bit direct</p>
+      <p>    sub_block_size: usize,</p>
+      <p>},</p>
+      <p>/// 加载 high bits（INT5/INT6 的额外位）。</p>
+      <p>TraceOp::QuantHighBitsLoad {</p>
+      <p>    block_ptr: u32,</p>
+      <p>    byte_offset: usize,</p>
+      <p>    bits_per_elem: usize,</p>
+      <p>},</p>
+      <p>/// Codebook 查找（SqueezeLLM / IQ 系列）。</p>
+      <p>TraceOp::QuantCodebookDequant {</p>
+      <p>    indices: u32,</p>
+      <p>    codebook_ptr: u32,</p>
+      <p>    vector_size: usize,</p>
+      <p>    bits_per_entry: usize,</p>
+      <p>},</p>
+      <p>```</p>
+      <p>```rust</p>
+      <p>/// 4-bit 加载 pass（GGUF split layout）。</p>
+      <p>#[derive(Debug, Clone, Copy)]</p>
+      <p>pub enum QuantLoadPass {</p>
+      <p>    /// 低 nibble: (byte &amp; 0x0F) - 8.0（有符号）或 (byte &amp; 0x0F)（无符号）</p>
+      <p>    LowNibble,</p>
+      <p>    /// 高 nibble: ((byte &gt;&gt; 4) &amp; 0x0F) - 8.0（有符号）或 ((byte &gt;&gt; 4) &amp; 0x0F)（无符号）</p>
+      <p>    HighNibble,</p>
+      <p>    /// 单 pass（8-bit / 5-bit / 6-bit 等）</p>
+      <p>    Single,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s1.4" data-section="1.4">
+      <h4>§1.4 参数化 trace 模板</h4>
+      <p>每族量化格式定义一个<strong>trace 生成函数</strong>，接受 <code>QuantFormatDescriptor</code> 参数，输出 <code>Vec&lt;TraceOp&gt;</code> 序列。</p>
+      <p>```rust</p>
+      <p>/// 量化 decode trace 模板：给定 QuantFormatDescriptor，</p>
+      <p>/// 生成一个 block 的 decode trace（加载 scale → 加载 data → 解包 → 乘 scale → 输出）。</p>
+      <p>fn quant_block_decode_trace(</p>
+      <p>    desc: &amp;QuantFormatDescriptor,</p>
+      <p>    block_ptr_slot: u32,  // 指向当前 block 的指针</p>
+      <p>    output_slot: u32,     // 输出向量 slot</p>
+      <p>    block_elem_offset: usize, // 当前 block 在输出中的元素偏移</p>
+      <p>) -&gt; Vec<traceop></traceop></p>
+      <p>```</p>
+      <strong>模板按 data_kind 分族</strong>：
+      <table>
+        <tr>
+          <th>data_kind</th>
+        </tr>
+        <tr>
+          <td>模板</td>
+        </tr>
+        <tr>
+          <td>生成 TraceOps</td>
+        </tr>
+        <tr>
+          <td>SignedPackedInt4</td>
+          <td> (Q4_0)</td>
+        </tr>
+        <tr>
+          <td>signed_int4_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantScaleLoad → QuantDataLoad(LowNibble) → Mul → QuantDataLoad(HighNibble) → Mul → Store</td>
+        </tr>
+        <tr>
+          <td>PackedInt4</td>
+          <td> (Q4_1)</td>
+        </tr>
+        <tr>
+          <td>unsigned_int4_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantScaleLoad → QuantDataLoad(LowNibble) → Mul → QuantZeroLoad → Add → (HighNibble 同) → Store</td>
+        </tr>
+        <tr>
+          <td>Int8</td>
+          <td> (Q8_0)</td>
+        </tr>
+        <tr>
+          <td>int8_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantScaleLoad → QuantDataLoad(Single) → Mul → Store</td>
+        </tr>
+        <tr>
+          <td>PackedInt5</td>
+          <td> (Q4_K)</td>
+        </tr>
+        <tr>
+          <td>int5_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantSubScaleLoad → QuantDataLoad(Single) → QuantHighBitsLoad → 合并 → Mul → Store</td>
+        </tr>
+        <tr>
+          <td>PackedInt6</td>
+          <td> (Q5_K)</td>
+        </tr>
+        <tr>
+          <td>int6_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantSubScaleLoad → QuantDataLoad(Single) → QuantHighBitsLoad → 合并 → Mul → Store</td>
+        </tr>
+        <tr>
+          <td>SuperLowBit</td>
+          <td> (TQ/IQ)</td>
+        </tr>
+        <tr>
+          <td>superlowbit_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantScaleLoad → QuantCodebookDequant → Mul → Store</td>
+        </tr>
+        <tr>
+          <td>Float4</td>
+          <td> (MXFP4/NVFP4)</td>
+        </tr>
+        <tr>
+          <td>fp4_decode_trace</td>
+        </tr>
+        <tr>
+          <td>QuantScaleLoad → QuantDataLoad(Single) → Cast(E2M1→F32) → Mul → Store</td>
+        </tr>
+        <tr>
+          <td>Bfloat16</td>
+        </tr>
+        <tr>
+          <td>bf16_passthrough</td>
+        </tr>
+        <tr>
+          <td>VecLoad → Cast(BF16→F32) → Store</td>
+        </tr>
+        <tr>
+          <td>Float16</td>
+        </tr>
+        <tr>
+          <td>fp16_passthrough</td>
+        </tr>
+        <tr>
+          <td>VecLoad → Cast(F16→F32) → Store</td>
+        </tr>
+        <tr>
+          <td>Float32</td>
+        </tr>
+        <tr>
+          <td>f32_passthrough</td>
+        </tr>
+        <tr>
+          <td>VecLoad → Store</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.5" data-section="1.5">
+      <h4>§1.5 auto_select 扩展</h4>
+      <p>```rust</p>
+      <p>// auto_select.rs dispatch_trace_op 新增 match arms:</p>
+      <p>TraceOp::QuantScaleLoad { block_ptr, byte_offset, quant_type } =&gt; {</p>
+      <p>    match quant_type {</p>
+      <p>        QuantType::Q4_0 | QuantType::Q8_0 | ... =&gt; {</p>
+      <p>            // x86: VmInstr::GgufF16ScaleLoad</p>
+      <p>            // ARM: 逐字节构建 f16 → f32</p>
+      <p>            // GPU: ld.global.b16 + cvt.rn.f32.f16</p>
+      <p>            prog.emit(VmInstr::GgufF16ScaleLoad { dst, base: slots[*block_ptr], offset, width })</p>
+      <p>        }</p>
+      <p>        QuantType::Q4K | QuantType::Q5K | ... =&gt; {</p>
+      <p>            // 层级化 scale: 可能需要多个加载步骤</p>
+      <p>        }</p>
+      <p>        _ =&gt; ...</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>TraceOp::QuantDataLoad { block_ptr, byte_offset, data_kind, pass } =&gt; {</p>
+      <p>    match (data_kind, pass) {</p>
+      <p>        (SignedPackedInt4, LowNibble) =&gt; VmInstr::GgufInt4Load,</p>
+      <p>        (SignedPackedInt4, HighNibble) =&gt; VmInstr::GgufInt4HighLoad,</p>
+      <p>        (PackedInt4, LowNibble) =&gt; VmInstr::GgufUInt4Load,</p>
+      <p>        (PackedInt4, HighNibble) =&gt; VmInstr::GgufUInt4HighLoad,</p>
+      <p>        (Int8, Single) =&gt; VmInstr::GgufInt8Load,</p>
+      <p>        ...</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 标量实现</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 QuantGather 标量实现矩阵</h4>
+      <p>每种量化格式族一个标量 gather 函数（不是每种格式一个——同族格式共享）：</p>
+      <strong>标量函数签名统一</strong>：
+      <p>```rust</p>
+      <p>// E: Element — 输出元素类型, 匹配 compute_dtype (由 TensorMeta.dtype × DeviceProfile 推导)</p>
+      <p>pub extern "C" fn scalar_<format>_gather(</format></p>
+      <p>    indices: *const u32,       // token IDs (整数索引, 非浮点)</p>
+      <p>    table_quant: *const u8,    // 量化 embed table</p>
+      <p>    output: *mut E,            // compute_dtype 输出</p>
+      <p>    seq_len: usize,</p>
+      <p>    hidden_dim: usize,</p>
+      <p>    vocab_size: usize,</p>
+      <p>)</p>
+      <p>```</p>
+      <p>标量函数内部用 <code>QuantFormatDescriptor</code> 的元数据（block_size, block_bytes, scale_layout 等）驱动解码，不硬编码任何偏移。</p>
+      <table>
+        <tr>
+          <th>标量函数</th>
+        </tr>
+        <tr>
+          <td>覆盖格式</td>
+        </tr>
+        <tr>
+          <td>关键差异</td>
+        </tr>
+        <tr>
+          <td>scalar_q4_0_gather</td>
+        </tr>
+        <tr>
+          <td>Q4_0</td>
+        </tr>
+        <tr>
+          <td>SignedPackedInt4, 单 scale f16, 无 zero-point</td>
+        </tr>
+        <tr>
+          <td>scalar_q4_1_gather</td>
+        </tr>
+        <tr>
+          <td>Q4_1</td>
+        </tr>
+        <tr>
+          <td>PackedInt4(无符号), scale f16 + min f16</td>
+        </tr>
+        <tr>
+          <td>scalar_q8_0_gather</td>
+        </tr>
+        <tr>
+          <td>Q8_0, Q8_1</td>
+        </tr>
+        <tr>
+          <td>Int8, 单 scale f16, Q8_1 有 sum f16</td>
+        </tr>
+        <tr>
+          <td>scalar_kquant_gather</td>
+        </tr>
+        <tr>
+          <td>Q2_K, Q3_K, Q4_K, Q5_K, Q6_K</td>
+        </tr>
+        <tr>
+          <td>层级化 scale, 2/3/4/5/6-bit packed</td>
+        </tr>
+        <tr>
+          <td>scalar_mxfp4_gather</td>
+        </tr>
+        <tr>
+          <td>MXFP4</td>
+        </tr>
+        <tr>
+          <td>E2M1 + E8M0 scale</td>
+        </tr>
+        <tr>
+          <td>scalar_awq4_gather</td>
+        </tr>
+        <tr>
+          <td>AWQ4</td>
+        </tr>
+        <tr>
+          <td>行优先, FP16 zero-point</td>
+        </tr>
+        <tr>
+          <td>scalar_gptq4_gather</td>
+        </tr>
+        <tr>
+          <td>GPTQ4</td>
+        </tr>
+        <tr>
+          <td>列交织, INT4 packed zp + 1 偏移</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 QuantGemm 标量实现</h4>
+      <p>QuantGemm 的标量实现不需要 SymExec 全量 trace（GEMM 循环结构由 emit_gemm_inline 统一处理）。关键改变是<strong>微核 prologue 从手写 VmInstr 改为 trace 模板驱动</strong>：</p>
+      <p>```rust</p>
+      <p>// 当前（错误）: emit_quant_gemm_tiled 直接发射 GgufInt4Load + VecBinOp::Mul</p>
+      <p>// 正确: 微核 prologue 调用 quant_block_decode_trace 生成 TraceOps → auto_select 映射</p>
+      <p>```</p>
+      <p>GEMM 的外层循环（M/N/K tiling）仍由 <code>emit_gemm_inline</code> 统一处理，但<strong>每个 K tile 内的权重 decode</strong> 从直接发射改为 trace 模板。</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 buffer_alloc 修复</h4>
+      <p>```rust</p>
+      <p>// 当前（错误）:</p>
+      <p>let elem_bytes = if tensor.producer.is_some() {</p>
+      <p>    DType::F32.size_bytes()  // BUG: 写死 F32，应从 producer 的输出 dtype 推导</p>
+      <p>} else {</p>
+      <p>    tensor.dtype.size_bytes()</p>
+      <p>};</p>
+      <p>// 正确: 从 producer 的 ComputePattern 推导输出 dtype</p>
+      <p>let elem_bytes = if let Some(producer) = tensor.producer {</p>
+      <p>    producer_output_dtype(producer, graph).elem_bytes()</p>
+      <p>} else {</p>
+      <p>    tensor.dtype.size_bytes()</p>
+      <p>};</p>
+      <p>// 正确: 从 tensor 的实际 dtype 推导</p>
+      <p>let elem_bytes = tensor.dtype.size_bytes();</p>
+      <p>// 如果 producer 的输出 dtype 与输入不同（如 QuantGather: Q4_0 输入 → F32 输出），</p>
+      <p>// 使用 producer 的输出 tensor dtype</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 注册表与 Trace 注入</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 QuantGather 注册</h4>
+      <p>```rust</p>
+      <p>// <a href="http://registry.rs">registry.rs</a></p>
+      <p>// Q4_0 族: SignedPackedInt4, 单 scale, 无 zp</p>
+      <p>reg.register(OpKindKey::QuantGather, q4_0_gather_sig);</p>
+      <p>reg.inject_trace(OpKindKey::QuantGather, OpTrace {</p>
+      <p>    op_kind: OpKind::QuantGather { quant_type: Q4_0, ... },</p>
+      <p>    pattern: ComputePattern::Injective {</p>
+      <p>        body: quant_block_decode_trace(&amp;Q4_0_DESCRIPTOR, ...),</p>
+      <p>        num_inputs: 2,</p>
+      <p>    },</p>
+      <p>    signature: q4_0_gather_sig,</p>
+      <p>});</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 QuantGemm 注册</h4>
+      <p>```rust</p>
+      <p>// QuantGemm 已注册为 Gemm pattern</p>
+      <p>// 改变: 微核 prologue 从直接 VmInstr 发射改为 trace 模板</p>
+      <p>// emit_gemm_inline 检测 quant_type → 调用 quant_block_decode_trace 生成 K-tile 内循环</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 计算模式分类</h4>
+      <table>
+        <tr>
+          <th>OpKind</th>
+        </tr>
+        <tr>
+          <td>ComputePattern</td>
+        </tr>
+        <tr>
+          <td>处理路径</td>
+        </tr>
+        <tr>
+          <td>QuantGather</td>
+        </tr>
+        <tr>
+          <td>Injective { body, num_inputs: 2 }</td>
+        </tr>
+        <tr>
+          <td>emit_injective_inline + auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>QuantGemm</td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>emit_gemm_inline + quant_block_decode_trace for K-tile</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 auto_select 扩展</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 新增 dispatch 规则</h4>
+      <p>```rust</p>
+      <p>// auto_select.rs</p>
+      <p>// QuantScaleLoad: 根据 quant_type 选择 scale 加载方式</p>
+      <p>TraceOp::QuantScaleLoad { block_ptr, byte_offset, quant_type } =&gt; {</p>
+      <p>    let r = alloc_slot(dst_slot);</p>
+      <p>    match quant_type {</p>
+      <p>        // f16 scale → GgufF16ScaleLoad (vmovd + vcvtph2ps + vbroadcastss)</p>
+      <p>        Q4_0 | Q4_1 | Q8_0 | Q8_1 =&gt; {</p>
+      <p>            prog.emit(VmInstr::GgufF16ScaleLoad { dst: r, base: slots[*block_ptr], offset: Const(*byte_offset), width });</p>
+      <p>        }</p>
+      <p>        // 层级化 scale → QuantSubScaleLoad + unpack</p>
+      <p>        Q4K | Q5K | Q6K =&gt; { ... }</p>
+      <p>        // E8M0 block scale → MXFP decode</p>
+      <p>        Mxfp4 { .. } =&gt; { ... }</p>
+      <p>        _ =&gt; ...</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>// QuantDataLoad: 根据 data_kind + pass 选择解包方式</p>
+      <p>TraceOp::QuantDataLoad { block_ptr, byte_offset, data_kind, pass } =&gt; {</p>
+      <p>    let r = alloc_slot(dst_slot);</p>
+      <p>    match (data_kind, pass) {</p>
+      <p>        (SignedPackedInt4, LowNibble) =&gt; {</p>
+      <p>            prog.emit(VmInstr::GgufInt4Load { dst: r, base: slots[*block_ptr], offset, width });</p>
+      <p>        }</p>
+      <p>        (SignedPackedInt4, HighNibble) =&gt; {</p>
+      <p>            prog.emit(VmInstr::GgufInt4HighLoad { dst: r, base: slots[*block_ptr], offset, width });</p>
+      <p>        }</p>
+      <p>        (PackedInt4, LowNibble) =&gt; {</p>
+      <p>            prog.emit(VmInstr::GgufUInt4Load { dst: r, base: slots[*block_ptr], offset, width });</p>
+      <p>        }</p>
+      <p>        (PackedInt4, HighNibble) =&gt; {</p>
+      <p>            prog.emit(VmInstr::GgufUInt4HighLoad { dst: r, base: slots[*block_ptr], offset, width });</p>
+      <p>        }</p>
+      <p>        (Int8, Single) =&gt; {</p>
+      <p>            prog.emit(VmInstr::GgufInt8Load { dst: r, base: slots[*block_ptr], offset, width });</p>
+      <p>        }</p>
+      <p>        (PackedInt5, Single) =&gt; { /* INT5 解包 */ }</p>
+      <p>        (PackedInt6, Single) =&gt; { /* INT6 解包 */ }</p>
+      <p>        (SuperLowBit, Single) =&gt; { /* codebook lookup */ }</p>
+      <p>        (Float4, Single) =&gt; { /* E2M1 decode */ }</p>
+      <p>        _ =&gt; Err(...)</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 迁移计划</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 阶段划分</h4>
+      <strong>Phase 1: TraceOp 扩展 + auto_select 基础</strong> (REQ-QPJ-001)
+      <li>在 <a href="http://trace.rs">trace.rs</a> 新增 QuantScaleLoad / QuantDataLoad / QuantZeroLoad / QuantSubScaleLoad / QuantHighBitsLoad / QuantCodebookDequant 变体</li>
+      <li>在 auto_select.rs 新增对应 match arms，映射到现有 VmInstr</li>
+      <li>不改变现有 QuantGather/QuantGemm lowering 路径，只建立基础设施</li>
+      <strong>Phase 2: QuantGather trace 模板化</strong> (REQ-QPJ-002)
+      <li>为 Q4_0/Q4_1/Q8_0/Q8_1 创建参数化 trace 模板</li>
+      <li><a href="http://registry.rs">registry.rs</a> 注入 trace（替代当前空 trace）</li>
+      <li>plan_lower.rs 中 <code>dispatch_structural</code> 的 QuantGather 分支改为调用 <code>emit_injective_inline</code> + <code>auto_lower_trace</code></li>
+      <li>删除 <code>emit_quant_gather_classic</code></li>
+      <li>验证: Q4_0/Q8_0 E2E 测试通过</li>
+      <strong>Phase 3: QuantGather 复杂格式 trace 模板化</strong> (REQ-QPJ-003)
+      <li>为 Q2_K/Q3_K/Q4_K/Q5_K/Q6_K 创建 trace 模板</li>
+      <li>为 AWQ4/GPTQ4/MXFP4/NVFP4/TQ 创建 trace 模板</li>
+      <li>删除 <code>emit_quant_gather_complex</code></li>
+      <li>验证: 所有量化格式 E2E 测试通过</li>
+      <strong>Phase 4: QuantGemm 微核 trace 模板化</strong> (REQ-QPJ-004)
+      <li>将 <code>emit_quant_gemm_tiled</code> 的微核 prologue 改为 trace 模板驱动</li>
+      <li>保留外层 M/N/K tiling 框架（这是合理的 GEMM 结构，不需要改变）</li>
+      <li>微核内部的 scale load / data load / dequant / FMA 改为 TraceOp → auto_select</li>
+      <li>删除手写的 GgufInt4Load/GgufF16ScaleLoad 发射代码</li>
+      <li>验证: 所有量化格式 GEMM 正确性</li>
+      <strong>Phase 5: 清理</strong> (REQ-QPJ-005)
+      <li>删除旧版 <code>emit_quant_gather_classic</code> / <code>emit_quant_gather_complex</code>（Phase 2/3 已用 trace 模板替代）</li>
+      <li>重构 <code>emit_quant_gemm_tiled</code> → <code>emit_gemm_quant</code>：保留外层 M/N/K tiling 框架（Phase 4 已将 prologue 改为 trace 模板），删除残留的手写 prologue 代码</li>
+      <li>删除 buffer_alloc.rs 中写死的 <code>DType::F32.size_bytes()</code></li>
+      <li>删除 mega_kernel.rs 中所有诊断 eprintln</li>
+      <li>验证: 全量 E2E 测试通过</li>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 验证标准</h4>
+      <table>
+        <tr>
+          <th>阶段</th>
+        </tr>
+        <tr>
+          <td>验证命令</td>
+        </tr>
+        <tr>
+          <td>通过标准</td>
+        </tr>
+        <tr>
+          <td>Phase 1</td>
+        </tr>
+        <tr>
+          <td>cd gllm-kernels &amp;&amp; cargo check</td>
+        </tr>
+        <tr>
+          <td>编译通过</td>
+        </tr>
+        <tr>
+          <td>Phase 2</td>
+        </tr>
+        <tr>
+          <td>cargo test --test test_e2e_generator -- gguf_q4_0 --test-threads=1</td>
+        </tr>
+        <tr>
+          <td>输出有意义文本（非 "!!!!!!!!!!"）</td>
+        </tr>
+        <tr>
+          <td>Phase 2</td>
+        </tr>
+        <tr>
+          <td>cargo test --test test_e2e_generator -- gguf_q8_0 --test-threads=1</td>
+        </tr>
+        <tr>
+          <td>通过</td>
+        </tr>
+        <tr>
+          <td>Phase 3</td>
+        </tr>
+        <tr>
+          <td>cargo test --test test_e2e_generator --test-threads=1</td>
+        </tr>
+        <tr>
+          <td>所有量化格式通过</td>
+        </tr>
+        <tr>
+          <td>Phase 4</td>
+        </tr>
+        <tr>
+          <td>cd gllm-kernels &amp;&amp; cargo test --lib</td>
+        </tr>
+        <tr>
+          <td>所有单元测试通过</td>
+        </tr>
+        <tr>
+          <td>Phase 5</td>
+        </tr>
+        <tr>
+          <td>cargo test --test test_e2e_generator --test-threads=1</td>
+        </tr>
+        <tr>
+          <td>全量 E2E 通过</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 REQ 清单</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ ID</th>
+        </tr>
+        <tr>
+          <td>标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">QuantGather/QuantGemm TraceOp 管线迁移完成</li><li id="2" data-criterion="2">DecodeTraceBuilder 统一所有格式</li><li id="3" data-criterion="3">auto_lower_trace_raw 驱动 VmInstr 正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">
+      
+      
+      </a></div>
+        
+    
+<section id="req-qpj-001" data-req="REQ-QPJ-001" data-req-status="implemented" data-req-domain="qpj" data-req-category="business" data-req-entity="ENT-QUANT-PIPELINE" data-req-api="API-QUANT-PIPELINE-JIT"><h3>REQ-QPJ-001</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qpj-002" data-req="REQ-QPJ-002" data-req-status="implemented" data-req-domain="qpj" data-req-category="business" data-req-entity="ENT-QUANT-PIPELINE" data-req-api="API-QUANT-PIPELINE-JIT"><h3>REQ-QPJ-002</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qpj-003" data-req="REQ-QPJ-003" data-req-status="implemented" data-req-domain="qpj" data-req-category="business" data-req-entity="ENT-QUANT-PIPELINE" data-req-api="API-QUANT-PIPELINE-JIT"><h3>REQ-QPJ-003</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qpj-004" data-req="REQ-QPJ-004" data-req-status="implemented" data-req-domain="qpj" data-req-category="business" data-req-entity="ENT-QUANT-PIPELINE" data-req-api="API-QUANT-PIPELINE-JIT"><h3>REQ-QPJ-004</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qpj-005" data-req="REQ-QPJ-005" data-req-status="implemented" data-req-domain="qpj" data-req-category="business" data-req-entity="ENT-QUANT-PIPELINE" data-req-api="API-QUANT-PIPELINE-JIT"><h3>REQ-QPJ-005</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+<section id="test-qpj-001" data-test="TEST-QPJ-001" data-req-ref="REQ-QPJ-001" data-test-categories="unit" <h3="">TEST-QPJ-001: 量化算子JIT管线化测试<p>验证REQ-QPJ-001相关功能正确性</p>
+      <div id="quantgather/quantgemm-traceop-管线迁移完成" data-criterion="QuantGather/QuantGemm TraceOp 管线迁移完成">QuantGather/QuantGemm TraceOp 管线迁移完成</div>
+      <div id="decodetracebuilder-统一所有格式" data-criterion="DecodeTraceBuilder 统一所有格式">DecodeTraceBuilder 统一所有格式</div>
+      <div id="auto-lower-trace-raw-驱动-vminstr-正确" data-criterion="auto_lower_trace_raw 驱动 VmInstr 正确">auto_lower_trace_raw 驱动 VmInstr 正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>TraceOp 量化扩展</td>
+        </tr>
+        <tr>
+          <td>新增 QuantScaleLoad/QuantDataLoad/QuantZeroLoad/QuantSubScaleLoad/QuantHighBitsLoad/QuantCodebookDequant TraceOp 变体 + auto_select 映射</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">QuantGather/QuantGemm TraceOp 管线迁移完成</li><li id="2" data-criterion="2">DecodeTraceBuilder 统一所有格式</li><li id="3" data-criterion="3">auto_lower_trace_raw 驱动 VmInstr 正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qpj-002" data-test="TEST-QPJ-002" data-req-ref="REQ-QPJ-002" data-test-categories="unit" <h3="">TEST-QPJ-002: 量化算子JIT管线化测试<p>验证REQ-QPJ-002相关功能正确性</p>
+      <div id="quantgather/quantgemm-traceop-管线迁移完成" data-criterion="QuantGather/QuantGemm TraceOp 管线迁移完成">QuantGather/QuantGemm TraceOp 管线迁移完成</div>
+      <div id="decodetracebuilder-统一所有格式" data-criterion="DecodeTraceBuilder 统一所有格式">DecodeTraceBuilder 统一所有格式</div>
+      <div id="auto-lower-trace-raw-驱动-vminstr-正确" data-criterion="auto_lower_trace_raw 驱动 VmInstr 正确">auto_lower_trace_raw 驱动 VmInstr 正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>QuantGather Classic 管线化</td>
+        </tr>
+        <tr>
+          <td>Q4_0/Q4_1/Q8_0/Q8_1 的 trace 模板 + registry 注入 + dispatch_structural 改为 auto_select</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">QuantGather/QuantGemm TraceOp 管线迁移完成</li><li id="2" data-criterion="2">DecodeTraceBuilder 统一所有格式</li><li id="3" data-criterion="3">auto_lower_trace_raw 驱动 VmInstr 正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qpj-003" data-test="TEST-QPJ-003" data-req-ref="REQ-QPJ-003" data-test-categories="unit" <h3="">TEST-QPJ-003: 量化算子JIT管线化测试<p>验证REQ-QPJ-003相关功能正确性</p>
+      <div id="quantgather/quantgemm-traceop-管线迁移完成" data-criterion="QuantGather/QuantGemm TraceOp 管线迁移完成">QuantGather/QuantGemm TraceOp 管线迁移完成</div>
+      <div id="decodetracebuilder-统一所有格式" data-criterion="DecodeTraceBuilder 统一所有格式">DecodeTraceBuilder 统一所有格式</div>
+      <div id="auto-lower-trace-raw-驱动-vminstr-正确" data-criterion="auto_lower_trace_raw 驱动 VmInstr 正确">auto_lower_trace_raw 驱动 VmInstr 正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>QuantGather Complex 管线化</td>
+        </tr>
+        <tr>
+          <td>K-Quant/AWQ/GPTQ/MXFP4/NVFP4/TQ 的 trace 模板</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">QuantGather/QuantGemm TraceOp 管线迁移完成</li><li id="2" data-criterion="2">DecodeTraceBuilder 统一所有格式</li><li id="3" data-criterion="3">auto_lower_trace_raw 驱动 VmInstr 正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qpj-004" data-test="TEST-QPJ-004" data-req-ref="REQ-QPJ-004" data-test-categories="unit" <h3="">TEST-QPJ-004: 量化算子JIT管线化测试<p>验证REQ-QPJ-004相关功能正确性</p>
+      <div id="quantgather/quantgemm-traceop-管线迁移完成" data-criterion="QuantGather/QuantGemm TraceOp 管线迁移完成">QuantGather/QuantGemm TraceOp 管线迁移完成</div>
+      <div id="decodetracebuilder-统一所有格式" data-criterion="DecodeTraceBuilder 统一所有格式">DecodeTraceBuilder 统一所有格式</div>
+      <div id="auto-lower-trace-raw-驱动-vminstr-正确" data-criterion="auto_lower_trace_raw 驱动 VmInstr 正确">auto_lower_trace_raw 驱动 VmInstr 正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>QuantGemm 微核管线化</td>
+        </tr>
+        <tr>
+          <td>微核 prologue 改为 trace 模板，外层 tiling 保留</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">QuantGather/QuantGemm TraceOp 管线迁移完成</li><li id="2" data-criterion="2">DecodeTraceBuilder 统一所有格式</li><li id="3" data-criterion="3">auto_lower_trace_raw 驱动 VmInstr 正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr" ENT-VM-INSTR<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qpj-005" data-test="TEST-QPJ-005" data-req-ref="REQ-QPJ-005" data-test-categories="unit" <h3="">TEST-QPJ-005: 量化算子JIT管线化测试<p>验证REQ-QPJ-005相关功能正确性</p>
+      <div id="quantgather/quantgemm-traceop-管线迁移完成" data-criterion="QuantGather/QuantGemm TraceOp 管线迁移完成">QuantGather/QuantGemm TraceOp 管线迁移完成</div>
+      <div id="decodetracebuilder-统一所有格式" data-criterion="DecodeTraceBuilder 统一所有格式">DecodeTraceBuilder 统一所有格式</div>
+      <div id="auto-lower-trace-raw-驱动-vminstr-正确" data-criterion="auto_lower_trace_raw 驱动 VmInstr 正确">auto_lower_trace_raw 驱动 VmInstr 正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>清理与修复</td>
+        </tr>
+        <tr>
+          <td>删除手写 lowering 函数 + buffer_alloc 修复 + 诊断代码清理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 修改文件总表</h3>
+    </section>
+    <section id="s-gllm-kernels" data-section="null">
+      <h4>gllm-kernels</h4>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>修改</td>
+        </tr>
+        <tr>
+          <td>src/compiler/trace.rs</td>
+        </tr>
+        <tr>
+          <td>新增 6 个 TraceOp 变体</td>
+        </tr>
+        <tr>
+          <td>src/compiler/codegen/vm/auto_select.rs</td>
+        </tr>
+        <tr>
+          <td>新增 6 个 dispatch_trace_op match arm</td>
+        </tr>
+        <tr>
+          <td>src/compiler/registry.rs</td>
+        </tr>
+        <tr>
+          <td>QuantGather/QuantGemm trace 注入</td>
+        </tr>
+        <tr>
+          <td>src/compiler/codegen/vm/plan_lower.rs</td>
+        </tr>
+        <tr>
+          <td>删除 emit_quant_gather_classic/complex + QuantGemm 微核改为 trace 模板</td>
+        </tr>
+        <tr>
+          <td>src/compiler/buffer_alloc.rs</td>
+        </tr>
+        <tr>
+          <td>elem_bytes 改为从 tensor.dtype 推导</td>
+        </tr>
+        <tr>
+          <td>scalar-ops/src/gather.rs</td>
+        </tr>
+        <tr>
+          <td>新增 Q4_1/Q8_0/K-Quant 标量 gather</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-gllm" data-section="null">
+      <h4>gllm</h4>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>修改</td>
+        </tr>
+        <tr>
+          <td>src/engine/mega_kernel.rs</td>
+        </tr>
+        <tr>
+          <td>删除诊断 eprintln（66+ 行）</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-COMPILER-GRAPH" id="ent-compiler-graph">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-QUANT-TYPE" id="ent-quant-type"><h4>ENT-QUANT-TYPE</h4><p>QuantType — 量化格式枚举（enum QuantType in gllm-kernels/src/quant.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Bf16|F16|F32|Q2K|Q3K|Q4K|Q5K|Q6K|Q8K|IQ1S|IQ1M|IQ2XXS|IQ2XS|IQ2S|IQ3XXS|IQ3S|IQ4NL|IQ4XS|Q4_0|Q4_1|Q5_0|Q5_1|Q8_0|Q8_1|AWQ4|GPTQ4|Squeeze|Fp8E4M3|Fp8E5M2|TQ1_0|TQ2_0|Mxfp4|Nvfp4</td><td>枚举变体名</td></tr><tr data-field="bits_per_element" data-type="number" data-required="true" <td="">bits_per_element<td>number</td><td>是</td><td>2~32</td><td>每个元素占用比特数</td></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>32|256|可配置</td><td>
+量化块大小（元素数）</td></tr><tr data-field="has_scale" data-type="boolean" data-required="true" <td="">has_scale<td>boolean</td><td>是</td><td>原生浮点=Bf16/F16/F32无scale</td><td>是否有缩放因子</td></tr><tr data-field="has_zero_point" data-type="boolean" data-required="true" <td="">has_zero_point<td>boolean</td><td>是</td><td>AWQ4有FP16 zp, GPTQ4有INT4 packed zp</td><td>是否有零点</td></tr><tr data-field="is_native_float" data-type="boolean" data-required="true" <td="">is_native_float<td>boolean</td><td>是</td><td>
+Bf16/F16/F32/Fp8E4M3/Fp8E5M2</td><td>是否为硬件原生浮点格式</td></tr><tr data-field="is_weight_only" data-type="boolean" data-required="true" <td="">is_weight_only<td>boolean</td><td>是</td><td>AWQ4/GPTQ4/Squeeze</td><td>是否仅权重路径</td></tr><tr data-field="block_size_param" data-type="number" data-required="false" <td="">block_size_param<td>number</td><td>否</td><td>仅 Mxfp4 变体</td><td>可配置 block_size 参数</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-TRACE-OP" id="ent-trace-op"><h4>ENT-TRACE-OP</h4><p>TraceOp — SSA中间表示算子（enum TraceOp in gllm-kernels/src/compiler/trace.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Input|Const|Add|Sub|Mul|Div|Fma|Neg|Abs|Exp|Sqrt|Rsqrt|Tanh|Recip|Log|Sigmoid|Max|Min|ConditionalBranch|QuantFma|BlockScale|Cast|HReduce|Prefetch|NonTemporalStore|BitExtract|Permute</td><td>枚举变体名</td></tr><tr data-field="input_index" data-type="number" data-required="false" <td="">input_index<td>number</td><td>否</td><td>u32, 仅 Input 变体</td><td>加载第 i 个输入元素</td></tr><tr data-field="const_value" data-type="number" data-required="false" <td="">const_value<td>number</td><td>否</td><td>
+f64, 仅 Const 变体</td><td>浮点常量值</td></tr><tr data-field="left_operand" data-type="number" data-required="false" <td="">left_operand<td>number</td><td>否</td><td>ValueId, 二元运算左操作数</td><td>Add/Sub/Mul/Div/Max/Min 的左操作数</td></tr><tr data-field="right_operand" data-type="number" data-required="false" <td="">right_operand<td>number</td><td>否</td><td>ValueId, 二元运算右操作数</td><td>Add/Sub/Mul/Div/Max/Min 的右操作数</td></tr><tr data-field="fma_third_operand" data-type="number" data-required="false" <td="">
+fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(a,b,c) = a*b+c 的 c</td></tr><tr data-field="reduce_kind" data-type="string" data-required="false" <td="">reduce_kind<td>string</td><td>否</td><td>Sum|Max|Min, 仅 HReduce 变体</td><td>水平归约操作类型</td></tr><tr data-field="quant_precision" data-type="string" data-required="false" <td="">quant_precision<td>string</td><td>否</td><td>QuantPrecision, 仅 QuantFma/Cast 变体</td><td>混合精度 dtype</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-VM-INSTR" id="ent-vm-instr">
+        <h4>ENT-VM-INSTR</h4>
+        <p>VmInstr — 虚拟指令集 (102+指令)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>VecLoad|VecStore|Fma|LoopBegin|...</td><td>指令变体名 (102+种)</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>QuantPrecision</td><td>数据精度类型</td></tr>
+<tr data-field="width" data-type="string" data-required="true" <td="">width<td>string</td><td>是</td><td>SimdWidth</td><td>SIMD宽度 (128/256/512/SVE)</td></tr><tr data-field="dst" data-type="string" data-required="false" <td="">dst<td>string</td><td>否</td><td>VRegId</td><td>目标寄存器</td></tr><tr data-field="src" data-type="string" data-required="false" <td="">src<td>string</td><td>否</td><td>VRegId</td><td>源寄存器</td></tr><tr data-field="offset" data-type="string" data-required="false" <td="">offset
+<td>string</td><td>否</td><td>OffsetExpr</td><td>内存偏移表达式</td></tr><tr data-field="base" data-type="string" data-required="false" <td="">base<td>string</td><td>否</td><td>VRegId</td><td>基址寄存器</td></tr><tr data-field="step" data-type="number" data-required="false" <td="">step<td>number</td><td>否</td><td>usize</td><td>循环步长 (LoopBegin专用)</td></tr></table>
+      </section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section data-entity-model-type="relational" data-entity="ENT-QUANT-PIPELINE" id="ent-quant-pipeline"><h3>ENT-QUANT-PIPELINE Quant Pipeline JIT</h3><table data-entity-table="ENT-QUANT-PIPELINE"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-required="true" data-type="string" data-field="quant_type"><td>quant_type</td><td>string</td><td>是</td><td></td><td>支持的量化类型</td></tr><tr data-required="true" data-type="number" data-field="block_size"><td>block_size</td><td>number</td><td>是</td><td></td><td>量化 block 大小</td></tr><tr data-required="true" data-type="number" data-field="group_size"><td>group_size</td><td>number</td><td>是</td><td></td><td>每组元素数</td></tr><tr data-required="true" data-type="number" data-field="pipeline_id"><td>pipeline_id</td><td>number</td><td>是</td><td></td><td>JIT 管线缓存 ID</td></tr><tr data-required="false" data-type="boolean" data-field="dynamic_dequant"><td>dynamic_dequant</td><td>boolean</td><td>否</td><td></td><td>是否支持动态反量化</td></tr></table></section><section data-api="POST /internal/quant/pipeline" id="post-/internal/quant/pipeline" data-api-type="internal" data-api-name="API-QUANT-PIPELINE-JIT"><h4>POST /internal/quant/pipeline — Quantized pipeline JIT compile</h4><p>量化管线 JIT 编译接口，将量化算子链（dequant → compute → requant）编译为单一融合 MegaKernelFn。支持管线级 epilogue 白嫖和跨算子 SymDim 传播。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：24-QUANT-PIPELINE-JIT.html</address>
+  </footer>
+</body>
+</html>

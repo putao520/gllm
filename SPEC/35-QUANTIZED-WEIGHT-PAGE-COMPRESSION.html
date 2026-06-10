@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="35-QUANTIZED-WEIGHT-PAGE-COMPRESSION" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"35-QUANTIZED-WEIGHT-PAGE-COMPRESSION", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>量化原生权重页压缩架构 (QUANTIZED-WEIGHT-PAGE-COMPRESSION)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>35-QUANTIZED-WEIGHT-PAGE-COMPRESSION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-量化原生权重页压缩架构-quantized-weight-page-compression" data-section="null">
+      <h2>量化原生权重页压缩架构 (QUANTIZED-WEIGHT-PAGE-COMPRESSION)</h2>
+      <p>&gt; <strong>实现状态</strong>: ✅ 全部完成 — REQ-QWP-001~007 (QuantBlockLoad + QuantGather GEMM prologue + .gllm 量化加载 + GGUF 转换 + 权重页 Tier 透传 + REQ-QWP-005 QuantGather 双缓冲 + REQ-QWP-006 SM61 解量化路径)</p>
+      <p>&gt; <strong>SSOT</strong>: 本文件定义量化权重页的压缩架构 — 量化即权重压缩的唯一可行路径。</p>
+      <p>&gt; <strong>实验依据</strong>: FWT 波函数反推、SIREN/INR、Hash Grid + Gabor、F-INR 泛函张量分解四种方法在真实 LLM 权重上实测均失败（cos_sim &lt; 0.02 ~ 0.81，需 77%+ 参数才能达到 0.99）。根因：LLM 权重是高熵（近似 i.i.d. 高斯）数据，信息论限制任何函数逼近方法的压缩比上限约为 1:1。</p>
+      <p>&gt; <strong>量化可行的根因</strong>: 量化不是"把数据变成公式"，而是"降低每个数值的精度"。4-bit 量化 = 8x 压缩（从 FP32），perplexity 损失 &lt; 0.1。这是有损压缩，但损失的精度不影响推理质量。</p>
+      <p>&gt; 交叉引用: <code>23-QUANT-CODEGEN-ALGO.md</code>（QuantFormatDescriptor 22 种量化格式）、<code>24-QUANT-PIPELINE-JIT.md</code>（QuantGather/QuantGemm JIT 管线）、<code>22-PAGE-COMPRESSION.md</code>（CompressionCodec，权重页 codec=None）、<code>21-WEIGHT-PAGING.md</code>（量化权重页 §8）、<code>36-GLLM-WEIGHT-FORMAT.md</code>（.gllm 量化权重格式）</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 设计原则</h3>
+      <p>1. <strong>量化即压缩</strong>: 权重压缩的唯一路径是量化（4-8 bit），不是函数逼近</p>
+      <p>2. <strong>解量化即 GEMM prologue</strong>: 量化权重的"解压"与 GEMM 融合（QuantGather），不是独立 pass</p>
+      <p>3. <strong>页级透传</strong>: 量化权重页以量化格式直接存储和传输，GEMM JIT 内 on-the-fly 解量化</p>
+      <p>4. <strong>格式覆盖</strong>: 支持 SPEC 23 定义的 22 种 QuantType（NVFP4/AWQ4/GPTQ4/SqueezeLLM/FP8 等）</p>
+      <p>5. <strong>与现有管线完全复用</strong>: QuantGather/QuantGemm 已在 SPEC 24 定义，本文件仅定义分页集成</p>
+    </section>
+    <section id="s0.1" data-section="0.1">
+      <h4>§0.1 为何函数逼近不可行</h4>
+      <p>四种方法实测数据（SmolLM2-135M q_proj 576×576）：</p>
+      <strong>根因</strong>: LLM 权重近似 i.i.d. 高斯分布，信息熵极高。1 bit 信息需要至少 1 bit 存储，任何参数化函数逼近方法都无法突破此限制。
+      <strong>量化为何不受此限</strong>: 量化降低每个数值的精度（FP32→INT4 = 8x 压缩），是逐元素操作，不依赖数据的低秩/低熵假设。4-8 bit 量化在所有主流 LLM 上已被验证 perplexity 损失 &lt; 0.1。
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>最佳 cos_sim</td>
+        </tr>
+        <tr>
+          <td>param_ratio</td>
+        </tr>
+        <tr>
+          <td>测试脚本</td>
+        </tr>
+        <tr>
+          <td>FWT 波函数反推</td>
+        </tr>
+        <tr>
+          <td>K=16: ~0.10</td>
+        </tr>
+        <tr>
+          <td>73% 系数才到 99% 能量</td>
+        </tr>
+        <tr>
+          <td>scripts/fwt_real_weight_test.py</td>
+        </tr>
+        <tr>
+          <td>SIREN/INR</td>
+        </tr>
+        <tr>
+          <td>0.99+</td>
+        </tr>
+        <tr>
+          <td>~77%</td>
+        </tr>
+        <tr>
+          <td>scripts/siren_weight_compression_test.py</td>
+        </tr>
+        <tr>
+          <td>Hash Grid + Gabor</td>
+        </tr>
+        <tr>
+          <td>0.81</td>
+        </tr>
+        <tr>
+          <td>81%</td>
+        </tr>
+        <tr>
+          <td>scripts/hashgrid_gabor_test.py</td>
+        </tr>
+        <tr>
+          <td>F-INR 泛函张量分解</td>
+        </tr>
+        <tr>
+          <td>0.01</td>
+        </tr>
+        <tr>
+          <td>&lt;0.5%</td>
+        </tr>
+        <tr>
+          <td>scripts/finr_weight_compression_test.py</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 量化权重页架构</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 端到端数据流</h4>
+      <p>```</p>
+      <p>离线阶段 (gllm-convert 工具):</p>
+      <p>  原始权重 (FP32/BF16/FP16)</p>
+      <p>    → 量化校准 (calibration data → optimal scale/zp per block)</p>
+      <p>    → 量化编码 (FP32 → AWQ4/GPTQ4/NVFP4/FP8/...)</p>
+      <p>    → 写入 .gllm 文件 (SPEC 36)</p>
+      <p>推理阶段 (GPU HBM 内):</p>
+      <p>  量化权重页 (从 .gllm mmap 或 weight paging 加载)</p>
+      <p>    → QuantBlockLoad (SPEC 26 VmInstr, 加载 packed data + scales + zp)</p>
+      <p>    → QuantGather (SPEC 24, GEMM prologue, on-the-fly 解量化)</p>
+      <p>    → 解量化后权重驻留寄存器</p>
+      <p>    → Tensor Core GEMM (累加器 F32)</p>
+      <p>    → Epilogue 写回 (可选: 窄化到原始 dtype)</p>
+      <p>```</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 量化格式 → 压缩比映射</h4>
+      <table>
+        <tr>
+          <th>量化格式</th>
+        </tr>
+        <tr>
+          <td>bits/elem</td>
+        </tr>
+        <tr>
+          <td>压缩比 (vs FP32)</td>
+        </tr>
+        <tr>
+          <td>压缩比 (vs FP16)</td>
+        </tr>
+        <tr>
+          <td>perplexity 损失</td>
+        </tr>
+        <tr>
+          <td>FP8 (E4M3/E5M2)</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>4:1</td>
+        </tr>
+        <tr>
+          <td>2:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.01</td>
+        </tr>
+        <tr>
+          <td>NVFP4 (E2M1+UE4M3)</td>
+        </tr>
+        <tr>
+          <td>4+scale</td>
+        </tr>
+        <tr>
+          <td>~7:1</td>
+        </tr>
+        <tr>
+          <td>~3.5:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.05</td>
+        </tr>
+        <tr>
+          <td>AWQ4 (行优先+FP16 zp)</td>
+        </tr>
+        <tr>
+          <td>4+zp</td>
+        </tr>
+        <tr>
+          <td>~7:1</td>
+        </tr>
+        <tr>
+          <td>~3.5:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.1</td>
+        </tr>
+        <tr>
+          <td>GPTQ4 (列交织+INT4 zp)</td>
+        </tr>
+        <tr>
+          <td>4+zp</td>
+        </tr>
+        <tr>
+          <td>~7:1</td>
+        </tr>
+        <tr>
+          <td>~3.5:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.1</td>
+        </tr>
+        <tr>
+          <td>INT4 (均匀量化)</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>8:1</td>
+        </tr>
+        <tr>
+          <td>4:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.3</td>
+        </tr>
+        <tr>
+          <td>SqueezeLLM (3-bit LUT)</td>
+        </tr>
+        <tr>
+          <td>3+codebook</td>
+        </tr>
+        <tr>
+          <td>~9:1</td>
+        </tr>
+        <tr>
+          <td>~4.5:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.2</td>
+        </tr>
+        <tr>
+          <td>MXFP4 (E2M1+E8M0)</td>
+        </tr>
+        <tr>
+          <td>4+shared_exp</td>
+        </tr>
+        <tr>
+          <td>~7:1</td>
+        </tr>
+        <tr>
+          <td>~3.5:1</td>
+        </tr>
+        <tr>
+          <td>&lt; 0.1</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 与 SPEC 22 CompressionCodec 的关系</h4>
+      <p>权重页的 <code>CompressionCodec</code> 固定为 <code>None = 0</code>。</p>
+      <p>量化权重页的"压缩"不是通过 CompressionCodec 实现的，而是通过 <strong>QuantType</strong> 实现的：</p>
+      <li><code>CompressionCodec</code> 管页级字节流压缩（LZ4/BitPackRle/ZstdDict）— 用于 KV Cache</li>
+      <li><code>QuantType</code> 管权重级精度压缩（AWQ4/GPTQ4/NVFP4）— 用于权重页</li>
+      <li>两者正交：量化权重页 = QuantType 压缩 + CompressionCodec=None（不需要额外字节流压缩）</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 GEMM Prologue 解量化融合</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 QuantGather 解量化路径</h4>
+      <p>量化权重页的解量化由 QuantGather VmInstr（SPEC 24 §2.2）在 GEMM prologue 中完成：</p>
+      <p>```</p>
+      <p>QuantGather 数据流:</p>
+      <p>  1. QuantBlockLoad: 从 Global Memory 加载 packed_weights + scales + zp</p>
+      <p>     → 按 QuantFormatDescriptor 的 block_size 分块</p>
+      <p>     → cp.async 异步加载到 Shared Memory</p>
+      <p>  2. On-the-fly 解量化:</p>
+      <p>     → 每个线程处理一个 block</p>
+      <p>     → dequant = (packed_weight - zp) × scale</p>
+      <p>     → 解量化结果直接写入寄存器 (Fragment A/B)</p>
+      <p>  3. GEMM Compute:</p>
+      <p>     → Tensor Core MMA 指令消费寄存器中的解量化数据</p>
+      <p>     → 累加器 F32</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 硬件特化路径</h4>
+      <table>
+        <tr>
+          <th>SM 版本</th>
+        </tr>
+        <tr>
+          <td>解量化路径</td>
+        </tr>
+        <tr>
+          <td>优势</td>
+        </tr>
+        <tr>
+          <td>SM100 (Blackwell)</td>
+        </tr>
+        <tr>
+          <td>tcgen05 原生 FP4 解量化</td>
+        </tr>
+        <tr>
+          <td>硬件级，零延迟</td>
+        </tr>
+        <tr>
+          <td>SM90 (Hopper)</td>
+        </tr>
+        <tr>
+          <td>WGMMA + 寄存器内解量化</td>
+        </tr>
+        <tr>
+          <td>TMA 异步加载 + 解量化与 GEMM 重叠</td>
+        </tr>
+        <tr>
+          <td>SM80 (Ampere)</td>
+        </tr>
+        <tr>
+          <td>mma.sync + Shared Memory staging</td>
+        </tr>
+        <tr>
+          <td>cp.async + 寄存器内解量化</td>
+        </tr>
+        <tr>
+          <td>CPU (AVX-512)</td>
+        </tr>
+        <tr>
+          <td>VNNI + VPDPBUSD + scale broadcast</td>
+        </tr>
+        <tr>
+          <td>4-bit unpack + FMA 融合</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 与 Mega-Kernel 的集成</h4>
+      <p>量化权重解量化集成到 Mega-Kernel 的 device function 集合中（SPEC 32）：</p>
+      <li><code>prefill_device_fn</code>: QuantGather + FlashAttention GEMM（解量化是 GEMM prologue）</li>
+      <li><code>decode_device_fn</code>: QuantGather + decode GEMV（解量化是 GEMV prologue）</li>
+      <strong>双缓冲优化</strong>:
+      <p>```</p>
+      <p>时间线:</p>
+      <p>  t0: [QuantGather 解量化 Page 0 → Fragment A] [GEMM 使用旧数据]</p>
+      <p>  t1: [GEMM 消费 Fragment A]                   [QuantGather 解量化 Page 1 → Fragment B]</p>
+      <p>  t2: [GEMM 消费 Fragment B]                   [QuantGather 解量化 Page 2 → Fragment A]</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 量化权重页与分页系统</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 页内布局</h4>
+      <p>量化权重页的物理布局必须与 <code>QuantBlockLoad</code> VmInstr（SPEC 26 §1.2.1）的加载模式对齐：</p>
+      <p>```</p>
+      <p>QuantizedWeightPage (page-aligned):</p>
+      <p>  ┌────────────────────────────────────────┐</p>
+      <p>  │ QuantBlock 数据 (packed_weights):      │</p>
+      <p>  │   按 block_size 分块，每块包含:         │</p>
+      <p>  │   - packed quantized values (4/8 bit)  │</p>
+      <p>  │   - scale factor (FP16/FP32/UE4M3)    │</p>
+      <p>  │   - zero_point (可选)                  │</p>
+      <p>  │   布局: 行优先 (AWQ) 或 列交织 (GPTQ)  │</p>
+      <p>  │   或 两级缩放 (NVFP4: E2M1+UE4M3)     │</p>
+      <p>  ├────────────────────────────────────────┤</p>
+      <p>  │ Padding 到 page_size 对齐              │</p>
+      <p>  └────────────────────────────────────────┘</p>
+      <p>```</p>
+      <strong>布局对齐规则</strong>:
+      <li>页大小 = <code>QuantFormatDescriptor.block_size</code> 的整数倍</li>
+      <li>packed_weights 连续存储，scales 紧跟其后（或按格式定义的布局）</li>
+      <li>页边界必须对齐到 CUDA 内存事务大小（128B for SM80+, 256B for TMA）</li>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 权重页生命周期</h4>
+      <p>```</p>
+      <p>加载时:</p>
+      <p>  Loader 读取 .gllm Tensor Directory</p>
+      <p>    → 识别 quant_format + shape + data_offset</p>
+      <p>    → 按 block_size 计算页数</p>
+      <p>    → 创建 QuantizedWeightPage 映射</p>
+      <p>    → 注册到 UnifiedVirtualPage 系统</p>
+      <p>推理时 (按需加载):</p>
+      <p>  GEMM 需要权重 tile</p>
+      <p>    → 检查 WeightPage 是否在 HBM</p>
+      <p>    → 如果不在: 从 .gllm mmap 读取量化数据 → DMA 到 HBM</p>
+      <p>    → QuantBlockLoad 加载 packed data + scales</p>
+      <p>    → QuantGather on-the-fly 解量化 → GEMM</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 与 WeightTier 的协同</h4>
+      <strong>关键</strong>: 权重在任何 Tier 都以量化格式存储。Tier 切换只是物理位置变化，不需要解量化/重量化。
+      <table>
+        <tr>
+          <th>Tier</th>
+        </tr>
+        <tr>
+          <td>存储内容</td>
+        </tr>
+        <tr>
+          <td>加载到 HBM 后</td>
+        </tr>
+        <tr>
+          <td>DeviceLocal (HBM)</td>
+        </tr>
+        <tr>
+          <td>量化权重页 (packed + scales)</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad → QuantGather → GEMM</td>
+        </tr>
+        <tr>
+          <td>HostLocal (DRAM)</td>
+        </tr>
+        <tr>
+          <td>量化权重页 (同上)</td>
+        </tr>
+        <tr>
+          <td>DMA 到 HBM → 同上</td>
+        </tr>
+        <tr>
+          <td>DiskMmap (NVMe)</td>
+        </tr>
+        <tr>
+          <td>.gllm 文件中的量化数据</td>
+        </tr>
+        <tr>
+          <td>pread → DMA 到 HBM → 同上</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 与 SPEC 36 .gllm 格式的集成</h3>
+      <p>.gllm 文件（SPEC 36）是量化权重的原生存储格式：</p>
+      <p>```</p>
+      <p>.gllm 文件中量化权重存储:</p>
+      <p>  Tensor Directory 条目:</p>
+      <p>    compression: None (不使用 CompressionCodec)</p>
+      <p>    quant_format: QuantType (AWQ4/GPTQ4/NVFP4/FP8/...)</p>
+      <p>    quant_block_size: u32 (量化块大小)</p>
+      <p>    data_offset: u64 (指向 packed data)</p>
+      <p>    compressed_size: u64 (量化后字节数)</p>
+      <p>    original_size: u64 (原始 FP32 字节数)</p>
+      <p>  数据区 (page-aligned):</p>
+      <p>    packed_quant_data: [u8; ...]   // 量化后权重</p>
+      <p>    scales: [scale_dtype; ...]     // per-block 缩放因子</p>
+      <p>    zero_points: [u8; ...]         // per-block 零点 (可选)</p>
+      <p>```</p>
+      <p>加载时零解压：量化数据直接映射为 QuantizedWeightPage，GEMM prologue 处理解量化。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 禁止规则</h3>
+      <li>❌ 禁止对权重页使用函数逼近压缩（FWT/SIREN/INR/Hash Grid/F-INR）— 实测不可行</li>
+      <li>❌ 禁止对权重页使用 CompressionCodec（LZ4/BitPackRle/ZstdDict）— 量化格式已是压缩态</li>
+      <li>❌ 禁止独立的权重解量化 pass — 必须与 GEMM 融合（QuantGather prologue）</li>
+      <li>❌ 禁止在 CPU 侧解量化权重 — 必须在 GPU JIT 内完成</li>
+      <li>❌ 禁止硬编码量化格式 — 由 .gllm Tensor Directory 的 quant_format 字段驱动</li>
+      <li>❌ 禁止量化格式不支持时 fallback 到 FP32 — 必须返回错误</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 REQ 清单</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ ID</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>依赖</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+    
+<section id="req-qwp-001" data-req="REQ-QWP-001" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-001</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qwp-003" data-req="REQ-QWP-003" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-003</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qwp-004" data-req="REQ-QWP-004" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-004</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qwp-005" data-req="REQ-QWP-005" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-005</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qwp-006" data-req="REQ-QWP-006" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-006</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qwp-007" data-req="REQ-QWP-007" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-007</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-qwp-008" data-req="REQ-QWP-008" data-req-status="implemented" data-req-domain="qwp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-QUANT-WEIGHT-PAGE"><h3>REQ-QWP-008</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+
+<section id="test-qwp-001" data-test="TEST-QWP-001" data-req-ref="REQ-QWP-001" data-test-categories="unit" <h3="">TEST-QWP-001: 量化原生权重页压缩测试<p>验证REQ-QWP-001相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>量化权重页布局定义</td>
+        </tr>
+        <tr>
+          <td>QuantizedWeightPage header + data 与 QuantBlockLoad VmInstr 对齐，page-aligned</td>
+        </tr>
+        <tr>
+          <td>SPEC 23</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+
+    <section id="test-qwp-002" data-test="TEST-QWP-002" data-req-ref="REQ-QWP-008" data-test-categories="unit" <h3="">TEST-QWP-002: 量化原生权重页压缩测试<p>验证REQ-QWP-002相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>GEMM prologue 解量化集成</td>
+        </tr>
+        <tr>
+          <td>QuantGather 从量化权重页解量化 + GEMM 融合，数值精度与 SPEC 10 一致</td>
+        </tr>
+        <tr>
+          <td>SPEC 24</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qwp-003" data-test="TEST-QWP-003" data-req-ref="REQ-QWP-003" data-test-categories="unit" <h3="">TEST-QWP-003: 量化原生权重页压缩测试<p>验证REQ-QWP-003相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>.gllm 量化权重加载</td>
+        </tr>
+        <tr>
+          <td>从 .gllm 文件加载量化权重页，推理结果与原始格式余弦相似度 &gt; 0.999</td>
+        </tr>
+        <tr>
+          <td>SPEC 36</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qwp-004" data-test="TEST-QWP-004" data-req-ref="REQ-QWP-004" data-test-categories="unit" <h3="">TEST-QWP-004: 量化原生权重页压缩测试<p>验证REQ-QWP-004相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>权重页 Tier 透传</td>
+        </tr>
+        <tr>
+          <td>量化权重在 HBM/DRAM/NVMe 间切换无需解量化/重量化，数据格式不变</td>
+        </tr>
+        <tr>
+          <td>SPEC 21</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qwp-005" data-test="TEST-QWP-005" data-req-ref="REQ-QWP-005" data-test-categories="unit" <h3="">TEST-QWP-005: 量化原生权重页压缩测试<p>验证REQ-QWP-005相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>双缓冲 QuantGather 流水线</td>
+        </tr>
+        <tr>
+          <td>解量化与 GEMM 重叠，吞吐量 &gt; 单缓冲的 1.5×</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qwp-006" data-test="TEST-QWP-006" data-req-ref="REQ-QWP-006" data-test-categories="unit" <h3="">TEST-QWP-006: 量化原生权重页压缩测试<p>验证REQ-QWP-006相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>硬件特化解量化路径</td>
+        </tr>
+        <tr>
+          <td>SM80/SM90/SM100/CPU 四路径通过 DeviceProfile 驱动选择</td>
+        </tr>
+        <tr>
+          <td>SPEC 24, SPEC 17</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">量化原生权重页压缩实现</li><li id="2" data-criterion="2">GEMM prologue 解量化融合正确</li><li id="3" data-criterion="3">权重页 Tier 透传正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-qwp-007" data-test="TEST-QWP-007" data-req-ref="REQ-QWP-007" data-test-categories="unit" <h3="">TEST-QWP-007: 量化原生权重页压缩测试<p>验证REQ-QWP-007相关功能正确性</p>
+      <div id="量化原生权重页压缩实现" data-criterion="量化原生权重页压缩实现">量化原生权重页压缩实现</div>
+      <div id="gemm-prologue-解量化融合正确" data-criterion="GEMM prologue 解量化融合正确">GEMM prologue 解量化融合正确</div>
+      <div id="权重页-tier-透传正确" data-criterion="权重页 Tier 透传正确">权重页 Tier 透传正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>GGUF 量化权重 → .gllm 转换</td>
+        </tr>
+        <tr>
+          <td>支持 Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 等格式转换为 .gllm 原生量化格式</td>
+        </tr>
+        <tr>
+          <td>SPEC 36</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-QUANT-TYPE" id="ent-quant-type"><h4>ENT-QUANT-TYPE</h4><p>QuantType — 量化格式枚举（enum QuantType in gllm-kernels/src/quant.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Bf16|F16|F32|Q2K|Q3K|Q4K|Q5K|Q6K|Q8K|IQ1S|IQ1M|IQ2XXS|IQ2XS|IQ2S|IQ3XXS|IQ3S|IQ4NL|IQ4XS|Q4_0|Q4_1|Q5_0|Q5_1|Q8_0|Q8_1|AWQ4|GPTQ4|Squeeze|Fp8E4M3|Fp8E5M2|TQ1_0|TQ2_0|Mxfp4|Nvfp4</td><td>枚举变体名</td></tr><tr data-field="bits_per_element" data-type="number" data-required="true" <td="">bits_per_element<td>number</td><td>是</td><td>2~32</td><td>每个元素占用比特数</td></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>32|256|可配置</td><td>
+量化块大小（元素数）</td></tr><tr data-field="has_scale" data-type="boolean" data-required="true" <td="">has_scale<td>boolean</td><td>是</td><td>原生浮点=Bf16/F16/F32无scale</td><td>是否有缩放因子</td></tr><tr data-field="has_zero_point" data-type="boolean" data-required="true" <td="">has_zero_point<td>boolean</td><td>是</td><td>AWQ4有FP16 zp, GPTQ4有INT4 packed zp</td><td>是否有零点</td></tr><tr data-field="is_native_float" data-type="boolean" data-required="true" <td="">is_native_float<td>boolean</td><td>是</td><td>
+Bf16/F16/F32/Fp8E4M3/Fp8E5M2</td><td>是否为硬件原生浮点格式</td></tr><tr data-field="is_weight_only" data-type="boolean" data-required="true" <td="">is_weight_only<td>boolean</td><td>是</td><td>AWQ4/GPTQ4/Squeeze</td><td>是否仅权重路径</td></tr><tr data-field="block_size_param" data-type="number" data-required="false" <td="">block_size_param<td>number</td><td>否</td><td>仅 Mxfp4 变体</td><td>可配置 block_size 参数</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-TRACE-OP" id="ent-trace-op"><h4>ENT-TRACE-OP</h4><p>TraceOp — SSA中间表示算子（enum TraceOp in gllm-kernels/src/compiler/trace.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Input|Const|Add|Sub|Mul|Div|Fma|Neg|Abs|Exp|Sqrt|Rsqrt|Tanh|Recip|Log|Sigmoid|Max|Min|ConditionalBranch|QuantFma|BlockScale|Cast|HReduce|Prefetch|NonTemporalStore|BitExtract|Permute</td><td>枚举变体名</td></tr><tr data-field="input_index" data-type="number" data-required="false" <td="">input_index<td>number</td><td>否</td><td>u32, 仅 Input 变体</td><td>加载第 i 个输入元素</td></tr><tr data-field="const_value" data-type="number" data-required="false" <td="">const_value<td>number</td><td>否</td><td>
+f64, 仅 Const 变体</td><td>浮点常量值</td></tr><tr data-field="left_operand" data-type="number" data-required="false" <td="">left_operand<td>number</td><td>否</td><td>ValueId, 二元运算左操作数</td><td>Add/Sub/Mul/Div/Max/Min 的左操作数</td></tr><tr data-field="right_operand" data-type="number" data-required="false" <td="">right_operand<td>number</td><td>否</td><td>ValueId, 二元运算右操作数</td><td>Add/Sub/Mul/Div/Max/Min 的右操作数</td></tr><tr data-field="fma_third_operand" data-type="number" data-required="false" <td="">
+fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(a,b,c) = a*b+c 的 c</td></tr><tr data-field="reduce_kind" data-type="string" data-required="false" <td="">reduce_kind<td>string</td><td>否</td><td>Sum|Max|Min, 仅 HReduce 变体</td><td>水平归约操作类型</td></tr><tr data-field="quant_precision" data-type="string" data-required="false" <td="">quant_precision<td>string</td><td>否</td><td>QuantPrecision, 仅 QuantFma/Cast 变体</td><td>混合精度 dtype</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-UNIFIED-VIRTUAL-PAGE" id="ent-unified-virtual-page"><h4>ENT-UNIFIED-VIRTUAL-PAGE</h4><p>UnifiedVirtualPage — 统一虚拟页 (系统级物理页容器, 所有载荷类型共用, IRR LIRS 驱逐)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_id" data-type="number" data-required="true" <td="">page_id<td>number</td><td>是</td><td>PageId</td><td>物理页标识</td></tr><tr data-field="payload_kind" data-type="string" data-required="true" <td="">
+payload_kind<td>string</td><td>是</td><td></td><td>页载荷类型 (KvContext/ExpertWeight/DenseLayerWeight/PromptSystem/RagFeature)</td></tr><tr data-field="residency" data-type="string" data-required="true" <td="">residency<td>string</td><td>是</td><td></td><td>物理驻留位置 (DeviceLocal/HostLocal/DiskSwap)</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>页载荷数据类型</td></tr>
+<tr data-field="codec" data-type="string" data-required="true" <td="">codec<td>string</td><td>是</td><td>CompressionCodec</td><td>压缩编解码器 (None/Lz4/BitPackRle/NvcompAns/ZstdDict)</td></tr><tr data-field="logical_index" data-type="number" data-required="true" <td="">logical_index<td>number</td><td>是</td><td></td><td>拥有者虚拟地址空间内逻辑页索引</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-WEIGHT-TIER-MANAGER" id="ent-weight-tier-manager"><h4>ENT-WEIGHT-TIER-MANAGER</h4><p>WeightTierManager — 权重张量跨异构内存层级放置管理器 (GMM Tier决策, 原子容量追踪)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="device_capacity" data-type="number" data-required="true" <td="">device_capacity<td>number</td><td>是</td><td>usize</td><td>设备内存容量 (字节)</td></tr>
+<tr data-field="host_capacity" data-type="number" data-required="true" <td="">host_capacity<td>number</td><td>是</td><td>usize</td><td>主机内存容量 (字节)</td></tr><tr data-field="device_used" data-type="number" data-required="true" <td="">device_used<td>number</td><td>是</td><td>AtomicUsize</td><td>设备内存已用 (原子追踪)</td></tr><tr data-field="host_used" data-type="number" data-required="true" <td="">host_used<td>number</td><td>是</td><td>AtomicUsize</td><td>主机内存已用 (原子追踪)</td></tr>
+<tr data-field="allocations" data-type="string" data-required="true" <td="">allocations<td>string</td><td>是</td><td>Mutex&lt;HashMap&gt;</td><td>每张量分配记录 (name -&gt; WeightAllocation)</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section data-api="POST /internal/quant/weight_page" id="post-/internal/quant/weight-page" data-api-type="internal" data-api-name="API-QUANT-WEIGHT-PAGE"><h4>POST /internal/quant/weight_page — Quantized weight page compress</h4><p>量化权重页压缩接口，在量化原生表示上直接执行页级压缩，避免反量化开销。支持 IQ/NVFP/AWQ/GPTQ 等低比特格式的页级 delta 编码与差分压缩。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：35-QUANTIZED-WEIGHT-PAGE-COMPRESSION.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2></section></body>
+</html>

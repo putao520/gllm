@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="auto-instruction-selector" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"auto-instruction-selector", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>自动指令选择器架构设计 (Auto Instruction Selector)</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>auto-instruction-selector</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-自动指令选择器架构设计-auto-instruction-selector" data-section="null">
+      <h2>自动指令选择器架构设计 (Auto Instruction Selector)</h2>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 背景与问题</h3>
+    </section>
+    <section id="s-当前架构问题" data-section="null">
+      <h4>当前架构问题</h4>
+      <p>当前 gllm-kernels 的 codegen 路径中存在<strong>两层手写指令选择</strong>：</p>
+      <p>1. <strong>plan_lower.rs</strong>：31 个 OpKind match arms，每个 op 调用专门的 lower 函数</p>
+      <p>2. <strong><a href="http://lower.rs">lower.rs</a></strong>：25 个专用 lower 函数（lower_gemm, lower_rope, lower_mha 等）</p>
+      <p>3. <strong>lower_trace_body</strong>：TraceOp → VmInstr 的大型 match 语句（约 40 个 arms）</p>
+      <strong>问题</strong>：
+      <li>手写 match arms 容易出错（bug 的源头）</li>
+      <li>难以维护和扩展</li>
+      <li>无法自动优化指令选择</li>
+      <li>不符合现代编译器架构（LLVM SelectionDAG/GlobalISel）</li>
+    </section>
+    <section id="s-正确架构" data-section="null">
+      <h4>正确架构</h4>
+      <p>```</p>
+      <p>Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowering → Machine Code</p>
+      <p>                                    ↑</p>
+      <p>                            Auto Instruction Selector</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 设计目标</h3>
+      <p>1. <strong>消除手写 match arms</strong>：从 TraceOp 到 VmInstr 的映射由算法自动完成</p>
+      <p>2. <strong>模式匹配</strong>：识别 TraceOp 序列中的模式，选择最优 VmInstr 序列</p>
+      <p>3. <strong>硬件感知</strong>：根据 SIMD 宽度、缓存层级等硬件特性优化</p>
+      <p>4. <strong>可扩展</strong>：新增 TraceOp 或 VmInstr 不需要修改核心选择器逻辑</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 核心概念</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 TraceOp 属性</h4>
+      <p>每个 TraceOp 具有以下属性：</p>
+      <p>```rust</p>
+      <p>pub enum TraceOp {</p>
+      <p>    // 算术</p>
+      <p>    Add(u32, u32),    // Binary, Commutative, Associative</p>
+      <p>    Mul(u32, u32),    // Binary, Commutative, Associative</p>
+      <p>    Fma(u32, u32, u32), // Ternary, Associative in accumulation</p>
+      <p>    // 一元</p>
+      <p>    Exp(u32),         // Unary, Monotonic</p>
+      <p>    Sqrt(u32),        // Unary, Monotonic</p>
+      <p>    // 内存</p>
+      <p>    Input(u32),       // Source operand</p>
+      <p>    Const(f64),       // Constant folding</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 VmInstr 属性</h4>
+      <p>每个 VmInstr 具有以下属性：</p>
+      <p>```rust</p>
+      <p>pub enum VmInstr {</p>
+      <p>    VecBinOp { op: VecOp },       // Add, Sub, Mul, Div, Max, Min</p>
+      <p>    VecUnaryOp { op: VecUnaryOp }, // Neg, Abs, Sqrt, Rsqrt</p>
+      <p>    Fma { .. },                    // Fused multiply-add</p>
+      <p>    Transcendental { .. },         // Exp, Log, Tanh</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 模式匹配规则</h4>
+      <strong>Pattern → VmInstr 映射表</strong>：
+      <table>
+        <tr>
+          <th>Pattern</th>
+        </tr>
+        <tr>
+          <td>VmInstr</td>
+        </tr>
+        <tr>
+          <td>优化条件</td>
+        </tr>
+        <tr>
+          <td>Add(x, Const(0))</td>
+        </tr>
+        <tr>
+          <td>NOP</td>
+        </tr>
+        <tr>
+          <td>常量折叠</td>
+        </tr>
+        <tr>
+          <td>Mul(x, Const(1))</td>
+        </tr>
+        <tr>
+          <td>NOP</td>
+        </tr>
+        <tr>
+          <td>恒等变换</td>
+        </tr>
+        <tr>
+          <td>Mul(Add(a, b), c)</td>
+        </tr>
+        <tr>
+          <td>FMA(a, c, b)</td>
+        </tr>
+        <tr>
+          <td>FMA 融合</td>
+        </tr>
+        <tr>
+          <td>Exp(x) + Exp(y)</td>
+        </tr>
+        <tr>
+          <td>FMA path</td>
+        </tr>
+        <tr>
+          <td>指数优化</td>
+        </tr>
+        <tr>
+          <td>Sqrt(Mul(x, x))</td>
+        </tr>
+        <tr>
+          <td>Abs(x)</td>
+        </tr>
+        <tr>
+          <td>代数简化</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 架构设计</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 SelectionDAG 风格</h4>
+      <p>```</p>
+      <p>TraceOp 序列 → DAG 构建 → 模式匹配 → VmInstr 选择 → 代码生成</p>
+      <p>```</p>
+      <strong>阶段 1：DAG 构建</strong>
+      <li>TraceOp 序列转换为 DAG</li>
+      <li>识别数据依赖关系</li>
+      <li>计算每个节点的属性（commutative, associative 等）</li>
+      <strong>阶段 2：模式匹配</strong>
+      <li>自底向上遍历 DAG</li>
+      <li>对每个节点尝试匹配已知模式</li>
+      <li>选择最优的 VmInstr 序列</li>
+      <strong>阶段 3：代码生成</strong>
+      <li>生成 VmInstr 序列</li>
+      <li>应用局部优化（常量折叠、死代码消除）</li>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 Pattern Matcher</h4>
+      <p>```rust</p>
+      <p>pub struct PatternMatcher {</p>
+      <p>    rules: Vec<patternrule>,</patternrule></p>
+      <p>}</p>
+      <p>pub struct PatternRule {</p>
+      <p>    pattern: Pattern,</p>
+      <p>    replacement: Replacement,</p>
+      <p>    condition: Option<condition>,</condition></p>
+      <p>}</p>
+      <p>pub enum Pattern {</p>
+      <p>    Leaf(OpKind),</p>
+      <p>    Binary(Box<pattern>, Box<pattern>),</pattern></pattern></p>
+      <p>    Ternary(Box<pattern>, Box<pattern>, Box<pattern>),</pattern></pattern></pattern></p>
+      <p>    Wildcard,</p>
+      <p>}</p>
+      <p>pub enum Replacement {</p>
+      <p>    Single(VmInstr),</p>
+      <p>    Sequence(Vec&lt;VmInstr&gt;),</p>
+      <p>    Transform(Box&lt;dyn Fn(&amp;Context) -&gt; Vec&lt;VmInstr&gt;&gt;),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 规则示例</h4>
+      <p>```rust</p>
+      <p>// FMA 融合规则</p>
+      <p>let fma_rule = PatternRule {</p>
+      <p>    pattern: Pattern::Binary(</p>
+      <p>        Box::new(Pattern::Binary(</p>
+      <p>            Box::new(Pattern::Leaf(OpKind::Mul)),</p>
+      <p>            Box::new(Pattern::Wildcard),</p>
+      <p>        )),</p>
+      <p>        Box::new(Pattern::Wildcard),</p>
+      <p>    ),</p>
+      <p>    replacement: Replacement::Single(VmInstr::Fma { .. }),</p>
+      <p>    condition: Some(Condition::HasFmaHardware),</p>
+      <p>};</p>
+      <p>// 常量折叠规则</p>
+      <p>let const_fold_rule = PatternRule {</p>
+      <p>    pattern: Pattern::Binary(</p>
+      <p>        Box::new(Pattern::Wildcard),</p>
+      <p>        Box::new(Pattern::Leaf(OpKind::Const(0.0))),</p>
+      <p>    ),</p>
+      <p>    replacement: Replacement::Nop,</p>
+      <p>    condition: None,</p>
+      <p>};</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 实施路径</h3>
+    </section>
+    <section id="s1" data-section="1">
+      <h4>Phase 1：Pattern Matcher 基础设施</h4>
+      <li>[ ] 定义 Pattern 和 Replacement 类型</li>
+      <li>[ ] 实现 DAG 构建器</li>
+      <li>[ ] 实现基础模式匹配算法</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h4>Phase 2：核心规则库</h4>
+      <li>[ ] 算术规则（常量折叠、结合律重排）</li>
+      <li>[ ] FMA 融合规则</li>
+      <li>[ ] 指数/对数优化规则</li>
+      <li>[ ] 内存访问优化规则</li>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>Phase 3：集成到现有管线</h4>
+      <li>[ ] 替换 lower_trace_body 中的 match 语句</li>
+      <li>[ ] 集成到 plan_lower.rs</li>
+      <li>[ ] 保留手写规则作为 fallback</li>
+    </section>
+    <section id="s4" data-section="4">
+      <h4>Phase 4：验证与优化</h4>
+      <li>[ ] 单元测试（每个规则）</li>
+      <li>[ ] 集成测试（现有 E2E 测试）</li>
+      <li>[ ] 性能测试（codegen 时间）</li>
+      <li>[ ] 数值对齐测试（与手写版本比较）</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 关键挑战</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 SSA 形式处理</h4>
+      <li>TraceOp 是 SSA 形式（每个操作定义一个新值）</li>
+      <li>VmInstr 也是 SSA（VRegId）</li>
+      <li>需要保持 SSA 不变式</li>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 循环处理</h4>
+      <li>TraceOp 可能在循环内部</li>
+      <li>需要区分循环不变量和循环变量</li>
+      <li>循环展开优化</li>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 硬件特性</h4>
+      <li>不同 ISA 的指令集差异（AVX2 vs AVX-512）</li>
+      <li>SIMD 宽度变化（W128, W256, W512）</li>
+      <li>需要硬件感知的模式匹配</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 参考实现</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 LLVM SelectionDAG</h4>
+      <li>DAG 构建：SDNode</li>
+      <li>模式匹配：MatcherTable</li>
+      <li>代码生成：ISel</li>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 LLVM GlobalISel</h4>
+      <li>更模块化的设计</li>
+      <li>规则可以独立定义和测试</li>
+      <li>更容易扩展</li>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 验证标准</h3>
+      <p>1. <strong>正确性</strong>：自动选择器生成的 VmInstr 与手写版本数值一致</p>
+      <p>2. <strong>性能</strong>：不增加 codegen 时间（&lt; 10% overhead）</p>
+      <p>3. <strong>可维护性</strong>：新增规则不需要修改核心代码</p>
+      <p>4. <strong>可测试性</strong>：每个规则都有独立的单元测试</p>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 里程碑</h3>
+      <li>[M1] Pattern Matcher 原型（1-2 周）</li>
+      <li>[M2] 核心规则库（2-3 周）</li>
+      <li>[M3] 集成测试通过（1 周）</li>
+      <li>[M4] 性能对齐（1 周）</li>
+      <li>[M5] 完全替换手写 match arms（2-3 周）</li>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 风险与缓解</h3>
+      <table>
+        <tr>
+          <th>风险</th>
+        </tr>
+        <tr>
+          <td>影响</td>
+        </tr>
+        <tr>
+          <td>缓解措施</td>
+        </tr>
+        <tr>
+          <td>模式匹配错误</td>
+        </tr>
+        <tr>
+          <td>正确性</td>
+        </tr>
+        <tr>
+          <td>保留手写版本作为 reference</td>
+        </tr>
+        <tr>
+          <td>性能回归</td>
+        </tr>
+        <tr>
+          <td>用户体验</td>
+        </tr>
+        <tr>
+          <td>性能测试 + fallback 机制</td>
+        </tr>
+        <tr>
+          <td>开发时间过长</td>
+        </tr>
+        <tr>
+          <td>进度</td>
+        </tr>
+        <tr>
+          <td>分阶段实施，逐步替换</td>
+        </tr>
+      </table>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：auto-instruction-selector.html</address>
+  </footer>
+</body>
+</html>

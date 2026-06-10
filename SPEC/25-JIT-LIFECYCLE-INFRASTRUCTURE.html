@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="25-JIT-LIFECYCLE-INFRASTRUCTURE" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"25-JIT-LIFECYCLE-INFRASTRUCTURE", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>25-JIT-LIFECYCLE-INFRASTRUCTURE.md</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>25-JIT-LIFECYCLE-INFRASTRUCTURE</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s25" data-section="25">
+      <h2>25-JIT-LIFECYCLE-INFRASTRUCTURE.md</h2>
+      <strong>JIT 管线声明式生命周期管理基础设施</strong>
+      <p>&gt; <strong>SSOT</strong>: 本文档是 JIT 虚拟寄存器生命周期、spill slot 管理、量化感知偏移计算、事后一致性验证的<strong>唯一权威源</strong>。</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 设计动机</h3>
+    </section>
+    <section id="s-问题诊断" data-section="null">
+      <h4>问题诊断</h4>
+      <p>Q4_0 NaN bug 的根因不是某条 VmInstr lowering 错误，而是 JIT codegen 存在四层系统性缺陷：</p>
+      <table>
+        <tr>
+          <th>缺陷层</th>
+        </tr>
+        <tr>
+          <td>症状</td>
+        </tr>
+        <tr>
+          <td>根因</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>VReg 无语义标注</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>寄存器分配器只知 VRegKind(Ptr/Vec/Scalar)，不知生命周期语义</td>
+        </tr>
+        <tr>
+          <td>LiveInterval</td>
+          <td> 只有 </td>
+          <td>def_point</td>
+          <td>/</td>
+          <td>last_use</td>
+          <td>，无 LoopInvariant/LoopCarried/BodyLocal 标签</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Spill slot 无 ownership</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>顺序单调分配 </td>
+          <td>spill_offset += size</td>
+          <td>，永不回收</td>
+        </tr>
+        <tr>
+          <td>SpillSlot</td>
+          <td> 无 scope 标记，ScopeBegin/ScopeEnd 不参与 spill 回收</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>偏移计算 dtype 盲</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>block_size * elem</td>
+          <td> 中 </td>
+          <td>elem=dtype.elem_bytes()</td>
+          <td> 对量化格式返回 4 (F32)</td>
+        </tr>
+        <tr>
+          <td>OffsetExpr</td>
+          <td> 无量化感知语义，不知道 Q4_0 的 block 内数据是 18 字节而非 32×4</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>无 post-hoc 验证</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NaN 在 JIT 执行后才发现，无编译期检查</td>
+        </tr>
+        <tr>
+          <td>verify.rs</td>
+          <td> 只有 5 条规则（loop pairing / def-before-use 等），无物理寄存器一致性或 dtype 偏移验证</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-arch-lifecycle-root-cause" data-section="null">
+      <h4>ARCH-LIFECYCLE-ROOT-CAUSE</h4>
+      <strong>NaN 传播路径</strong>: embed QuantGather 输出 NaN → input_norm 输入 NaN → 所有下游全 NaN。具体触发条件：量化偏移计算使用 compute_dtype elem_bytes 而非量化格式 block_bytes，或寄存器分配器在嵌套循环中将 loop-invariant 值覆盖。
+    </section>
+    <section id="s-解决策略" data-section="null">
+      <h4>解决策略</h4>
+      <p>不是修单个 bug，而是构建四层声明式基础设施，从结构上消除所有此类 bug 的产生条件。</p>
+    </section>
+    <section id="req-lc-001" data-req="REQ-LC-001" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="1" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="">§1 VReg 生命周期语义标注 (REQ-LC-001~003)
+      <p>为 JIT 虚拟寄存器引入 LifecycleTag 语义标注体系，自动推导每个 VReg 的生命周期角色（LoopInvariant/LoopCarried/BodyLocal/CrossScope/Global），并据此调整物理寄存器分配优先级和 spill 策略，从结构上消除寄存器分配器覆盖循环不变量等系统性缺陷。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    
+<section id="req-lc-009" data-req="REQ-LC-009" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-009</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-012" data-req="REQ-LC-012" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-012</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-017" data-req="REQ-LC-017" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-017</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-018" data-req="REQ-LC-018" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-018</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-020" data-req="REQ-LC-020" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-020</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-021" data-req="REQ-LC-021" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-021</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-022" data-req="REQ-LC-022" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-022</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-024" data-req="REQ-LC-024" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-024</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-025" data-req="REQ-LC-025" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-025</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-026" data-req="REQ-LC-026" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-026</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section id="req-lc-027" data-req="REQ-LC-027" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-LIFECYCLE"><h3>REQ-LC-027</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+
+<section id="test-lc-001" data-test="TEST-LC-001" data-req-ref="REQ-LC-009" data-test-categories="unit" <h3="">TEST-LC-001: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-001相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-013" data-req="REQ-LC-013" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="1.1" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§1.1 LifecycleTag 枚举 (REQ-LC-013)
+      <p>在 <code>reg_alloc.rs</code> 的 <code>LiveInterval</code> 中新增语义标签：</p>
+      <p>```</p>
+      <p>LifecycleTag:</p>
+      <p>  | LoopInvariant     — 定义在循环外，每次迭代只读</p>
+      <p>                       例: weight_ptr, scale_ptr, output_base</p>
+      <p>  | LoopCarried       — 定义在循环外，循环内读+写，跨迭代传递</p>
+      <p>                       例: seq_counter, blk_counter, data_ptr</p>
+      <p>  | BodyLocal         — 定义在循环内，每次迭代重新覆盖</p>
+      <p>                       例: block_ptr, decoded_vec, tmp_vec</p>
+      <p>  | CrossScope        — 定义在 ScopeBegin 内，需在 ScopeEnd 后存活</p>
+      <p>                       例: GEMM 累加器跨 inner-K 和 outer-N scope</p>
+      <p>  | Global            — 全生命周期 (prologue 到 epilogue)</p>
+      <p>                       例: scratchpad_ptr, batch_ctx_ptr</p>
+      <p>```</p>
+      <strong>分配策略影响</strong>:
+      <table>
+        <tr>
+          <th>LifecycleTag</th>
+        </tr>
+        <tr>
+          <td>物理寄存器策略</td>
+        </tr>
+        <tr>
+          <td>Spill 策略</td>
+        </tr>
+        <tr>
+          <td>LoopInvariant</td>
+        </tr>
+        <tr>
+          <td>固定分配，循环内不释放</td>
+        </tr>
+        <tr>
+          <td>循环入口 spill，出口 restore</td>
+        </tr>
+        <tr>
+          <td>LoopCarried</td>
+        </tr>
+        <tr>
+          <td>固定分配，跨迭代保留</td>
+        </tr>
+        <tr>
+          <td>循环入口 spill，出口 restore，循环内 spill 安全</td>
+        </tr>
+        <tr>
+          <td>BodyLocal</td>
+        </tr>
+        <tr>
+          <td>自由分配，迭代内复用</td>
+        </tr>
+        <tr>
+          <td>仅在迭代内 spill</td>
+        </tr>
+        <tr>
+          <td>CrossScope</td>
+        </tr>
+        <tr>
+          <td>固定分配，跨 scope 保留</td>
+        </tr>
+        <tr>
+          <td>ScopeBegin spill，ScopeEnd restore</td>
+        </tr>
+        <tr>
+          <td>Global</td>
+        </tr>
+        <tr>
+          <td>callee-save 或固定 GPR</td>
+        </tr>
+        <tr>
+          <td>prologue spill，epilogue restore</td>
+        </tr>
+      </table>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-013" data-test="TEST-LC-013" data-req-ref="REQ-LC-017" data-test-categories="unit" <h3="">TEST-LC-013: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-013相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    
+    
+
+    <section id="req-lc-002" data-req="REQ-LC-002" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="1.3" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§1.3 分配优先级调整 (REQ-LC-002)
+      <p>当前 <code>allocate()</code> 仅有 Counter 的 no-spill 特殊政策。新增基于 LifecycleTag 的分配优先级：</p>
+      <p>```</p>
+      <p>分配优先级 (高→低):</p>
+      <p>  1. Global (callee-save 或固定分配)</p>
+      <p>  2. Counter (no-spill，已有)</p>
+      <p>  3. LoopInvariant / LoopCarried (跨迭代必须保留)</p>
+      <p>  4. CrossScope</p>
+      <p>  5. BodyLocal (自由分配)</p>
+      <p>```</p>
+      <strong>Spill 优先级</strong> (谁先被 spill 到栈):
+      <p>```</p>
+      <p>Spill 优先级 (先被 spill → 物理寄存器腾出):</p>
+      <p>  1. BodyLocal — 生命周期最短，重新加载代价最低</p>
+      <p>  2. CrossScope — 需跨 scope 但可 spill+restore</p>
+      <p>  3. LoopCarried — 跨迭代但可 spill 到循环入口</p>
+      <p>  4. LoopInvariant — spill 代价高 (循环内每次迭代都要 reload)</p>
+      <p>  5. Global — 几乎不 spill</p>
+      <p>  6. Counter — 永不 spill</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-002" data-test="TEST-LC-002" data-req-ref="REQ-LC-012" data-test-categories="unit" <h3="">TEST-LC-002: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-002相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-004" data-req="REQ-LC-004" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="2" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="">§2 基于 Scope 的 Spill Slot 管理 (REQ-LC-004~006)
+      <p>用 ScopedSpillAllocator 替代当前的顺序单调 spill 分配，实现基于 scope 的 slot 分配与回收，使 ScopeBegin/ScopeEnd 真正参与内存管理，支持嵌套 scope 下的 slot 复用和 CrossScope 变量的安全保留。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-004" data-test="TEST-LC-004" data-req-ref="REQ-LC-018" data-test-categories="unit" <h3="">TEST-LC-004: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-004相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-014" data-req="REQ-LC-014" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="2.1" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§2.1 ScopedSpillAllocator (REQ-LC-014)
+      <p>替代当前的顺序单调分配 <code>spill_offset += size</code>：</p>
+      <p>```</p>
+      <p>ScopedSpillAllocator:</p>
+      <p>  slots: Vec<spillslotinfo></spillslotinfo></p>
+      <p>  free_list: Vec&lt;usize&gt;           — 已释放 slot 索引</p>
+      <p>  scope_stack: Vec<scopeid>       — 嵌套 scope 栈</scopeid></p>
+      <p>  scope_slots: Map&lt;ScopeId, Vec&lt;usize&gt;&gt; — 每个 scope 拥有的 slot</p>
+      <p>SpillSlotInfo:</p>
+      <p>  offset: usize                   — 栈帧偏移</p>
+      <p>  size: usize                     — 字节数</p>
+      <p>  owner: Option<scopeid>          — 所属 scope (None = global)</scopeid></p>
+      <p>  vreg: Option<vregid>            — 当前占用者</vregid></p>
+      <p>  state: SlotState                — Free / Occupied</p>
+      <p>SlotState:</p>
+      <p>  | Free        — 可分配</p>
+      <p>  | Occupied    — 被 VReg 占用</p>
+      <p>```</p>
+      <strong>分配算法</strong>:
+      <p>```</p>
+      <p>alloc(vreg, size, scope_id):</p>
+      <p>  // 优先从 free_list 找 size 完全匹配的 slot</p>
+      <p>  for idx in free_list:</p>
+      <p>    if slots[idx].size == size:</p>
+      <p>      slots[idx].state = Occupied</p>
+      <p>      slots[idx].vreg = vreg</p>
+      <p>      slots[idx].owner = scope_id</p>
+      <p>      scope_slots[scope_id].push(idx)</p>
+      <p>      free_list.remove(idx)</p>
+      <p>      return slots[idx].offset</p>
+      <p>  // 无匹配：分配新 slot</p>
+      <p>  offset = next_offset</p>
+      <p>  next_offset += size</p>
+      <p>  slots.push(SpillSlotInfo { offset, size, owner: scope_id, vreg, state: Occupied })</p>
+      <p>  scope_slots[scope_id].push(slots.len() - 1)</p>
+      <p>  return offset</p>
+      <p>```</p>
+      <strong>释放算法</strong>:
+      <p>```</p>
+      <p>scope_end(scope_id):</p>
+      <p>  for idx in scope_slots[scope_id]:</p>
+      <p>    slots[idx].state = Free</p>
+      <p>    slots[idx].vreg = None</p>
+      <p>    free_list.push(idx)</p>
+      <p>  scope_slots.remove(scope_id)</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-014" data-test="TEST-LC-014" data-req-ref="REQ-LC-020" data-test-categories="unit" <h3="">TEST-LC-014: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-014相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-003" data-req="REQ-LC-003" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="2.2" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§2.2 ScopeBegin/ScopeEnd 接入 (REQ-LC-003)
+      <p>当前 ScopeBegin/ScopeEnd 是空操作（<code>referenced_vregs</code> 返回空 vec）。改为：</p>
+      <li>ScopeBegin: 推入 <code>scope_stack</code>，分配 <code>ScopeId</code>，传递给 <code>ScopedSpillAllocator</code></li>
+      <li>ScopeEnd: 弹出 <code>scope_stack</code>，触发 <code>scope_end(scope_id)</code> 释放该 scope 的所有 spill slot</li>
+      <strong>ScopeId 分配</strong>:
+      <p>```</p>
+      <p>next_scope_id: usize = 0</p>
+      <p>// ScopeBegin: scope_stack.push(next_scope_id); next_scope_id += 1</p>
+      <p>// ScopeEnd: scope_stack.pop()</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-003" data-test="TEST-LC-003" data-req-ref="REQ-LC-021" data-test-categories="unit" <h3="">TEST-LC-003: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-003相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    
+    <section id="test-lc-11" data-test="TEST-LC-11" data-req-ref="REQ-LC-018" data-test-categories="unit" <h3="">TEST-LC-11: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-004相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-007" data-req="REQ-LC-007" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="3" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="">§3 量化感知偏移计算 DSL (REQ-LC-007~009)
+      <p>定义 QuantOffsetDsl 声明式偏移计算基础设施，从 QuantFormatDescriptor 自动推导量化数据的 block stride、data offset、scale offset 等参数，严格分离输入偏移（block_bytes）与输出偏移（compute_dtype.elem_bytes），消除手写偏移公式导致的 NaN 传播。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-007" data-test="TEST-LC-007" data-req-ref="REQ-LC-022" data-test-categories="unit" <h3="">TEST-LC-007: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-007相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-015" data-req="REQ-LC-015" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="3.1" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§3.1 QuantLayoutExpr (REQ-LC-015)
+      <p>在 <code>OffsetExpr</code> 基础上，新增量化感知偏移计算语义。不修改 <code>OffsetExpr</code> 枚举，而是在 <code>emit_quant_gather_trace_driven</code> 等函数中通过 <code>QuantFormatDescriptor</code> 自动推导偏移：</p>
+      <p>```</p>
+      <p>QuantOffsetDsl:</p>
+      <p>  // 从 QuantFormatDescriptor 推导所有偏移参数，消除手写公式</p>
+      <p>  derive_block_stride(desc: &amp;QuantFormatDescriptor) -&gt; usize:</p>
+      <p>    return desc.block_bytes   // Q4_0=18, Q8_0=34+2=34</p>
+      <p>  derive_data_offset(desc: &amp;QuantFormatDescriptor, sub_block_idx: usize, lanes: usize) -&gt; i64:</p>
+      <p>    match desc.data_layout:</p>
+      <p>      PackedNibbles { offset, .. } =&gt; offset as i64 + (sub_block_idx * (lanes / 2)) as i64</p>
+      <p>      Bytes { offset, .. } =&gt; offset as i64 + (sub_block_idx * lanes) as i64</p>
+      <p>      NibbleWithHighBits { offset, .. } =&gt; offset as i64 + (sub_block_idx * (lanes / 2)) as i64</p>
+      <p>      CodebookIndex { index_bits, .. } =&gt; offset as i64 + (sub_block_idx * ((lanes * index_bits + 7) / 8)) as i64</p>
+      <p>  derive_scale_offset(desc: &amp;QuantFormatDescriptor) -&gt; usize:</p>
+      <p>    match desc.scale_layout:</p>
+      <p>      BlockScalar { offset_bytes, .. } =&gt; offset_bytes</p>
+      <p>      BlockScalarWithMin { scale_offset, .. } =&gt; scale_offset</p>
+      <p>      PackedScale { .. } =&gt; 0  // packed scale 在 QuantScaleLoad VmInstr 内处理</p>
+      <p>  derive_output_stride(hidden_dim: usize, compute_dtype: QuantPrecision) -&gt; usize:</p>
+      <p>    return hidden_dim * compute_dtype.elem_bytes()  // compute_dtype 由 TensorMeta.dtype × DeviceProfile 推导</p>
+      <p>  derive_output_block_offset(block_idx: usize, block_size: usize, sub_offset: usize, compute_dtype: QuantPrecision) -&gt; OffsetExpr:</p>
+      <p>    // 输出缓冲区是 compute_dtype, elem_bytes 由 (模型 dtype, 硬件) 联合决定</p>
+      <p>    return Add(Mul(ScalarVReg(block_counter), block_size * compute_dtype.elem_bytes()), LoopOffset(sub_offset))</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-015" data-test="TEST-LC-015" data-req-ref="REQ-LC-024" data-test-categories="unit" <h3="">TEST-LC-015: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-015相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-005" data-req="REQ-LC-005" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="3.2" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§3.2 输入 vs 输出偏移分离 (REQ-LC-005)
+      <p>当前 NaN 的关键混淆：<strong>输入偏移</strong>使用量化格式的 block_bytes (Q4_0=18)，<strong>输出偏移</strong>使用 compute_dtype 的 elem_bytes。两者语义不同但在代码中都使用 <code>block_size * elem</code> 计算。</p>
+      <strong>约束</strong>:
+      <strong>禁止规则</strong>:
+      <li>禁止用 <code>dtype.elem_bytes()</code> 计算量化数据的字节偏移</li>
+      <li>禁止用 <code>block_bytes</code> 计算输出缓冲区的偏移</li>
+      <li>量化数据的字节布局<strong>必须</strong>从 <code>QuantFormatDescriptor</code> 推导，不允许硬编码</li>
+      <table>
+        <tr>
+          <th>偏移类型</th>
+        </tr>
+        <tr>
+          <td>计算方式</td>
+        </tr>
+        <tr>
+          <td>来源</td>
+        </tr>
+        <tr>
+          <td>输入 (量化数据)</td>
+        </tr>
+        <tr>
+          <td>block_idx * block_bytes</td>
+        </tr>
+        <tr>
+          <td>QuantFormatDescriptor.block_bytes</td>
+        </tr>
+        <tr>
+          <td>输入 (scale)</td>
+        </tr>
+        <tr>
+          <td>block_base + scale_offset_bytes</td>
+        </tr>
+        <tr>
+          <td>QuantFormatDescriptor.scale_layout</td>
+        </tr>
+        <tr>
+          <td>输入 (data)</td>
+        </tr>
+        <tr>
+          <td>block_base + data_offset + sub_idx * data_byte_advance</td>
+        </tr>
+        <tr>
+          <td>QuantFormatDescriptor.data_layout</td>
+        </tr>
+        <tr>
+          <td>输出 (compute_dtype)</td>
+        </tr>
+        <tr>
+          <td>block_idx * block_size * compute_dtype.elem_bytes()</td>
+        </tr>
+        <tr>
+          <td>输出缓冲区 dtype = compute_dtype</td>
+        </tr>
+      </table>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-005" data-test="TEST-LC-005" data-req-ref="REQ-LC-025" data-test-categories="unit" <h3="">TEST-LC-005: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-005相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-006" data-req="REQ-LC-006" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="3.3" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§3.3 emit_quant_gather 参数化约束 (REQ-LC-006)
+      <code>emit_quant_gather_trace_driven</code> 的所有偏移计算必须通过 <code>QuantOffsetDsl</code> 方法推导：
+      <p>```</p>
+      <p>必须使用 QuantOffsetDsl 的位置:</p>
+      <p>  1. seq loop 的 step_bytes = 4 (固定: 每个索引 4 字节 u32)</p>
+      <p>  2. block loop 的 step_bytes = derive_block_stride(desc)</p>
+      <p>  3. sub_block loop 的 step_bytes = block_size * compute_dtype.elem_bytes() (输出行内步进)</p>
+      <p>  4. data_ptr 的初始偏移 = derive_data_offset(desc, 0, lanes)</p>
+      <p>  5. data_ptr 的步进 = derive_data_offset(desc, 1, lanes) - derive_data_offset(desc, 0, lanes)</p>
+      <p>  6. scale 加载偏移 = derive_scale_offset(desc) (在 DecodeTraceBuilder 内)</p>
+      <p>  7. 输出行步进 = derive_output_stride(hidden_dim, compute_dtype)</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-006" data-test="TEST-LC-006" data-req-ref="REQ-LC-026" data-test-categories="unit" <h3="">TEST-LC-006: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-006相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    <section id="req-lc-010" data-req="REQ-LC-010" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="4" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="">§4 Post-Hoc 一致性验证 Pass (REQ-LC-010~012)
+      <p>在 verify.rs 中新增物理寄存器冲突检测、spill slot 一致性、量化偏移合理性、循环嵌套生命周期安全四条验证规则，并引入编译时数值模拟，在编译期即发现解量化 trace 的数学错误而非等到运行时出现 NaN。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-010" data-test="TEST-LC-010" data-req-ref="REQ-LC-010" data-test-categories="unit" <h3="">TEST-LC-010: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-010相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    -LC-010" data-xref-type="req" href="25-JIT-LIFECYCLE-INFRASTRUCTURE.html#REQ-LC-010"&gt;REQ-LC-010
+    <section id="req-lc-016" data-req="REQ-LC-016" data-req-status="implemented" data-req-domain="lc" data-req-category="business" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-api="API-JIT-LIFECYCLE" data-section="4.1" data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="">§4.1 验证规则扩展 (REQ-LC-016)
+      <p>在 <code>verify.rs</code> 的 <code>verify_vm_program</code> 中新增 4 条验证规则：</p>
+      <strong>规则 6: 物理寄存器冲突检测</strong>
+      <p>```</p>
+      <p>verify_no_physical_reg_conflict(prog, alloc):</p>
+      <p>  对每个相邻指令对 (instr[i], instr[i+1]):</p>
+      <p>    检查 instr[i] 的所有 src VReg 的物理寄存器</p>
+      <p>    是否被 instr[i+1] 的 dst VReg 覆盖</p>
+      <p>    但 src 在 i+1 仍有后续使用 (不是 dead)</p>
+      <p>  如果冲突 → Err("physical register conflict: ...")</p>
+      <p>```</p>
+      <strong>规则 7: Spill slot 一致性</strong>
+      <p>```</p>
+      <p>verify_spill_consistency(prog, alloc, frame):</p>
+      <p>  对每个 SpillSlot:</p>
+      <p>    1. offset + size 不超过 spill_area</p>
+      <p>    2. 同 scope 内两个 slot 的 [offset, offset+size) 不重叠</p>
+      <p>    3. LifecycleTag::LoopInvariant 的 VReg 在 loop 入口有 spill，出口有 reload</p>
+      <p>```</p>
+      <strong>规则 8: 量化偏移合理性</strong>
+      <p>```</p>
+      <p>verify_quant_offset_sanity(prog):</p>
+      <p>  对每个 VecLoad/VecStore 涉及量化数据的指令:</p>
+      <p>    如果 base 来自 QuantGather 的 embed_ptr 路径:</p>
+      <p>      检查 OffsetExpr 中的 Const 值是否为 block_bytes 的整数倍</p>
+      <p>      检查步进值是否与 QuantFormatDescriptor 一致</p>
+      <p>  如果不合理 → Err("quant offset sanity check failed: ...")</p>
+      <p>```</p>
+      <strong>规则 9: Loop 嵌套生命周期安全</strong>
+      <p>```</p>
+      <p>verify_loop_lifecycle_safety(prog, intervals):</p>
+      <p>  对每个 LoopBegin/LoopEnd 范围内的 VReg:</p>
+      <p>    如果 LifecycleTag == LoopInvariant:</p>
+      <p>      验证该 VReg 的物理寄存器在 loop body 内没有被其他 VReg 覆盖</p>
+      <p>    如果 LifecycleTag == LoopCarried:</p>
+      <p>      验证该 VReg 在 LoopEnd 前有写入 (确保下一次迭代有合法值)</p>
+      <p>  如果违反 → Err("loop lifecycle safety violation: ...")</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li>
+        <li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-lc-016" data-test="TEST-LC-016" data-req-ref="REQ-LC-027" data-test-categories="unit" <h3="">TEST-LC-016: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-016相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    心逻辑路径"&gt;单元测试覆盖核心逻辑路径
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    
+    <section id="test-lc-12" data-test="TEST-LC-12" data-req-ref="REQ-LC-022" data-test-categories="unit" <h3="">TEST-LC-12: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-007相关功能正确性</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    </section>
+
+    枚举定义完整且编译通过: cargo check"&gt;声明式基础设施结构体/枚举定义完整且编译通过: cargo check
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    a-section="4.3"&gt;
+      <h4>§4.3 分配后完整性检查 (REQ-LC-008)</h4>
+      <p>在 <code>RegAllocator::allocate()</code> 完成后，自动执行：</p>
+      <p>```</p>
+      <p>post_alloc_verify(alloc, intervals, prog):</p>
+      <p>  1. 每个 VRegId 都有物理寄存器或 spill slot</p>
+      <p>  2. 两个冲突的 VReg 不在同一物理寄存器上</p>
+      <p>  3. Spill slot 无重叠</p>
+      <p>  4. LoopInvariant VReg 在循环内的所有引用点，其物理寄存器未被覆盖</p>
+      <p>  5. Counter 永远在物理寄存器上 (不 spill)</p>
+      <div id="声明式基础设施结构体/枚举定义完整且编译通过:-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
+      <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
+      <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
+      <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
+      
+    
+ data-criteria&gt;
+        <h5>验收标准</h5>
+        <ol>
+        <li dat<="" li="">
+        </li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li>
+        <li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li>
+        <li id="4" data-criterion="4">与已有代码集成无编译错误</li>
+        </ol>
+      
+    <section id="s5" data-section="5">
+      <h3>§5 实施范围</h3>
+    </section>
+    <section id="s-文件修改清单" data-section="null">
+      <h4>文件修改清单</h4>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>REQ</td>
+        </tr>
+        <tr>
+          <td>改动</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/reg_alloc.rs</td>
+        </tr>
+        <tr>
+          <td>LC-001~003, LC-012</td>
+        </tr>
+        <tr>
+          <td>新增 LifecycleTag + Pass 4 推导 + 分配优先级 + post_alloc_verify</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/instr.rs</td>
+        </tr>
+        <tr>
+          <td>LC-005</td>
+        </tr>
+        <tr>
+          <td>ScopeBegin 新增 scope_id 字段</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/stack_frame.rs</td>
+        </tr>
+        <tr>
+          <td>LC-004~006</td>
+        </tr>
+        <tr>
+          <td>ScopedSpillAllocator 替代顺序分配</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/plan_lower.rs</td>
+        </tr>
+        <tr>
+          <td>LC-007~009</td>
+        </tr>
+        <tr>
+          <td>QuantOffsetDsl 接入 emit_quant_gather</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/verify.rs</td>
+        </tr>
+        <tr>
+          <td>LC-010~011</td>
+        </tr>
+        <tr>
+          <td>新增规则 6~9 + 数值模拟</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/quant_decode.rs</td>
+        </tr>
+        <tr>
+          <td>LC-011</td>
+        </tr>
+        <tr>
+          <td>标量模拟接口</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-不改动的文件" data-section="null">
+      <h4>不改动的文件</h4>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/x86_lower.rs</td>
+        </tr>
+        <tr>
+          <td>ISA lowering 无需感知 LifecycleTag，物理分配已完成</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/auto_select.rs</td>
+        </tr>
+        <tr>
+          <td>TraceOp→VmInstr 映射与生命周期无关</td>
+        </tr>
+        <tr>
+          <td>quant_format.rs</td>
+        </tr>
+        <tr>
+          <td>QuantFormatDescriptor 已完整，无需修改</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 REQ 清单</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ ID</th>
+        </tr>
+        <tr>
+          <td>标题</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      <a data-xref-type="entity" data-xref-id="ent-scoped-spill-allocator" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-scoped-spill-allocator" ENT-SCOPED-SPILL-ALLOCATOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></a></div>
+        
+        <tr>
+          <td>LifecycleTag 枚举定义</td>
+        </tr>
+        <tr>
+          <td>LiveInterval</td>
+          <td> 包含 </td>
+          <td>lifecycle: LifecycleTag</td>
+          <td> 字段，5 种标签全部定义</td>
+        </tr>
+        
+        <tr>
+          <td>自动推导 Pass 4</td>
+        </tr>
+        <tr>
+          <td>compute_intervals</td>
+          <td> 输出所有 VReg 的 LifecycleTag，零手工标注</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>分配优先级调整</td>
+        </tr>
+        <tr>
+          <td>allocate()</td>
+          <td> 按 Global &gt; Counter &gt; LoopInvariant &gt; BodyLocal 优先级分配</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>ScopedSpillAllocator</td>
+        </tr>
+        <tr>
+          <td>spill slot 在 ScopeEnd 时释放，free_list 支持复用</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>ScopeBegin/End 接入</td>
+        </tr>
+        <tr>
+          <td>ScopeBegin 分配 ScopeId，ScopeEnd 释放该 scope 的 spill slot</td>
+        </tr>
+        
+        <tr>
+          <td>嵌套 Scope 规则</td>
+        </tr>
+        <tr>
+          <td>内层 scope 结束不释放外层 slot，CrossScope slot 不随 scope 释放</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>QuantOffsetDsl 定义</td>
+        </tr>
+        <tr>
+          <td>量化数据偏移从 QuantFormatDescriptor 自动推导，零硬编码</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>输入/输出偏移分离</td>
+        </tr>
+        <tr>
+          <td>输入偏移使用 block_bytes，输出偏移使用 compute_dtype.elem_bytes()，二者独立推导</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>emit_quant_gather 参数化</td>
+        </tr>
+        <tr>
+          <td>所有偏移通过 QuantOffsetDsl 方法推导，删除手写公式</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>验证规则 6~9</td>
+        </tr>
+        <tr>
+          <td>物理寄存器冲突、spill 一致性、量化偏移、循环生命周期四条规则通过</td>
+        </tr>
+        
+        <tr>
+          <td>编译时数值模拟</td>
+        </tr>
+        <tr>
+          <td>DecodeTraceBuilder 标量模拟一个 block，输出无 NaN/Inf</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl" ENT-QUANT-OFFSET-DSL<="" a="">
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>分配后完整性检查</td>
+        </tr>
+        <tr>
+          <td>post_alloc_verify 检查 5 项不变量全部通过</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-QUANT-OFFSET-DSL" id="ent-quant-offset-dsl"><h4>ENT-QUANT-OFFSET-DSL</h4>
+        <p>QuantOffsetDsl — 量化感知偏移DSL (输入偏移用 block_bytes, 输出偏移用 compute_elem_bytes, REQ-LC-008)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>Const|BlockIndex|ScaleOffset|ZeroPointOffset|DataOffset|OutputBlockOffset|OutputRowStride|SubBlockOutputStep|...</td><td>偏移计算变体</td></tr><tr data-field="block_bytes" data-type="number" data-required="false" <td="">block_bytes<td>number</td><td>否</td><td>usize</td><td>
+量化 block 字节数 (输入偏移用)</td></tr><tr data-field="compute_elem_bytes" data-type="number" data-required="false" <td="">compute_elem_bytes<td>number</td><td>否</td><td>usize</td><td>计算 dtype 每元素字节数 (输出偏移用)</td></tr><tr data-field="block_size" data-type="number" data-required="false" <td="">block_size<td>number</td><td>否</td><td>usize</td><td>量化 block 元素数</td></tr><tr data-field="hidden_dim" data-type="number" data-required="false" <td="">hidden_dim<td>number</td><td>否</td><td>usize</td><td>
+隐藏维度 (OutputRowStride 用)</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-SCOPED-SPILL-ALLOCATOR" id="ent-scoped-spill-allocator"><h4>ENT-SCOPED-SPILL-ALLOCATOR</h4><p>ScopedSpillAllocator — 基于 Scope 的 Spill Slot 分配器 (替代顺序单调分配, ScopeEnd释放复用)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="next_scope_id" data-type="number" data-required="true" <td="">next_scope_id<td>number</td><td>是</td><td>usize</td><td>下一个 Scope ID 递增计数器</td></tr>
+<tr data-field="next_offset" data-type="number" data-required="true" <td="">next_offset<td>number</td><td>是</td><td>usize</td><td>下一个 spill slot 字节偏移</td></tr><tr data-field="slots" data-type="string" data-required="true" <td="">slots<td>string</td><td>是</td><td>Vec&lt;SpillSlotInfo&gt;</td><td>已分配 spill slot 信息列表 (offset/size/owner/vreg/state)</td></tr><tr data-field="free_list" data-type="string" data-required="true" <td="">free_list<td>string</td><td>是</td><td>Vec&lt;usize&gt;</td><td>
+空闲 slot 索引列表 (复用优先)</td></tr><tr data-field="scope_slots" data-type="string" data-required="true" <td="">scope_slots<td>string</td><td>是</td><td>HashMap&lt;ScopeId,Vec&lt;usize&gt;&gt;</td><td>每个 Scope 拥有的 slot 索引映射</td></tr><tr data-field="scope_stack" data-type="string" data-required="true" <td="">scope_stack<td>string</td><td>是</td><td>Vec&lt;ScopeId&gt;</td><td>当前 Scope 嵌套栈</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-VM-INSTR" id="ent-vm-instr">
+        <h4>ENT-VM-INSTR</h4>
+        <p>VmInstr — 虚拟指令集 (102+指令)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>VecLoad|VecStore|Fma|LoopBegin|...</td><td>指令变体名 (102+种)</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>QuantPrecision</td><td>数据精度类型</td></tr>
+<tr data-field="width" data-type="string" data-required="true" <td="">width<td>string</td><td>是</td><td>SimdWidth</td><td>SIMD宽度 (128/256/512/SVE)</td></tr><tr data-field="dst" data-type="string" data-required="false" <td="">dst<td>string</td><td>否</td><td>VRegId</td><td>目标寄存器</td></tr><tr data-field="src" data-type="string" data-required="false" <td="">src<td>string</td><td>否</td><td>VRegId</td><td>源寄存器</td></tr><tr data-field="offset" data-type="string" data-required="false" <td="">offset
+<td>string</td><td>否</td><td>OffsetExpr</td><td>内存偏移表达式</td></tr><tr data-field="base" data-type="string" data-required="false" <td="">base<td>string</td><td>否</td><td>VRegId</td><td>基址寄存器</td></tr><tr data-field="step" data-type="number" data-required="false" <td="">step<td>number</td><td>否</td><td>usize</td><td>循环步长 (LoopBegin专用)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-VREG-LIFECYCLE-TAG" id="ent-vreg-lifecycle-tag"><h4>ENT-VREG-LIFECYCLE-TAG</h4><p>VRegLifecycleTag — VReg 生命周期语义标签 (由 compute_intervals 自动推导, 禁止手工标注, 5个变体)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>LoopInvariant|LoopCarried|BodyLocal|CrossScope|Global</td><td>生命周期语义变体</td></tr>
+<tr data-field="alloc_priority" data-type="number" data-required="true" <td="">alloc_priority<td>number</td><td>是</td><td>0-4</td><td>分配优先级 (数值越小越优先分配物理寄存器)</td></tr><tr data-field="spill_priority" data-type="number" data-required="true" <td="">spill_priority<td>number</td><td>是</td><td>0-4</td><td>Spill 优先级 (数值越小越先被 spill 到栈)</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section data-api="POST /internal/jit/lifecycle" id="post-/internal/jit/lifecycle" data-api-type="internal" data-api-name="API-JIT-LIFECYCLE"><h4>POST /internal/jit/lifecycle — JIT lifecycle manage</h4><p>JIT 生命周期管理接口，声明式生命周期管理覆盖编译→缓存→失效→重编译全流程。三级缓存（L1 内存/L2 共享内存/L3 磁盘），SymDim 变维不触发重编译。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：25-JIT-LIFECYCLE-INFRASTRUCTURE.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2></section></body>
+</html>

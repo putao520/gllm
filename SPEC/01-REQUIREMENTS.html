@@ -1,0 +1,5186 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="01-REQUIREMENTS" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"01-REQUIREMENTS", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>gllm 功能需求清单</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>01-REQUIREMENTS</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-gllm-功能需求清单" data-section="null">
+      <h2>gllm 功能需求清单</h2>
+      <p>&gt; <strong>📌 SSOT</strong>: 本文档是 gllm 项目的功能需求唯一真源。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 模型支持 (REQ-MODEL)</h3>
+      <p>&gt; <strong>SSOT</strong>: 详细列表见 <a data-xref-type="section" data-xref-id="" href="./SUPPORTED_MODELS.html" SUPPORTED_MODELS.md<="" a=""></a></p>
+      <p>&gt; <strong>Constraint (REQ-MODEL-LATEST)</strong>: 仅支持 <strong>2025年9月</strong> 以后发布的模型。当系列推出新版（如 Qwen3），必须立即废弃旧版（Qwen2.5）。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MODEL-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embedding 模型支持</td>
+        </tr>
+        <tr>
+          <td>支持 Next-Gen 嵌入模型</td>
+        </tr>
+        <tr>
+          <td>覆盖 Qwen3-Embed, BGE-M4</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MODEL-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Rerank 模型支持</td>
+        </tr>
+        <tr>
+          <td>支持 Next-Gen 重排序模型</td>
+        </tr>
+        <tr>
+          <td>覆盖 Qwen3-Rerank, BGE-Rerank-v3</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MODEL-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Generator 模型支持</td>
+        </tr>
+        <tr>
+          <td>支持 Next-Gen 稠密/MoE 生成模型</td>
+        </tr>
+        <tr>
+          <td>覆盖 Qwen3, Llama 4, GLM-4.7/5, Mistral 3</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MODEL-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MoE 架构支持</td>
+        </tr>
+        <tr>
+          <td>支持 2026 新一代 MoE</td>
+        </tr>
+        <tr>
+          <td>覆盖 Qwen3-A22B, Llama 4 MoE</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MODEL-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPT-OSS 模型支持</td>
+        </tr>
+        <tr>
+          <td>支持 OpenAI GPT-OSS (Fused QKV) 架构</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>registry</td>
+          <td> 解析正确</td>
+          <td>2. </td>
+          <td>loader</td>
+          <td> 正确处理 </td>
+          <td>c_attn</td>
+          <td>/</td>
+          <td>c_proj</td>
+          <td> 权重</td>
+          <td>3. 能够成功加载 GPT-OSS 权重</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 模型加载与管理 (REQ-LOADER)</h3>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>HuggingFace 集成</td>
+        </tr>
+        <tr>
+          <td>原生支持 HF Hub 协议，自动下载模型</td>
+        </tr>
+        <tr>
+          <td>loader::from_hf("repo/model")</td>
+          <td> 正常工作</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>智能缓存系统</td>
+        </tr>
+        <tr>
+          <td>支持本地缓存管理，避免重复下载</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>源头隔离</td>
+          <td> (hf/ + ms/ 子目录)</td>
+          <td>2. 同源模型避免重复下载</td>
+          <td>3. 支持校验和验证</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: be8b444]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>并发加载</td>
+        </tr>
+        <tr>
+          <td>支持多线程并发下载和张量加载</td>
+        </tr>
+        <tr>
+          <td>大模型加载速度显著提升</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>权重转换</td>
+        </tr>
+        <tr>
+          <td>支持 safetensors/bin 自动探测与转换</td>
+        </tr>
+        <tr>
+          <td>兼容主流权重格式</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-011</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GGUF 格式支持</td>
+        </tr>
+        <tr>
+          <td>支持加载 GGUF 量化模型 (q4_0, q8_0)</td>
+        </tr>
+        <tr>
+          <td>1. 自研零拷贝 GGUF 解析器 (</td>
+          <td>src/loader/gguf/</td>
+          <td>)</td>
+          <td>2. 能够加载 GGUF 张量到 Tensor 结构</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: bc1a030]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ModelScope 支持</td>
+        </tr>
+        <tr>
+          <td>支持从魔搭社区(ModelScope)下载模型</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>source</td>
+          <td> 配置项支持切换源</td>
+          <td>2. 自动处理 ModelScope 特有的文件结构</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>动态模型发现</td>
+        </tr>
+        <tr>
+          <td>支持任意 HF Model ID，无需预注册</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>Client::new("org/model-name", ModelKind::Chat)</td>
+          <td> 自动下载</td>
+          <td>2. 从 </td>
+          <td>config.json</td>
+          <td> 自动识别架构</td>
+          <td>3. 无需修改代码即可支持新模型</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>架构自动识别</td>
+        </tr>
+        <tr>
+          <td>从模型配置文件自动推断架构类型</td>
+        </tr>
+        <tr>
+          <td>1. 读取 </td>
+          <td>config.json</td>
+          <td> 的 </td>
+          <td>model_type</td>
+          <td>/</td>
+          <td>architectures</td>
+          <td>2. 匹配到对应的 Adapter</td>
+          <td>3. 支持常见架构的自动探测</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-009</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Registry 清理</td>
+        </tr>
+        <tr>
+          <td>移除 KnownModel 枚举，实现纯动态加载</td>
+        </tr>
+        <tr>
+          <td>1. 移除 KnownModel</td>
+          <td>2. 移除硬编码 Repo 信息</td>
+          <td>3. 仅允许动态 Model ID</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-010</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Registry 删除与显式用途</td>
+        </tr>
+        <tr>
+          <td>彻底移除 Registry，API 显式指定 ModelKind</td>
+        </tr>
+        <tr>
+          <td>1. 删除 Registry 与 ManifestOverride</td>
+          <td>2. </td>
+          <td>Client::new(model_id, kind)</td>
+          <td> 强制显式传入用途</td>
+          <td>3. 提供 </td>
+          <td>new_chat</td>
+          <td>/</td>
+          <td>new_embedding</td>
+          <td> 快捷方法</td>
+          <td>4. </td>
+          <td>manifest_from_config</td>
+          <td> 不再接受 overrides</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-012</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ONNX 格式支持</td>
+        </tr>
+        <tr>
+          <td>原生支持加载 .onnx 模型文件 (纯 Rust 实现)</td>
+        </tr>
+        <tr>
+          <td>1. 集成官方完整 ONNX Proto 定义 (Enterprise Grade)</td>
+          <td>2. </td>
+          <td>禁止引入第三方推理引擎</td>
+          <td> (tract/ort)</td>
+          <td>3. 完整解析 Model/Graph/Node/Tensor 结构</td>
+          <td>4. 支持零拷贝/内存映射加载</td>
+          <td>5. </td>
+          <td>必须实现 Graph Pattern Matching</td>
+          <td></td>
+          <td>6. </td>
+          <td>必须将子图映射为 Fused Kernels</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: 088b9a8]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-013</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>自动格式探测</td>
+        </tr>
+        <tr>
+          <td>自动探测模型文件格式 (safetensors/GGUF/ONNX)</td>
+        </tr>
+        <tr>
+          <td>1. 根据文件扩展名自动识别格式</td>
+          <td>2. 支持从 HF/MS 自动选择对应加载器</td>
+          <td>3. 无需用户手动指定格式</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: d16d3ea]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-014</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GGUF 量化元数据读取</td>
+        </tr>
+        <tr>
+          <td>从 GGUF 文件读取量化类型信息</td>
+        </tr>
+        <tr>
+          <td>1. 从 GGUF 元数据读取 </td>
+          <td>general.quantization_version</td>
+          <td>2. 从 GGUF tensor 信息读取实际量化类型 (Q4_0, Q8_0, Q5_K, etc.)</td>
+          <td>3. </td>
+          <td>禁止基于文件名推断</td>
+          <td> (Ω1: 真实性原则)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 95c30d9]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-015</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ONNX 精度元数据读取</td>
+        </tr>
+        <tr>
+          <td>从 ONNX 文件读取精度信息</td>
+        </tr>
+        <tr>
+          <td>1. 从 ONNX tensor dtype 读取实际精度 (F32/F16/INT8)</td>
+          <td>2. </td>
+          <td>禁止基于文件名推断</td>
+          <td> (Ω1: 真实性原则)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 95c30d9]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-016</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>智能源选择</td>
+        </tr>
+        <tr>
+          <td>HF 不可用时自动切换到 ModelScope</td>
+        </tr>
+        <tr>
+          <td>1. HF 下载失败时自动尝试 ModelScope</td>
+          <td>2. 支持配置优先级 (HF→MS 或 MS→HF)</td>
+          <td>3. 记录源切换日志</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: d16d3ea]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-017</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>统一加载入口</td>
+        </tr>
+        <tr>
+          <td>单一 API 支持所有格式和源</td>
+        </tr>
+        <tr>
+          <td>Loader::auto("repo/model")</td>
+          <td> 自动探测格式+源</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: d16d3ea]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-018</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>迻除时模型热切换</td>
+        </tr>
+        <tr>
+          <td>支持在不重启进程的情况下切换模型</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>client.swap_model(new_model)</td>
+          <td> API</td>
+          <td>2. 自动释放旧模型显存 (KV Cache &amp; Weights)</td>
+          <td>3. 重新初始化新模型环境</td>
+          <td>4. 线程安全（阻塞新请求直到切换完成）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: HEAD]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-019</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GGUF 架构元数据读取</td>
+        </tr>
+        <tr>
+          <td>从 GGUF 文件读取架构信息</td>
+        </tr>
+        <tr>
+          <td>1. 读取 GGUF 内置 </td>
+          <td>general.architecture</td>
+          <td> 字段 (如 "llama", "qwen2", "deepseek")</td>
+          <td>2. </td>
+          <td>禁止基于 Model ID 推断架构</td>
+          <td> (Ω1: 真实性原则)</td>
+          <td>3. 如果 GGUF 缺少架构元数据，返回明确的错误而非推测</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 95c30d9]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-020</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>DeepSeek 架构支持</td>
+        </tr>
+        <tr>
+          <td>支持 DeepSeek V2/V3/R1 系列 MoE 模型</td>
+        </tr>
+        <tr>
+          <td>1. 实现 DeepSeekAdapter</td>
+          <td>2. 支持 MoE 架构 (671B 总参数, 37B 激活)</td>
+          <td>3. 从 config.json 识别 </td>
+          <td>model_type: "deepseek"</td>
+          <td>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, </td>
+          <td>Kimi-K2</td>
+          <td> (使用 DeepSeek 架构)</td>
+          <td>5. 兼容 SafeTensors/GGUF/ONNX 格式</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-15)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-021</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>融合权重元数据驱动分割</td>
+        </tr>
+        <tr>
+          <td>融合权重 (如 QKV) 分割完全基于 config.json，禁止硬编码</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>split_phi4_qkv</td>
+          <td> 等函数接收 </td>
+          <td>ModelConfig</td>
+          <td> 参数</td>
+          <td>2. Q 维度 = </td>
+          <td>config.hidden_size</td>
+          <td>3. KV 维度 = </td>
+          <td>config.num_key_value_heads * config.head_dim</td>
+          <td>4. </td>
+          <td>禁止</td>
+          <td>硬编码任何维度值 (如 3072, 1024)</td>
+          <td>5. 支持同一架构的不同变体 (不同 hidden_size / num_kv_heads)</td>
+          <td>6. </td>
+          <td>关联</td>
+          <td>: ARCH-QUANT-METADATA-001, ARCH-LOADER-FUSED-METADATA</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: HEAD]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOADER-022</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>张量驱动配置推导 (Tensor-Driven)</td>
+        </tr>
+        <tr>
+          <td>基于 Tensor Role Matching (Regex) 和张量形状推导配置，优先于硬编码逻辑</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>核心</td>
+          <td>: 定义 </td>
+          <td>TensorRole</td>
+          <td> (Embedding/Attention/FFN)</td>
+          <td>2. </td>
+          <td>推导</td>
+          <td>: 纯张量形状推导 </td>
+          <td>hidden_size</td>
+          <td>, </td>
+          <td>num_heads</td>
+          <td>, </td>
+          <td>head_dim</td>
+          <td>3. </td>
+          <td>禁止</td>
+          <td>: </td>
+          <td>if model == "llama"</td>
+          <td> 硬编码逻辑</td>
+          <td>4. </td>
+          <td>优先级</td>
+          <td>: 张量形状 &gt; config.json</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-08)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 GGUF 量化加载 (REQ-QUANT)</h4>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-QUANT-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GgmlDType→QuantType 桥接</td>
+        </tr>
+        <tr>
+          <td>映射 GGUF 量化类型到 gllm-kernels QuantType</td>
+        </tr>
+        <tr>
+          <td>ggml_dtype_to_quant_type()</td>
+          <td> 覆盖 K-Quant/Classic/IQ 共 21 种类型</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-QUANT-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TensorProvider 量化元数据</td>
+        </tr>
+        <tr>
+          <td>TensorProvider 暴露原始 GGML dtype</td>
+        </tr>
+        <tr>
+          <td>ggml_dtype()</td>
+          <td> default method，GgufReader 实现返回实际 dtype</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-QUANT-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>QuantizedTensor 双存储</td>
+        </tr>
+        <tr>
+          <td>WeightsHandle 支持量化/native 双存储</td>
+        </tr>
+        <tr>
+          <td>quantized</td>
+          <td> HashMap + </td>
+          <td>new_with_quantized()</td>
+          <td>/</td>
+          <td>quantized_tensor()</td>
+          <td>/</td>
+          <td>is_quantized()</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-QUANT-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>upload_provider 精度分流</td>
+        </tr>
+        <tr>
+          <td>量化权重跳过 GPU 重加载</td>
+        </tr>
+        <tr>
+          <td>量化层级→QuantizedTensor 直接加载，非量化层级→按硬件原生极化 DType 映射上传</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-QUANT-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TensorLookup 量化访问</td>
+        </tr>
+        <tr>
+          <td>TensorLookup trait 支持量化 tensor 查询</td>
+        </tr>
+        <tr>
+          <td>get_quantized()</td>
+          <td> default method，WeightsHandle 实现</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-QUANT-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Backend DType 特化 matmul</td>
+        </tr>
+        <tr>
+          <td>Backend trait DType 特化矩阵乘法</td>
+        </tr>
+        <tr>
+          <td>JIT 编译 DType 特化向量操作，完全抹除运行时 dispatch</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 核心功能 (REQ-CORE)</h3>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-CORE-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>自动后端检测</td>
+        </tr>
+        <tr>
+          <td>自动选择 CUDA/CPU (ROCm/Metal 计划中)</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>detect_backend()</td>
+          <td> 检测逻辑完整</td>
+          <td>2. 优先级: CUDA &gt; ROCm &gt; Metal &gt; CPU</td>
+          <td>3. 未实现后端返回 </td>
+          <td>Unimplemented</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 823e6bd]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-CORE-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>OOM Halt 硬件截断</td>
+        </tr>
+        <tr>
+          <td>GPU OOM 必须直接引发全进程 Halt，严禁以任何降级/退回 CPU 形式处理</td>
+        </tr>
+        <tr>
+          <td>OomHaltError</td>
+          <td> 返回，无降级</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-CORE-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>静态极化量化支持 (TurboQuant)</td>
+        </tr>
+        <tr>
+          <td>支持统一强转极化格式 (INT4/FP8)</td>
+        </tr>
+        <tr>
+          <td>1. 能够加载量化模型权重</td>
+          <td>2. 运行时消除多态混合精度分派，全网强制统一至 TurboQuant 固定块规格</td>
+          <td>3. 废除反量化，只提供定点/微浮点硬派算子</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-CORE-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>精度优先架构</td>
+        </tr>
+        <tr>
+          <td>系统强制运行在"精度优先"模式</td>
+        </tr>
+        <tr>
+          <td>1. Mega-Kernel 块级路由确保 Batch 内每个请求 Thread Block 独立计算（§9）</td>
+          <td>2. Chunked Prefill 交织调度确保 Decode 永远零等待（§10）</td>
+          <td>3. </td>
+          <td>移除</td>
+          <td> 任何吞吐量优先的妥协配置</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 823e6bd]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 高级调度与内存管理 (REQ-SCHED)</h3>
+      <p>&gt; <strong>详细设计</strong>: 见 <a data-xref-type="section" data-xref-id="" href="./DOCS/scheduling/hgal-scheduler-algorithm.html" SPEC="" DOCS="" scheduling="" hgal-scheduler-algorithm.md<="" a=""></a></p>
+      <p>&gt; <strong>架构原则</strong>: 精度优先。Mega-Kernel 块级路由（§9）确保 Batch 内每个请求的 Thread Block 独立计算，消除跨请求规约误差。</p>
+      <p>&gt; <strong>详细设计</strong>: 见 </p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-012</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>确定性调度 (Deterministic)</td>
+        </tr>
+        <tr>
+          <td>⛔ </td>
+          <td>已废弃</td>
+          <td> — 被 §9 Mega-Kernel 块级路由覆盖。Thread Block 独立读取 Request_State_Table，Batch 物理布局不影响计算结果。</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>⛔ 已废弃</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-013</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>阶段隔离 (Phase Isolation)</td>
+        </tr>
+        <tr>
+          <td>⛔ </td>
+          <td>已废弃</td>
+          <td> — 被 §10 Chunked Prefill 交织调度覆盖。Prefill Chunk 与 Decode Token 交织塞入同一 Batch，Decode 永远零等待。</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>⛔ 已废弃</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-EXEC-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>串行微批次执行</td>
+        </tr>
+        <tr>
+          <td>⛔ </td>
+          <td>已废弃</td>
+          <td> — 与 §9 Mega-Kernel 单次 Launch 全批次并行直接矛盾。串行执行吞吐量损失 10-100x，且块级路由已隔离各请求计算。</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>⛔ 已废弃</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-EXEC-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ONNX 推理执行引擎</td>
+        </tr>
+        <tr>
+          <td>实现 ONNX 模型的完整推理执行能力</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>Embedding/Reranker</td>
+          <td>: 单次前向传播已支持 (BERT/XLM-R/Qwen3)</td>
+          <td>2. </td>
+          <td>Generator</td>
+          <td>: 实现生成循环 + KV Cache + Sampling</td>
+          <td>3. 使用 FusedKernel 执行 ONNX 子图</td>
+          <td>4. 支持 ONNX 模型的动态批处理</td>
+          <td>5. 与现有 PagedAttention 调度器集成</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 3a0957d]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-EXEC-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ONNX KV Cache 集成</td>
+        </tr>
+        <tr>
+          <td>ONNX Generator 模型的 KV Cache 支持</td>
+        </tr>
+        <tr>
+          <td>1. 从 ONNX 图中提取 KV 输出张量</td>
+          <td>2. 跨轮缓存 KV 状态</td>
+          <td>3. 支持 PagedAttention 页面分配</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-15)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>PagedAttention 调度</td>
+        </tr>
+        <tr>
+          <td>实现自定义的分页注意力调度算法 (HGAL)</td>
+        </tr>
+        <tr>
+          <td>1. 显存碎片率 &lt; 5%</td>
+          <td>2. 支持动态 Block 分配</td>
+          <td>3. </td>
+          <td>禁止序列内页面分散换出</td>
+          <td></td>
+          <td>4. </td>
+          <td>使用 LIRS 优先级计算</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: 063f150]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>双缓冲 KV Cache</td>
+        </tr>
+        <tr>
+          <td>支持 GPU 双缓冲调度 (Swap 功能)</td>
+        </tr>
+        <tr>
+          <td>1. Swap-in/Swap-out 已实现</td>
+          <td>2. </td>
+          <td>Warm-up 保护期机制</td>
+          <td></td>
+          <td>3. </td>
+          <td>页面状态机 (Active/Standby/Swapped/Warm/Protected)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-06) [commit: external-kernels]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>动态批处理</td>
+        </tr>
+        <tr>
+          <td>支持 Continuous Batching</td>
+        </tr>
+        <tr>
+          <td>1. 吞吐量优于 Static Batching</td>
+          <td>2. </td>
+          <td>序列完成自动移除</td>
+          <td></td>
+          <td>3. </td>
+          <td>新序列动态加入</td>
+          <td></td>
+          <td>4. </td>
+          <td>BatchAction 决策</td>
+          <td> (Continue/Complete/Pause)</td>
+          <td>5. </td>
+          <td>企业级死锁防护</td>
+          <td> (admit_waiting 无限循环修复)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-07) [commit: 823e6bd]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Gang-Aware 调度</td>
+        </tr>
+        <tr>
+          <td>序列组整体调度，禁止序列内页面分散</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>SequenceGroup 作为换出单位</td>
+          <td></td>
+          <td>2. </td>
+          <td>All-or-nothing within one sequence</td>
+          <td></td>
+          <td>3. 优先级调度 (FCFS/Priority)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: 063f150]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Cache Thrashing 防护</td>
+        </tr>
+        <tr>
+          <td>防止刚换入的页面立即被换出</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>Warm-up 保护期</td>
+          <td> (默认 100ms)</td>
+          <td>2. </td>
+          <td>Thrash 率 &lt; 1%</td>
+          <td></td>
+          <td>3. 新换入页面不被选中为受害者</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: 063f150]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SCHED-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Working Set 检测</td>
+        </tr>
+        <tr>
+          <td>自动识别高频访问页面并锁定保护</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>自动热页检测</td>
+          <td> (默认阈值 3 次访问)</td>
+          <td>2. </td>
+          <td>Protected 状态</td>
+          <td></td>
+          <td>3. </td>
+          <td>保护解除机制</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: 063f150]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h3>4.1 KV Cache 管理重构需求 (REQ-KV)</h3>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KV-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>KvPrefixIndex 前缀复用</td>
+        </tr>
+        <tr>
+          <td>无 Session 场景下按最长前缀复用 KV 页面</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>find_longest_prefix(tokens)</td>
+          <td> 支持 O(n) 前缀匹配</td>
+          <td>2. 支持 append 场景复用（非 hash 全等）</td>
+          <td>3. 命中页面必须校验有效性后复用</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-11) [commit: 8c41031]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KV-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SessionKvCache 确定性复用</td>
+        </tr>
+        <tr>
+          <td>会话内基于 finalized position 做确定性 prefix claim</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>register_session</td>
+          <td>/</td>
+          <td>claim_session_prefix</td>
+          <td>/</td>
+          <td>finalize_session_tokens</td>
+          <td> API 完整</td>
+          <td>2. </td>
+          <td>finalized_position</td>
+          <td> 单调递增</td>
+          <td>3. 禁止 claim 超过已确认边界</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-11) [commit: 8c41031]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KV-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>KvPipeline 双管线隔离</td>
+        </tr>
+        <tr>
+          <td>Thinking/Reasoning 不污染会话主缓存</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>KvPipeline::{Conversation,Working}</td>
+          <td> 定义完整</td>
+          <td>2. </td>
+          <td>prepare_next_turn</td>
+          <td> 释放 Working，保留 Conversation</td>
+          <td>3. 管线维度参与虚拟页标识</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-11) [commit: 8c41031]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 自适应 Chunk 与 KV 增量更新 (REQ-KV-EXT)</h4>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KV-EXT-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>自适应 Chunk 大小</td>
+        </tr>
+        <tr>
+          <td>根据运行时负载（L1 可用页数、并发请求数、prompt 长度）动态调整 prefill chunk_size，替代当前硬编码 max_seq_len</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>AdaptiveChunkPolicy</td>
+          <td> 结构体，输入 L1 可用页数/并发请求数/prompt 长度，输出 chunk_size</td>
+          <td>2. Executor 调用 </td>
+          <td>plan_prefill()</td>
+          <td> 时使用自适应 chunk_size 而非 </td>
+          <td>max_seq_len</td>
+          <td>3. chunk_size 范围 </td>
+          <td>[ChunkedConfig::chunk_size, max_seq_len]</td>
+          <td>，下界为 ChunkedConfig 默认值 64</td>
+          <td>4. 高负载（L1 可用 &lt; 25%）时 chunk_size 缩小至下界</td>
+          <td>5. 低负载（L1 可用 &gt; 75%）时 chunk_size 扩大至 max_seq_len</td>
+          <td>6. 单元测试覆盖高/低/中三种负载场景</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-15)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 JIT 缓存协议规范 (REQ-JIT-CACHE)</h4>
+      <p>&gt; <strong>关联规范</strong>: <a data-xref-type="section" data-xref-id="" href="./DOCS/scheduling/jit-cache-protocol.html" SPEC="" DOCS="" scheduling="" jit-cache-protocol.md<="" a=""></a></p>
+      <p>&gt; <strong>SSOT</strong>: 完整的 REQ-JIT-CACHE-001~006 定义见本文 §8.6。</p>
+    </section>
+    <section id="s-后续增强计划-未来版本" data-section="null">
+      <h4>后续增强计划（未来版本）</h4>
+      <table>
+        <tr>
+          <th>优化</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>L3 分布式缓存</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Redis/NATS 等分布式后端支持</td>
+        </tr>
+        <tr>
+          <td>📋 未来计划</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 测试矩阵 (REQ-TEST)</h3>
+      <p>&gt; <strong>测试策略</strong>: 三维测试网格 - 后端 × 模型 × 功能</p>
+    </section>
+    <section id="s-测试维度定义" data-section="null">
+      <h4>测试维度定义</h4>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>选项</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>后端</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>cpu</td>
+          <td>, </td>
+          <td>jit-cuda</td>
+        </tr>
+        <tr>
+          <td>jit-hip</td>
+          <td>/</td>
+          <td>jit-metal</td>
+          <td> 未来支持</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>模型类型</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>generator</td>
+          <td>, </td>
+          <td>embedding</td>
+          <td>, </td>
+          <td>rerank</td>
+        </tr>
+        <tr>
+          <td>三种核心功能</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>模型大小</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>mini</td>
+          <td> (最小)</td>
+        </tr>
+        <tr>
+          <td>快速回归，CI 友好</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>功能模块</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>loader</td>
+          <td>, </td>
+          <td>inference</td>
+          <td>, </td>
+          <td>scheduler</td>
+          <td>, </td>
+          <td>quantization</td>
+          <td>, </td>
+          <td>scheduler_refactor</td>
+        </tr>
+        <tr>
+          <td>分层验证</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-测试矩阵需求" data-section="null">
+      <h4>测试矩阵需求</h4>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>后端覆盖测试</td>
+        </tr>
+        <tr>
+          <td>CPU 和 CUDA 后端功能验证</td>
+        </tr>
+        <tr>
+          <td>1. 所有单元测试在 CPU 后端通过</td>
+          <td>2. 所有 E2E 测试在 CPU 后端通过</td>
+          <td>3. CUDA 后端可用时通过相同测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Generator 模型矩阵</td>
+        </tr>
+        <tr>
+          <td>覆盖所有 Generator 模型类型</td>
+        </tr>
+        <tr>
+          <td>1. qwen3-7b (基准)</td>
+          <td>2. llama-4-8b (多模态)</td>
+          <td>3. phi-4-mini (轻量)</td>
+          <td>4. qwen3-moe (MoE)</td>
+          <td>5. smollm2-135m (超轻量)</td>
+          <td>6. smollm3-3b (轻量多用途)</td>
+          <td>7. internlm3-8b (高效推理)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embedding 模型矩阵</td>
+        </tr>
+        <tr>
+          <td>覆盖所有 Embedding 模型</td>
+        </tr>
+        <tr>
+          <td>1. qwen3-embed</td>
+          <td>2. bge-m3 (中文)</td>
+          <td>3. bge-m4 (升级版)</td>
+          <td>4. e5-small (轻量)</td>
+          <td>5. e5-base (标准)</td>
+          <td>6. e5-large (高精度)</td>
+          <td>7. m3e-base (中文)</td>
+          <td>8. jina-embeddings-v2-small (轻量英文)</td>
+          <td>9. jina-embeddings-v2-base (标准英文)</td>
+          <td>10. jina-embeddings-v4 (最新)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Reranker 模型矩阵</td>
+        </tr>
+        <tr>
+          <td>覆盖所有 Reranker 模型</td>
+        </tr>
+        <tr>
+          <td>1. qwen3-rerank</td>
+          <td>2. bge-reranker-v2-m3 (轻量中文)</td>
+          <td>3. bge-rerank-v3 (升级版)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>功能模块覆盖</td>
+        </tr>
+        <tr>
+          <td>分层功能测试</td>
+        </tr>
+        <tr>
+          <td>1. Loader: 权重加载、格式转换</td>
+          <td>2. Inference: 生成、嵌入、重排序</td>
+          <td>3. Scheduler: PagedAttention、CB、Swap</td>
+          <td>4. Quantization: AWQ/GPTQ</td>
+          <td>5. Scheduler Refactor: PrefixIndex、SessionKvCache、KvPipeline、BatchOrderPolicy</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-15)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>量化格式测试</td>
+        </tr>
+        <tr>
+          <td>多种量化格式验证</td>
+        </tr>
+        <tr>
+          <td>1. AWQ (已实现)</td>
+          <td>2. GPTQ</td>
+          <td>3. SmoothQuant</td>
+          <td>4. 动态量化</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>错误处理测试</td>
+        </tr>
+        <tr>
+          <td>边界条件和错误场景</td>
+        </tr>
+        <tr>
+          <td>1. OOM 处理</td>
+          <td>2. 无效输入</td>
+          <td>3. 权重损坏</td>
+          <td>4. 不支持的架构</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-008</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>性能基准测试</td>
+        </tr>
+        <tr>
+          <td>吞吐量和延迟验证</td>
+        </tr>
+        <tr>
+          <td>1. Tokens/sec 吞吐量</td>
+          <td>2. 首token 延迟 (TTFT)</td>
+          <td>3. 内存占用</td>
+          <td>4. 性能回归检测</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-009</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MoE 专项测试</td>
+        </tr>
+        <tr>
+          <td>MoE 模型特殊验证</td>
+        </tr>
+        <tr>
+          <td>1. 专家路由正确性</td>
+          <td>2. 负载均衡</td>
+          <td>3. 动态专家选择</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-TEST-010</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>后端一致性测试</td>
+        </tr>
+        <tr>
+          <td>CPU vs CUDA 结果一致性</td>
+        </tr>
+        <tr>
+          <td>1. 相同输入产生相同输出</td>
+          <td>2. 数值精度在容差范围内</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-02) [commit: fc36508]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-测试文件规划" data-section="null">
+      <h4>测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_embedding.rs</td>
+        </tr>
+        <tr>
+          <td>Embedding E2E (REQ-TEST-003)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_generator.rs</td>
+        </tr>
+        <tr>
+          <td>Generator E2E (REQ-TEST-002)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_reranker.rs</td>
+        </tr>
+        <tr>
+          <td>Reranker E2E (REQ-TEST-004)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/test_error_handling.rs</td>
+        </tr>
+        <tr>
+          <td>错误处理 (REQ-TEST-007)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/test_moe_routing.rs</td>
+        </tr>
+        <tr>
+          <td>MoE 专项 (REQ-TEST-009)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/test_performance.rs</td>
+        </tr>
+        <tr>
+          <td>性能基准 (REQ-TEST-008)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/quantization_metadata.rs</td>
+        </tr>
+        <tr>
+          <td>量化格式 (REQ-TEST-006)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td>tests/test_backend_compat.rs</td>
+        </tr>
+        <tr>
+          <td>后端一致性 (REQ-TEST-010)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 架构约束 (REQ-ARCH)</h3>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>零拷贝推理</td>
+        </tr>
+        <tr>
+          <td>推理过程中 GPU 数据不回传 CPU</td>
+        </tr>
+        <tr>
+          <td>符合 ARCH-GPU-001</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>单一后端原则</td>
+        </tr>
+        <tr>
+          <td>全程在单一后端执行</td>
+        </tr>
+        <tr>
+          <td>符合 ARCH-SINGLE-BACKEND</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>纯 Rust 依赖原则</td>
+        </tr>
+        <tr>
+          <td>禁止引入 </td>
+          <td>candle</td>
+          <td>、</td>
+          <td>tch</td>
+          <td> 等重量级深度学习框架依赖</td>
+        </tr>
+        <tr>
+          <td>1. Cargo.toml 中无 candle/tch</td>
+          <td>2. 仅使用 safetensors/half 等底层工具库，GGUF 解析器完全自研</td>
+          <td>3. 计算核心完全自研 (gllm-kernels)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-02-05) [commit: fc36508]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>KV Cache Scatter Kernel</td>
+        </tr>
+        <tr>
+          <td>GQA 多头 KV cache 写入通过 GPU scatter kernel 一次 launch 完成，禁止逐 token 逐 head 独立 DtoD</td>
+        </tr>
+        <tr>
+          <td>1. 新增 </td>
+          <td>OpKind::KvScatterWrite</td>
+          <td> + PTX/HIP/MSL codegen</td>
+          <td>2. grid=(num_kv_heads, seq_len), block=(head_dim)</td>
+          <td>3. MQA 单头保留 2 次 DtoD 快速路径</td>
+          <td>4. GQA 8heads×512seq: 1 次 kernel launch 替代 4096 次 DtoD</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-22) [commit: b432d26]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPU 权重常驻缓存</td>
+        </tr>
+        <tr>
+          <td>首次 forward 一次性上传所有层权重到 GPU，后续 step DtoD 复制</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>GpuWeightCache</td>
+          <td> 结构体持有 per-layer GPU buffer</td>
+          <td>2. 首次 forward: htod 上传 + 缓存 device_ptr</td>
+          <td>3. 后续 forward: DtoD 从缓存复制到 kernel input</td>
+          <td>4. 大模型 fallback: 可用显存不足时保持 htod 路径</td>
+          <td>5. Executor drop 释放所有 GPU buffer</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-22) [commit: b432d26]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Metal Prefill KV 直写</td>
+        </tr>
+        <tr>
+          <td>Metal prefill KV write 直接通过 shared memory 指针写入，消除中间 buffer</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>metal_write_kv_direct()</td>
+          <td> 直接 ptr::copy_nonoverlapping</td>
+          <td>2. 消除 dtoh→中间 Vec→htod 三步路径</td>
+          <td>3. 利用 Metal shared memory 特性（</td>
+          <td>[buffer contents]</td>
+          <td> CPU 可见）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-22) [commit: b432d26]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-ARCH-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>PagedKvView 三后端统一</td>
+        </tr>
+        <tr>
+          <td>Paged attention 支持 CUDA/HIP/Metal 三后端</td>
+        </tr>
+        <tr>
+          <td>1. HIP: </td>
+          <td>gpu_write_kv_cache_scatter_hip</td>
+          <td> + scatter kernel</td>
+          <td>2. Metal: </td>
+          <td>metal_write_kv_direct</td>
+          <td> (shared memory 直写)</td>
+          <td>3. 三后端共享 </td>
+          <td>build_gpu_paged_attention_graph</td>
+          <td>4. </td>
+          <td>GeneratorForwardConfig.paged_kv_page_table</td>
+          <td> 驱动三后端统一切换</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (2026-03-22) [commit: 6ec3dcd]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-观测与调度-req-obs" data-section="null">
+      <h3>观测与调度 (REQ-OBS)</h3>
+    </section>
+    <section data-req-api="POST /internal/observability/observe" id="req-obs-001" data-req="REQ-OBS-001" data-req-status="implemented" data-req-domain="obs" data-req-category="business" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-section="001" data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" <h4="">REQ-OBS-001: Epilogue 物理写入 (In-Place Logging)
+      <li>彻底废除 CPU 侧的 <code>BasicObserver::capture()</code> 异步轮询。</li>
+      <li>采用 GPU Kernel 尾部 (Epilogue) 的掩码计算直接通过 <code>STG</code> 指令写入 <code>KvPageHeader</code>。</li>
+      <li><code>kv_fragmentation</code> 和 <code>logits_entropy</code> 等指标由 GPU 自主物理内存覆盖，不进入 CPU 主内存通信。</li>
+      <li><strong>验收标准</strong>: 单步 GPU Kernel 执行完毕后，直接抽取 Device 内存对应 PageHeader 取得精确同步特征，零流切换。</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">Epilogue 物理写入实现正确</li>
+        <li id="2" data-criterion="2">AbsolutePolicy 强制约束生效</li>
+        <li id="3" data-criterion="3">跨步熔断零介入</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section id="test-obs-001" data-test="TEST-OBS-001" data-req-ref="REQ-OBS-001" data-test-categories="unit" <h3="">TEST-OBS-001: Epilogue物理写入测试<p>验证REQ-OBS-001相关功能正确性</p>
+      <div id="epilogue-物理写入实现正确" data-criterion="Epilogue 物理写入实现正确">Epilogue 物理写入实现正确</div>
+      <div id="absolutepolicy-强制约束生效" data-criterion="AbsolutePolicy 强制约束生效">AbsolutePolicy 强制约束生效</div>
+      <div id="跨步熔断零介入" data-criterion="跨步熔断零介入">跨步熔断零介入</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-req-api="POST /internal/observability/observe" id="req-obs-002" data-req="REQ-OBS-002" data-req-status="implemented" data-req-domain="obs" data-req-category="business" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-section="002" data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" <h4="">REQ-OBS-002: 单轨 AbsolutePolicy 强制约束
+      <li>剥夺原设计中由 CPU 切换精度模式的权力（移除 AccuracyFirst, Balanced, ThroughputFirst）。</li>
+      <li>系统由 QuantType 直接驱动 JIT 生成硬件原生内核，推理过程中无类型判断分支。</li>
+      <li>Scheduler 只能执行护栏级的吞吐保护 <code>AbsolutePolicy</code>，只改变 <code>admit_new_prefill</code> 等外围流水线压弹，绝不更改核心 <code>kernel_strategy</code>。</li>
+      <li><strong>验收标准</strong>: 核心系统中不存在 <code>kernel_strategy</code> 传参，任何批次的硬件执行路线拥有绝对的静态等价性。</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">Epilogue 物理写入实现正确</li>
+        <li id="2" data-criterion="2">AbsolutePolicy 强制约束生效</li>
+        <li id="3" data-criterion="3">跨步熔断零介入</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section id="test-obs-002" data-test="TEST-OBS-002" data-req-ref="REQ-OBS-002" data-test-categories="unit" <h3="">TEST-OBS-002: Epilogue物理写入测试<p>验证REQ-OBS-002相关功能正确性</p>
+      <div id="epilogue-物理写入实现正确" data-criterion="Epilogue 物理写入实现正确">Epilogue 物理写入实现正确</div>
+      <div id="absolutepolicy-强制约束生效" data-criterion="AbsolutePolicy 强制约束生效">AbsolutePolicy 强制约束生效</div>
+      <div id="跨步熔断零介入" data-criterion="跨步熔断零介入">跨步熔断零介入</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-req-api="POST /internal/observability/observe" id="req-obs-003" data-req="REQ-OBS-003" data-req-status="implemented" data-req-domain="obs" data-req-category="business" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-section="003" data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" <h4="">REQ-OBS-003: 跨步熔断零介入
+      <li>移除所有基于 CPU 延时反馈的“热切换（set_policy）”。</li>
+      <li>Kernel 内部依靠硬编码门控实现条件跳过（Ragged Tensor Compaction）。</li>
+      <li><strong>验收标准</strong>: OOM 或 Veto 直接由硬件指令流阻断（Trap），交由崩溃链或 GC 兜底。</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">Epilogue 物理写入实现正确</li>
+        <li id="2" data-criterion="2">AbsolutePolicy 强制约束生效</li>
+        <li id="3" data-criterion="3">跨步熔断零介入</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section id="test-obs-003" data-test="TEST-OBS-003" data-req-ref="REQ-OBS-003" data-test-categories="unit" <h3="">TEST-OBS-003: Epilogue物理写入测试<p>验证REQ-OBS-003相关功能正确性</p>
+      <div id="epilogue-物理写入实现正确" data-criterion="Epilogue 物理写入实现正确">Epilogue 物理写入实现正确</div>
+      <div id="absolutepolicy-强制约束生效" data-criterion="AbsolutePolicy 强制约束生效">AbsolutePolicy 强制约束生效</div>
+      <div id="跨步熔断零介入" data-criterion="跨步熔断零介入">跨步熔断零介入</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s-kv-cache-持久化-req-kv" data-section="null">
+      <h3>KV Cache 持久化 (REQ-KV)</h3>
+    </section>
+    <section data-req-api="POST /internal/kv_cache/manage" id="req-kv-001" data-req="REQ-KV-001" data-req-status="implemented" data-req-domain="kv" data-req-category="business" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER" data-section="005" data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGE-TABLE ENT-PAGED-SCHEDULER" <h4="">REQ-KV-001: KV Cache 增量持久化
+      <li><code>update_kv_cache()</code> 必须将 JIT 计算的 K/V 值写入 cache buffer</li>
+      <li>增量 decode 复用已缓存的 K/V，不重新计算</li>
+      <li><strong>验收标准</strong>: 多步 decode 中 KV cache buffer 包含正确的 K/V 数据</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table" ENT-PAGE-TABLE<="" a="">
+      
+      
+      
+      
+      </a></div>
+    </section>
+    <section id="test-kv-001" data-test="TEST-KV-001" data-req-ref="REQ-KV-001" data-test-categories="unit" <h3="">TEST-KV-001: KV Cache智能优化测试<p>验证REQ-KV-001相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s-错误处理-req-err" data-section="null">
+      <h3>错误处理 (REQ-ERR)</h3>
+    </section>
+    <section data-req-api="POST /internal/error/handle" id="req-err-001" data-req="REQ-ERR-001" data-req-status="implemented" data-req-domain="err" data-req-category="business" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-section="001" data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" <h4="">REQ-ERR-001: 消除静默失败
+      <li>所有 <code>let _ = memory_manager.*</code> 替换为 <code>?</code> 传播或 <code>log::warn!</code></li>
+      <li>所有 <code>Err(_)</code> 替换为具体错误匹配</li>
+      <li>所有 <code>unwrap_or(default)</code> 替换为 <code>?</code> 或显式错误处理</li>
+      <li>所有生产代码 <code>expect()</code> 替换为 <code>Result</code> 返回</li>
+      <li><strong>验收标准</strong>: <code>grep -rn "let _ =" src/ | grep -v test</code> 返回 0 匹配；<code>grep -rn "Err(_)" src/ | grep -v test</code> 返回 0 匹配</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">错误处理语义正确</li>
+        <li id="2" data-criterion="2">错误码覆盖所有失败场景</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      </div>
+    </section>
+    <section id="test-err-001" data-test="TEST-ERR-001" data-req-ref="REQ-ERR-001" data-test-categories="unit" <h3="">TEST-ERR-001: 错误处理语义测试<p>验证REQ-ERR-001相关功能正确性</p>
+      <div id="错误处理语义正确" data-criterion="错误处理语义正确">错误处理语义正确</div>
+      <div id="错误码覆盖所有失败场景" data-criterion="错误码覆盖所有失败场景">错误码覆盖所有失败场景</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-req-api="POST /internal/error/handle" id="req-err-002" data-req="REQ-ERR-002" data-req-status="implemented" data-req-domain="err" data-req-category="business" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-section="002" data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" <h4="">REQ-ERR-002: OOM Halt 截断 (ARCH-ZERO-FALLBACK)
+      <li>物理显存分配失败时必须 <code>log::error!</code> 记录 <code>OOM Halt triggered</code></li>
+      <li>系统必须当场返回架构级硬件越界错误，坚决禁止退回到 CPU</li>
+      <li><strong>验收标准</strong>: OOM 时直接导致全进程/线程 Halt 并暴露 OOM 异常对象，无任何降级发生</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">错误处理语义正确</li>
+        <li id="2" data-criterion="2">错误码覆盖所有失败场景</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      </div>
+    </section>
+    <section id="test-err-002" data-test="TEST-ERR-002" data-req-ref="REQ-ERR-002" data-test-categories="unit" <h3="">TEST-ERR-002: 错误处理语义测试<p>验证REQ-ERR-002相关功能正确性</p>
+      <div id="错误处理语义正确" data-criterion="错误处理语义正确">错误处理语义正确</div>
+      <div id="错误码覆盖所有失败场景" data-criterion="错误码覆盖所有失败场景">错误码覆盖所有失败场景</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-req-api="POST /internal/error/handle" id="req-err-003" data-req="REQ-ERR-003" data-req-status="implemented" data-req-domain="err" data-req-category="business" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-section="003" data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" <h4="">REQ-ERR-003: Backend Detection 错误传播
+      <li><code>detection.rs</code> 的 <code>expect()</code> 替换为 <code>Result</code> 返回</li>
+      <li>探测失败返回 <code>Err(BackendContextError)</code>，不 panic</li>
+      <li><strong>验收标准</strong>: 后端探测失败时返回 Err 而非 panic</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">错误处理语义正确</li>
+        <li id="2" data-criterion="2">错误码覆盖所有失败场景</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      </div>
+    </section>
+    <section id="test-err-003" data-test="TEST-ERR-003" data-req-ref="REQ-ERR-003" data-test-categories="unit" <h3="">TEST-ERR-003: 错误处理语义测试<p>验证REQ-ERR-003相关功能正确性</p>
+      <div id="错误处理语义正确" data-criterion="错误处理语义正确">错误处理语义正确</div>
+      <div id="错误码覆盖所有失败场景" data-criterion="错误码覆盖所有失败场景">错误码覆盖所有失败场景</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s-gllm-kernels-侧需求-req-kernels" data-section="null">
+      <h3>gllm-kernels 侧需求 (REQ-KERNELS)</h3>
+      <p>&gt; <strong>仓库</strong>: <code>/home/putao/code/rust/gllm-kernels/</code></p>
+      <p>&gt; <strong>关联</strong>: 以下需求在 gllm-kernels 仓库实现，gllm 侧仅记录需求定义和验收标准</p>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 IQ Codebook 与 TurboQuant 映射 (REQ-KERNELS-IQ)</h4>
+      <p>&gt; <strong>架构定义</strong>: 所有 IQ 权重的解码均内联静态化至 Mega-Kernel 的整型/定点逻辑中。所有 <code>dequant</code> 操作均视为零开销的指令级特征投影，运行时全图保持静态定点状态。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ1_S 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 </td>
+          <td>IQ1S_GRID</td>
+          <td>（2048×u64 E8-lattice）实现纯整型查表，禁止升格 f32</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=50, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ1_M 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 </td>
+          <td>IQ1S_GRID</td>
+          <td> 内联定点乘法，禁止运行时解包 f32 浮点</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=56, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ2_XXS 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 D4-lattice codebook（256×u64）</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=66, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ2_XS 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 </td>
+          <td>KSIGNS_IQ2XS</td>
+          <td>/</td>
+          <td>KMASK_IQ2XS</td>
+          <td> + D4-lattice</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=74, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ2_S 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 D4-lattice（1024×u64）</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=82, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ3_XXS 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 D4-lattice（256×u32）</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=98, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ3_S 静态映射</td>
+        </tr>
+        <tr>
+          <td>使用 D4-lattice（512×u32）</td>
+        </tr>
+        <tr>
+          <td>1. 寄存器内保持量化定点态</td>
+          <td>2. block_bytes=110, QK_K=256</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-IQ-008</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>IQ matmul TurboQuant 集成</td>
+        </tr>
+        <tr>
+          <td>iq_matmul()</td>
+          <td> 结合 VNNI/SVE2 指令做直接微字节整数乘加</td>
+        </tr>
+        <tr>
+          <td>1. 禁止 </td>
+          <td>dequant→f32</td>
+          <td> 路径</td>
+          <td>2. 定点产出结果</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 GPU TileLevelFusion / ComputeRoot (REQ-KERNELS-GPU)</h4>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-GPU-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPU TileLevelFusion</td>
+        </tr>
+        <tr>
+          <td>plan_emitter.rs</td>
+          <td> 支持 </td>
+          <td>FusionMode::TileLevelFusion</td>
+          <td>，使用 shared memory 替代 CPU L1 tiling</td>
+        </tr>
+        <tr>
+          <td>1. PTX/HIP/MSL codegen 不再返回 error</td>
+          <td>2. shared memory 分配 = </td>
+          <td>tile_rows × k × byte_width</td>
+          <td>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取</td>
+          <td>4. 与 CPU TileLevelFusion 数值一致（容差 &lt; 1e-5）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (HIP/PTX/MSL 三后端)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-GPU-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPU ComputeRoot</td>
+        </tr>
+        <tr>
+          <td>plan_emitter.rs</td>
+          <td> 支持 </td>
+          <td>FusionMode::ComputeRoot</td>
+          <td>，全量 Norm 输出写入 shared/global memory 后执行 GEMM</td>
+        </tr>
+        <tr>
+          <td>1. PTX/HIP/MSL codegen 不再返回 error</td>
+          <td>2. Norm 全量输出缓冲区分配正确</td>
+          <td>3. 与 CPU ComputeRoot 数值一致（容差 &lt; 1e-5）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 (HIP/PTX/MSL 三后端)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-GPU-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPU 融合模式决策复用</td>
+        </tr>
+        <tr>
+          <td>GPU codegen 复用 </td>
+          <td>detect_tile_vs_compute_root()</td>
+          <td> 的 75% L1 阈值决策逻辑，GPU 侧用 shared memory 容量替代 L1</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>DeviceProfile</td>
+          <td> 提供 </td>
+          <td>shared_memory_per_block()</td>
+          <td> 方法</td>
+          <td>2. 阈值决策对 GPU 使用 shared memory 容量而非 L1 cache</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 PTX 算法多版本支持 (REQ-KERNELS-PTX-MULTIVER)</h4>
+      <p>&gt; <strong>核心理念</strong>: 同一算法（如 FlashAttention）可维护多个 PTX 实现版本，每个版本针对特定 SM 架构深度优化。运行时通过 JIT 全链路根据 GPU compute capability 动态选择最优内核，<strong>禁止 Fallback</strong>——不支持的 SM 版本必须明确报错。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-PTX-MV-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>PTX 内核版本注册表</td>
+        </tr>
+        <tr>
+          <td>PtxKernelRegistry</td>
+          <td> 支持同一算法注册多个 SM 版本特化实现，每个实现声明 </td>
+          <td>SmRange { min_sm, max_sm }</td>
+        </tr>
+        <tr>
+          <td>1. 注册表支持 </td>
+          <td>register(algorithm, sm_range, emitter_fn)</td>
+          <td> 注册</td>
+          <td>2. 同一算法可注册多个不重叠的 SM 范围</td>
+          <td>3. SM 范围重叠时编译期/注册期报错</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-PTX-MV-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SM 版本检测与验证</td>
+        </tr>
+        <tr>
+          <td>启动时通过 CUDA Driver API 检测 GPU compute capability，与注册表匹配</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>CudaDevice</td>
+          <td> 已有 </td>
+          <td>sm_version</td>
+          <td> 字段（现有）</td>
+          <td>2. </td>
+          <td>PtxKernelRegistry::select()</td>
+          <td> 返回精确匹配的实现或 </td>
+          <td>Err</td>
+          <td>3. 无匹配时返回 </td>
+          <td>Err("SM {ver} not supported for {algorithm}, requires SM {ranges}")</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-PTX-MV-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>禁止 Fallback 机制</td>
+        </tr>
+        <tr>
+          <td>不支持的 SM 版本必须返回明确错误，禁止降级到次优实现</td>
+        </tr>
+        <tr>
+          <td>1. 无 </td>
+          <td>_ =&gt; fallback()</td>
+          <td> 分支</td>
+          <td>2. 无 </td>
+          <td>default</td>
+          <td> 实现</td>
+          <td>3. 错误信息包含当前 SM 版本和所有已注册的 SM 范围</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-PTX-MV-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FlashAttention 多版本实现</td>
+        </tr>
+        <tr>
+          <td>以 FlashAttention 为首个案例，注册 4 个 SM 版本特化内核</td>
+        </tr>
+        <tr>
+          <td>1. FA-v1 (sm_70-79): wmma tiled attention</td>
+          <td>2. FA-v2 (sm_80-89): mma.sync + cp.async + Split-Q</td>
+          <td>3. FA-v3 (sm_90-99): TMA + WGMMA + warp specialization</td>
+          <td>4. FA-v4 (sm_100+): TMEM + tcgen05.mma + 2-CTA cooperative</td>
+          <td>5. 每个版本独立 codegen 函数，走完整 JIT 管线</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-KERNELS-PTX-MV-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>JIT 全链路集成</td>
+        </tr>
+        <tr>
+          <td>多版本内核选择集成到现有 JIT 编译管线（Phase 3 ISA Lowering）</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>PtxDialect::emit_gemm_kernel</td>
+          <td> 中 CachedGQA/FlashV2 分支查询注册表</td>
+          <td>2. 选择结果传递到 </td>
+          <td>kernel_builder</td>
+          <td> 层</td>
+          <td>3. 生成的 PTX 代码包含正确的 </td>
+          <td>.target sm_XX</td>
+          <td> 和对应指令集</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>8.4 深度算子融合 (REQ-FUSION-DEEP)</h4>
+      <p>&gt; <strong>核心理念</strong>: 突破当前 2-5 ops 的融合深度限制，实现 8-16 ops 的深度融合。消除三大瓶颈：单输出 ABI、Opaque Op 黑洞、跨层融合缺失。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-FUSION-DEEP-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>多输出 ABI</td>
+        </tr>
+        <tr>
+          <td>CompilerGraph</td>
+          <td> 支持单个 op 产生多个输出张量，codegen 层支持多输出 kernel</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>CompilerOp.outputs: Vec&lt;TensorId&gt;</td>
+          <td> 已支持多输出（现有）</td>
+          <td>2. JIT ABI 扩展：output 指针数组替代单指针</td>
+          <td>3. MoE pre-attention (Q/K/V) 可融合为单 kernel</td>
+          <td>4. 编译次数从 3× 降为 1×</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-FUSION-DEEP-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Attention 可融合化</td>
+        </tr>
+        <tr>
+          <td>将 MHA/CachedGQA 从 Opaque 降级为可融合的复合 Op，允许前驱/后继融合</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>OpSemantics::Attention</td>
+          <td> 新分类（非 Opaque）</td>
+          <td>2. RmsNorm → Q/K/V GEMM → RoPE → Attention 可融合为单 kernel (6 ops)</td>
+          <td>3. Attention → O GEMM → Residual Add 可融合为单 kernel (3 ops)</td>
+          <td>4. 融合后消除 4 次中间张量写回</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-FUSION-DEEP-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>深度 Epilogue 链</td>
+        </tr>
+        <tr>
+          <td>EpilogueInjection 支持 ≤8 ops 的 epilogue 链（当前 ≤4）</td>
+        </tr>
+        <tr>
+          <td>1. AVX2: 通过寄存器溢出到栈扩展 epilogue 容量</td>
+          <td>2. AVX-512: 利用 32 个 zmm 寄存器支持 8 ops 无溢出</td>
+          <td>3. GEMM + Bias + SiLU + Mul + Add + RmsNorm 6-op epilogue 可融合</td>
+          <td>4. 融合 cost model 更新：考虑溢出代价 vs 内存流量节省</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-FUSION-DEEP-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FFN 全融合</td>
+        </tr>
+        <tr>
+          <td>SwiGLU FFN 的 Gate/Up/Down 三个 GEMM + 激活融合为单 kernel</td>
+        </tr>
+        <tr>
+          <td>1. Gate GEMM + Up GEMM 共享输入 → QkvSharedInput 模式复用</td>
+          <td>2. SiLU(Gate) × Up → Down GEMM 的 epilogue 链</td>
+          <td>3. 整个 FFN 从 5 个独立 kernel 降为 1-2 个融合 kernel</td>
+          <td>4. 消除 Gate/Up 中间张量写回（2 × hidden × inter × 4 bytes）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-FUSION-DEEP-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>融合规则引擎</td>
+        </tr>
+        <tr>
+          <td>可扩展的融合规则系统，支持声明式模式匹配 + 硬件感知决策</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>FusionRule</td>
+          <td> trait: </td>
+          <td>fn matches(subgraph) -&gt; Option&lt;FusionPlan&gt;</td>
+          <td>2. 内置规则: NormGemm / GemmEpilogue / QkvShared / AttentionBlock / FFNBlock</td>
+          <td>3. 规则优先级排序（深度融合优先于浅融合）</td>
+          <td>4. 硬件感知: 规则可查询 DeviceProfile 决定融合深度</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-FUSION-DEEP-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>跨层残差融合</td>
+        </tr>
+        <tr>
+          <td>Decoder layer 的残差 Add 与下一层的 RmsNorm 融合</td>
+        </tr>
+        <tr>
+          <td>1. Layer N 的 </td>
+          <td>residual_add</td>
+          <td> + Layer N+1 的 </td>
+          <td>RmsNorm</td>
+          <td> 融合为单 kernel</td>
+          <td>2. 消除层间中间张量写回（seq_len × hidden × 4 bytes）</td>
+          <td>3. Mega-Kernel 全层融合图构建支持跨层边</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.5" data-section="8.5">
+      <h4>8.5 JIT 图执行通用化 (REQ-JIT-GRAPH)</h4>
+      <p>&gt; <strong>背景</strong>: 当前存在两个相互关联的问题：(1) <code>CompilerGraph</code> shape 在构建时硬编码为具体数值，<code>total_seq</code> 每步 +1 导致 CachedGQA 图每步重编译；(2) auto_graph 与实际执行路径断层，每新增模型都需手写分支。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-GRAPH-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>JIT 图 Symbolic Shape 支持</td>
+        </tr>
+        <tr>
+          <td>CompilerGraph</td>
+          <td> 支持 symbolic 维度，运行时传入具体值，避免 shape 变化时重编译</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>CompilerGraph</td>
+          <td> 支持 </td>
+          <td>SymDim</td>
+          <td>（符号维度），可声明 </td>
+          <td>Concrete(usize)</td>
+          <td> 或 </td>
+          <td>Symbolic(String)</td>
+          <td>2. </td>
+          <td>total_seq</td>
+          <td>、</td>
+          <td>batch_size</td>
+          <td> 等动态维度必须声明为 </td>
+          <td>SymDim::Symbolic</td>
+          <td>3. 编译一次，运行时通过 shape binding 传入具体值</td>
+          <td>4. CachedGQA 图不再每 decode step 重编译</td>
+          <td>5. 禁止在图构建时将动态维度硬编码为具体数值</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.6" data-section="8.6">
+      <h4>8.6 JIT 编译缓存 (REQ-JIT-CACHE)</h4>
+      <p>&gt; <strong>SSOT</strong>: <a data-xref-type="section" data-xref-id="" href="./DOCS/scheduling/jit-cache-protocol.html" SPEC="" DOCS="" scheduling="" jit-cache-protocol.md<="" a=""></a></p>
+      <p>&gt; <strong>⚠️ 2026-03-27 架构演进</strong>: 原始 REQ-JIT-CACHE-001~003（基于 <code>DecodeCachedJit</code> 函数栈 + <code>GraphKey{QRope|Norm2, seq_len}</code> 算子级缓存）已被推翻，由 REQ-JIT-CACHE-001~007 全面替代。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-CACHE-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>全核心态级预编译</td>
+        </tr>
+        <tr>
+          <td>所有算子必须在模型加载阶段完成全网计算图预编译</td>
+        </tr>
+        <tr>
+          <td>1. 禁用独立算子的 JIT 缓存支持</td>
+          <td>2. </td>
+          <td>MegaKernelExecutor</td>
+          <td> 为唯一的编译和执行入口</td>
+          <td>3. 推理热路径中无任何单层或单算子重编译</td>
+        </tr>
+        <tr>
+          <td>🟢 已设定</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-CACHE-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>CPU/GPU 算子与流程统一</td>
+        </tr>
+        <tr>
+          <td>CPU 后端与 GPU 后端的图执行行为必须 100% 对齐</td>
+        </tr>
+        <tr>
+          <td>1. 消除 CPU 特有算子节点分支</td>
+          <td>2. 共同使用 </td>
+          <td>OpKind</td>
+          <td> 泛型拓扑与符号化绑定绑定(</td>
+          <td>SymDim</td>
+          <td>)</td>
+          <td>3. 完全消除 </td>
+          <td>GraphType</td>
+          <td> 的概念</td>
+        </tr>
+        <tr>
+          <td>🟢 已设定</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-CACHE-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>磁盘级持久化重构</td>
+        </tr>
+        <tr>
+          <td>依据版本信息缓存整图的二进制编译形态</td>
+        </tr>
+        <tr>
+          <td>1. L3 保存全模二进制 Kernel (以 Hash 为签名)</td>
+          <td>2. 跳过应用级调度管线编译</td>
+          <td>3. </td>
+          <td>Fallback</td>
+          <td> 防护机制健壮</td>
+        </tr>
+        <tr>
+          <td>🟢 已设定</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-CACHE-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>热路径零编译</td>
+        </tr>
+        <tr>
+          <td>推理 Decode Step 层循环中严禁用例</td>
+        </tr>
+        <tr>
+          <td>compile()</td>
+          <td> 调用频次必须恒为 0（推理热路径中不得编译，SPEC/39）</td>
+        </tr>
+        <tr>
+          <td>🟢 已设定</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-CACHE-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SymDim::Symbolic 动态绑定</td>
+        </tr>
+        <tr>
+          <td>SeqLen 通过 ShapeBinding 运行时绑定</td>
+        </tr>
+        <tr>
+          <td>1. 结合 JIT 的 变量发射寄存器 (Param Registers) 不触发内核重编译</td>
+          <td>2. 直接于执行队列替换 </td>
+          <td>total_seq_len</td>
+        </tr>
+        <tr>
+          <td>🟢 已设定</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-CACHE-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>零层级执行器</td>
+        </tr>
+        <tr>
+          <td>彻底废除按 Layer、按 Attention/FFN 进行调度的入口</td>
+        </tr>
+        <tr>
+          <td>ModelJitCache</td>
+          <td>、</td>
+          <td>FusedAttentionLayer</td>
+          <td> 这类概念不得出现任何一行存留</td>
+        </tr>
+        <tr>
+          <td>🟢 已设定</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 终极硬件与通信墙拓扑感知 (REQ-TOPOLOGY)</h3>
+      <p>&gt; <strong>核心理念</strong>: JIT 编译器不仅侦测单一算核，必须将硅晶体系至网络网卡的全部环境常数化，化为 IR 极化限制边界。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-HARDWARE-SENSORS</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>全世代指令核探测</td>
+        </tr>
+        <tr>
+          <td>涵盖 CPU/GPU 最新前沿硅晶操作集的硬指标识别</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>x86</td>
+          <td>: </td>
+          <td>AVX-512</td>
+          <td> (VNNI, BF16, VP2INTERSECT), </td>
+          <td>AVX10.1/10.2</td>
+          <td> (识别 P/E 混合锁定 256-bit Converged), </td>
+          <td>AMX</td>
+          <td>, </td>
+          <td>APX</td>
+          <td> (31 GPR 全量利用)。</td>
+          <td>2. </td>
+          <td>ARM</td>
+          <td>: </td>
+          <td>SVE2</td>
+          <td>, </td>
+          <td>SME/SME2</td>
+          <td> (</td>
+          <td>ZA_Array</td>
+          <td>)。</td>
+          <td>3. </td>
+          <td>NVIDIA GPU</td>
+          <td>: Hopper SM90 (</td>
+          <td>TMA</td>
+          <td>, </td>
+          <td>WGMMA</td>
+          <td>, </td>
+          <td>cuda::barrier</td>
+          <td>, </td>
+          <td>L2 mcast</td>
+          <td>), Blackwell SM100 (</td>
+          <td>FP4/FP6 Native Tension</td>
+          <td>, </td>
+          <td>Block Scale</td>
+          <td>)。</td>
+          <td>4. </td>
+          <td>AMD GPU</td>
+          <td>: CDNA3 (</td>
+          <td>WMMA</td>
+          <td>, XCD/GCD 拓扑屏障)</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COMM-SENSORS</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>跨域通信墙侦测</td>
+        </tr>
+        <tr>
+          <td>识别系统级别的异步传输障碍及延迟</td>
+        </tr>
+        <tr>
+          <td>1. 探明跨 NUMA 核心及缓存 (L1/L2/L3/TLB) 深度，生成 </td>
+          <td>Core Pinning</td>
+          <td> 强约束。</td>
+          <td>2. 识别主板 PCIe P2P 与 NVLink/XGMI 跳板限制。</td>
+          <td>3. 探测网卡 </td>
+          <td>RoCE v2/InfiniBand</td>
+          <td> 大吞吐 DMA 单向 </td>
+          <td>RDMA_Latency</td>
+          <td>。</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-LOAD-TIME-MATH</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>全格式权重加载 + TurboQuant 运行时优化</td>
+        </tr>
+        <tr>
+          <td>gllm 加载 SafeTensors/GGUF/ONNX 全格式权重，推理过程中执行 TurboQuant 数学精度优化</td>
+        </tr>
+        <tr>
+          <td>1. 加载任意格式权重文件（解包、内存布局重排、元数据提取）。</td>
+          <td>2. QuantType 直接驱动 JIT 生成硬件原生内核。</td>
+          <td>3. 前向传播中执行 3 个在线 FWHT 旋转（内联 Mega-Kernel Epilogue）。</td>
+          <td>4. KV Cache 非对称量化（K per-channel, V per-token）+ RaBitQ 无偏修正。</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. AI 大一统运行时图策略 (REQ-UNIFIED-JIT)</h3>
+      <p>&gt; <strong>极化机制</strong>: "纯 Rust，无软路由退避 (No Fallback)，异构块级调度与热覆写"。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AI-DEV-GUIDELINES</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Gllm 零妥协禁忌</td>
+        </tr>
+        <tr>
+          <td>所有开发者/Agent 触犯核心规则直接算架构违章</td>
+        </tr>
+        <tr>
+          <td>1. 绝对纯 Rust 环境，0 FFI Python 调用。</td>
+          <td>2. 核心发生兼容性不足，必须 </td>
+          <td>Result::Err</td>
+          <td> 中断！</td>
+          <td>3. </td>
+          <td>禁止静默降级到无能的 F32 标量（Silent Scalar Fallback）</td>
+          <td>。</td>
+          <td>4. 基于纯硬件掩码流出（Ragged Compaction / Predicated bitmask）。</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-DYNA-BLOCK-GRAPHS</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>基于物理资源的动态专门计算图</td>
+        </tr>
+        <tr>
+          <td>不采用一图到底，而是根据侦探到的通信/指令墙，派发专属化子图</td>
+        </tr>
+        <tr>
+          <td>1. JIT 将稠密态、极度稀疏态、残差早期剥离（Early-Exit）分类，为每个特化分支编译不同性能上限的子图。</td>
+          <td>2. 运行期由 </td>
+          <td>Request_State_Table</td>
+          <td> 动态下发至 SM 的特定 Thread Block 或指定大小 CPU 核丛。</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-JIT-HOT-REPAIR</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>运行时原子热修补 (Hot JMP Patching / DCE)</td>
+        </tr>
+        <tr>
+          <td>处理不可逆冷专家或无际长前缀静滞期</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>JIT Director Daemon</td>
+          <td> 观察大批量的确定稳态池。</td>
+          <td>2. 在无停机、无断点环境下发起 5-bytes 的原子硬件 </td>
+          <td>.text</td>
+          <td> 覆盖。</td>
+          <td>3. </td>
+          <td>jmp</td>
+          <td>/</td>
+          <td>NOP</td>
+          <td> 滑块消除分发指令开销，瞬间重连/坍缩全系统网络图（De-optimization Bailout / Uncommon Traps）。</td>
+        </tr>
+        <tr>
+          <td>🟢 架构约束生效</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>11. 全局性能验收水准 (REQ-NEXT-GEN-METRICS)</h3>
+      <p>&gt; <strong>来源</strong>: 会话 6e743114 implementation_plan.md §6</p>
+      <p>&gt; <strong>核心法则</strong>: 架构设计必须有明确、可量化的高目标索引，而非 "best effort"。</p>
+      <table>
+        <tr>
+          <th>硬件级别</th>
+        </tr>
+        <tr>
+          <td>验收指标</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>老卡 (1080Ti / P4 级)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>通过 TurboQuant 6x KV 压缩 + DTOD 同步削减，</td>
+          <td>强行</td>
+          <td>运行原本无法承载的 128K 动态请求，性能无明显崩盘</td>
+        </tr>
+        <tr>
+          <td>验证极端精度压缩下的可用性与通用性</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>当代旗舰 (H100 / AMX)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>利用 Gate-First 跳过和残差旁路削去 </td>
+          <td>~50%</td>
+          <td> 浮点算力需求；利用 TMA 预取消除长 Context 访存延迟</td>
+        </tr>
+        <tr>
+          <td>极限算力释放</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>总吞吐</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>冲击现存开源方案 (vLLM/TGI) 的 </td>
+          <td>2.5×+</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>同硬件同精度下 End-to-End throughput</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tail Latency (P99)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>&lt; 50ms (混合负载)</td>
+        </tr>
+        <tr>
+          <td>Chunked Prefill 交织调度保障</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>GPU 利用率方差</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>&lt; 15%</td>
+        </tr>
+        <tr>
+          <td>消除 Memory Bound / Compute Bound 切换抖动</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KV Cache 压缩比</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>≥ 4x vs FP16 (即 4-bit 主池)</td>
+        </tr>
+        <tr>
+          <td>TurboQuant + QJL 双轨极化</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>冷专家 Deopt 恢复延迟</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>&lt; 1ms (微冷冻)</td>
+        </tr>
+        <tr>
+          <td>Uncommon Trap / OSR Bailout</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12" data-section="12">
+      <h3>12. Semantic Gatekeeper 知识注入 (REQ-SG)</h3>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md</code></p>
+      <p>&gt; <strong>API 定义</strong>: <code>SPEC/04-API-DESIGN.md §7-§8</code></p>
+      <p>&gt; <strong>Callback 集成</strong>: <code>SPEC/05-OPTIMIZATIONS.md §2.9</code></p>
+      <p>&gt; <strong>执行器扩展</strong>: <code>SPEC/08-EXECUTOR.md §4.2.1</code></p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Level Keys 预计算</td>
+        </tr>
+        <tr>
+          <td>模型加载期通过小 CompilerGraph 预计算 3 个层级键向量（每个检测层）</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>LevelKeysCache</td>
+          <td> 对每个 </td>
+          <td>detection_depth × num_layers</td>
+          <td> 填充 3 个非全零 finite 向量；2. 向量维度 = </td>
+          <td>num_kv_heads × head_dim</td>
+          <td>；3. 小图通过 Mega-Kernel JIT 编译 / 运行（ARCH-FULL-JIT 合规）；4. 同一小图在 CPU/PTX/HIP/MSL 产出数值一致（容差 1e-4）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FusedAttentionLayer Q-Tap</td>
+        </tr>
+        <tr>
+          <td>检测层 </td>
+          <td>FusedAttentionLayer</td>
+          <td> 编译期注入 </td>
+          <td>q_tap</td>
+          <td>；JIT codegen 在 </td>
+          <td>q_proj</td>
+          <td> 尾段追加 STG 写 ring buffer</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>q_tap: None</td>
+          <td> 时零额外指令（cargo-asm diff 对比）；2. </td>
+          <td>q_tap: Some(...)</td>
+          <td> 时主计算结果与无 tap 版本一致（L2 误差 &lt; 1e-4）；3. Ring buffer 读出 Q 与 CPU 参考 </td>
+          <td>q_proj(hidden)[-1]</td>
+          <td> 一致；4. 双缓冲 atomic step_index 协议防陈旧读；5. 未拆融合 / 未引入后端特化 GraphType</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 — ring buffer 在 Executor::new() 预创建，sink_ptr/step_index_ptr 编入 JIT；SG 注册时复用同一 buffer [commit: gllm-kernels 777c3b52, gllm d6ec8c0]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>层级路由与门控</td>
+        </tr>
+        <tr>
+          <td>SemanticGatekeeperCallback.pre_node</td>
+          <td> 计算 cosine(Q, K_Lx) 路由；best_score &lt; τ 时返回 Continue</td>
+        </tr>
+        <tr>
+          <td>1. mock Provider 始终返回 None 时 hidden_state 保持不变（cosine 相似度 = 1.0）；2. best_score &lt; gate_threshold 触发 Continue 分支；3. argmax 正确映射到 SemanticLevel::L1/L2/L3</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>稳定性追踪与 ActiveState 刷新</td>
+        </tr>
+        <tr>
+          <td>hidden 相似度 &gt; stability_threshold &amp;&amp; AST 节点未变时复用 </td>
+          <td>v_knowledge</td>
+          <td>；否则 FullCompute；AST 节点变更强制刷新</td>
+        </tr>
+        <tr>
+          <td>1. 连续 20 步相同语义上下文，ActiveState 复用次数 ≥ 15（≥75%）；2. AST node_kind 变更时 FullCompute 在下一个检测层触发；3. </td>
+          <td>reset_gatekeeper_state()</td>
+          <td> 清空 ActiveState 但保留 LevelKeysCache；4. 跨请求边界自动刷新</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>残差相加注入（零 API 扩展）</td>
+        </tr>
+        <tr>
+          <td>Callback 内部计算 </td>
+          <td>h_new_last = h_last + α × confidence × v_knowledge</td>
+          <td>，通过现有 </td>
+          <td>CallbackAction::InjectHidden</td>
+          <td> 返回</td>
+        </tr>
+        <tr>
+          <td>1. 不修改 </td>
+          <td>CallbackAction</td>
+          <td> 枚举；2. 不修改 </td>
+          <td>LayerCallback</td>
+          <td> trait 签名；3. Provider 返回 confidence=0.0 时 hidden 未变；4. confidence=1.0 + α=0.15 时 hidden 最后 token 数值符合公式（逐元素误差 &lt; 1e-6）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>KnowledgeProvider + AstSentinel 契约</td>
+        </tr>
+        <tr>
+          <td>用户实现 trait，SG 内核 trait-object 调度；Provider 失败返回 None 时 SG 降级为 Continue</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>KnowledgeProvider::retrieve</td>
+          <td> 返回 None 时 SG Continue；2. AstSentinel 返回 None 时 SG 仅凭 hidden 锚点做稳定性判断；3. trait 签名严格匹配 </td>
+          <td>SPEC/04-API-DESIGN.md §7.3-§7.4</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>部署形态透明</td>
+        </tr>
+        <tr>
+          <td>SG 对 KnowledgeProvider 的本地 / 远程实现形态无感</td>
+        </tr>
+        <tr>
+          <td>1. 同一 SG Callback 在本地 LSH Provider 和 HTTP Provider 下行为一致；2. Provider 延迟 0ms 与 500ms 场景下 SG 核心行为（路由、稳定性、注入）等价（仅端到端延迟差异）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-SG-008</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>E2E 行为差异验证</td>
+        </tr>
+        <tr>
+          <td>注册 SG 后 mega-kernel callback table 路径端到端接通：JIT NativeCall → C ABI callback → vtable dispatch → KnowledgeProvider.retrieve() → TextEncoder.encode("Paris") → SgSharedMemory → SgInject (hidden += confidence × knowledge_vector)</td>
+        </tr>
+        <tr>
+          <td>1. ✅ </td>
+          <td>FixedTextProvider("Paris")</td>
+          <td> → </td>
+          <td>retrieve()</td>
+          <td> 被 callback 调用 240 次 (NO_ISLAND_MODULE); 2. ✅ SG-on 输出与 baseline 不同 (</td>
+          <td>diff=true</td>
+          <td>) — SgInject 读取正确 SgSharedMemory 偏移 (confidence+12, knowledge_vector+16+hidden*4); 3. ✅ StackAlign + YMM save/restore + CLD 使嵌套调用 (tokenizer, JIT) 安全</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: gllm-kernels 75d2f3c8, gllm bed5660]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12.1" data-section="12.1">
+      <h4>12.1 测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_semantic_gatekeeper.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-SG-001~008 端到端（TEST-SG-001~008 见 </td>
+          <td>SPEC/SEMANTIC-GATEKEEPER.md §8.2</td>
+          <td>）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [8 tests: test_sg_001~008]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12.2" data-section="12.2">
+      <h4>12.2 实现路径（Destroy-Rebuild 铁律）</h4>
+      <li>旧 <code>src/knowledge.rs</code> + <code>src/compat/knowledge_injector.rs</code> 的 <code>InjectionKind::FrozenKvChunk / LateFusionVector / DynamicLoRA</code> 与 <code>LayerTarget::ShallowSyntax / MidSemantic / DeepLogic</code> 全部物理删除（<a href="http://CLAUDE.md">CLAUDE.md</a> §6 铁律2 禁止渐进式开发）</li>
+      <li><code>Client::inject_knowledge(source, target)</code> 旧签名整体替换为 <code>Client::register_semantic_gatekeeper(config)</code></li>
+      <li>新增 <code>src/semantic_gatekeeper/</code> 模块（<code>level_keys.rs</code> / <code>small_graph.rs</code> / <code>callback.rs</code> / <code>ring_buffer.rs</code> / <code>active_state.rs</code>）</li>
+      <li>gllm-kernels 侧 <code>FusedAttentionLayerConfig</code> 扩展 <code>q_tap: Option&lt;QTapConfig&gt;</code>，Phase 3 codegen 扩展 Q-tap STG 指令生成（x86_64 / AArch64 / PTX / HIP / MSL 全后端）</li>
+    </section>
+    <section id="s13" data-section="13">
+      <h3>13. Head Routing SDK (REQ-HR)</h3>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/HEAD-ROUTING.md</code></p>
+      <p>&gt; <strong>API 定义</strong>: <code>SPEC/04-API-DESIGN.md §3.8</code></p>
+      <p>&gt; <strong>定位</strong>: 同一 generator LLM 加载后,通过 Client API 运行时切换输出头形态 (generate / classify_binary / classify_multiway / encode_to_layer),<strong>不重新加载模型权重、不重新 JIT 编译</strong>。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-HR-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Binary classify head</td>
+        </tr>
+        <tr>
+          <td>lm_head logits 切片 positive/negative token → softmax(T) → P(positive)</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>client.classify_binary("Is water wet? Answer yes or no:", {positive="yes", negative="no", T=1.0})</td>
+          <td> 返回 f32 ∈ [0.0, 1.0]；2. SmolLM2-135M-Instruct 上 P(yes) &gt; 0.5 (真实 LLM 行为)；3. </td>
+          <td>P(yes) + P(no) - 1.0</td>
+          <td> 绝对值 &lt; 1e-5</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-HR-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Multiway classify head</td>
+        </tr>
+        <tr>
+          <td>N 个候选 token 的 lm_head logit 联合 softmax 归一化</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>classify_multiway(prompt, ["sports", "politics", "technology"])</td>
+          <td> 返回 Vec</td>
+          <td> 长度 3；2. </td>
+          <td>sum(probs) - 1.0</td>
+          <td> 绝对值 &lt; 1e-5；3. 所有 </td>
+          <td>probs[i] ∈ [0.0, 1.0]</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-HR-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mid-layer encode</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel callback table 通过 </td>
+          <td>MidLayerEncodeCallback</td>
+          <td> 截断, </td>
+          <td>encode_to_layer</td>
+          <td> pool hidden 返回</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>client.encode_to_layer(text, LayerAnchor::Relative(0.5), PoolMode::MeanPool)</td>
+          <td> 返回 </td>
+          <td>Ok(Vec&lt;f32&gt;)</td>
+          <td> 长度 = hidden_size；2. 向量所有元素 finite, L2 norm &gt; 0；3. 不同 anchor (0.5 vs 0.9) 产生</td>
+          <td>不同</td>
+          <td> embedding — 证明截断深度真实生效；4. 禁止 stub / scalar fallback / silent Ok</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-HR-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>同一 Client 切换不重新加载模型</td>
+        </tr>
+        <tr>
+          <td>多个 HR API 调用复用同一 </td>
+          <td>BackendContext</td>
+        </tr>
+        <tr>
+          <td>1. 同一 client 依次 </td>
+          <td>generate / classify_binary / classify_multiway</td>
+          <td>,三次 API 调用之间 </td>
+          <td>Arc::as_ptr(&amp;state.backend)</td>
+          <td> 地址恒定；2. HR 调用不触发 </td>
+          <td>ClientBuilder::build_state</td>
+          <td>；3. 总 JIT 编译次数 = 1 (加载时)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-HR-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NO_ISLAND_MODULE 合规</td>
+        </tr>
+        <tr>
+          <td>HR API 真实接入生产路径,禁止仅 </td>
+          <td>#[cfg(test)]</td>
+          <td> 调用</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>grep classify_binary|classify_multiway|encode_to_layer src/*.rs</td>
+          <td> 在非 </td>
+          <td>#[cfg(test)]</td>
+          <td> 路径中有真实实现与导出；2. </td>
+          <td>Client::classify_binary</td>
+          <td> 真实调用 </td>
+          <td>MegaKernelExecutor::execute_score_tokens()</td>
+          <td> (output_mode=4)；3. E2E 测试 TEST-HR-001/002/004 通过真实 SmolLM2 推理路径验证</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.1" data-section="13.1">
+      <h4>13.1 测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_head_routing.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-HR-001~005 端到端 (TEST-HR-001..005)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.2" data-section="13.2">
+      <h4>13.2 实现映射</h4>
+      <li><code>src/head_routing.rs</code> — <code>LayerAnchor</code> / <code>PoolMode</code> / <code>ClassifyBinaryConfig</code> / <code>ClassifyMultiwayConfig</code> / <code>HeadRoutingError</code></li>
+      <li><code>src/client.rs</code> — <code>Client::classify_binary</code> / <code>classify_multiway</code> / <code>encode_to_layer</code></li>
+      <li><code>src/compat/cpu_backend.rs</code> — Backend trait 方法签名 (Executor 直接调 mega-kernel 绕过 Backend)</li>
+      <li><code>src/engine/mega_kernel.rs</code> — <code>execute_score_tokens()</code> (output_mode=4) + <code>execute_encode_at_layer()</code> (output_mode=5)</li>
+      <li><code>src/compat/mod.rs</code> — 相关 trait 方法签名</li>
+      <li><code>src/compat/gpu_backend_macro.rs</code> — GPU 后端 (CUDA/HIP/Metal) 统一返回 <code>Unimplemented</code> (显式,非 silent)</li>
+      <li><code>src/graph/executor.rs</code> — Mega-Kernel callback table 扩展 (Part 1 基础设施)</li>
+      <li><code>src/engine/callbacks/mid_layer_encode.rs</code> — <code>MidLayerEncodeCallback</code> (post_node ExitEarly with hidden)</li>
+      <li><code>src/backend/mod.rs</code> / <code>src/engine/executor.rs</code> — 调用链 pass-through</li>
+      <li><code>src/lib.rs</code> — 公共类型导出</li>
+    </section>
+    <section id="s14" data-section="14">
+      <h3>14. Guardrail SDK (REQ-GR)</h3>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/GUARDRAIL.md</code></p>
+      <p>&gt; <strong>API 定义</strong>: <code>SPEC/04-API-DESIGN.md §3.9</code></p>
+      <p>&gt; <strong>定位</strong>: 在推理前向<strong>中途</strong>插入小线性安全分类探针 + 多档策略响应 (HaltAndVeto / LogOnly / SampleDowngrade), 正交于 SG / HR。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-GR-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>零权重探针不触发 veto</td>
+        </tr>
+        <tr>
+          <td>GuardProbeWeights { weight=[0...], bias=0 }</td>
+          <td> + </td>
+          <td>HaltAndVeto { threshold: 0.99 }</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>classify_binary</td>
+          <td> 成功返回 Ok; 2. </td>
+          <td>attachment.is_vetoed() == false</td>
+          <td>; 3. </td>
+          <td>last_score() ≈ 0.5</td>
+          <td> (sigmoid(0)); 4. </td>
+          <td>actual_layer ∈ [0, num_layers)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-GR-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>HaltAndVeto 触发</td>
+        </tr>
+        <tr>
+          <td>weight=[0...], bias=+20</td>
+          <td> → sigmoid(20) ≈ 1.0 &gt; threshold=0.5</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>classify_binary</td>
+          <td> 返回 Err(guardrail vetoed); 2. </td>
+          <td>is_vetoed() == true</td>
+          <td>; 3. </td>
+          <td>last_veto_reason()</td>
+          <td> 包含 "vetoed" / "score" 子串; 4. </td>
+          <td>last_score() &gt; 0.99</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-GR-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>LogOnly 不改变生成</td>
+        </tr>
+        <tr>
+          <td>bias=+100, LogOnly</td>
+        </tr>
+        <tr>
+          <td>1. classify_binary 成功返回; 2. 分数与无 guardrail 时完全相等 (浮点 &lt; 1e-4); 3. </td>
+          <td>is_vetoed() == false</td>
+          <td>; 4. </td>
+          <td>last_score() &gt; 0.99</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-GR-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SampleDowngrade 记录温度</td>
+        </tr>
+        <tr>
+          <td>SampleDowngrade { min_temperature: 0.3 }</td>
+        </tr>
+        <tr>
+          <td>1. classify_binary 成功返回; 2. </td>
+          <td>attachment.downgraded_temperature() == Some(0.3)</td>
+          <td>; 3. </td>
+          <td>is_vetoed() == false</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-GR-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Attach / detach 生命周期</td>
+        </tr>
+        <tr>
+          <td>多次 attach / detach 的 id 管理</td>
+        </tr>
+        <tr>
+          <td>1. 多次 attach 返回单调递增 id; 2. detach 未知 id → Err; 3. detach 后重复 detach 同一 id → Err; 4. 另一个 id 独立成功</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s14.1" data-section="14.1">
+      <h4>14.1 测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_guardrail.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-GR-001..005 + TEST-GR-006 (safetensors 缺文件)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s14.2" data-section="14.2">
+      <h4>14.2 实现映射</h4>
+      <li><code>src/guardrail.rs</code> — <code>GuardProbe</code> / <code>GuardProbeWeights</code> / <code>SafetyPolicy</code> / <code>GuardrailError</code> / <code>GuardrailAttachment</code> / <code>GuardrailSharedState</code> / <code>load_probe_weights</code> / <code>validate_policy</code> / <code>resolve_anchor</code></li>
+      <li><code>src/engine/callbacks/guardrail_probe.rs</code> — <code>GuardrailProbeCallback</code> (<code>LayerCallback::post_node</code>)</li>
+      <li><code>src/client.rs</code> — <code>Client::attach_guardrail</code> / <code>attach_guardrail_inline</code> / <code>detach_guardrail</code> / <code>build_guardrail_chain</code> / <code>guardrails</code> registry</li>
+      <li><code>src/compat/cpu_backend.rs</code> — Backend trait 方法签名 (Executor 通过 callback_table_ptr 集成到 mega-kernel generate)</li>
+      <li><code>src/engine/mega_kernel.rs</code> — Mega-Kernel ABI arg 21 (callback_table_ptr) 传入 GuardrailProbeCallback</li>
+      <li><code>src/compat/gpu_backend_macro.rs</code> — GPU 后端 <code>Unimplemented</code> (显式)</li>
+      <li><code>src/lib.rs</code> — 公共导出</li>
+    </section>
+    <section id="s15" data-section="15">
+      <h3>15. Intent Recall SDK (REQ-INTENT)</h3>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/INTENT.md</code></p>
+      <p>&gt; <strong>API 定义</strong>: <code>SPEC/04-API-DESIGN.md §3.10</code></p>
+      <p>&gt; <strong>定位</strong>: 截断前向到 anchor 层 + pool hidden state 作为意图识别 / RAG query 召回向量。<code>Client::encode_intent</code> 是 <code>encode_to_layer</code> 的语义包装 (DRY 铁律 — 零代码复制)。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-INTENT-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Basic shape + finite</td>
+        </tr>
+        <tr>
+          <td>encode_intent 返回 </td>
+          <td>IntentEncoding { embedding, actual_layer, pool }</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>dim()</td>
+          <td> == </td>
+          <td>hidden_size</td>
+          <td>; 2. 所有元素 finite; 3. </td>
+          <td>l2_norm() &gt; 0</td>
+          <td>; 4. </td>
+          <td>pool</td>
+          <td> 原样透传; 5. </td>
+          <td>actual_layer ∈ [0, num_layers)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-INTENT-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>PoolMode 语义</td>
+        </tr>
+        <tr>
+          <td>MeanPool / LastToken / ClsToken 在多 token 文本上产生不同 embedding</td>
+        </tr>
+        <tr>
+          <td>1. 三个 embedding 维度相同; 2. MeanPool vs LastToken L1 delta &gt; 1e-3; 3. ClsToken vs LastToken L1 delta &gt; 1e-3</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-INTENT-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>delegate 等价</td>
+        </tr>
+        <tr>
+          <td>encode_intent</td>
+          <td> 内部 delegate 到 </td>
+          <td>encode_to_layer</td>
+          <td>,结果一致</td>
+        </tr>
+        <tr>
+          <td>1. 同 text/anchor/pool 下 </td>
+          <td>encode_intent(...).embedding</td>
+          <td> 与 </td>
+          <td>encode_to_layer(...)</td>
+          <td> 逐元素 |Δ| &lt; 1e-5; 2. DRY: </td>
+          <td>encode_intent</td>
+          <td> 在 </td>
+          <td>client.rs</td>
+          <td> 中无独立前向实现</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s15.1" data-section="15.1">
+      <h4>15.1 测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_intent.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-INTENT-001..003</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s15.2" data-section="15.2">
+      <h4>15.2 实现映射</h4>
+      <li><code>src/intent.rs</code> — <code>IntentEncoding</code> / <code>IntentError</code></li>
+      <li><code>src/client.rs</code> — <code>Client::encode_intent</code> (delegate 到 <code>encode_to_layer</code>)</li>
+      <li><code>src/engine/callbacks/mid_layer_encode.rs</code> — <code>MidLayerEncodeCallback</code> (复用 HR 路径)</li>
+      <li><code>src/engine/executor.rs</code> — <code>Executor::encode_at_layer_for_prompt</code></li>
+      <li><code>src/compat/cpu_backend.rs</code> — Backend trait 方法签名 (Executor 直接调 mega-kernel 绕过 Backend)</li>
+      <li><code>src/engine/mega_kernel.rs</code> — <code>execute_encode_at_layer()</code> (output_mode=5)</li>
+      <li><code>src/compat/gpu_backend_macro.rs</code> — GPU 后端 <code>Unimplemented</code> (显式)</li>
+      <li><code>src/lib.rs</code> — 公共导出</li>
+    </section>
+    <section id="s16" data-section="16">
+      <h3>16. CoT Reasoner SDK (REQ-COT)</h3>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/COT-REASONER.md</code></p>
+      <p>&gt; <strong>API 定义</strong>: <code>SPEC/04-API-DESIGN.md §3.11</code></p>
+      <p>&gt; <strong>实现模块</strong>: <code>src/cot_reasoner.rs</code> + <code>src/generation.rs::GenerationBuilder::reasoning</code></p>
+      <p>&gt; <strong>核心定位</strong>: 对<strong>任意</strong> generator LLM（SmolLM2 / Llama / Qwen 等，不依赖模型自带 thinking_head 权重）原生支持 Chain-of-Thought 推理。完全复用 <code>Client::generate</code> 公共管线，不新增 Backend trait 方法。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Manual 模式 budget 精确控制</td>
+        </tr>
+        <tr>
+          <td>用户指定 </td>
+          <td>max_reasoning_tokens</td>
+          <td> + </td>
+          <td>step_count</td>
+          <td>，引擎严格遵守预算与步数上限</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>reasoning_trace.len() ≤ step_count</td>
+          <td>；2. </td>
+          <td>total_reasoning_tokens ≤ max_reasoning_tokens</td>
+          <td>（允许 ≤10% tokenizer 估算误差）；3. </td>
+          <td>stopped_reason ∈ { StepCountReached, BudgetExhausted }</td>
+          <td>；4. 最终 </td>
+          <td>text</td>
+          <td> 非空</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Auto 模式 pattern-match 停止</td>
+        </tr>
+        <tr>
+          <td>ReasoningMode::Auto</td>
+          <td> 下任一 </td>
+          <td>stop_patterns</td>
+          <td> 子串在 chunk 中命中即停止</td>
+        </tr>
+        <tr>
+          <td>1. 命中时 </td>
+          <td>stopped_reason == PatternMatched(p)</td>
+          <td>；2. 未命中时 </td>
+          <td>stopped_reason ∈ { BudgetExhausted, EntropyConverged }</td>
+          <td>，不静默继续；3. </td>
+          <td>reasoning_trace.len() ≥ 1</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Auto 模式 entropy-convergence 停止</td>
+        </tr>
+        <tr>
+          <td>entropy_threshold: Some(t)</td>
+          <td> 启用连续 chunk 文本熵估算收敛检测（当前启发式版本，logit 级见 §5.2 未来）</td>
+        </tr>
+        <tr>
+          <td>1. 已知重复模式文本喂入 → 估算 entropy &lt; t → </td>
+          <td>EntropyConverged</td>
+          <td>；2. 单元测试覆盖启发式本身；3. 文档说明真实 logit-level entropy 依赖 </td>
+          <td>GenerationResponse</td>
+          <td> 扩展</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Reasoning trace 完整保留</td>
+        </tr>
+        <tr>
+          <td>每个 reasoning step 产出的 chunk text 作为独立元素存入 </td>
+          <td>reasoning_trace: Vec&lt;String&gt;</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>reasoning_trace.len() == actual_steps</td>
+          <td>；2. 每个 trace 元素非空；3. trace 中保留 step chunk 的原始语义内容</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>与 Semantic Gatekeeper 正交</td>
+        </tr>
+        <tr>
+          <td>register_semantic_gatekeeper(cfg)</td>
+          <td> 后调用 </td>
+          <td>reason(...)</td>
+          <td> 可正常工作，step 间的 </td>
+          <td>Client::generate</td>
+          <td> 自然走 SG 注入</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>reason</td>
+          <td> 调用不 panic；2. 每次内部 </td>
+          <td>execute_generation</td>
+          <td> 触发 SG callback ≥1 次（mock counter 验证）；3. 不修改 SG API 或 Callback chain</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NO_ISLAND_MODULE 合规</td>
+        </tr>
+        <tr>
+          <td>Client::reason</td>
+          <td> 必须在真实 SDK 路径被调用，不是孤岛模块</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>GenerationBuilder::reasoning</td>
+          <td> → </td>
+          <td>ReasoningBuilder::execute</td>
+          <td> → </td>
+          <td>Client::reason</td>
+          <td> 的转发链真实存在；2. E2E 测试 </td>
+          <td>test_cot_006_arbitrary_llm</td>
+          <td> 用 SmolLM2-135M-Instruct 跑通全链；3. grep </td>
+          <td>Client::reason</td>
+          <td> 在 </td>
+          <td>src/</td>
+          <td> 非测试代码中有至少 1 个真实调用点</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Step Hook trait 定义与生命周期</td>
+        </tr>
+        <tr>
+          <td>ReasoningStepHook</td>
+          <td> trait 提供 </td>
+          <td>on_step_start</td>
+          <td> / </td>
+          <td>on_step_end</td>
+          <td> 回调，通过 </td>
+          <td>ReasoningBuilder::with_step_hook()</td>
+          <td> 注册</td>
+        </tr>
+        <tr>
+          <td>1. trait 有 </td>
+          <td>on_step_start(&amp;mut self, &amp;StepContext) -&gt; StepAction</td>
+          <td> + </td>
+          <td>on_step_end(&amp;mut self, &amp;StepResult) -&gt; StepKnowledge</td>
+          <td> 两个方法；2. trait bound 包含 </td>
+          <td>Send + Sync</td>
+          <td>；3. E2E 测试: 注册 hook 后 Manual 3 步 reasoning，</td>
+          <td>on_step_start</td>
+          <td> 和 </td>
+          <td>on_step_end</td>
+          <td> 各被调用 3 次；4. 不注册 hook 时行为与原实现完全一致 (backward compatible)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-008</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>StepContext 包含 accumulated reasoning text</td>
+        </tr>
+        <tr>
+          <td>StepContext</td>
+          <td> 传递前序步骤累积文本，允许 hook 基于历史做动态决策</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>on_step_start</td>
+          <td> 的 </td>
+          <td>StepContext.accumulated_text</td>
+          <td> 在 step_index=0 时为空串；2. step_index=1 时包含 step 0 的 chunk_text；3. step_index=2 时包含 step 0+1 的累积文本；4. </td>
+          <td>model_name</td>
+          <td> 非空；5. </td>
+          <td>remaining_budget</td>
+          <td> &gt; 0 且逐步递减</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-COT-009</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>StepAction 支持 Continue/Skip/InjectPrompt/Halt</td>
+        </tr>
+        <tr>
+          <td>StepAction</td>
+          <td> 枚举提供 4 种流程控制，</td>
+          <td>StepKnowledge</td>
+          <td> 支持跨步知识注入与温度覆盖</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>Continue</td>
+          <td> 正常执行；2. </td>
+          <td>Skip</td>
+          <td> 跳过某步且 trace 无空元素；3. </td>
+          <td>InjectPrompt(extra)</td>
+          <td> 的 extra 出现在该步 prompt 中；4. </td>
+          <td>Halt(reason)</td>
+          <td> 提前终止且 </td>
+          <td>stopped_reason = HaltByHook(reason)</td>
+          <td>；5. E2E 测试覆盖 </td>
+          <td>InjectPrompt</td>
+          <td>: 注入关键词后 chunk 包含该关键词</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s16.1" data-section="16.1">
+      <h4>16.1 测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_cot_reasoner.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-COT-001~009 端到端（SmolLM2-135M-Instruct 真实模型）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [cot_reasoner.rs + E2E tests]</td>
+        </tr>
+        <tr>
+          <td>src/cot_reasoner.rs</td>
+          <td> </td>
+          <td>#[cfg(test)]</td>
+        </tr>
+        <tr>
+          <td>模板渲染 / budget 分配 / stop pattern / entropy 启发式 / Step Hook 单元测试</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [25 tests passing]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s16.2" data-section="16.2">
+      <h4>16.2 实现路径（纯 Client SDK，零 Backend 扩展）</h4>
+      <li><code>Client::reason(prompt, mode, template)</code> 在 <code>src/cot_reasoner.rs</code> 实现，内部多轮调用 <code>Client::execute_generation</code> 复用现有 Mega-Kernel JIT 缓存</li>
+      <li><code>GenerationBuilder::reasoning(mode) -&gt; ReasoningBuilder</code> 在 <code>src/generation.rs</code> 添加便捷链式 API</li>
+      <li><strong>禁止</strong>修改 <code>src/compat/</code> 任何 forward pass / Backend trait</li>
+      <li><strong>禁止</strong>新增 Backend trait 方法</li>
+      <li><strong>禁止</strong>为 CoT 扩展 JIT 管线或 GraphType</li>
+      <li>完全符合 <a href="http://CLAUDE.md">CLAUDE.md</a> ARCH-CPU-GPU-UNIFIED（CoT 只在 Client 层 orchestrate，后端零变更）</li>
+    </section>
+    <section id="s17" data-section="17">
+      <h3>17. 多模型融合管线 (REQ-PIPELINE)</h3>
+      <p>&gt; <strong>API 定义</strong>: <code>SPEC/04-API-DESIGN.md §2.1 (Client Builder)</code>, <code>§3.5 (Embed+Rerank)</code>, <code>§3.6 (Embed+Rerank+LLM)</code></p>
+      <p>&gt; <strong>E2E 测试</strong>: <code>tests/test_e2e_fusion.rs</code> (REQ-PIPELINE-004/005 融合管线), <code>tests/test_e2e_rag_pipeline.rs</code> (REQ-PIPELINE-005 跨模型 RAG)</p>
+      <p>&gt; <strong>核心定位</strong>: 在同一 Client 实例内组合 Embedder + Reranker + Generator 三类模型，支持从单一 embed 到完整 RAG 的渐进式管线，模型间零权重重载、encoder 架构相同时权重共享。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-PIPELINE-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Client Builder 多模型挂载</td>
+        </tr>
+        <tr>
+          <td>Client::builder().model(emb).reranker(rr).generator(llm).build()</td>
+          <td> 在单次 build 中加载 1-3 个异构模型，各自独立 JIT 编译</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>.model()</td>
+          <td> 必选；</td>
+          <td>.reranker()</td>
+          <td> / </td>
+          <td>.generator()</td>
+          <td> 可选；2. 三个模型架构可完全不同（Encoder/Decoder/Reranker）；3. build 失败时所有已加载模型资源释放；4. </td>
+          <td>model_info()</td>
+          <td> 返回三者各自的 manifest</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-PIPELINE-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>异构模型 Session 隔离</td>
+        </tr>
+        <tr>
+          <td>Embedder / Reranker / Generator 各自持有独立的 </td>
+          <td>ClientState</td>
+          <td>（权重、JIT cache、KV cache），不共享指针或缓存</td>
+        </tr>
+        <tr>
+          <td>1. 三个 </td>
+          <td>model_info().id</td>
+          <td> 互不相等；2. 权重内存地址互不重叠；3. JIT cache 按 </td>
+          <td>ModelArchKey</td>
+          <td> 隔离；4. 一个模型 swap 不影响其余两个</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-PIPELINE-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Encoder 权重共享</td>
+        </tr>
+        <tr>
+          <td>当 reranker 与 embedder 同架构（相同 </td>
+          <td>ModelArchKey</td>
+          <td>）时，encoder 前向权重物理共享，仅输出层独立</td>
+        </tr>
+        <tr>
+          <td>1. 同架构 embed+rerank 内存占用 &lt; 2× 单 embedder + 10%；2. 两者 embedding forward 数值 bit-exact 一致；3. 不同架构时各自独立加载，无共享</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-PIPELINE-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embed+Rerank 融合管线</td>
+        </tr>
+        <tr>
+          <td>embed_builder(texts).rerank_query(q).top_n(n).generate()</td>
+          <td> 在单次调用内完成 embed → rerank → 排序截断</td>
+        </tr>
+        <tr>
+          <td>1. 返回 </td>
+          <td>EmbeddingsResponse { embeddings, rerank_scores }</td>
+          <td>；2. rerank_scores 非退化、降序排列；3. top_n 截断后结果数 ≤ n；4. 未设 </td>
+          <td>.rerank_query()</td>
+          <td> 时退化为普通 embed（零开销）；5. 设 </td>
+          <td>.rerank_query()</td>
+          <td> 但未挂载 reranker → </td>
+          <td>RerankerNotLoaded</td>
+          <td> 错误</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-PIPELINE-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embed+Rerank+LLM 完整 RAG 管线</td>
+        </tr>
+        <tr>
+          <td>embed_builder(texts).rerank_query(q).top_n(n).generate_answer(prompt)</td>
+          <td> 三阶段串联：embed → rerank → LLM 生成</td>
+        </tr>
+        <tr>
+          <td>1. 返回 </td>
+          <td>RagResponse { text, sources, rerank_scores }</td>
+          <td>；2. </td>
+          <td>text</td>
+          <td> 非空且语义合理（非重复/退化）；3. </td>
+          <td>sources</td>
+          <td> 为 top-n 文档索引集合；4. 未挂载 generator 时 → </td>
+          <td>GeneratorNotLoaded</td>
+          <td> 错误；5. LLM context 通过文本拼接传入（非 hidden state 注入），保持通用性</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s17.1" data-section="17.1">
+      <h4>17.1 测试文件规划</h4>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖维度</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_fusion.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-PIPELINE-001/004/005 融合管线（同架构+跨架构 embed+rerank、top_n 截断、RAG 生成）</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_rag_pipeline.rs</td>
+        </tr>
+        <tr>
+          <td>REQ-PIPELINE-001/002/005 跨模型 RAG（独立 Client session 隔离、cosine 召回+rerank 精排+generator 生成）</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s18" data-section="18">
+      <h3>18. Mega-Kernel Session &amp; Multimodal 支持 (REQ-MEGA)</h3>
+      <p>&gt; <strong>SSOT</strong>: [SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.3, §6.5, §6.6]</p>
+      <p>&gt; <strong>背景</strong>: <code>generate_with_session</code> 和 <code>generate_with_multimodal</code> 已删除 step-by-step Rust 编排路径（<code>9fa0f51</code>），改为返回 Err。需要 mega-kernel 原生支持才能恢复。</p>
+    </section>
+    <section id="s18.1" data-section="18.1">
+      <h4>18.1 Session KV Cache 复用</h4>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MEGA-SESSION-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel Session 模式</td>
+        </tr>
+        <tr>
+          <td>mega-kernel 支持 KV cache 跨轮次复用</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>MegaKernelBusinessConfig.session_enabled=true</td>
+          <td> 时图中插入 </td>
+          <td>SessionKvRestore</td>
+          <td> op</td>
+          <td>2. ABI 新增 </td>
+          <td>session_position</td>
+          <td> 参数 (StackArg(104))</td>
+          <td>3. session_position &gt; 0 时跳过已处理 tokens，复用已有 KV cache</td>
+          <td>4. session_position == 0 时 NOP (全新生成)</td>
+          <td>5. </td>
+          <td>generate_with_session()</td>
+          <td> 不再返回 Err，改为调用 mega-kernel</td>
+          <td>6. 多轮对话中 KV cache 连续性正确（第二轮输出与第一轮衔接）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [commit: gllm-kernels df91b8a0]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MEGA-SESSION-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Session 位置指针管理</td>
+        </tr>
+        <tr>
+          <td>Executor 层维护 session position 跨轮次传递</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>MegaKernelExecutor</td>
+          <td> 新增 </td>
+          <td>session_position: usize</td>
+          <td> 状态</td>
+          <td>2. 每次 mega-kernel 调用后更新: session_position += generated_tokens</td>
+          <td>3. session reset (新对话) 时 session_position = 0</td>
+          <td>4. 位置溢出保护 (session_position + prompt_len &lt; max_seq_len)</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [commit: gllm-kernels df91b8a0]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s18.2" data-section="18.2">
+      <h4>18.2 Multimodal Fused Hidden 注入</h4>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MEGA-MM-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel Multimodal 模式</td>
+        </tr>
+        <tr>
+          <td>mega-kernel 支持预计算 fused hidden state 注入</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>MegaKernelBusinessConfig.multimodal_enabled=true</td>
+          <td> 时图中插入 </td>
+          <td>MmHiddenInject</td>
+          <td> op</td>
+          <td>2. ABI 新增 </td>
+          <td>fused_hidden_ptr</td>
+          <td> (StackArg(112)) + </td>
+          <td>num_mm_tokens</td>
+          <td> (StackArg(120))</td>
+          <td>3. fused_hidden_ptr != NULL 时循环 ADD 到 embedding buffer</td>
+          <td>4. fused_hidden_ptr == NULL 时 NOP (纯文本)</td>
+          <td>5. </td>
+          <td>generate_with_multimodal()</td>
+          <td> 不再返回 Err，改为调用 mega-kernel</td>
+          <td>6. 多模态输入的生成结果语义正确</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [commit: gllm-kernels df91b8a0]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MEGA-MM-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Fused Hidden 预计算</td>
+        </tr>
+        <tr>
+          <td>Client 层在 mega-kernel 调用前预计算多模态 fused hidden</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>Client::generate_with_multimodal()</td>
+          <td> 内部先调用 vision/audio encoder 获取 hidden state</td>
+          <td>2. 预计算结果通过 fused_hidden_ptr 传入 mega-kernel</td>
+          <td>3. 编码过程不触发 JIT 重编译（复用已有 encoder mega-kernel）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [commit: gllm-kernels df91b8a0]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s18.3" data-section="18.3">
+      <h4>18.3 Mega-Kernel Semantic Gatekeeper 集成</h4>
+      <p>&gt; <strong>SSOT</strong>: [SPEC/SEMANTIC-GATEKEEPER.md §7.4], [SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.3 SgDetect/SgInject]</p>
+      <p>&gt; <strong>背景</strong>: 当前 mega-kernel <code>generate_single_sequence</code> 不传递 <code>hook_ctx_ptr</code>（传 <code>null</code>），SG Callback 只在非 mega-kernel 的 <code>run_batch_forward</code> 路径中生效。需要让 mega-kernel 原生支持 SG。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MEGA-SG-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel SG 共享内存</td>
+        </tr>
+        <tr>
+          <td>mega-kernel 通过 scratchpad 共享内存传递 detect/knowledge buffer，JIT 内嵌 SgDetect/SgInject OpKind 操作 scratchpad</td>
+        </tr>
+        <tr>
+          <td>1. ✅ </td>
+          <td>MegaKernelBusinessConfig.semantic_gatekeeper=Some(...)</td>
+          <td> 时图中插入 </td>
+          <td>SgDetect</td>
+          <td> + </td>
+          <td>SgInject</td>
+          <td> side-channel op</td>
+          <td>2. ✅ SgDetect lowering: 从 hidden 复制到 scratchpad detect buffer</td>
+          <td>3. ✅ SgInject lowering: NOP (scratchpad 零初始化时 hidden += 0)</td>
+          <td>4. ✅ buffer_alloc 正确分配 detect/knowledge scratchpad</td>
+          <td>5. ✅ </td>
+          <td>hook_ctx_ptr</td>
+          <td> 路径已接入 — SgSharedMemory 在 Executor 预创建，control bit 驱动 JIT 开关</td>
+          <td>6. ✅ E2E 测试验证无 NaN（SG 开启/关闭一致）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: gllm-kernels 61677998]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MEGA-SG-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel Callback Table</td>
+        </tr>
+        <tr>
+          <td>mega-kernel 通过 ABI arg 20 传递 C 风格函数指针表，JIT 在 SgDetect 后 CALL 外部回调函数实现知识注入</td>
+        </tr>
+        <tr>
+          <td>1. ✅ MegaKernelCallbackTable (#[repr(C)], 8 slots × 16B)</td>
+          <td>2. ✅ Slot 0 = SG_KNOWLEDGE_RETRIEVE: 回调读 detect_hidden → KnowledgeProvider.retrieve() → TextEncoder.encode() → 写 knowledge_vector + confidence</td>
+          <td>3. ✅ VmInstr::NativeCall + LoadCallbackEntry x86_64 ISA lowering (caller-saved regs save/restore, call rax)</td>
+          <td>4. ✅ SgDetect 尾部 +CALL callback (LoadCallbackEntry → GprSkipIfNull → MemFence Release → NativeCall → MemFence Acquire) + SgInject SIMD FMA 注入 (hidden += confidence × knowledge_vector)</td>
+          <td>5. ✅ callback_table_ptr=NULL 时 GprSkipIfNull 零开销</td>
+          <td>6. ✅ Executor::callback_table 字段，set_sg_callback_shim 注册 slot 0，clear_sg_callback_shim 清理</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: gllm 55acd87 + 2c92244, gllm-kernels 489157cb]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s19" data-section="19">
+      <h3>19. 自动指令选择器 (REQ-AIS)</h3>
+      <p>&gt; <strong>SSOT</strong>: [SPEC/01-JIT-PIPELINE.md §6.1], <a href="http://CLAUDE.md">CLAUDE.md</a> ARCH-AUTO-INSTR-SELECT</p>
+      <p>&gt; <strong>背景</strong>: TraceOp→VmInstr 和 OpKind→lower 的手写 match arms 是 bug 的系统性源头。正确架构类似 LLVM SelectionDAG — 指令选择完全由算法驱动。</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TraceOp→VmInstr 自动查表</td>
+        </tr>
+        <tr>
+          <td>TraceOp body 编译为 VmInstr 序列无需手写 match</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>auto_lower_trace()</td>
+          <td> 覆盖全部已实现 TraceOp</td>
+          <td>2. 同类操作共享辅助函数（6 二元/5 一元/3 超越函数）</td>
+          <td>3. 未实现 TraceOp 返回 Err（NO_SILENT_FALLBACK）</td>
+          <td>4. 生成结果与原手写 </td>
+          <td>lower_trace_body</td>
+          <td> 数值 bit-exact</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>OpKind→ComputePattern 自动分发</td>
+        </tr>
+        <tr>
+          <td>emit_standalone_op</td>
+          <td> 从手写 match arm 改为 ComputePattern 驱动分发</td>
+        </tr>
+        <tr>
+          <td>1. Elementwise ops 全部走 auto_dispatch_elementwise 路径</td>
+          <td>2. Norm/Gemm/Attention 等走专用 lower 函数</td>
+          <td>3. MoERouter 有专用 lower（修复 GPT-OSS "CapCapCap"）</td>
+          <td>4. 未实现 OpKind 返回 Err（不静默 NOP）</td>
+          <td>5. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: gllm-kernels e8ee8460]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TraceOp 扩展（Compare/Cast）</td>
+        </tr>
+        <tr>
+          <td>新增 Compare/Cast TraceOp 解锁条件分支和 dtype 转换</td>
+        </tr>
+        <tr>
+          <td>1. TraceOp::Compare → VmInstr::VecCmp</td>
+          <td>2. TraceOp::Cast → VmInstr::VecCast</td>
+          <td>3. 对应 VmInstr 在 x86_64 和 AArch64 codegen 中实现</td>
+          <td>4. 单元测试验证数值正确性</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [auto_select.rs emit_cmp/VecCast]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TraceOp 扩展（HReduce）</td>
+        </tr>
+        <tr>
+          <td>新增 HReduce TraceOp 解锁 softmax/norm 全自动 lowering</td>
+        </tr>
+        <tr>
+          <td>1. TraceOp::HReduce → VmInstr::VecReduce</td>
+          <td>2. 支持 Sum/Max/Min/Prod 归约操作</td>
+          <td>3. Softmax 可完全通过 SymExec trace 自动 lowering</td>
+          <td>4. E2E 测试通过</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [auto_select.rs HReduce Sum/Max/Min/Prod]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Category D 消除</td>
+        </tr>
+        <tr>
+          <td>emit_standalone_op</td>
+          <td> 中所有手写 OpKind match arm 消除，全部改为 ComputePattern 驱动路由</td>
+        </tr>
+        <tr>
+          <td>1. Silu/Residual/LogitSoftcap 走 auto elementwise（已有 scalar 注册，无需额外代码）</td>
+          <td>2. Argmax 走 Reduction pattern + VmInstr::Argmax</td>
+          <td>3. StoreToken/WriteLogits 走 structural VecStore（带偏移计算）</td>
+          <td>4. CheckStopCondition/EarlyExit/GuardrailCheck/CotStepCheck 走 structural 控制流 VmInstr</td>
+          <td>5. SgInject/SgDetect 走 structural 共享内存 VmInstr</td>
+          <td>6. </td>
+          <td>emit_standalone_op</td>
+          <td> 中零 </td>
+          <td>OpKind::Xxx =&gt;</td>
+          <td> 非 NOP match arm</td>
+          <td>7. 所有 E2E 测试通过</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: 63f020bd]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ConditionalBranch VmInstr</td>
+        </tr>
+        <tr>
+          <td>实现 ConditionalSelect VmInstr 解锁条件选择路径</td>
+        </tr>
+        <tr>
+          <td>1. TraceOp::ConditionalBranch → VmInstr::ConditionalSelect</td>
+          <td>2. x86_64: vblendvps (AVX2) / vpmovd2m+vblendmps{k1} (AVX-512)</td>
+          <td>3. AArch64: CodegenViolation（与 VecCmp 一致）</td>
+          <td>4. GPU: CodegenViolation（与 VecCmp 一致）</td>
+          <td>5. SelectOp 可完全通过 SymExec trace 自动 lowering</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: gllm-kernels dd0b213c]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-AIS-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>全覆盖验证</td>
+        </tr>
+        <tr>
+          <td>新增 OpKind 只需注册 scalar impl，零额外 codegen 代码</td>
+        </tr>
+        <tr>
+          <td>1. 新增 elementwise OpKind 只写 scalar fn + registry，</td>
+          <td>auto_lower_trace</td>
+          <td> 自动覆盖</td>
+          <td>2. </td>
+          <td>dispatch_compute_pattern</td>
+          <td> 按 ComputePattern 自动路由，路由键不是 OpKind</td>
+          <td>3. </td>
+          <td>grep 'OpKind::' plan_lower.rs</td>
+          <td> 在 </td>
+          <td>emit_standalone_op</td>
+          <td> 中返回零非 NOP 匹配</td>
+          <td>4. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B, Qwen3-7B）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [commit: gllm-kernels 63f020bd]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s20" data-section="20">
+      <h3>20. MoE 算子完善 (REQ-MOE)</h3>
+      <p>&gt; <strong>SSOT</strong>: [SPEC/04-OPERATORS.md §4.6]</p>
+      <p>&gt; <strong>背景</strong>: MoERouter 无 JIT lowering，是 GPT-OSS-20B "CapCapCap" 根因</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MOE-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MoERouter JIT Lowering</td>
+        </tr>
+        <tr>
+          <td>实现 </td>
+          <td>lower_moe_router()</td>
+          <td> 分解为 GEMM + softmax + top-k</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>dispatch_compute_pattern</td>
+          <td> 有 </td>
+          <td>OpKind::MoERouter</td>
+          <td> match arm</td>
+          <td>2. 内部调用 </td>
+          <td>lower_moe_router()</td>
+          <td> (GEMV + softmax + top-k, 128 行)</td>
+          <td>3. 输出 (router_weights, router_indices) 格式正确</td>
+          <td>4. GPT-OSS-20B E2E 测试输出非退化（不再是 "CapCapCap"）</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [gllm-kernels lower.rs:2464-2608, E2E passed]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-MOE-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MoEDispatchPacked JIT Lowering</td>
+        </tr>
+        <tr>
+          <td>实现专家分发+计算的融合 lowering</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>dispatch_compute_pattern</td>
+          <td> 有 </td>
+          <td>OpKind::MoEDispatchPacked</td>
+          <td> match arm</td>
+          <td>2. 内部调用 </td>
+          <td>lower_moe_dispatch_packed()</td>
+          <td> (路由+MXFP4 dequant+SwiGLU+down GEMV, 417 行)</td>
+          <td>3. 加权求和输出</td>
+          <td>4. GPT-OSS-20B E2E 测试通过 (2219s)</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 [gllm-kernels lower.rs:3660-4123, E2E passed]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s21" data-section="21">
+      <h3>21. 统一图来源：Mega-Kernel 唯一执行路径 (REQ-UGS)</h3>
+      <p>&gt; <strong>SSOT</strong>: [gllm-kernels SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §2.4-2.6]</p>
+      <p>&gt; <strong>背景</strong>: gllm 历史上有两条编译/执行路径：(A) FusedGraph 路径 (auto_graph→OnnxGraph→FusedGraph(FusedOp)→CompilerGraph(OpKind)→JIT) 和 (B) Mega-Kernel 路径 (auto_graph→CompilerGraph(OpKind)→JIT)。路径 A 的 FusedOp→OpKind 转换存在系统性字段丢失（RoPE.partial_ratio 硬编码 1.0、FlashAttention.scale 丢失、GQA.num_kv_heads 丢失、MoERouting.top_k 丢失），且路径 A 的逐层编译无法支持 generate loop 融合。</p>
+      <p>&gt; <strong>架构决策 — Mega-Kernel 为唯一路径</strong>：删除 FusedGraph/FusedOp/FusedGraphExecutor 及其关联优化器 (pattern_fusion/hardware_fusion/constant_folding/dead_code)，删除 <code>to_onnx_graph()</code> 中间表示。Mega-Kernel 是系统唯一的编译和执行路径，所有模型（dense + MoE）统一使用。</p>
+      <p>&gt; <strong>唯一数据流</strong>: <code>auto_graph</code> (tensor-name-driven) → <code>CompilerGraph</code> → <code>compile()</code> → 单次 CALL → 推理结果</p>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>需求标题</td>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-001</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>auto_graph→CompilerGraph 直接构建器</td>
+        </tr>
+        <tr>
+          <td>auto_graph</td>
+          <td> 从 tensor names 直接构建 CompilerGraph（跳过 OnnxGraph/FusedGraph 中间层）</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>auto_graph</td>
+          <td> 根据 tensor names 推导架构特征，直接构建 CompilerGraph</td>
+          <td>2. </td>
+          <td>op_type</td>
+          <td> 字符串 → </td>
+          <td>OpKind</td>
+          <td> 枚举完整映射表（Gather→OpKind::Gather, MatMul→OpKind::Gemm, SimplifiedLayerNormalization→OpKind::RmsNorm, SiLU→OpKind::Silu, Mul→OpKind::Mul, Add→OpKind::Add, RotaryEmbedding→OpKind::RoPE, Attention→OpKind::MultiHeadAttention, QkNorm→OpKind::QkNorm, ValueNorm→OpKind::ValueNorm, PerLayerEmbed→OpKind::PerLayerEmbed, PleSlice→OpKind::ColumnSlice, DualRotaryEmbedding→展开为两个 OpKind::RoPE）</td>
+          <td>3. 模型配置属性 → </td>
+          <td>OpKind</td>
+          <td> 字段注入（theta→RoPE.theta, eps→RmsNorm.eps, head_dim→QkNorm.head_dim 等）</td>
+          <td>4. </td>
+          <td>only_if</td>
+          <td> 条件守卫复用 </td>
+          <td>eval_only_if_with_loop()</td>
+          <td> 逻辑</td>
+          <td>5. </td>
+          <td>repeat</td>
+          <td> 块展开为 N 组独立 OpKind 节点</td>
+          <td>6. mega-kernel 独有节点（SgInject, SessionKvRestore, MmHiddenInject, GenerateLoop）由 </td>
+          <td>MegaKernelBusinessConfig</td>
+          <td> 驱动注入</td>
+          <td>7. 所有已支持架构（Llama/Qwen3/Gemma4/Phi4/Mistral/DeepSeek）构建结果与 </td>
+          <td>decoder_model()</td>
+          <td> / </td>
+          <td>decoder_model_hetero()</td>
+          <td> 等价</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [SmolLM2 E2E 2026-04-27]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-002</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>异构层模板折叠</td>
+        </tr>
+        <tr>
+          <td>to_compiler_graph()</td>
+          <td> 根据 </td>
+          <td>config.attention_pattern[]</td>
+          <td> + </td>
+          <td>config.num_kv_shared_layers</td>
+          <td> 自动生成异构层图，替代手写 </td>
+          <td>decoder_model_hetero()</td>
+        </tr>
+        <tr>
+          <td>1. 按 </td>
+          <td>(attention_pattern[i], ffn_size[i])</td>
+          <td> 二元组去重，推导 K 个唯一层模板（如 Gemma-4 E2B → 4 模板: sliding_small/full_small/sliding_large/full_large）</td>
+          <td>2. 权重布局自动推导：从模板中收集所有权重张量，按模板分组计算 </td>
+          <td>PerLayerWeightLayout</td>
+          <td>，替代手写 </td>
+          <td>compute_per_layer_bytes</td>
+          <td>3. </td>
+          <td>HeteroLayerLoopConfig</td>
+          <td> 从 </td>
+          <td>config.attention_pattern[]</td>
+          <td> + </td>
+          <td>config.intermediate_size[]</td>
+          <td> 自动生成，包含 </td>
+          <td>num_segments</td>
+          <td> 和 </td>
+          <td>layers_per_segment</td>
+          <td>4. SharedKvRef 条件分支：层模板中 k_proj/k_norm/v_proj/v_norm/rope_k 五个 op 前插入 </td>
+          <td>GprCondAction { condition: layer_idx &lt; threshold, action: Skip(N) }</td>
+          <td>。Consumer 层运行时跳过这五个 op（省 GEMM 算力），MHA 从 donor 层 KV cache page 读取 K/V（见 SPEC 03 §1.3.1）</td>
+          <td>5. Consumer 层 MHA 的 KV 输入通过 PagedAttention 间接寻址指向 donor 层 KV cache page，</td>
+          <td>effective_kv_layer()</td>
+          <td> 按 attention 类型匹配 donor（同类型最后一个非共享层），无需额外 tensor 引用</td>
+          <td>6. SharedKvRef Prefill 两阶段加速（见 SPEC 03 §1.3.2, SPEC 32 §2.4）：Donor pass 完成后 donor KV 驻留 L2 → Consumer pass MHA 读命中 L2；节省 </td>
+          <td>num_shared × 2</td>
+          <td> 次 K/V GEMM（~30% prefill FLOPs）；非 SharedKvRef 退化为单阶段零开销</td>
+        </tr>
+        <tr>
+          <td>✅ 条件分支已实现 [GprCondAction + LayerCondition + CmpGeU, 2026-06-04]; K 模板折叠 + prefill 两阶段为性能优化待后续</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-003</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>删除 graph_builders.rs 手写图构建</td>
+        </tr>
+        <tr>
+          <td>MegaKernelExecutor</td>
+          <td> 消费 auto_graph 构建的 CompilerGraph，</td>
+          <td>InferenceCompiler::compile() (SPEC/39 统一编译入口)</td>
+          <td> 接受外部 CompilerGraph</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>MegaKernelExecutor</td>
+          <td> 调用 auto_graph 构建 CompilerGraph + </td>
+          <td>compile() (SPEC/39 统一编译入口)</td>
+          <td>2. </td>
+          <td>gllm-kernels</td>
+          <td> 新增 </td>
+          <td>compile() (SPEC/39 统一编译入口)</td>
+          <td> 接受外部 CompilerGraph</td>
+          <td>3. </td>
+          <td>gllm-kernels/src/compiler/graph_builders.rs</td>
+          <td> 中 </td>
+          <td>decoder_model()</td>
+          <td> / </td>
+          <td>decoder_model_hetero()</td>
+          <td> / </td>
+          <td>build_layer_body()</td>
+          <td> 函数保留（旧路径仍可用）</td>
+          <td>4. 所有 E2E 测试通过（SmolLM2, Gemma-4 E2B）</td>
+          <td>5. 新增模型只需在 ARCH_TABLE 注册 + auto_graph 添加特征检测 + 标量算子注册，零额外 Rust 代码修改</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [SmolLM2 E2E 2026-04-27]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-004</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ModelConfig 缺失字段补全</td>
+        </tr>
+        <tr>
+          <td>补全 config.json 中未解析的模型配置字段</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>use_double_wide_mlp</td>
+          <td> → 控制 FFN intermediate 倍率</td>
+          <td>2. </td>
+          <td>final_logit_softcapping</td>
+          <td> → 替代 executor 硬编码 30.0</td>
+          <td>3. </td>
+          <td>hidden_activation</td>
+          <td> → 自动选择 FfnActivation 枚举</td>
+          <td>4. 这些字段从 config.json → ModelConfig → ModelGeometry 全链路传递</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现 [commit: 9aa58c7]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-005</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>删除 FusedGraph/FusedOp 整套子系统</td>
+        </tr>
+        <tr>
+          <td>物理删除 FusedGraph、FusedOp、FusedNode、所有 Config 结构体、FusedGraphExecutor、build_*_graph 函数、graph/optimizer/ 整个目录</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>src/graph/types.rs</td>
+          <td> 中 FusedOp 枚举（含全部 25+ 变体）、FusedNode、FusedGraph、FlashAttentionConfig、SwiGLUConfig、RoPEConfig、FusedQkvRopeConfig、FusedQkvNormRopeConfig、FusedRMSLinearConfig、GQAConfig、MoERoutingConfig、PleConfig、AtomicOp 全部删除</td>
+          <td>2. </td>
+          <td>src/graph/executor.rs</td>
+          <td> 中 FusedGraphExecutor 结构体、build_flash_attention_graph、build_swiglu_graph、build_rope_graph、build_fused_qkv_rope_graph、build_fused_qkv_norm_rope_graph、build_node_graph_inner（FusedOp→OpKind 转换中心）全部删除</td>
+          <td>3. </td>
+          <td>src/graph/optimizer/pattern_fusion.rs</td>
+          <td>、</td>
+          <td>hardware_fusion.rs</td>
+          <td>、</td>
+          <td>constant_folding.rs</td>
+          <td>、</td>
+          <td>dead_code.rs</td>
+          <td>、</td>
+          <td>pass.rs</td>
+          <td> 全部删除</td>
+          <td>4. </td>
+          <td>src/engine/executor.rs</td>
+          <td> 中 </td>
+          <td>graph_executor: Option&lt;FusedGraphExecutor&gt;</td>
+          <td> 字段、</td>
+          <td>graph_executor_ptr: *mut FusedGraphExecutor</td>
+          <td> 字段、所有 </td>
+          <td>graph_executor_ptr</td>
+          <td> 赋值、逐节点 JIT 执行路径全部删除</td>
+          <td>5. </td>
+          <td>src/compat/</td>
+          <td> 中所有引用 FusedGraphExecutor 的代码路径删除</td>
+          <td>6. 编译通过（</td>
+          <td>cargo check</td>
+          <td>）+ 所有非 MoE E2E 测试通过</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-006</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MoE 模型 Mega-Kernel 路径</td>
+        </tr>
+        <tr>
+          <td>MoE 模型（GPT-OSS-20B、DeepSeek-V3、GLM-5）走 Mega-Kernel 编译路径，删除 executor 中 </td>
+          <td>if is_moe { None }</td>
+          <td> 跳过逻辑</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>executor.rs</td>
+          <td> 中删除 </td>
+          <td>if is_moe { None }</td>
+          <td> 分支，MoE 模型正常进入 mega-kernel 编译</td>
+          <td>2. MoE auto_graph 包含 MoEGate/MoERouter/MoEDispatchPacked OpKind 节点</td>
+          <td>3. </td>
+          <td>compile()</td>
+          <td> 正确处理 MoE OpKind（不再返回空 vec）</td>
+          <td>4. 专家权重布局：mega-kernel 权重打包支持 per-expert 权重 stride</td>
+          <td>5. MoE 模型 E2E 测试通过（GPT-OSS-20B 输出非退化）</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>REQ-UGS-007</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>删除 to_onnx_graph() 中间表示</td>
+        </tr>
+        <tr>
+          <td>删除 </td>
+          <td>ArchTemplate::to_onnx_graph()</td>
+          <td> 方法及 OnnxGraph 中间表示，auto_graph 是唯一的图构建出口</td>
+        </tr>
+        <tr>
+          <td>1. </td>
+          <td>src/arch/template.rs</td>
+          <td> 整个文件删除（已被 auto_graph 替代）</td>
+          <td>2. </td>
+          <td>src/graph/types.rs</td>
+          <td> 中 OnnxGraph 相关类型保留（仍被 loader 等使用），FusedGraph 相关类型随 REQ-UGS-005 删除</td>
+          <td>3. 所有调用 </td>
+          <td>to_onnx_graph()</td>
+          <td> 的代码改为 auto_graph 直接构建</td>
+          <td>4. 编译通过 + E2E 测试通过</td>
+        </tr>
+        <tr>
+          <td>🟢 已实现</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-COMPILER-GRAPH" id="ent-compiler-graph">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-EPILOGUE-POLICY" id="ent-epilogue-policy">
+        <h4>ENT-EPILOGUE-POLICY</h4>
+        <p>AbsolutePolicy — Epilogue强制策略</p>
+      <table data-entity-table="ENT-EPILOGUE-POLICY"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="policy_type" data-type="string" data-required="true" <td="">policy_type<td>string</td><td>是</td><td>AbsolutePolicy variant</td><td>策略变体 (Identity/Clip/Quantize/TopK/Telemetry)</td></tr><tr data-field="clip_min" data-type="number" data-required="false" <td="">clip_min<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>裁剪最小值</td></tr>
+<tr data-field="clip_max" data-type="number" data-required="false" <td="">clip_max<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>裁剪最大值</td></tr><tr data-field="quant_bits" data-type="number" data-required="false" <td="">quant_bits<td>number</td><td>否</td><td>Option&lt;u8&gt;</td><td>量化位数</td></tr><tr data-field="telemetry_key" data-type="string" data-required="false" <td="">telemetry_key<td>string</td><td>否</td><td>Option&lt;String&gt;</td><td>观测键名</td></tr>
+<tr data-field="pressure_emergency" data-type="number" data-required="true" <td="">pressure_emergency<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="frag_defrag_threshold" data-type="number" data-required="true" <td="">frag_defrag_threshold<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="batch_safe" data-type="number" data-required="true" <td="">batch_safe<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="batch_normal" data-type="number" data-required="true" <td="">batch_normal<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="batch_aggressive" data-type="number" data-required="true" <td="">batch_aggressive<td>number</td><td>是</td><td>(synced)</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-KV-CACHE" id="ent-kv-cache">
+        <h4>ENT-KV-CACHE</h4>
+        <p>KvCache — KV缓存数据结构</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="num_kv_heads" data-type="number" data-required="true" <td="">num_kv_heads<td>number</td><td>是</td><td>usize</td><td>KV注意力头数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">
+head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度</td></tr><tr data-field="kv_dtype" data-type="string" data-required="true" <td="">kv_dtype<td>string</td><td>是</td><td>DType</td><td>KV cache元素dtype</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>usize</td><td>
+页大小 (tokens per page)</td></tr><tr data-field="num_kv_shared_layers" data-type="number" data-required="true" <td="">num_kv_shared_layers<td>number</td><td>是</td><td>usize</td><td>SharedKvRef共享KV层数</td></tr><tr data-field="is_mla" data-type="boolean" data-required="true" <td="">is_mla<td>boolean</td><td>是</td><td></td><td>是否为MLA模型</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-KV-PAGE-HEADER" id="ent-kv-page-header">
+        <h4>ENT-KV-PAGE-HEADER</h4>
+        <p>KvPageHeader — KV页头 (40B/56B)</p>
+      <table data-entity-table="ENT-KV-PAGE-HEADER"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_id" data-type="number" data-required="true" <td="">page_id<td>number</td><td>是</td><td>PhysicalId</td><td>物理页标识</td></tr><tr data-field="sequence_id" data-type="number" data-required="true" <td="">sequence_id<td>number</td><td>是</td><td>RequestId</td><td>所属序列ID</td></tr><tr data-field="logical_index" data-type="number" data-required="true" <td="">
+logical_index<td>number</td><td>是</td><td>usize</td><td>序列内逻辑页索引</td></tr><tr data-field="ref_count" data-type="number" data-required="true" <td="">ref_count<td>number</td><td>是</td><td>usize</td><td>共享页引用计数</td></tr><tr data-field="codec" data-type="string" data-required="true" <td="">codec<td>string</td><td>是</td><td>CompressionCodec</td><td>压缩编解码 (None/Lz4/BitPackRle/NvcompAns/ZstdDict)</td></tr><tr data-field="storage_tier" data-type="string" data-required="true" <td="">storage_tier
+<td>string</td><td>是</td><td>StorageTier</td><td>存储层级 (GpuHbm/CpuDram/Nvme)</td></tr><tr data-field="last_access_seq" data-type="number" data-required="true" <td="">last_access_seq<td>number</td><td>是</td><td>usize</td><td>LRU驱逐排序序号</td></tr><tr data-field="importance_score" data-type="number" data-required="true" <td="">importance_score<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="precision_tier" data-type="number" data-required="false" <td="">precision_tier<td>number</td>
+<td>否</td><td>(synced)</td></tr><tr data-field="compressed_size" data-type="number" data-required="false" <td="">compressed_size<td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="pipeline_id" data-type="number" data-required="false" <td="">pipeline_id<td>number</td><td>否</td><td>(synced)</td></tr></table></section>
+
+      <section data-entity-model-type="relational" data-entity="ENT-MODEL-CONFIG" id="ent-model-config">
+        <h4>ENT-MODEL-CONFIG</h4>
+        <p>ModelConfig — 模型配置 (tensor-driven Ω1)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hidden_size" data-type="number" data-required="true" <td="">hidden_size<td>number</td><td>是</td><td>usize</td><td>隐藏层维度</td></tr><tr data-field="num_attention_heads" data-type="number" data-required="true" <td="">num_attention_heads<td>number</td><td>是</td><td>usize</td><td>注意力头数</td></tr>
+<tr data-field="num_key_value_heads" data-type="number" data-required="true" <td="">num_key_value_heads<td>number</td><td>是</td><td>usize</td><td>KV头数 (GQA)</td></tr><tr data-field="num_hidden_layers" data-type="number" data-required="true" <td="">num_hidden_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小</td></tr>
+<tr data-field="max_position_embeddings" data-type="number" data-required="true" <td="">max_position_embeddings<td>number</td><td>是</td><td>usize</td><td>最大位置编码数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>模型权重dtype (F32/F16/BF16)</td></tr><tr data-required="false" data-type="boolean" data-field="qk_norm"><td>qk_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="boolean" data-field="value_norm"><td>value_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="number" data-field="embedding_scale_factor"><td>embedding_scale_factor</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="number" data-field="rope_partial_ratio_global"><td>rope_partial_ratio_global</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="boolean" data-field="mla_use_unabsorbed"><td>mla_use_unabsorbed</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="number" data-field="unabsorbed_threshold"><td>unabsorbed_threshold</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-required="false" data-type="string" data-field="hidden_act"><td>hidden_act</td><td>string</td><td>否</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-PAGE-TABLE" id="ent-page-table"><h4>ENT-PAGE-TABLE</h4><p>PageTable — 虚拟→物理页映射表（struct PageTable in gllm/src/scheduler/memory_manager.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_mappings" data-type="number" data-required="true" <td="">num_mappings<td>number</td><td>是</td><td>HashMap 大小</td><td>虚拟页→物理页映射数量</td></tr>
+<tr data-field="virtual_page_id" data-type="number" data-required="true" <td="">
+virtual_page_id<td>number</td><td>是</td><td>VirtualPageId key</td><td>虚拟页标识</td></tr><tr data-field="physical_id" data-type="number" data-required="true" <td="">physical_id<td>number</td><td>是</td><td>PhysicalId</td><td>物理页标识</td></tr><tr data-field="tier" data-type="string" data-required="true" <td="">tier<td>string</td><td>是</td><td>L1|L2|L3</td><td>存储层级</td></tr><tr data-field="sequence_id" data-type="number" data-required="false" <td="">sequence_id<td>number</td><td>否</td><td>
+RequestId</td><td>所属序列 ID</td></tr><tr data-field="logical_index" data-type="number" data-required="false" <td="">logical_index<td>number</td><td>否</td><td>usize</td><td>逻辑页索引</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-PAGED-SCHEDULER" id="ent-paged-scheduler">
+        <h4>ENT-PAGED-SCHEDULER</h4>
+        <p>PagedScheduler — PagedAttention调度器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>usize</td><td>页大小 (tokens per block)</td></tr><tr data-field="total_blocks" data-type="number" data-required="true" <td="">total_blocks<td>number</td><td>是</td><td>usize</td><td>总物理页数</td></tr>
+<tr data-field="used_blocks" data-type="number" data-required="true" <td="">used_blocks<td>number</td><td>是</td><td>usize</td><td>已使用页数</td></tr><tr data-field="num_block_tables" data-type="number" data-required="true" <td="">num_block_tables<td>number</td><td>是</td><td>usize</td><td>活跃请求块表数量</td></tr><tr data-field="hgal" data-type="string" data-required="true" <td="">hgal<td>string</td><td>是</td><td>HGALScheduler</td><td>HGAL调度器实例</td></tr>
+<tr data-field="prefix_index" data-type="string" data-required="true" <td="">prefix_index<td>string</td><td>是</td><td>KvPrefixIndex</td><td>KV前缀索引 (trie)</td></tr><tr data-field="memory_manager" data-type="string" data-required="true" <td="">memory_manager<td>string</td><td>是</td><td>GlobalMemoryManager</td><td>三级内存管理器 (L1 GPU/L2 CPU/L3 NVMe)</td></tr><tr data-field="vllm_state" data-type="string" data-required="false" <td="">vllm_state<td>string</td><td>否</td><td>
+Option&lt;Scheduler2024State&gt;</td><td>vLLM 2024调度器状态</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-TELEMETRY-OFFSET" id="ent-telemetry-offset"><h4>ENT-TELEMETRY-OFFSET</h4><p>TelemetryOffset — Epilogue 遥测缓冲区偏移常量 (gllm-kernels telemetry_offsets 模块, 15个偏移常量)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="silu_dead_neuron_count" data-type="number" data-required="true" <td="">silu_dead_neuron_count<td>number</td><td>是</td><td>=0</td><td>SiLU 死神经元计数偏移</td></tr>
+<tr data-field="residual_delta_offset" data-type="number" data-required="true" <td="">residual_delta_offset<td>number</td><td>是</td><td>=128</td><td>残差 delta 偏移</td></tr><tr data-field="softmax_sharpness_offset" data-type="number" data-required="true" <td="">softmax_sharpness_offset<td>number</td><td>是</td><td>=332</td><td>Softmax 锐度偏移</td></tr><tr data-field="gemm_row_norm_l1_offset" data-type="number" data-required="true" <td="">gemm_row_norm_l1_offset<td>number</td><td>是</td><td>=364</td>
+<td>GEMM 行 L1 范数偏移</td></tr><tr data-field="telemetry_buffer_min_bytes" data-type="number" data-required="true" <td="">telemetry_buffer_min_bytes<td>number</td><td>是</td><td>=512</td><td>遥测缓冲区最小字节数</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+      
+      
+      
+    </section>
+</main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：01-REQUIREMENTS.html</address>
+  </footer>
+</body>
+</html>

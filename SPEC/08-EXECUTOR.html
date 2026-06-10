@@ -1,0 +1,1556 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="08-EXECUTOR" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"08-EXECUTOR", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>执行引擎 (Executor)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>08-EXECUTOR</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-执行引擎-executor" data-section="null">
+      <h2>执行引擎 (Executor)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档是 gllm 执行引擎结构、全 JIT Mega-Kernel 执行模型、Session 管理、模型热切换的唯一真源。</p>
+      <p>&gt; <strong>架构 (ARCH-FULL-JIT + REQ-UGS-005)</strong>: 全 JIT 执行模型。所有模型（Decoder/Encoder/Reranker）统一通过 Mega-Kernel 单次 CALL 执行。手写前向传播路径（bert_forward.rs / decoder_forward.rs）已物理删除。FusedGraph/FusedOp/FusedGraphExecutor 整套子系统已物理删除。<code>auto_graph</code> 直接构建 <code>CompilerGraph</code>，编译为单一 Mega-Kernel 机器码。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. Executor 结构</h3>
+      <p>Executor 是推理引擎的核心，持有完整推理所需的全部组件。</p>
+      <p>```rust</p>
+      <p>pub struct Executor&lt;B: Backend<e> + 'static, E: Element = f32&gt; {</e></p>
+      <p>    // ── 核心运行时 ──────────────────────────────────────────</p>
+      <p>    pub backend: B,</p>
+      <p>    pub scheduler: PagedScheduler,</p>
+      <p>    pub batcher: ContinuousBatcher,</p>
+      <p>    pub observer: BasicObserver,</p>
+      <p>    pub policy: PolicyVariant,</p>
+      <p>    pub requests: HashMap&lt;RequestId, RequestData&gt;,</p>
+      <p>    // ── 模型数据 ──────────────────────────────────────────</p>
+      <p>    pub manifest: Arc<modelmanifest>,</modelmanifest></p>
+      <p>    pub weights: WeightsHandle&lt;B, E&gt;,</p>
+      <p>    pub add_special_tokens: bool,</p>
+      <p>    pub model_config: ModelConfig,</p>
+      <p>    pub forward_config: GeneratorForwardConfig,</p>
+      <p>    pub kv_cache_config: KvCacheConfig,</p>
+      <p>    pub tokenizer: TokenizerHandle,</p>
+      <p>    // ── KV Cache ──────────────────────────────────────────</p>
+      <p>    pub kv_cache: Option<kvcachedoublebuffer>,</kvcachedoublebuffer></p>
+      <p>    pub kv_cache_slot: KvCacheSlot,</p>
+      <p>    pub memory_manager: GlobalMemoryManager,</p>
+      <p>    // ── Mega-Kernel 编译产物 ─────────────────────────────</p>
+      <p>    pub mega_kernel: CompiledLayer,                   // 全模型 JIT 机器码（加载时编译，非 Option）</p>
+      <p>    // ── 注意力拓扑 ──────────────────────────────────────</p>
+      <p>    pub topology: AttentionTopology,</p>
+      <p>    // ── 优化子系统 ────────────────────────────────────────</p>
+      <p>    pub moe: Option<moesubsystem>,</moesubsystem></p>
+      <p>    pub residual_bus: ResidualBus,</p>
+      <p>    pub profile_accumulator: ProfileAccumulator,</p>
+      <p>    pub hooks: Arc&lt;RwLock&lt;Vec&lt;Box&lt;dyn GenerationHook&gt;&gt;&gt;&gt;,</p>
+      <p>    pub epilogue: EpilogueSubsystem,</p>
+      <p>    pub last_epilogue_summary: Option<epiloguebatchsummary>,</epiloguebatchsummary></p>
+      <p>    pub page_headers: HashMap&lt;PageId, KvPageHeader&gt;,</p>
+      <p>    // ── 按需激活的优化子系统 ──────────────────────────────</p>
+      <p>    pub spec_state: Option<specdecodingstate>,</specdecodingstate></p>
+      <p>    pub early_exit: Option<earlyexitcontroller>,</earlyexitcontroller></p>
+      <p>    pub rag: Option<latefusionrag>,</latefusionrag></p>
+      <p>    pub intent_config: Option<intentconfig>,</intentconfig></p>
+      <p>    pub seq_histogram: SeqHistogram,</p>
+      <p>    pub golden_buckets: GoldenBucketRegistry,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>关键变更</strong>: 所有模型加载时必须成功编译 Mega-Kernel（<code>compile()</code>），否则返回 <code>ExecutorError::Compilation</code>。<code>CompiledLayer</code> 持有完整的 JIT 机器码、权重 blob 和预分配 buffer。
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 MoeSubsystem</h4>
+      <p>```rust</p>
+      <p>pub struct MoeSubsystem {</p>
+      <p>    pub route_config: ExpertRouteConfig,</p>
+      <p>    pub thermal_manager: ExpertThermalManager,</p>
+      <p>    pub weight_prefetcher: ExpertWeightPrefetcher,</p>
+      <p>    pub hardware_dispatcher: MoeHardwareDispatcher,</p>
+      <p>    pub hot_patch_manager: HotPatchManager,</p>
+      <p>    pub load_balancer: ExpertLoadBalancer,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 GeneratorForwardConfig</h4>
+      <p>```rust</p>
+      <p>pub struct GeneratorForwardConfig {</p>
+      <p>    pub hidden_size: usize,</p>
+      <p>    pub num_layers: usize,</p>
+      <p>    pub num_heads: usize,</p>
+      <p>    pub num_kv_heads: usize,</p>
+      <p>    pub head_dim: usize,</p>
+      <p>    pub max_seq_len: usize,</p>
+      <p>    pub vocab_size: usize,</p>
+      <p>    pub rope_theta: f64,</p>
+      <p>    pub rope_scale: f64,</p>
+      <p>    pub rope_interleaved: bool,</p>
+      <p>    pub rope_precompute: bool,</p>
+      <p>    pub position_encoding: PositionEncoding,</p>
+      <p>    pub arch_family: ArchFamily,</p>
+      <p>    pub intermediate_size: usize,</p>
+      <p>    pub norm_eps: f32,</p>
+      <p>    pub rerank_yes_token_id: Option&lt;u32&gt;,</p>
+      <p>    pub rerank_no_token_id: Option&lt;u32&gt;,</p>
+      <p>    pub moe_config: Option<moeconfig>,</moeconfig></p>
+      <p>    pub dtype: DType,</p>
+      <p>    pub compute_dtype: DType,  // 计算精度（默认 = dtype，可被 Loader::with_compute_dtype 覆盖）</p>
+      <p>    pub paged_kv_page_table: Option&lt;Vec&lt;u32&gt;&gt;,</p>
+      <p>    pub paged_kv_page_size: usize,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>变更</strong>: 所有模型加载时成功编译 Mega-Kernel（<code>compile()</code>），产出 <code>CompiledLayer</code> 持有 JIT 机器码、权重 blob 和预分配 buffer。
+    </section>
+    <section id="s1.2.1" data-section="1.2.1">
+      <h4>1.2.1 Effective KV max_seq_len (ARCH-KV-EFFECTIVE-MAXSEQ)</h4>
+      <code>GeneratorForwardConfig::max_seq_len()</code> 与 <code>KvCacheConfig::max_seq_len()</code> 返回的是 KV cache 的<strong>有效</strong>长度上界，必须等于 JIT 编译时 baked 进 attention kernel 的 <code>compile_seq_len</code>（由 <code>SYMDIM_MAX_SEQ_LEN</code> 统一定义，当前值 <code>2048</code>）。
+      <strong>单一真源</strong>:
+      <p>```rust</p>
+      <p>#[inline]</p>
+      <p>pub fn effective_kv_max_seq_len(geometry_max_seq_len: usize) -&gt; usize {</p>
+      <p>    geometry_max_seq_len.min(SYMDIM_MAX_SEQ_LEN)</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>为什么必须 cap</strong>:
+      <li>现代 LLM 的 <code>max_position_embeddings</code> 动辄 10 万级（Gemma 4 E2B: 131 072; Kimi-K2: 200 000+），未 cap 时会在加载阶段分配数 GB 全零 KV cache（Gemma 4 E2B: 15 effective layers × 1 KV head × 131 072 × 256 head_dim × 4 B × 2 = 3.84 GB memset）。</li>
+      <li>JIT 发射的 <code>emit_multi_head_attention</code> 把 <code>compile_seq_len * kv_dim * 4</code> 作为 <code>V_ptr</code> 的编译时常量偏移（见 <code>gllm-kernels/src/compiler/graph.rs</code>）。若 KV cache stride 小于该常量 → JIT 越界读；若大于 → 浪费内存但 JIT 读不到超出 stride 的位置。</li>
+      <li><code>merge_kv_cache_for_decode</code> / <code>perform_kv_cache_write</code> 的 <code>layer_byte_offset = effective_kv_layer × num_kv_heads × cache_max_seq × head_dim × elem_bytes</code> 必须使用同一 <code>cache_max_seq</code>，否则各层 K/V 写入位置漂移。</li>
+      <strong>禁止</strong>:
+      <li>直接使用 <code>geometry.max_seq_len</code>（未 cap 的原始 <code>max_position_embeddings</code>）作为 KV cache 维度</li>
+      <li>在 <code>KvCacheBuffer::new</code> / <code>merge_kv_cache_for_decode</code> / <code>perform_kv_cache_write</code> 中分别计算 cap（违反 SSOT）</li>
+    </section>
+    <section id="s1.2.2" data-section="1.2.2">
+      <h4>1.2.2 SharedKvRef Effective Layer Remapping (ARCH-KV-EFFECTIVE-LAYER)</h4>
+      <p>Gemma 4 E2B / E4B 的后 <code>num_kv_shared_layers</code> 层共享前一个同类型（sliding / global）非共享层的 KV cache（见 §3 SharedKvRef）。因此 KV cache buffer 只分配 <code>effective_kv_layers = num_layers - num_kv_shared_layers</code> 个物理层槽。</p>
+      <p>所有直接寻址 KV buffer 的调用点必须将原始 <code>layer_index</code> 映射到 <code>effective_kv_layer</code>：</p>
+      <p>```rust</p>
+      <p>pub fn effective_kv_layer(&amp;self, layer: usize) -&gt; usize {</p>
+      <p>    let shared_start = self.num_layers.saturating_sub(self.num_kv_shared_layers);</p>
+      <p>    if layer &lt; shared_start {</p>
+      <p>        return layer.min(self.effective_kv_layers().saturating_sub(1));</p>
+      <p>    }</p>
+      <p>    // Shared tail: find nearest preceding same-type non-shared layer.</p>
+      <p>    let this_type = self.attention_pattern.get(layer).copied().unwrap_or(0);</p>
+      <p>    for j in (0..shared_start).rev() {</p>
+      <p>        if self.attention_pattern.get(j).copied().unwrap_or(0) == this_type {</p>
+      <p>            return j;</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>    self.effective_kv_layers().saturating_sub(1)  // clamp</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>调用点</strong> (必须使用 <code>effective_kv_layer</code>，不是原始 layer index):
+      <li><code>Mega-Kernel 内部 merge_kv_cache</code>（JIT 机器码内部，Rust 不参与）</li>
+      <li><code>Mega-Kernel 内部 perform_kv_cache_write</code>（JIT 机器码内部，Rust 不参与）</li>
+      <li><code>KvCacheBuffer::layer_kv_offset</code></li>
+      <strong>越界保护</strong>: 所有计算 <code>layer_byte_offset</code> 的位置必须附 <code>debug_assert!(effective_kv_layer &lt; effective_kv_layers())</code>，防止 SharedKvRef 元数据错误导致 buffer 越界写。
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 ExecutorError</h4>
+      <p>```rust</p>
+      <p>pub enum ExecutorError {</p>
+      <p>    Backend(BackendError),</p>
+      <p>    Config(ModelConfigError),</p>
+      <p>    Loader(LoaderError),</p>
+      <p>    Tokenizer(TokenizerError),</p>
+      <p>    KvCache(KvCacheError),</p>
+      <p>    MemoryManager(MemoryManagerError),</p>
+      <p>    Scheduler(String),</p>
+      <p>    Compilation(String),           // Mega-Kernel JIT 编译失败</p>
+      <p>    GraphExpansion(String),        // auto_graph → CompilerGraph 构建失败</p>
+      <p>    EmptyPrompt,</p>
+      <p>    EmptySample,</p>
+      <p>    RequestNotFound { request_id: RequestId },</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>变更</strong>: 删除 <code>OnnxPlan</code>（ONNX 走同一管线）。新增 <code>GraphExpansion</code>（图展开错误）。
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. Backend 统一接口</h3>
+      <p>四后端统一：CPU / CUDA / HIP / Metal。</p>
+      <p>&gt; Backend 提供<strong>内存管理</strong>和<strong>同步原语</strong>。前向传播<strong>不再是 Backend 的方法</strong>——所有计算由 Mega-Kernel JIT 机器码完成，Backend 只负责 buffer 分配和 device 同步。</p>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 后端检测</h4>
+      <p>```rust</p>
+      <p>// 优先级: CUDA &gt; ROCm &gt; Metal &gt; CPU</p>
+      <p>// 失败时返回 Err，禁止 panic</p>
+      <p>let backend = detect_backend()?;</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 Backend Trait 核心能力</h4>
+      <strong>废弃方法</strong>: <code>decoder_forward()</code>、<code>encoder_forward()</code>、<code>embedding_forward_gpu_pure()</code> 全部删除。Backend 不再包含前向传播逻辑。
+      <table>
+        <tr>
+          <th>能力</th>
+        </tr>
+        <tr>
+          <td>方法</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>内存分配</td>
+        </tr>
+        <tr>
+          <td>alloc(n, dtype)</td>
+        </tr>
+        <tr>
+          <td>64 字节对齐</td>
+        </tr>
+        <tr>
+          <td>数据上传</td>
+        </tr>
+        <tr>
+          <td>upload_weights(src)</td>
+        </tr>
+        <tr>
+          <td>编译时: 权重 htod 上传到 GPU (一次性); CPU 路径: 零拷贝</td>
+        </tr>
+        <tr>
+          <td>数据下载</td>
+        </tr>
+        <tr>
+          <td>download_output(src, dst)</td>
+        </tr>
+        <tr>
+          <td>GPU 路径: kernel 完成后 dtoh 传回 output tokens; CPU 路径: 不需要</td>
+        </tr>
+        <tr>
+          <td>KV Cache</td>
+        </tr>
+        <tr>
+          <td>alloc_kv_cache(batch, seq)</td>
+        </tr>
+        <tr>
+          <td>分页分配</td>
+        </tr>
+        <tr>
+          <td>同步</td>
+        </tr>
+        <tr>
+          <td>sync()</td>
+        </tr>
+        <tr>
+          <td>等待异步操作完成</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 废弃的手写前向传播文件</h4>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>处理</td>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>compat/bert_forward.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>物理删除</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel JIT 统一处理 Encoder</td>
+        </tr>
+        <tr>
+          <td>compat/decoder_forward.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>物理删除</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel JIT 统一处理 Decoder</td>
+        </tr>
+        <tr>
+          <td>compat/cpu_backend.rs</td>
+          <td> 中的 forward 分发</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>简化</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>只保留内存管理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Executor::step() 生命周期</h3>
+      <p>```</p>
+      <p>step()</p>
+      <p> ├── 1. schedule()        — 调度器决策</p>
+      <p> ├── 2. build_batch()     — 组装混合批次</p>
+      <p> ├── 3. forward()         — 一次 CALL 进入 mega-kernel（唯一路径）</p>
+      <p> │    └── compiled_model.entry_fn(token_ids, weights, kv_cache, ...)</p>
+      <p> │         └── [JIT 机器码内部: 所有层 + KV cache + sample + token→text + generate 循环]</p>
+      <p> ├── 4. 返回结果           — output_buffer 中已有完整文本字符串（JIT 内部完成 token→text）</p>
+      <p> ├── 5. update()          — 更新请求状态</p>
+      <p> └── 6. epilogue_ingest() — Epilogue 遥测收集 + 决策</p>
+      <p>```</p>
+      <strong>核心</strong>: <code>forward()</code> 是一次函数调用，不是循环。整个前向传播由 JIT mega-kernel 完成。
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 全 JIT 前向传播 (ARCH-FULL-JIT)</h3>
+    </section>
+    <section id="s4.0" data-section="4.0">
+      <h4>4.0 设计原则</h4>
+      <p>&gt; <strong>核心定位</strong>: Rust 是<strong>代码生成器</strong>。模型加载时 Rust 通过 JIT 管线生成机器码。加载完成后，推理请求<strong>直接跳入 JIT 机器码执行</strong>，Rust 不参与任何计算、编排、数据搬运、文本解码。</p>
+      <p>&gt; <strong>Rust 的唯一职责</strong>: 生成代码。之后的一切由 JIT 机器码完成。不参与推理、不参与计算、不参与数据搬运、不参与文本解码。</p>
+      <p>&gt; <strong>铁律 ARCH-RUST-IS-CODEGEN</strong>: Rust = 代码生成器 + Hook ABI 工具库。推理阶段 Rust <strong>什么都不做</strong>。所有功能（forward、采样、generate 循环、KV cache 管理、stop condition、token→text 解码、Guardrail、Semantic Gatekeeper、Head Routing、Intent Recall、CoT Reasoner、Early Exit、MoE Routing）全部由 JIT 编译为机器码。Rust 在推理时只调用一次 JIT 入口函数，不参与任何推理/计算相关的操作。</p>
+      <table>
+        <tr>
+          <th>铁律</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-FULL-JIT</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>所有算子走 REGISTER-VM JIT 管线。零手写前向传播代码。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-MEGA-KERNEL</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>整个前向传播编译为</td>
+          <td>一个</td>
+          <td> JIT mega-kernel。不存在"逐节点调用"、"逐层循环"。热路径 = 一次 JMP 指令。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-NO-EMPTY-GRAPH</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>每个 OpKind 节点必须产生有效的 CompilerGraph（output_numel &gt; 0）。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-SHAPE-ELIM</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Shape/Reshape 等元数据操作在编译时常量折叠。运行时零开销。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-GATHER-JIT</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Gather（embedding lookup）编译为 JIT 索引加载内核。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-HOTPATH-ZERO-OVERHEAD</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>热路径中零 Rust 参与。不存在 HashMap、String、Vec、for 循环、函数指针调用。所有编排逻辑在 JIT 生成时已烘焙进机器码。</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 架构模型：Rust = 代码生成器，热路径 = 纯 JIT</h4>
+    </section>
+    <section id="s4.1.1" data-section="4.1.1">
+      <h5>4.1.1 两阶段模型</h5>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────┐</p>
+      <p>│ 阶段 1: 编译（Rust 活跃）— 模型加载时执行一次               │</p>
+      <p>│                                                               │</p>
+      <p>│  Rust 职责:                                                   │</p>
+      <p>│  ├── 解析模型 (auto_graph/ONNX/GGUF) → CompilerGraph        │</p>
+      <p>│  ├── 分析图拓扑，确定层间数据流                              │</p>
+      <p>│  ├── 为整个前向传播 + 采样生成一个 CompilerGraph              │</p>
+      <p>│  ├── JIT codegen → 一段连续机器码（完整前向传播 + 采样）     │</p>
+      <p>│  ├── 将所有权重 pack 到连续内存区域（weight blob）            │</p>
+      <p>│  ├── 分配所有中间 buffer（activation、scratchpad、KV stride）│</p>
+      <p>│  ├── 采样参数通过栈传入（每次请求可不同）                     │</p>
+      <p>│  └── 若有 hook 注册，生成对应层 JMP 跳转代码                 │</p>
+      <p>│     若无 hook 注册，不生成任何跳转代码（零开销）              │</p>
+      <p>│                                                               │</p>
+      <p>│  产出: 一个可执行的 CompiledLayer，包含：                    │</p>
+      <p>│  ├── code: &amp;[u8]          — JIT 机器码                       │</p>
+      <p>│  ├── weight_blob: &amp;[u8]   — 全部权重连续打包                 │</p>
+      <p>│  ├── scratchpad: &amp;mut [u8] — 全部中间 buffer 预分配          │</p>
+      <p>│  └── 所有偏移 = JIT 机器码内的立即数，Rust 不持有            │</p>
+      <p>└─────────────────────────────────────────────────────────────┘</p>
+      <p>┌─────────────────────────────────────────────────────────────┐</p>
+      <p>│ 阶段 2: 推理（Rust 不参与）— 请求级别执行                   │</p>
+      <p>│                                                               │</p>
+      <p>│  Rust 职责: 一次 CALL。之后一切由 JIT 完成。                 │</p>
+      <p>│                                                               │</p>
+      <p>│  热路径: Rust 调用 kernel_entry，传入初始 token_ids           │</p>
+      <p>│  之后 JIT 机器码内部完成整个 generate 循环:                  │</p>
+      <p>│                                                               │</p>
+      <p>│  JIT 内部循环 (每个 token):                                   │</p>
+      <p>│  ├── Embedding lookup (token_ids → embeddings)               │</p>
+      <p>│  ├── for layer 0..N:                                          │</p>
+      <p>│  │   ├── RmsNorm → QKV GEMM → RoPE → Attn → Wo → Residual  │</p>
+      <p>│  │   ├── RmsNorm → Gate+SiLU+Up+Down → Residual              │</p>
+      <p>│  │   └── [Hook JMP] — 仅在有 hook 时存在                     │</p>
+      <p>│  ├── lm_head GEMM → logits                                   │</p>
+      <p>│  ├── Sample → next_token_id                                  │</p>
+      <p>│  ├── 写 next_token_id 到 output_buffer[index]                │</p>
+      <p>│  ├── 更新 KV cache position                                  │</p>
+      <p>│  ├── 检查 stop condition (EOS / max_tokens)                  │</p>
+      <p>│  └── 未停止 → JMP 回 embedding lookup (JIT 内部循环)         │</p>
+      <p>│                                                               │</p>
+      <p>│  停止条件满足时:                                              │</p>
+      <p>│  ├── RET                                                     │</p>
+      <p>│  └── output_buffer 中已包含完整 UTF-8 文本字符串              │</p>
+      <p>│      (token→text 解码也在 JIT 内部完成)                       │</p>
+      <p>│                                                               │</p>
+      <p>│  所有数据 (token_id, logits, text) 全部在 JIT 侧内存/显存中。│</p>
+      <p>│  Rust 不读取、不处理、不持有任何中间数据。                    │</p>
+      <p>│  只有 hook 需要调用外部函数时才 JMP 出 JIT。                  │</p>
+      <p>└─────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+      <strong>热路径中 Rust 做了什么</strong>: 一次 CALL。返回后 output_buffer 中已有完整 UTF-8 文本字符串。
+      <strong>热路径中 Rust 不做什么</strong>: 一切。forward、采样、generate 循环、KV cache 更新、stop condition、token→text 解码 — 全部在 JIT 机器码内部完成。
+      <strong>采样</strong>: temperature / top_k / top_p 通过栈参数传入（每次请求可不同）。结果直接存 JIT 侧 output buffer。
+      <strong>数据流</strong>: token_ids → [JIT 全程处理: forward + sample + decode + 循环] → output_buffer (UTF-8 文本字符串)。Rust 调用方直接读 output_buffer 即可。
+    </section>
+    <section id="s4.1.2" data-section="4.1.2">
+      <h5>4.1.2 Mega-Kernel 编译过程</h5>
+      <p>```</p>
+      <p>InferenceCompiler::compile()</p>
+      <p> ├── 输入: ModelMegaConfig (num_layers, hidden, num_heads, ..., vocab_size)</p>
+      <p> │</p>
+      <p> ├── 1. 全模型 CompilerGraph 构建</p>
+      <p> │   ├── 单层模板图: RmsNorm→QKV→RoPE→MHA→O_proj→Residual→RmsNorm→Gate/Up→SwiGLU→Down→Residual</p>
+      <p> │   ├── 层循环: emit_loop(BoundExpr::Const(num_layers), weight_stride)</p>
+      <p> │   │   ├── 循环体内 weight_ptr = weight_base + byte_offset (LoopBegin 自动维护)</p>
+      <p> │   │   └── weight_stride = 单层全部权重字节大小 (编译时计算)</p>
+      <p> │   ├── Activation: 同一 buffer 原地更新 (残差连接 output = input + delta 直接写回)</p>
+      <p> │   ├── 层外算子: 由图拓扑推导 (SPEC/39 §1.3.2)，典型顺序为 Gather → [层循环] → RmsNorm → Gemm</p>
+      <p> │   └── g.inputs = [token_ids, embed_w, attn_norm_w, w_q, ..., w_down, final_norm_w, lm_head_w]</p>
+      <p> │</p>
+      <p> ├── 2. JIT 编译 (完整管线，单一函数)</p>
+      <p> │   ├── SemanticDAG: 全图算子分类 (ElemWise/Injective/Reduction/Gemm/Opaque)</p>
+      <p> │   ├── FusionEngine: 全局融合 (NormIntoGemm, EpilogueInjection, LoopFusion 等)</p>
+      <p> │   ├── buffer_alloc: interval coloring 生命周期分析，自动复用中间张量空间</p>
+      <p> │   ├── VM Lower: CompilerGraph → VmInstr (含 LoopBegin/LoopEnd 层循环)</p>
+      <p> │   ├── RegAlloc: VReg → 物理寄存器分配</p>
+      <p> │   └── x86_lower: VmInstr → x86_64 机器码</p>
+      <p> │</p>
+      <p> ├── 3. Generate Loop 发射 (x86 wrapper)</p>
+      <p> │   ├── prologue: 读取 MegaKernelFn ABI 参数 → callee-save 寄存器</p>
+      <p> │   ├── generate_loop: JMP 回 embedding lookup</p>
+      <p> │   │   ├── embedding lookup: input_ids[prompt_len + counter] → Gather</p>
+      <p> │   │   ├── 层循环: 单层模板机器码 (权重从 weight_blob + layer_offset 读取)</p>
+      <p> │   │   ├── lm_head: Gemm → logits buffer</p>
+      <p> │   │   ├── argmax / sampling: 从栈参数读取 temperature/top_k/top_p</p>
+      <p> │   │   ├── store token: output_tokens[counter] = token_id</p>
+      <p> │   │   └── check stop: EOS / max_new_tokens → break</p>
+      <p> │   └── epilogue: 恢复 callee-save, 返回 generated_count</p>
+      <p> │</p>
+      <p> ├── 4. 权重打包</p>
+      <p> │   ├── 连续 weight_blob: embed_w + layer_0_weights + ... + layer_N-1_weights + final_norm_w + lm_head_w</p>
+      <p> │   ├── weight_stride = 单层权重字节大小 (所有层相同)</p>
+      <p> │   └── layer_offset = embed_bytes + layer_idx × weight_stride</p>
+      <p> │</p>
+      <p> ├── 5. Buffer 预分配</p>
+      <p> │   ├── activation_buf: [hidden_size × elem_bytes]  (单缓冲，原地更新)</p>
+      <p> │   ├── scratchpad: [buffer_alloc.total_bytes]       (中间张量，生命周期自动复用)</p>
+      <p> │   └── logits_buf: [vocab_size × elem_bytes]        (lm_head 输出，argmax 输入)</p>
+      <p> │</p>
+      <p> └── 产出: CompiledLayer</p>
+      <p>      ├── code: Vec&lt;u8&gt;              — 单一 JIT 机器码 (generate loop 内含全模型前向)</p>
+      <p>      ├── weight_blob: Vec&lt;u8&gt;       — 全部权重连续打包</p>
+      <p>      ├── scratchpad: Vec&lt;u8&gt;        — 临时空间 (activation + 中间张量 + logits)</p>
+      <p>      └── rope_cache: Vec&lt;u8&gt;        — cos/sin 预计算表</p>
+      <p>```</p>
+    </section>
+    <section id="s4.1.3" data-section="4.1.3">
+      <h5>4.1.3 Mega-Kernel ABI（唯一的函数入口）</h5>
+      <p>```rust</p>
+      <p>/// Mega-kernel 入口: 输入 token_ids → 输出 generated token 序列。</p>
+      <p>/// Rust 设置参数，CALL。返回后 output_buffer 中已有完整 UTF-8 文本。</p>
+      <p>/// 每次请求可以传不同的 temperature/top_k/top_p/max_tokens。</p>
+      <p>pub type MegaKernelFn = unsafe extern "C" fn(</p>
+      <p>    // ── 寄存器参数 (System V AMD64 ABI) ──</p>
+      <p>    input_ids_ptr: *const u32,   // rdi: prompt token ID 数组</p>
+      <p>    weight_blob_ptr: *const u8,  // rsi: 全部权重连续打包</p>
+      <p>    kv_cache_ptr: *mut u8,       // rdx: KV Cache 起始</p>
+      <p>    positions_ptr: *const u32,   // rcx: 位置数组</p>
+      <p>    aux_ptr: *const u8,          // r8: KV-V half 指针</p>
+      <p>    batch_size: usize,           // r9: 批大小</p>
+      <p>    // ── 栈参数 ──</p>
+      <p>    prompt_len: usize,           // [rsp+0]: prompt 长度</p>
+      <p>    scratchpad_ptr: *mut u8,     // [rsp+8]: 临时缓冲区</p>
+      <p>    output_tokens_ptr: *mut u32, // [rsp+16]: 输出 token 序列缓冲区</p>
+      <p>    // ── 采样参数 (每次请求可不同) ──</p>
+      <p>    temperature: f32,            // [rsp+24]: 温度 (0.0 = greedy)</p>
+      <p>    top_k: u32,                  // [rsp+28]: top-k (0 = disabled)</p>
+      <p>    top_p: f32,                  // [rsp+32]: top-p (1.0 = disabled)</p>
+      <p>    max_new_tokens: u32,         // [rsp+36]: 最大生成 token 数</p>
+      <p>    eos_token_id: u32,           // [rsp+40]: EOS token ID</p>
+      <p>    hook_ctx_ptr: *mut u8,       // [rsp+48]: hook 上下文 (无 hook 时 null)</p>
+      <p>    telemetry_ptr: *mut u8,      // [rsp+56]: 遥测缓冲区</p>
+      <p>) -&gt; u32;  // rax: 实际生成的 token 数</p>
+      <p>```</p>
+      <strong>Rust 调用侧（热路径全部代码）</strong>:
+      <p>```rust</p>
+      <p>// 热路径全部代码：设置参数，CALL，读取结果。</p>
+      <p>let num_generated: u32 = unsafe {</p>
+      <p>    (kernel.entry_fn)(</p>
+      <p>        prompt_tokens.as_ptr(),       // rdi: prompt</p>
+      <p>        kernel.weight_blob.as_ptr(),  // rsi: 权重</p>
+      <p>        kv_cache_k,                   // rdx: KV cache</p>
+      <p>        positions.as_ptr(),           // rcx: positions</p>
+      <p>        kv_cache_v as *const u8,      // r8: V half</p>
+      <p>        1,                            // r9: batch</p>
+      <p>        prompt_tokens.len(),          // [rsp+0]: prompt_len</p>
+      <p>        kernel.scratchpad.as_mut_ptr(), // [rsp+8]</p>
+      <p>        output_buf.as_mut_ptr(),      // [rsp+16]: output tokens</p>
+      <p>        0.7f32,                       // [rsp+24]: temperature</p>
+      <p>        50u32,                        // [rsp+28]: top_k</p>
+      <p>        0.9f32,                       // [rsp+32]: top_p</p>
+      <p>        100u32,                       // [rsp+36]: max_new_tokens</p>
+      <p>        eos_token_id,                 // [rsp+40]: EOS</p>
+      <p>        std::ptr::null_mut(),         // [rsp+48]: hook_ctx</p>
+      <p>        std::ptr::null_mut(),         // [rsp+56]: telemetry</p>
+      <p>    )</p>
+      <p>};</p>
+      <p>// output_buf 中已是完整 UTF-8 文本字符串。Rust 直接返回给调用方。</p>
+      <p>```</p>
+      <strong>没有</strong>: logits 读取、采样逻辑、HashMap、String、Vec 分配。采样参数通过栈传入，每次请求可不同。
+    </section>
+    <section id="s4.1.4" data-section="4.1.4">
+      <h5>4.1.4 JIT 内部数据流（机器码内部，Rust 不可见）</h5>
+      <p>```</p>
+      <p>JIT 机器码内部执行流程（编译时烘焙，运行时不可变）:</p>
+      <p>  ; ── Generate Loop (wrapper 层，JMP 回 embedding) ──</p>
+      <p>  gen_counter = 0</p>
+      <p>  .gen_loop:</p>
+      <p>      if gen_counter &gt;= max_new_tokens: goto .done</p>
+      <p>      if gen_counter &gt; 0:</p>
+      <p>          token_id = output_tokens[gen_counter - 1]   ; 上一步生成的 token</p>
+      <p>      else:</p>
+      <p>          ; prefill: 处理 prompt tokens, 填充 KV cache</p>
+      <p>          token_id = input_ids[prompt_len + gen_counter]</p>
+      <p>  ; ── Embedding lookup (Gather) ──</p>
+      <p>  activation[0..hidden] = weight_blob[embed_offset + token_id * hidden_bytes]</p>
+      <p>  ; ── Layer Loop (JIT 内部循环，权重 stride 递增) ──</p>
+      <p>  ; LoopBegin counter=0, byte_offset=0, bound=num_layers, step_bytes=weight_stride</p>
+      <p>  .layer_loop:</p>
+      <p>      if counter &gt;= num_layers: goto .layer_done</p>
+      <p>      weight_ptr = weight_blob + layer_0_offset + byte_offset</p>
+      <p>      ; ── Attention Block ──</p>
+      <p>      residual = activation                          ; 保存残差</p>
+      <p>      rms_norm(activation, weight_ptr[norm_off])     ; 原地 RmsNorm</p>
+      <p>      q = gemm(activation, weight_ptr[q_off])        ; 读 activation → 写 scratch q</p>
+      <p>      k = gemm(activation, weight_ptr[k_off])        ; 读 activation → 写 scratch k</p>
+      <p>      v = gemm(activation, weight_ptr[v_off])        ; 读 activation → 写 scratch v</p>
+      <p>      rope(q, positions, rope_cache)                 ; 原地 RoPE</p>
+      <p>      rope(k, positions, rope_cache)                 ; 原地 RoPE</p>
+      <p>      merge_kv(k, v, kv_cache[kv_offset * counter]) ; 写入 KV cache</p>
+      <p>      attn_out = attention(q, kv_cache)              ; 读 q + KV → 写 scratch attn_out</p>
+      <p>      o_proj = gemm(attn_out, weight_ptr[o_off])     ; 读 attn_out → 写 scratch o_proj</p>
+      <p>      activation = residual + o_proj                 ; 原地残差加法</p>
+      <p>      ; ── FFN Block ──</p>
+      <p>      residual = activation                          ; 保存残差</p>
+      <p>      rms_norm(activation, weight_ptr[ffn_norm_off]) ; 原地 RmsNorm</p>
+      <p>      gate = gemm(activation, weight_ptr[gate_off])  ; 读 activation → 写 scratch gate</p>
+      <p>      up = gemm(activation, weight_ptr[up_off])      ; 读 activation → 写 scratch up</p>
+      <p>      silu(gate)                                     ; 原地 SiLU</p>
+      <p>      swiglu = gate * up                             ; 写 scratch swiglu</p>
+      <p>      down = gemm(swiglu, weight_ptr[down_off])      ; 读 swiglu → 写 scratch down</p>
+      <p>      activation = residual + down                   ; 原地残差加法</p>
+      <p>      counter++, byte_offset += weight_stride</p>
+      <p>      goto .layer_loop</p>
+      <p>  .layer_done:</p>
+      <p>  ; ── Final Norm + lm_head ──</p>
+      <p>  rms_norm(activation, weight_blob[final_norm_offset])  ; 原地</p>
+      <p>  logits = gemm(activation, weight_blob[lm_head_offset]) ; → logits buffer</p>
+      <p>  ; ── Sampling (JIT 内部，参数从栈读取) ──</p>
+      <p>  next_token_id = argmax(logits)                ; temperature=0 时</p>
+      <p>  ; 或: sample(logits, temperature, top_k, top_p) ; 有采样时</p>
+      <p>  output_tokens[gen_counter] = next_token_id</p>
+      <p>  gen_counter++</p>
+      <p>  if next_token_id == eos_token_id: goto .done</p>
+      <p>  goto .gen_loop</p>
+      <p>  .done:</p>
+      <p>  return gen_counter</p>
+      <p>```</p>
+      <strong>层循环机制</strong>: <code>LoopBegin { counter, byte_offset, bound, step_bytes }</code> 自动维护 <code>byte_offset = counter × weight_stride</code>。
+      <strong>权重 stride</strong>: 每层权重相同大小，循环体内 <code>weight_ptr = weight_base + byte_offset</code>，通过 <code>PtrExpr::VRegPlusVReg</code> 实现。
+      <strong>Activation 原地更新</strong>: 同一块 buffer 反复使用。RmsNorm/GEMM/SwiGLU 读写 scratch，残差连接 <code>add(residual, delta → activation)</code> 直接写回。
+      <strong>中间张量生命周期</strong>: buffer allocator 通过 interval coloring 自动复用 scratch 空间（q/k/v/attn_out/gate/up 等生命周期不重叠）。
+      <strong>KV cache</strong>: 每层 attention 读取/写入对应层的 KV cache 偏移（<code>kv_cache + kv_layer_stride × counter</code>）。
+    </section>
+    <section id="s4.1.5" data-section="4.1.5">
+      <h5>4.1.5 Hook 集成（条件跳转，无 hook = 零代码）</h5>
+      <p>Hook（Guardrail、SG、HR、Intent、Early Exit）通过 <strong>JIT 代码内嵌的条件跳转</strong> 集成。</p>
+      <strong>没有 hook 注册时，不生成任何跳转代码。机器码中不存在 hook 相关的指令。</strong>
+      <p>```</p>
+      <p>编译时:</p>
+      <p>  ├── 检查 hook 注册表</p>
+      <p>  │</p>
+      <p>  ├── 无 hook 注册:</p>
+      <p>  │   └── 不生成任何跳转/分支/trap 代码。层循环是连续的直线代码。</p>
+      <p>  │</p>
+      <p>  └── 有 hook 注册:</p>
+      <p>      ├── Guardrail veto: 在 target layer 后生成 JMP (读 hook_ctx 状态字)</p>
+      <p>      │   └── hook_ctx 状态字由外部写入 (CPU: 共享内存; GPU: global mem)</p>
+      <p>      ├── SG q-tap: 在 q_proj GEMM 后生成 STG (副作用写，不改控制流)</p>
+      <p>      ├── HR head routing: 在对应层后生成分支 JMP</p>
+      <p>      ├── Early exit: 在指定层后生成 conditional RET (直接返回 token_id)</p>
+      <p>      └── hook_ctx_ptr 参数非 null 时有效</p>
+      <p>运行时:</p>
+      <p>  ├── 无 hook: 机器码是纯直线代码，无分支，最大 ILP</p>
+      <p>  ├── 有 hook: 条件 JMP 读 hook_ctx 状态字</p>
+      <p>  │   ├── veto/skip → JMP 跳过后续计算</p>
+      <p>  │   ├── exit → RET token_id</p>
+      <p>  │   └── continue → 零额外开销 (CMP+JE 被 branch predictor 吞掉)</p>
+      <p>  └── hook_ctx 写入方: 外部进程/线程/GPU kernel (不经过 Rust)</p>
+      <p>```</p>
+      <strong>关键</strong>:
+      <li><strong>无 hook = 零代码</strong>: 机器码中不存在任何 hook 指令。不是"生成了但跳过"，是<strong>根本没生成</strong>。</li>
+      <li><strong>Hook 通信 = 共享内存</strong>: hook_ctx 通过共享内存写入，JIT 机器码直接读取。不经过 Rust 函数调用、不经过函数指针。</li>
+      <li><strong>GPU 路径</strong>: hook trigger 通过 GPU global memory 写入，JIT kernel 读同一个地址。CPU callable hook 通过 GPU→CPU interrupt 或共享内存轮询。</li>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 auto_graph → CompilerGraph OpKind 覆盖</h4>
+      <strong>auto_graph 为每个 OpKind 节点构建有效的 CompilerGraph。禁止返回空图。</strong> 完整 OpKind 清单见 <code>SPEC/04-OPERATORS.md</code>。
+      <table>
+        <tr>
+          <th>OpKind</th>
+        </tr>
+        <tr>
+          <td>CompilerGraph 子图</td>
+        </tr>
+        <tr>
+          <td>output_numel</td>
+        </tr>
+        <tr>
+          <td>MultiHeadAttention</td>
+        </tr>
+        <tr>
+          <td>RmsNorm → Gemm(Wq) → Gemm(Wk) → Gemm(Wv) → RoPE(Q) → RoPE(K) → Attention(Q,K,V) → Gemm(Wo)</td>
+        </tr>
+        <tr>
+          <td>seq_len × hidden_size</td>
+        </tr>
+        <tr>
+          <td>MultiHeadAttention</td>
+          <td> + Q-Tap</td>
+        </tr>
+        <tr>
+          <td>同上 + </td>
+          <td>q_proj</td>
+          <td> GEMM 后尾段 STG 指令写 GatekeeperRingBuffer（见 §4.2.1）</td>
+        </tr>
+        <tr>
+          <td>同上（tap 仅副作用写，不改主输出）</td>
+        </tr>
+        <tr>
+          <td>FFN (SwiGLU)</td>
+        </tr>
+        <tr>
+          <td>RmsNorm → Gemm(gate) → Silu → Gemm(up) → Mul → Gemm(down)</td>
+        </tr>
+        <tr>
+          <td>seq_len × hidden_size</td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>Gemm(m, n, k)</td>
+        </tr>
+        <tr>
+          <td>m × n</td>
+        </tr>
+        <tr>
+          <td>RmsNorm</td>
+        </tr>
+        <tr>
+          <td>RmsNorm(hidden, eps)</td>
+        </tr>
+        <tr>
+          <td>seq_len × hidden</td>
+        </tr>
+        <tr>
+          <td>RoPE</td>
+        </tr>
+        <tr>
+          <td>RoPE(Q, positions)</td>
+        </tr>
+        <tr>
+          <td>seq_len × head_dim</td>
+        </tr>
+        <tr>
+          <td>Gather</td>
+        </tr>
+        <tr>
+          <td>OpKind::Gather { table_rows, embed_dim }</td>
+        </tr>
+        <tr>
+          <td>seq_len × embed_dim</td>
+        </tr>
+        <tr>
+          <td>SliceView</td>
+        </tr>
+        <tr>
+          <td>OpKind::SliceView { axis, start, end }</td>
+        </tr>
+        <tr>
+          <td>根据 slice 参数推导</td>
+        </tr>
+        <tr>
+          <td>MoEGate</td>
+          <td> / </td>
+          <td>MoERouter</td>
+          <td> / </td>
+          <td>MoEDispatchPacked</td>
+        </tr>
+        <tr>
+          <td>Gemm(gate) → Softmax → TopK → [expert branches] → Add</td>
+        </tr>
+        <tr>
+          <td>seq_len × hidden_size</td>
+        </tr>
+        <tr>
+          <td>PerLayerEmbed</td>
+        </tr>
+        <tr>
+          <td>Slice(ple_weight) → Linear → Add</td>
+        </tr>
+        <tr>
+          <td>seq_len × hidden_size</td>
+        </tr>
+        <tr>
+          <td>QkNorm</td>
+        </tr>
+        <tr>
+          <td>L2 归一化 + √head_dim 缩放</td>
+        </tr>
+        <tr>
+          <td>seq_len × head_dim</td>
+        </tr>
+        <tr>
+          <td>ValueNorm</td>
+        </tr>
+        <tr>
+          <td>RMSNorm (无学习参数)</td>
+        </tr>
+        <tr>
+          <td>seq_len × head_dim</td>
+        </tr>
+        <tr>
+          <td>Add</td>
+          <td> / </td>
+          <td>Mul</td>
+          <td> / </td>
+          <td>Silu</td>
+        </tr>
+        <tr>
+          <td>逐元素操作</td>
+        </tr>
+        <tr>
+          <td>同输入</td>
+        </tr>
+        <tr>
+          <td>MeanPool</td>
+        </tr>
+        <tr>
+          <td>MeanPool(seq_len, hidden)</td>
+        </tr>
+        <tr>
+          <td>1 × hidden</td>
+        </tr>
+        <tr>
+          <td>L2Normalize</td>
+        </tr>
+        <tr>
+          <td>L2Normalize(hidden)</td>
+        </tr>
+        <tr>
+          <td>同输入</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2.1" data-section="4.2.1">
+      <h5>4.2.1 FusedAttentionLayer Q-Tap 扩展 (ARCH-SG-QTAP)</h5>
+      <p>&gt; <strong>关联</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md §4</code>（Q 截获协议）</p>
+      <code>MultiHeadAttention</code> OpKind 扩展可选字段 <code>q_tap: Option&lt;QTapConfig&gt;</code>（通过 <code>MegaKernelBusinessConfig</code> 注入）。仅 Semantic Gatekeeper 注册时的"检测层" Attention 节点携带 <code>Some(...)</code>，其他层保持 <code>None</code>，零额外指令开销。
+      <p>```rust</p>
+      <p>pub struct QTapConfig {</p>
+      <p>    /// Gatekeeper ring buffer 的设备可见指针</p>
+      <p>    pub sink_ptr: u64,</p>
+      <p>    /// 要写出的 token 位置</p>
+      <p>    pub tap_position: QTapPosition,</p>
+      <p>    /// 写出 dtype（默认 = q_proj 输出 dtype）</p>
+      <p>    pub dtype: DType,</p>
+      <p>}</p>
+      <p>pub enum QTapPosition {</p>
+      <p>    LastToken,    // 仅最后一个 token（decode step）</p>
+      <p>    AllTokens,    // 全序列（prefill）</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>JIT codegen 行为</strong>（ARCH-CPU-GPU-UNIFIED 合规，全后端统一）：
+      <li>编译期 <code>q_tap: Some(cfg)</code> → Phase 3 codegen 在 <code>q_proj</code> GEMM 的尾段追加 STG 指令写 <code>cfg.sink_ptr</code></li>
+      <li>主计算路径（<code>q_proj</code> → RoPE → Attention）不变，tap 仅是副作用写</li>
+      <li>Ring buffer 双缓冲 + atomic <code>step_index</code>（<code>release</code> 写 / <code>acquire</code> 读），防止 <code>pre_node</code> 回调读到陈旧值</li>
+      <li>编译期 <code>q_tap: None</code> → codegen 不生成 tap 指令（零开销）</li>
+      <strong>不允许的做法</strong>：
+      <li>❌ 拆分 Attention OpKind 为子节点以暴露 Q（违反 ARCH-CPU-GPU-UNIFIED "禁止子算子级 GraphType"）</li>
+      <li>❌ 引入 Q-tap 专用的新 <code>GraphType</code> 变体（同上）</li>
+      <li>❌ 为 Q-tap 单独分配 backend-specific 的辅助 buffer（违反 CPU/GPU 统一路径）</li>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 Gather JIT 内核 (ARCH-GATHER-JIT)</h4>
+      <p>Embedding lookup 必须通过 JIT 编译为索引加载内核。</p>
+      <p>```</p>
+      <p>输入: token_ids (seq_len,)  +  embed_table (vocab_size × embed_dim)</p>
+      <p>输出: embeddings (seq_len × embed_dim)</p>
+      <p>JIT 逻辑 (Phase 3 codegen):</p>
+      <p>  for i in 0..seq_len:</p>
+      <p>    row = token_ids[i]</p>
+      <p>    memcpy(output[i * embed_dim .. (i+1) * embed_dim],</p>
+      <p>           embed_table[row * embed_dim .. (row+1) * embed_dim])</p>
+      <p>```</p>
+      <strong>CompilerGraph OpKind</strong>:
+      <p>```rust</p>
+      <p>OpKind::Gather {</p>
+      <p>    table_rows: usize,    // vocab_size</p>
+      <p>    embed_dim: usize,     // embedding dimension</p>
+      <p>    index_dim: SymDim,    // seq_len (Symbolic)</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>VM 管线处理</strong>:
+      <li>Phase 0: <code>scalar_gather()</code> 参考实现 → SymExec → OpTrace</li>
+      <li>Phase 1: SemanticDAG → <code>OpClass::Injective</code>（逐元素索引查找）</li>
+      <li>Phase 2: Fusion → Standalone（Gather 不参与融合）</li>
+      <li>Phase 3: lower → <code>emit_loop { VecLoad(index) → VecLoad(table[index]) → VecStore(output) }</code></li>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 Shape/Slice 编译时处理 (ARCH-SHAPE-ELIM)</h4>
+      <p>```rust</p>
+      <p>OpKind::SliceView {</p>
+      <p>    axis: usize,</p>
+      <p>    start: usize,</p>
+      <p>    end: usize,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>output_numel 推导规则</strong>: <code>input_shape[axis]</code> 替换为 <code>end - start</code>，其他维度不变。
+      <p>&gt; <strong>SPEC/39 说明</strong>: 下表描述的是不同模型 CompilerGraph 拓扑的自然差异，不是编译器的形态分支。编译器不区分 encoder/decoder——图有什么算子就编译什么算子。</p>
+      <table>
+        <tr>
+          <th>操作</th>
+        </tr>
+        <tr>
+          <td>编译时行为</td>
+        </tr>
+        <tr>
+          <td>运行时行为</td>
+        </tr>
+        <tr>
+          <td>Shape</td>
+        </tr>
+        <tr>
+          <td>常量折叠为具体值。CompilerGraph 中不产生 op。output_numel = 输入 numel（恒等传递）</td>
+        </tr>
+        <tr>
+          <td>零运行时开销</td>
+        </tr>
+        <tr>
+          <td>Slice</td>
+        </tr>
+        <tr>
+          <td>转换为 </td>
+          <td>SliceView</td>
+          <td> 指针偏移。不拷贝数据。output_numel = slice 范围大小</td>
+        </tr>
+        <tr>
+          <td>零拷贝视图</td>
+        </tr>
+        <tr>
+          <td>Reshape</td>
+        </tr>
+        <tr>
+          <td>转换为 </td>
+          <td>Reshape</td>
+          <td> 元数据 op。JIT codegen 生成 NOP（已授权 NO_SILENT_FALLBACK 例外）</td>
+        </tr>
+        <tr>
+          <td>零拷贝视图</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.5" data-section="4.5">
+      <h4>4.5 三种模型类型的统一执行</h4>
+      <strong>三种类型共享同一 Mega-Kernel ABI</strong>。差异在编译时烘焙进 JIT 机器码，不在运行时分支。
+      <table>
+        <tr>
+          <th>模型类型</th>
+        </tr>
+        <tr>
+          <td>Mega-Kernel 结构</td>
+        </tr>
+        <tr>
+          <td>特殊处理</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Decoder (Generator)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embed → N × [Attn+Residual + FFN+Residual] → lm_head</td>
+        </tr>
+        <tr>
+          <td>KV Cache 逐层更新（JIT 内部）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Encoder (Embedding)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embed → N × [BiAttn + FFN] → MeanPool → L2Norm</td>
+        </tr>
+        <tr>
+          <td>无 KV Cache</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Reranker</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Embed → N × [BiAttn + FFN] → Slice(CLS) → Linear</td>
+        </tr>
+        <tr>
+          <td>无 KV Cache</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.6" data-section="4.6">
+      <h4>4.6 output_numel 推导协议</h4>
+      <strong>不变量</strong>: 对 CompilerGraph 中每个 OpKind 节点，<code>output_numel</code> 必须 &gt; 0。
+      <p>推导规则：</p>
+      <p>1. 从 OpKind 的输入形状和配置参数推导输出形状</p>
+      <p>2. 动态维度使用 <code>SymDim::Symbolic</code> 的 <code>max_value</code> 上界分配 buffer</p>
+      <p>3. 运行时实际使用的 numel 可以 &lt; 分配的 buffer 大小（过量分配是安全的，不足分配导致 SIGSEGV）</p>
+      <p>```rust</p>
+      <p>// 推导优先级（由 auto_graph 构建时确定）</p>
+      <p>match &amp;op.kind {</p>
+      <p>    OpKind::MultiHeadAttention { num_heads, head_dim, .. } =&gt; max_seq_len * num_heads * head_dim,</p>
+      <p>    OpKind::Gemm { n, .. } =&gt; m * n,</p>
+      <p>    OpKind::Gather { embed_dim, .. } =&gt; max_seq_len * embed_dim,</p>
+      <p>    OpKind::RmsNorm { hidden_size, .. } =&gt; max_seq_len * hidden_size,</p>
+      <p>    // ... 其他 OpKind 类推</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.7" data-section="4.7">
+      <h4>4.7 ABI 契约</h4>
+      <p>Mega-kernel 入口签名见 §4.1.3。调用方保证：</p>
+      <li><code>weight_blob_ptr</code> 指向编译时 pack 的全部权重（连续内存）</li>
+      <li><code>kv_cache_ptr</code> 指向 KV Cache 起始（Decoder），或 null（Encoder/Reranker）</li>
+      <li><code>scratchpad_ptr</code> 指向至少 <code>max(所有层 scratchpad 需求, vocab_size × dtype.size_bytes())</code> 字节的可写内存（采样在 scratchpad 内完成）</li>
+      <li><code>scratchpad_ptr</code> 指向至少 <code>max(所有层 scratchpad 需求)</code> 字节的可写内存</li>
+      <li><code>seq_len</code> 是运行时值，通过 <code>[rsp+0]</code> 传入（SymDim::Symbolic 的运行时绑定）</li>
+      <strong>已物理删除 (SPEC/39)</strong>: 单节点 ABI <code>CompiledLayerFn</code>。Mega-kernel 是唯一入口。详见 <code>SPEC/39-UNIFIED-MEGA-KERNEL.md</code>。
+    </section>
+    <section id="s4.1.4" data-section="4.1.4">
+      <h4>§4.1.4 图拓扑无 KV/Sampling Ops 时的参数传值</h4>
+      <p>编译器不区分"encoder"和"decoder"——它只看到 CompilerGraph 拓扑。当图不含 KV ops 和 sampling ops 时，调用方将相关参数设为 NULL/0：</p>
+      <p>JIT 机器码中不存在对 NULL 参数的访问——编译时图拓扑无对应 ops 就不会生成访问代码。输出通过 scratchpad output tensor 读取（由 buffer_alloc 映射），不依赖 <code>output_tokens_ptr</code>。</p>
+      <table>
+        <tr>
+          <th>ABI 参数</th>
+        </tr>
+        <tr>
+          <td>图含 KV + Sampling (Decoder)</td>
+        </tr>
+        <tr>
+          <td>图无 KV/Sampling (Encoder/小图)</td>
+        </tr>
+        <tr>
+          <td>kv_cache_ptr</td>
+        </tr>
+        <tr>
+          <td>KV buffer</td>
+        </tr>
+        <tr>
+          <td>NULL</td>
+        </tr>
+        <tr>
+          <td>output_tokens_ptr</td>
+        </tr>
+        <tr>
+          <td>输出缓冲</td>
+        </tr>
+        <tr>
+          <td>NULL</td>
+        </tr>
+        <tr>
+          <td>max_new_tokens</td>
+        </tr>
+        <tr>
+          <td>≥1</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>output_mode_selector</td>
+        </tr>
+        <tr>
+          <td>0 (Generate)</td>
+        </tr>
+        <tr>
+          <td>3 (EncodeToLayer) / 2 (ClassifyMultiway) / 1 (ClassifyBinary) / 0 (小图)</td>
+        </tr>
+        <tr>
+          <td>temperature/top_k/top_p</td>
+        </tr>
+        <tr>
+          <td>采样参数</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>prompt_len</td>
+        </tr>
+        <tr>
+          <td>prompt 长度</td>
+        </tr>
+        <tr>
+          <td>全输入长度 / 索引数量</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. Callback 构建流程</h3>
+      <code>build_step_callbacks()</code> 根据配置注册优化模块回调。Callback 在编译时烘焙进 mega-kernel 机器码（见 §4.1.5），不在运行时通过 Rust 函数调用。CallbackAction、LayerCallback trait 和 CallbackChain 完整定义见 <code>SPEC/05-OPTIMIZATIONS.md</code> §1。
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. Session 多轮 KV Cache 复用</h3>
+      <p>Session API 支持跨轮次 KV Cache 确定性复用。<code>SessionKvCache</code> 底层数据结构和隔离约束定义见 <code>SPEC/06-RUNTIME.md</code> §4.3。</p>
+      <p>```rust</p>
+      <p>let session_id = executor.register_session();</p>
+      <p>loop {</p>
+      <p>    executor.claim_session_prefix(session_id, &amp;new_tokens)?;</p>
+      <p>    // ... forward ...</p>
+      <p>    executor.finalize_session_tokens(session_id, new_tokens.len());</p>
+      <p>}</p>
+      <p>```</p>
+      <code>finalized_position</code> 单调递增约束：禁止 claim 超过已确认边界。
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 模型热切换</h3>
+      <p>Stop-the-World 流程，基于 <code>Arc&lt;RwLock&lt;Option&lt;Executor&gt;&gt;&gt;</code>。</p>
+      <p>```rust</p>
+      <p>impl Client {</p>
+      <p>    pub fn swap_model(&amp;self, new_model_id: &amp;str) -&gt; Result&lt;()&gt; {</p>
+      <p>        let mut guard = self.executor.write().unwrap();</p>
+      <p>        *guard = None;</p>
+      <p>        let new_executor = Executor::from_loader(/* ... */)?;</p>
+      <p>        *guard = Some(new_executor);</p>
+      <p>        Ok(())</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. GPU 数据通路优化</h3>
+      <p>&gt; <strong>铁律</strong>: GPU 推理遵循与 CPU 完全相同的 ARCH-RUST-IS-CODEGEN 铁律。编译时 Rust 一次性完成 JIT codegen + 权重 htod + buffer 分配。推理时一次 GPU kernel launch。详见 <code>02-ARCHITECTURE.md §8.10</code>。</p>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 KV Scatter（编译进 mega-kernel）</h4>
+      <code>OpKind::KvScatterWrite</code> + PTX/HIP/MSL codegen。KV scatter 逻辑编译进 mega-kernel，kernel 内部 per-thread-block 散写，不经过 Rust。
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 权重管理（编译时一次性 htod）</h4>
+      <p>编译时：weight_blob pack → htod → GPU 常驻。所有权重偏移 bake 进 GPU kernel 立即数。推理时 kernel 直接从 GPU 常驻权重读取，Rust 不发起任何 htod/dtoh 操作。</p>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 Metal KV 直写（编译时 bake 指针）</h4>
+      <p>Metal unified memory：编译时获取 shared memory 指针 bake 进 kernel。运行时 kernel 直接读写，零额外传输。</p>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>8.4 PagedKvView 三后端统一</h4>
+      <p>编译时：page_table 构建 + htod 上传 + bake 进 kernel。运行时 kernel 内部 page lookup → gather K/V → attention。CUDA / HIP / Metal 三后端统一。</p>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 废弃清单 (ARCH-FULL-JIT 迁移)</h3>
+      <table>
+        <tr>
+          <th>废弃项</th>
+        </tr>
+        <tr>
+          <td>替代</td>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>graph_executor_ptr: *mut</td>
+        </tr>
+        <tr>
+          <td>mega_kernel: CompiledLayer</td>
+          <td> 固定成员</td>
+        </tr>
+        <tr>
+          <td>消除裸指针，Mega-Kernel 编译产物</td>
+        </tr>
+        <tr>
+          <td>onnx_generator_plan</td>
+        </tr>
+        <tr>
+          <td>ONNX → auto_graph → CompilerGraph → Mega-Kernel JIT</td>
+        </tr>
+        <tr>
+          <td>ONNX 模型走同一管线</td>
+        </tr>
+        <tr>
+          <td>OnnxPlan</td>
+          <td> error variant</td>
+        </tr>
+        <tr>
+          <td>GraphExpansion</td>
+        </tr>
+        <tr>
+          <td>统一错误类型</td>
+        </tr>
+        <tr>
+          <td>Backend 的 </td>
+          <td>decoder_forward</td>
+          <td> 方法</td>
+        </tr>
+        <tr>
+          <td>Mega-kernel </td>
+          <td>CALL</td>
+        </tr>
+        <tr>
+          <td>Backend 只管内存</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>逐节点 Rust 循环 (</td>
+          <td>for node in nodes</td>
+          <td>)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Mega-kernel 单次 </td>
+          <td>CALL</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL: 热路径零 Rust 参与</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CompiledNode</td>
+          <td> 数组 + 逐节点 </td>
+          <td>execute()</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>单个 </td>
+          <td>CompiledModel</td>
+          <td> + 一次 </td>
+          <td>CALL</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CompiledLayerFn</td>
+          <td> 单节点 ABI — 已物理删除 (SPEC/39)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MegaKernelFn</td>
+          <td> 全图 ABI</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL; </td>
+          <td>CompiledLayerFn</td>
+          <td> 已物理删除 (SPEC/39)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>tensors: HashMap&lt;String, Vec&lt;u8&gt;&gt;</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>权重偏移 bake 进 JIT 机器码立即数</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL: Rust 不持有任何权重偏移数据结构</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>热路径 String 操作</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>编译时 bake 进机器码，运行时无 String</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>热路径 Vec 分配 (</td>
+          <td>vec!</td>
+          <td>/</td>
+          <td>to_vec</td>
+          <td>/</td>
+          <td>clone</td>
+          <td>)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>所有 buffer 编译时分配，运行时零分配</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>热路径 weight pack (</td>
+          <td>pack_weight_blob</td>
+          <td>)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>编译时一次性 pack 全部权重，偏移 bake 进机器码立即数</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Callback Rust 函数调用 (per-node)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>JIT 机器码内嵌条件跳转</td>
+        </tr>
+        <tr>
+          <td>ARCH-MEGA-KERNEL: callback 烘焙进机器码</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 热路径零开销执行协议 (ARCH-MEGA-KERNEL + ARCH-HOTPATH-ZERO-OVERHEAD)</h3>
+      <p>&gt; <strong>SSOT</strong>: 本节定义推理热路径中 Rust 的角色边界。</p>
+      <p>&gt; <strong>核心铁律 ARCH-RUST-IS-CODEGEN</strong>: Rust = 代码生成器。推理阶段 Rust <strong>什么都不做</strong>。所有功能全部 JIT。Rust 只调用一次 JIT 入口函数。</p>
+    </section>
+    <section id="s10.1" data-section="10.1">
+      <h4>10.1 热路径开销预算</h4>
+      <strong>SmolLM2-135M 参考模型</strong> (24 层, hidden=576, BF16→F32, CPU JIT):
+      <table>
+        <tr>
+          <th>指标</th>
+        </tr>
+        <tr>
+          <td>旧架构 (Rust 编排)</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel 目标</td>
+        </tr>
+        <tr>
+          <td>测量方法</td>
+        </tr>
+        <tr>
+          <td>热路径 Rust 指令数</td>
+        </tr>
+        <tr>
+          <td>~5000 (循环+HashMap+clone)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>~20</td>
+          <td> (设置参数 + CALL)</td>
+        </tr>
+        <tr>
+          <td>perf stat -e instructions</td>
+        </tr>
+        <tr>
+          <td>热路径 Rust malloc</td>
+        </tr>
+        <tr>
+          <td>~100</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>0</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>代码审计</td>
+        </tr>
+        <tr>
+          <td>热路径 HashMap 操作</td>
+        </tr>
+        <tr>
+          <td>~100</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>0</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>代码审计</td>
+        </tr>
+        <tr>
+          <td>热路径 String 操作</td>
+        </tr>
+        <tr>
+          <td>~50</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>0</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>代码审计</td>
+        </tr>
+        <tr>
+          <td>热路径函数调用</td>
+        </tr>
+        <tr>
+          <td>~50 (逐节点 execute)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>1</td>
+          <td> (mega-kernel CALL)</td>
+        </tr>
+        <tr>
+          <td>代码审计</td>
+        </tr>
+        <tr>
+          <td>Decode ms/token (release)</td>
+        </tr>
+        <tr>
+          <td>~220ms</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>&lt; 10ms</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>examples/bench_step.rs</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10.2" data-section="10.2">
+      <h4>10.2 编译时完整性验证</h4>
+      <code>compile()</code> 完成后，以下条件必须全部成立:
+      <p>```rust</p>
+      <p>let model: &amp;CompiledModel = &amp;executor.mega_kernel.mega_compiled;</p>
+      <p>assert!(!model.exec_code.code_bytes().is_empty(), "JIT 机器码必须非空");</p>
+      <p>assert!(!model.weight_blob.is_empty(), "权重必须已打包");</p>
+      <p>assert!(!model.buffer_layout.activation_bytes &gt; 0, "activation buffer 必须已分配");</p>
+      <p>assert!(model.buffer_layout.total_scratchpad_bytes &gt; 0, "scratchpad 必须已分配 (含中间张量 + logits)");</p>
+      <p>```</p>
+    </section>
+    <section id="s10.3" data-section="10.3">
+      <h4>10.3 热路径审计命令</h4>
+      <p>```bash</p>
+      <p>grep -n "vec![" src/engine/executor.rs | grep -v "compile|new|test|//"</p>
+      <p>grep -n "to_vec|.clone()|Vec::new|Vec::with_capacity" src/engine/executor.rs | grep -v "compile|test|//"</p>
+      <p>grep -n "tensors.get|tensors.insert|tensors.remove|HashMap" src/engine/executor.rs | grep -v "compile|test|fn seed|//"</p>
+      <p>grep -n "for .*\n.*in|while " src/graph/executor.rs | grep -v "compile|test|//"</p>
+      <p>grep -n ".clone()|.to_string()|format!|String" src/graph/executor.rs | grep -v "compile|test|//"</p>
+      <p>```</p>
+    </section>
+    <section id="s10.4" data-section="10.4">
+      <h4>10.4 合规的特殊路径</h4>
+      <strong>Rust 在推理阶段不执行任何操作。</strong>
+      <table>
+        <tr>
+          <th>操作</th>
+        </tr>
+        <tr>
+          <td>实现位置</td>
+        </tr>
+        <tr>
+          <td>Rust 是否参与</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>Embedding lookup</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>Gather 内嵌</td>
+        </tr>
+        <tr>
+          <td>KV cache merge</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>JIT 内部处理</td>
+        </tr>
+        <tr>
+          <td>GQA head expansion</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>broadcast 内嵌</td>
+        </tr>
+        <tr>
+          <td>Residual add</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>Epilogue 融合</td>
+        </tr>
+        <tr>
+          <td>RoPE cos/sin</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>rope_cache 表</td>
+        </tr>
+        <tr>
+          <td>Logits GEMM</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>lm_head 内嵌</td>
+        </tr>
+        <tr>
+          <td>采样 (argmax/top_k/top_p)</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>参数从栈传入</td>
+        </tr>
+        <tr>
+          <td>Generate 循环</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>JMP 回 embed</td>
+        </tr>
+        <tr>
+          <td>Stop condition</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>EOS + max_tokens</td>
+        </tr>
+        <tr>
+          <td>Hook 条件跳转</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>仅在有 hook 时生成</td>
+        </tr>
+        <tr>
+          <td>Token→UTF-8 解码</td>
+        </tr>
+        <tr>
+          <td>JIT 机器码</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>vocab lookup 内嵌</td>
+        </tr>
+      </table>
+    </section>
+  <section id="post-/internal/executor/forward-step" data-api="POST /internal/executor/forward_step" data-api-type="internal" data-api-name="API-EXECUTOR-FORWARD"><h4>POST /internal/executor/forward_step — ExecutorApi::forward_step()</h4><p>执行器前向步进 API，驱动单步推理计算</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="u32" data-required="true" data-param="step"><td>step</td><td>u32</td><td>是</td><td>当前步进序号</td></tr><tr data-type="ExecutionContext" data-required="true" data-param="context"><td>context</td><td>ExecutionContext</td><td>是</td><td>执行上下文</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="StepResult"><td>200</td><td>成功</td><td>StepResult</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：08-EXECUTOR.html</address>
+  </footer>
+</body>
+</html>

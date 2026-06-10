@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="gemma4-altup" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"gemma4-altup", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>AltUp (Alternating Updates) + PerLayerEmbedding 技术协议</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>gemma4-altup</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-altup-alternating-updates-perlayerembedding-技术协议" data-section="null">
+      <h2>AltUp (Alternating Updates) + PerLayerEmbedding 技术协议</h2>
+      <p>&gt; <strong>SSOT</strong> — Gemma 4 E2B/E4B 的 PLE 注入机制基于 AltUp 框架。</p>
+      <p>&gt; 现有 <code>gemma4-op-audit.md §1.5</code> 中的 PLE 公式为<strong>已废弃近似</strong>（无 AltUp、无 LAuReL、无门控乘法），</p>
+      <p>&gt; 本文档完全取代 §1.5。</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>0. 设计决策记录</h3>
+      <table>
+        <tr>
+          <th>决策</th>
+        </tr>
+        <tr>
+          <td>选项</td>
+        </tr>
+        <tr>
+          <td>选择</td>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>层间携带状态</td>
+        </tr>
+        <tr>
+          <td>单 </td>
+          <td>[S,H]</td>
+          <td> + AltUp 拆散</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>胖激活 </td>
+          <td>[P,S,H]</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>不破坏单模板 ping-pong；宪法禁向后兼容</td>
+        </tr>
+        <tr>
+          <td>per_layer_inputs 存储</td>
+        </tr>
+        <tr>
+          <td>每层重算 projection</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>预计算 + 持久激活 buffer</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>projection 是一次性全层大 GEMM，按层重算无法廉价切片</td>
+        </tr>
+        <tr>
+          <td>per_layer_inputs 布局</td>
+        </tr>
+        <tr>
+          <td>column-major </td>
+          <td>[S, L·hpl]</td>
+          <td> + ColumnSlice</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>layer-major </td>
+          <td>[L, S, hpl]</td>
+          <td> + 步进指针</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>cache 友好；与 weight stride 机制对称；无需动态 ColumnSlice</td>
+        </tr>
+        <tr>
+          <td>AltUp OpKind 粒度</td>
+        </tr>
+        <tr>
+          <td>单一复合 PerLayerEmbed</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>3 个细粒度 OpKind</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>predict/correct/inject 是不可再约的新计算模式；其余用现有算子组合</td>
+        </tr>
+        <tr>
+          <td>现有 PerLayerEmbed</td>
+        </tr>
+        <tr>
+          <td>保留 + 扩展</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>物理删除</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>公式不等价于官方；宪法禁向后兼容</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. AltUp 架构概览</h3>
+      <p>AltUp (Alternating Updates) 把每层的残差流从 1 路 <code>[S, H]</code> 扩展为 P 路并行预测 <code>[P, S, H]</code>，</p>
+      <p>每层执行："预测全部 P 路 → 仅对 active 路（index 0）跑真实 attention/FFN → 用 active 路结果修正全部 P 路"。</p>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 Config 参数</h4>
+      <p>&gt; <strong>注</strong>：官方 Gemma3nConfig 默认 <code>altup_num_inputs=4</code>，但 Gemma 4 E2B/E4B 实际使用</p>
+      <p>&gt; <code>altup_num_inputs=2</code>。需在模型 config.json 中确认具体值。若实际为 4，则本协议中</p>
+      <p>&gt; 所有 <code>[2,S,H]</code> 应替换为 <code>[4,S,H]</code>，buffer 预算相应调整。</p>
+      <table>
+        <tr>
+          <th>参数</th>
+        </tr>
+        <tr>
+          <td>Gemma 4 E2B</td>
+        </tr>
+        <tr>
+          <td>Gemma 4 E4B</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>altup_num_inputs</td>
+          <td> (P)</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>并行预测路数（官方默认 4，Gemma 4 E2B/E4B 为 2）</td>
+        </tr>
+        <tr>
+          <td>altup_active_idx</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>Active 预测索引</td>
+        </tr>
+        <tr>
+          <td>altup_coef_clip</td>
+        </tr>
+        <tr>
+          <td>120.0</td>
+        </tr>
+        <tr>
+          <td>120.0</td>
+        </tr>
+        <tr>
+          <td>预测/修正系数裁剪值</td>
+        </tr>
+        <tr>
+          <td>altup_correct_scale</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>是否对 active 预测应用 correct_output_scale</td>
+        </tr>
+        <tr>
+          <td>hidden_size_per_layer_input</td>
+          <td> (hpl)</td>
+        </tr>
+        <tr>
+          <td>256</td>
+        </tr>
+        <tr>
+          <td>256</td>
+        </tr>
+        <tr>
+          <td>每层 PLE 嵌入维度</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 数据流全景</h4>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────────┐</p>
+      <p>│ Prefill 阶段 (循环外，一次性计算)                                │</p>
+      <p>│                                                                 │</p>
+      <p>│  token_ids ──→ Gather(embed_per_layer) ──→ ple_tokens [S,L·hpl]│</p>
+      <p>│                                      reshape ──→ [L,S,hpl]      │</p>
+      <p>│                                                                 │</p>
+      <p>│  hidden_0 ──→ per_layer_model_projection(GEMM) ──→ proj [S,L·hpl]│</p>
+      <p>│                × hidden_size⁻⁰·⁵  →  reshape ──→ [L,S,hpl]     │</p>
+      <p>│                RMSNorm(hpl)                                     │</p>
+      <p>│                                                                 │</p>
+      <p>│  per_layer_inputs[L,S,hpl] = (projection + ple_tokens × √hpl)  │</p>
+      <p>│                               × 1/√2                            │</p>
+      <p>│  → 存入 PersistentActivation buffer                             │</p>
+      <p>│                                                                 │</p>
+      <p>│  AltUp init:                                                    │</p>
+      <p>│  hidden_0 [S,H] → stack [P,S,H]                                │</p>
+      <p>│    slice[0] = hidden_0                                          │</p>
+      <p>│    slice[1..P] = altup_projection + 幅度归一化     │</p>
+      <p>│  → 存入 ping buffer [P,S,H]                                    │</p>
+      <p>└─────────────────────────────────┬───────────────────────────────┘</p>
+      <p>                                  │</p>
+      <p>                                  ▼</p>
+      <p>┌─────────────────────────────────────────────────────────────────┐</p>
+      <p>│ 层循环 (每层执行，模板 × N)                                      │</p>
+      <p>│                                                                 │</p>
+      <p>│  ping [P,S,H] = 上层输出                                        │</p>
+      <p>│                                                                 │</p>
+      <p>│  ── AltUp Predict ──                                            │</p>
+      <p>│  modalities = tanh(router_norm(active) × H⁻¹ @ W_router)        │</p>
+      <p>│  coefs = prediction_coefs(modalities)  → [P,P] per position     │</p>
+      <p>│  predictions[p] = hidden[p] + Σ_q coefs[p,q]·hidden[q]         │</p>
+      <p>│                                                                 │</p>
+      <p>│  ── Active path (slice 0, [S,H]) ──                             │</p>
+      <p>│  active = predictions[0]                                        │</p>
+      <p>│  normed = input_norm(active)                                    │</p>
+      <p>│  laurel = LAuReL(normed)                                        │</p>
+      <p>│  attn = MHA(normed)                                             │</p>
+      <p>│  attn_laurel = (active + attn + laurel) / √2                    │</p>
+      <p>│  ffn = MLP(pre_ffn_norm(attn_laurel))                           │</p>
+      <p>│  gated = attn_laurel + ffn                                      │</p>
+      <p>│                                                                 │</p>
+      <p>│  ── AltUp Correct ──                                            │</p>
+      <p>│  innovation = gated - predictions[0]                            │</p>
+      <p>│  corrected_coefs = correction_coefs(modalities) + 1.0           │</p>
+      <p>│  corrected[p] = predictions[p] + corrected_coefs[p]·innovation  │</p>
+      <p>│  corrected[0] = gated  (active 路直接更新)                       │</p>
+      <p>│  if altup_correct_scale:                                        │</p>
+      <p>│    corrected[0] ×= correct_output_scale                         │</p>
+      <p>│                                                                 │</p>
+      <p>│  ── PLE 门控注入 ──                                              │</p>
+      <p>│  ple_input = per_layer_inputs[layer_idx]  [S,hpl] (步进指针)    │</p>
+      <p>│  gate = GELU(per_layer_input_gate(corrected[0]))  [S,hpl]       │</p>
+      <p>│  gated_ple = gate × ple_input                                   │</p>
+      <p>│  projected = per_layer_projection(gated_ple)  [S,H]             │</p>
+      <p>│  normalized = post_per_layer_input_norm(projected)  RMSNorm     │</p>
+      <p>│  corrected[1:] += normalized  (注入到非 active 预测)             │</p>
+      <p>│                                                                 │</p>
+      <p>│  pong [P,S,H] = corrected                                       │</p>
+      <p>│  ActivationSwap → 下层 ping = 本层 pong                         │</p>
+      <p>└─────────────────────────────────┬───────────────────────────────┘</p>
+      <p>                                  │</p>
+      <p>                                  ▼</p>
+      <p>┌─────────────────────────────────────────────────────────────────┐</p>
+      <p>│ AltUp Unembed (循环后)                                           │</p>
+      <p>│                                                                 │</p>
+      <p>│  对于 i=1..P-1:                                                 │</p>
+      <p>│    hidden[i] = altup_unembed_projection           │</p>
+      <p>│    magnitude normalize to match hidden[0]                       │</p>
+      <p>│  result = mean(hidden[0..P-1], dim=0)  [S,H]                   │</p>
+      <p>│  result = final_norm(result)                                    │</p>
+      <p>│  → 继续到 lm_head                                               │</p>
+      <p>└─────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 权重清单</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 AltUp 核心权重 (模型级，循环外)</h4>
+      <table>
+        <tr>
+          <th>权重名</th>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>altup.correct_output_scale</td>
+        </tr>
+        <tr>
+          <td>[H]</td>
+        </tr>
+        <tr>
+          <td>Active 预测修正缩放</td>
+        </tr>
+        <tr>
+          <td>altup.correction_coefs.weight</td>
+        </tr>
+        <tr>
+          <td>[P, P]</td>
+        </tr>
+        <tr>
+          <td>修正系数矩阵</td>
+        </tr>
+        <tr>
+          <td>altup.prediction_coefs.weight</td>
+        </tr>
+        <tr>
+          <td>[P², P]</td>
+        </tr>
+        <tr>
+          <td>预测系数矩阵 (reshape 为 [P,P])</td>
+        </tr>
+        <tr>
+          <td>altup.modality_router.weight</td>
+        </tr>
+        <tr>
+          <td>[P, H]</td>
+        </tr>
+        <tr>
+          <td>模态路由器</td>
+        </tr>
+        <tr>
+          <td>altup.router_norm.weight</td>
+        </tr>
+        <tr>
+          <td>[H]</td>
+        </tr>
+        <tr>
+          <td>路由器前 RMSNorm</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 AltUp 初始化/反嵌权重 (模型级，循环外)</h4>
+      <table>
+        <tr>
+          <th>权重名</th>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>altup_projections.{i}.weight</td>
+        </tr>
+        <tr>
+          <td>[H, H]</td>
+          <td> × (P-1)</td>
+        </tr>
+        <tr>
+          <td>初始化：将 hidden_0 投影到非 active 槽</td>
+        </tr>
+        <tr>
+          <td>altup_unembed_projections.{i}.weight</td>
+        </tr>
+        <tr>
+          <td>[H, H]</td>
+          <td> × (P-1)</td>
+        </tr>
+        <tr>
+          <td>反嵌：将非 active 槽投影回</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 PLE 权重 (模型级，循环外)</h4>
+      <table>
+        <tr>
+          <th>权重名</th>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>per_layer_embedding.embed_tokens.weight</td>
+        </tr>
+        <tr>
+          <td>[vocab_size, L·hpl]</td>
+        </tr>
+        <tr>
+          <td>PLE token embedding 表</td>
+        </tr>
+        <tr>
+          <td>per_layer_embedding.per_layer_projection.weight</td>
+        </tr>
+        <tr>
+          <td>[L·hpl, H]</td>
+        </tr>
+        <tr>
+          <td>Context-aware 投影</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>2.4 PLE 权重 (层循环内，per-layer)</h4>
+      <table>
+        <tr>
+          <th>权重名</th>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>layers.{i}.per_layer_input_gate.weight</td>
+        </tr>
+        <tr>
+          <td>[hpl, H]</td>
+        </tr>
+        <tr>
+          <td>门控线性投影 H→hpl</td>
+        </tr>
+        <tr>
+          <td>layers.{i}.per_layer_projection.weight</td>
+        </tr>
+        <tr>
+          <td>[H, hpl]</td>
+        </tr>
+        <tr>
+          <td>PLE 投影 hpl→H</td>
+        </tr>
+        <tr>
+          <td>layers.{i}.post_per_layer_input_norm.weight</td>
+        </tr>
+        <tr>
+          <td>[H]</td>
+        </tr>
+        <tr>
+          <td>PLE 后 RMSNorm</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.5" data-section="2.5">
+      <h4>2.5 LAuReL 权重 (层循环内，per-layer)</h4>
+      <p>&gt; <code>laurel_rank</code> = 64 (Gemma 4 E2B/E4B)</p>
+      <table>
+        <tr>
+          <th>权重名</th>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>layers.{i}.laurel_up.weight</td>
+        </tr>
+        <tr>
+          <td>[laurel_rank, H]</td>
+        </tr>
+        <tr>
+          <td>LAuReL 升维投影</td>
+        </tr>
+        <tr>
+          <td>layers.{i}.laurel_down.weight</td>
+        </tr>
+        <tr>
+          <td>[H, laurel_rank]</td>
+        </tr>
+        <tr>
+          <td>LAuReL 降维投影</td>
+        </tr>
+        <tr>
+          <td>layers.{i}.laurel_norm.weight</td>
+        </tr>
+        <tr>
+          <td>[H]</td>
+        </tr>
+        <tr>
+          <td>LAuReL 后 RMSNorm</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 新增 OpKind</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 AltUpPredict</h4>
+      <p>```</p>
+      <p>AltUpPredict {</p>
+      <p>    num_preds: usize,     // P = altup_num_inputs (编译期常量)</p>
+      <p>    hidden: usize,        // H</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>语义</strong>：对 <code>[P,S,H]</code> 胖激活做 altup 维混合预测。
+      <p>```</p>
+      <p>输入: stacked [P,S,H], router_coefs [S, P²] (由外部 GEMM+Tanh 产出)</p>
+      <p>输出: predictions [P,S,H]</p>
+      <p>predictions[p][s][h] = stacked[p][s][h] + Σ_q coefs[p][q] · stacked[q][s][h]</p>
+      <p>```</p>
+      <strong>OpClass</strong>: Injective（多输入多输出逐元素，P≤4 ≤ UNROLL_THRESHOLD 可内层展开）
+      <strong>TraceOp 表达</strong>：
+      <li>外层 <code>emit_loop(s ∈ [0, seq_len) Symbolic)</code></li>
+      <li>内层 <code>for p in 0..P</code> (Const 展开, P≤4)</li>
+      <li>逐 h_vec: VecLoad stacked[p], ScalarLoad coefs[p][q], Fma 链, VecStore predictions[p]</li>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 AltUpCorrect</h4>
+      <p>```</p>
+      <p>AltUpCorrect {</p>
+      <p>    num_preds: usize,     // P</p>
+      <p>    hidden: usize,        // H</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>语义</strong>：用 active 路的 innovation 修正所有 P 路预测。
+      <p>```</p>
+      <p>输入: predictions [P,S,H], corrected_coefs [S, P], activated [S,H]</p>
+      <p>输出: corrected [P,S,H]</p>
+      <p>innovation[s][h] = activated[s][h] - predictions[0][s][h]</p>
+      <p>corrected[p][s][h] = predictions[p][s][h] + corrected_coefs[s][p] × innovation[s][h]</p>
+      <p>corrected[0] = activated  (active 路直接覆盖)</p>
+      <p>```</p>
+      <strong>OpClass</strong>: Injective
+      <strong>TraceOp 表达</strong>：与 AltUpPredict 类似，但多一个 innovation 计算。
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 AltUpInject</h4>
+      <p>```</p>
+      <p>AltUpInject {</p>
+      <p>    num_preds: usize,     // P</p>
+      <p>    hidden: usize,        // H</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>语义</strong>：将 PLE 门控结果注入到非 active 预测。
+      <p>```</p>
+      <p>输入: corrected [P,S,H], ple_projected [S,H]</p>
+      <p>输出: corrected [P,S,H] (in-place 修改 slice 1..P)</p>
+      <p>corrected[p][s][h] += ple_projected[s][h]   for p = 1..P-1</p>
+      <p>```</p>
+      <strong>OpClass</strong>: Injective（多输出写回）
+      <strong>TraceOp 表达</strong>：外层 Symbolic s 循环 + 内层 <code>for p in 1..P</code> (Const 展开) + VecLoad+VecAdd+VecStore。
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Buffer 生命周期</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 胖激活 Ping-Pong</h4>
+      <p>现有 <code>ActivationSwap</code> 机制零改动复用，仅将 buffer 尺寸从 <code>[S,H]</code> 扩展为 <code>[P,S,H]</code>。</p>
+      <p>E2B (H=2048, S=512, P=2): 每个 buffer 8MB，共 16MB。</p>
+      <table>
+        <tr>
+          <th>Buffer</th>
+        </tr>
+        <tr>
+          <td>尺寸</td>
+        </tr>
+        <tr>
+          <td>生命周期</td>
+        </tr>
+        <tr>
+          <td>altup_ping</td>
+        </tr>
+        <tr>
+          <td>P × S × H × 4B</td>
+        </tr>
+        <tr>
+          <td>层循环全程，ping-pong 交替</td>
+        </tr>
+        <tr>
+          <td>altup_pong</td>
+        </tr>
+        <tr>
+          <td>P × S × H × 4B</td>
+        </tr>
+        <tr>
+          <td>层循环全程，ping-pong 交替</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 PersistentActivation: per_layer_inputs</h4>
+      <p>新增 buffer 类：全 Mega-Kernel 生命周期，可写一次读多次。</p>
+      <p>E2B (L=35, S=512, hpl=256): ~18MB。</p>
+      <table>
+        <tr>
+          <th>Buffer</th>
+        </tr>
+        <tr>
+          <td>尺寸</td>
+        </tr>
+        <tr>
+          <td>生命周期</td>
+        </tr>
+        <tr>
+          <td>per_layer_inputs</td>
+        </tr>
+        <tr>
+          <td>L × S × hpl × 4B</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel 全程，层循环只读</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 Scratch buffer (层内临时)</h4>
+      <table>
+        <tr>
+          <th>Buffer</th>
+        </tr>
+        <tr>
+          <td>尺寸</td>
+        </tr>
+        <tr>
+          <td>生命周期</td>
+        </tr>
+        <tr>
+          <td>active_path</td>
+        </tr>
+        <tr>
+          <td>S × H × 4B</td>
+        </tr>
+        <tr>
+          <td>层内，attention/FFN/LAuReL scratch</td>
+        </tr>
+        <tr>
+          <td>ple_ctx</td>
+        </tr>
+        <tr>
+          <td>S × hpl × 4B</td>
+        </tr>
+        <tr>
+          <td>层内，PLE 投影中间结果</td>
+        </tr>
+        <tr>
+          <td>innovation</td>
+        </tr>
+        <tr>
+          <td>S × H × 4B</td>
+        </tr>
+        <tr>
+          <td>层内，AltUp correct 中间结果</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 与 SharedKvRef 的交互</h3>
+      <p>两者正交共存，无需特殊协调：</p>
+      <li><strong>SharedKvRef GprCondAction</strong> (<code>LayerIdxLt(num_layers - num_kv_shared_layers)</code>)：</li>
+      <p>  守护 K/V 子 op（k_proj/v_proj/k_norm/v_norm/rope_k）</p>
+      <li><strong>AltUp ops</strong>：全部 <code>guard=Always</code>（每层无条件执行）</li>
+      <li>op 集不相交，互不干扰</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 与 LAuReL 的关系</h3>
+      <p>LAuReL (Learned Augmented Residual Layer) 是 Gemma 4 E2B/E4B 的另一个新子系统，</p>
+      <p>与 AltUp 正交但协同工作。</p>
+      <strong>计算</strong>：
+      <p>```</p>
+      <p>laurel_hidden = GEMM(normed, laurel_up)     // [S, H] → [S, 64]</p>
+      <p>laurel_hidden = GELU(laurel_hidden)</p>
+      <p>laurel_output = GEMM(laurel_hidden, laurel_down)  // [S, 64] → [S, H]</p>
+      <p>laurel_output = RMSNorm(laurel_output, laurel_norm)</p>
+      <p>```</p>
+      <strong>融合点</strong>：<code>attn_laurel = (active + attn + laurel_output) / √2</code>
+      <p>这是 3 路加法 + 缩放，可融合为单个 elementwise op。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 废弃声明</h3>
+      <li><strong><code>OpKind::PerLayerEmbed</code></strong>：已废弃，物理删除。其 scalar 实现 (<code>scalar_per_layer_embed</code>)</li>
+      <p>  和专用 lower (<code>lower_per_layer_embed</code>) 一并删除。</p>
+      <li><strong><code>PleScratchRequirement</code></strong>：已废弃，被 <code>PersistentActivation</code> 取代。</li>
+      <li><strong><code>gemma4-op-audit.md §1.5</code></strong>：已废弃，以本文档为 SSOT。</li>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 实施依赖 DAG</h3>
+      <p>```</p>
+      <p>P0 SPEC 建档 (本文档) ──┬─→ P1a PersistentActivation buffer 类</p>
+      <p>                        ├─→ P1b LayerLoopConfig 扩展: per_layer_input_stride</p>
+      <p>                        ├─→ P1c 新增 3 OpKind scalar 实现</p>
+      <p>                        └─→ P1d 删除废弃 PerLayerEmbed + lower + scratch</p>
+      <p>                                    │</p>
+      <p>P1c ──→ P2 SymExec/registry + TraceOp dispatch (auto_select.rs)</p>
+      <p>                                    │</p>
+      <p>P1a,P1b,P2 ──→ P3 build_graph 重构:</p>
+      <p>  ├─ 删除 PLE 块 (:245-297)</p>
+      <p>  ├─ 插入 AltUp init + PLE precompute (循环前)</p>
+      <p>  ├─ 层模板改胖 buffer [P,S,H] + predict/LAuReL/correct/gate/inject</p>
+      <p>  └─ 插入 AltUp unembed + mean (循环后)</p>
+      <p>                                    │</p>
+      <p>P3 ──→ P4 ISA lowering 验证 + 数值对齐</p>
+      <p>                                    │</p>
+      <p>P4 ──→ P5 E2E: gemma-4-E2B dry-run + cos_sim ≥ 0.999</p>
+      <p>```</p>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：gemma4-altup.html</address>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,1384 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head><body><section id="testing" data-tests-section="" <h2="">测试用例
+
+
+
+
+</section></body>
+  <meta charset="utf-8">
+  <meta content="SUPPORTED_MODELS" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"SUPPORTED_MODELS", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>Supported Models (SSOT) - 2026 SOTA Edition</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>SUPPORTED_MODELS</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s2026" data-section="2026">
+      <h2>Supported Models (SSOT) - 2026 SOTA Edition</h2>
+      <p>&gt; <strong>📌 SSOT</strong>: 本文档是 <code>gllm</code> 支持的所有模型的唯一真源。</p>
+      <p>&gt; <strong>关联需求</strong>: REQ-MODEL-001 (Generator 架构覆盖), REQ-MODEL-002 (Embedding 模型), REQ-MODEL-003 (Reranker 模型), REQ-MODEL-004 (MoE 架构), REQ-MODEL-005 (Thinking Head), REQ-MODEL-006 (Classifier 模型)</p>
+      <p>&gt; <strong>Constraint</strong>: 严格遵循 <strong>"Latest Version Only"</strong> 策略。</p>
+      <p>&gt; <strong>Strategy</strong>: 同一系列出新版后，立即废弃旧版（e.g., Qwen3 发布即删除 Qwen2.5）。</p>
+      <p>&gt; <strong>Exception (REQ-MODEL-LATEST)</strong>: 仅允许在本表中<strong>显式标注</strong>的 Legacy Exception。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. Generator Models (文本生成)</h3>
+    </section>
+    <section id="s-qwen-series-alibaba" data-section="null">
+      <h4>Qwen Series (Alibaba)</h4>
+      <p>&gt; Status: <strong>Qwen3 (Jan 2026)</strong> is the current standard. Qwen2.5 is deprecated.</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>qwen3-7b</td>
+        </tr>
+        <tr>
+          <td>Qwen3</td>
+        </tr>
+        <tr>
+          <td>7B Dense</td>
+        </tr>
+        <tr>
+          <td>Qwen/Qwen3-7B-Instruct</td>
+        </tr>
+        <tr>
+          <td>qwen/Qwen3-7B-Instruct</td>
+        </tr>
+        <tr>
+          <td>通用标杆</td>
+        </tr>
+        <tr>
+          <td>qwen3-moe</td>
+        </tr>
+        <tr>
+          <td>Qwen3MoE</td>
+        </tr>
+        <tr>
+          <td>A22B (235B)</td>
+        </tr>
+        <tr>
+          <td>Qwen/Qwen3-235B-A22B-Instruct</td>
+        </tr>
+        <tr>
+          <td>qwen/Qwen3-235B-A22B-Instruct</td>
+        </tr>
+        <tr>
+          <td>旗舰 MoE, 双模式(Thinking)</td>
+        </tr>
+        <tr>
+          <td>qwen3-thinking</td>
+        </tr>
+        <tr>
+          <td>Qwen3</td>
+        </tr>
+        <tr>
+          <td>32B</td>
+        </tr>
+        <tr>
+          <td>Qwen/Qwen3-Max-Thinking</td>
+        </tr>
+        <tr>
+          <td>qwen/Qwen3-Max-Thinking</td>
+        </tr>
+        <tr>
+          <td>强化推理能力</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-llama-series-meta" data-section="null">
+      <h4>Llama Series (Meta)</h4>
+      <p>&gt; Status: <strong>Llama 4 (Apr 2025)</strong> is the current standard. Llama 3.x is deprecated.</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>llama-4-8b</td>
+        </tr>
+        <tr>
+          <td>Llama4</td>
+        </tr>
+        <tr>
+          <td>8B MoE</td>
+        </tr>
+        <tr>
+          <td>meta-llama/Llama-4-8B-Instruct</td>
+        </tr>
+        <tr>
+          <td>LLM-Research/Llama-4-8B-Instruct</td>
+        </tr>
+        <tr>
+          <td>原生多模态/多语言</td>
+        </tr>
+        <tr>
+          <td>llama-4-scout</td>
+        </tr>
+        <tr>
+          <td>Llama4</td>
+        </tr>
+        <tr>
+          <td>17B (Active)</td>
+        </tr>
+        <tr>
+          <td>meta-llama/Llama-4-Scout</td>
+        </tr>
+        <tr>
+          <td>LLM-Research/Llama-4-Scout</td>
+        </tr>
+        <tr>
+          <td>16 Experts MoE</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-mistral-series-mistral-ai" data-section="null">
+      <h4>Mistral Series (Mistral AI)</h4>
+      <p>&gt; Status: <strong>Mistral 3 / Ministral (Dec 2025)</strong> is the current standard.</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>ministral-8b</td>
+        </tr>
+        <tr>
+          <td>Ministral</td>
+        </tr>
+        <tr>
+          <td>8B</td>
+        </tr>
+        <tr>
+          <td>mistralai/Ministral-8B-Instruct</td>
+        </tr>
+        <tr>
+          <td>AI-ModelScope/Ministral-8B-Instruct</td>
+        </tr>
+        <tr>
+          <td>边缘侧 SOTA</td>
+        </tr>
+        <tr>
+          <td>mistral-small-3</td>
+        </tr>
+        <tr>
+          <td>Mistral3</td>
+        </tr>
+        <tr>
+          <td>3.2 (Update)</td>
+        </tr>
+        <tr>
+          <td>mistralai/Mistral-Small-3.2</td>
+        </tr>
+        <tr>
+          <td>AI-ModelScope/Mistral-Small-3.2</td>
+        </tr>
+        <tr>
+          <td>高效推理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-glm-series-zhipu-ai" data-section="null">
+      <h4>GLM Series (Zhipu AI)</h4>
+      <p>&gt; Status: <strong>GLM-4.7 (Dec 2025)</strong> is the current standard.</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>glm-4.7-flash</td>
+        </tr>
+        <tr>
+          <td>GLM-4</td>
+        </tr>
+        <tr>
+          <td>3B (Active)</td>
+        </tr>
+        <tr>
+          <td>THUDM/glm-4.7-flash</td>
+        </tr>
+        <tr>
+          <td>ZhipuAI/glm-4.7-flash</td>
+        </tr>
+        <tr>
+          <td>MoE 架构, 免费级首选</td>
+        </tr>
+        <tr>
+          <td>glm-5-9b</td>
+        </tr>
+        <tr>
+          <td>GLM-5</td>
+        </tr>
+        <tr>
+          <td>9B</td>
+        </tr>
+        <tr>
+          <td>THUDM/glm-5-9b-chat</td>
+        </tr>
+        <tr>
+          <td>ZhipuAI/glm-5-9b-chat</td>
+        </tr>
+        <tr>
+          <td>下一代架构 (Preview)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-gpt-oss-series-openai" data-section="null">
+      <h4>GPT-OSS Series (OpenAI)</h4>
+      <p>&gt; Status: <strong>GPT-OSS (2025)</strong> open weights release。MoE + sliding-window + yarn RoPE + RMSNorm + SiLU + attention bias。</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>gpt-oss-20b</td>
+        </tr>
+        <tr>
+          <td>GptOss</td>
+        </tr>
+        <tr>
+          <td>20B (MoE, 4 experts/token)</td>
+        </tr>
+        <tr>
+          <td>openai/gpt-oss-20b</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>mxfp4 量化 + 24 层 sliding/full 交替 attention</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-phi-series-microsoft" data-section="null">
+      <h4>Phi Series (Microsoft)</h4>
+      <p>&gt; Status: <strong>Phi-4 (2025)</strong> 轻量主力，<strong>Phi-4-mini (Feb 2025)</strong> SLM 标准。<strong>Legacy Exception</strong>: 低资源设备与兼容性保留（早于 2025-09）。</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>phi-4</td>
+        </tr>
+        <tr>
+          <td>Phi4</td>
+        </tr>
+        <tr>
+          <td>14B Dense</td>
+        </tr>
+        <tr>
+          <td>microsoft/Phi-4</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>Phi 系列主力版本</td>
+        </tr>
+        <tr>
+          <td>phi-4-mini</td>
+        </tr>
+        <tr>
+          <td>Phi4</td>
+        </tr>
+        <tr>
+          <td>3.8B Dense</td>
+        </tr>
+        <tr>
+          <td>microsoft/Phi-4-mini-instruct</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>端侧小模型/低延迟推理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-smollm-series-huggingfacetb" data-section="null">
+      <h4>SmolLM Series (HuggingFaceTB)</h4>
+      <p>&gt; Status: <strong>SmolLM (2025)</strong> 轻量级高效模型系列。</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>smollm2-135m</td>
+        </tr>
+        <tr>
+          <td>Llama4</td>
+        </tr>
+        <tr>
+          <td>135M</td>
+        </tr>
+        <tr>
+          <td>HuggingFaceTB/SmolLM2-135M-Instruct</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>超轻量端侧模型</td>
+        </tr>
+        <tr>
+          <td>smollm3-3b</td>
+        </tr>
+        <tr>
+          <td>Llama4</td>
+        </tr>
+        <tr>
+          <td>3B</td>
+        </tr>
+        <tr>
+          <td>HuggingFaceTB/SmolLM3-3B</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>轻量级多用途</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-internlm-series-shanghai-ai-lab" data-section="null">
+      <h4>InternLM Series (Shanghai AI Lab)</h4>
+      <p>&gt; Status: <strong>Internlm3 (2025)</strong> 开源高效模型。</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>internlm3-8b</td>
+        </tr>
+        <tr>
+          <td>Llama4</td>
+        </tr>
+        <tr>
+          <td>8B</td>
+        </tr>
+        <tr>
+          <td>internlm/internlm3-8b-instruct</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>高效推理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-gemma-series-google" data-section="null">
+      <h4>Gemma Series (Google)</h4>
+      <p>&gt; Status: Gemma 4 是当前唯一支持的 Gemma 世代(Apr 2026 发布),Gemma 2/3 已全面下线。</p>
+      <strong>Gemma 4 能力状态矩阵</strong> (T21–T42 接入通路完成,T43–T47 并行中):
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Specs</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>特性</td>
+        </tr>
+        <tr>
+          <td>gemma-4-e2b</td>
+        </tr>
+        <tr>
+          <td>Gemma4</td>
+        </tr>
+        <tr>
+          <td>Effective 2B (PLE)</td>
+        </tr>
+        <tr>
+          <td>google/gemma-4-E2B</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>轻量设备端对话 / 长上下文</td>
+        </tr>
+        <tr>
+          <td>gemma-4-e4b</td>
+        </tr>
+        <tr>
+          <td>Gemma4</td>
+        </tr>
+        <tr>
+          <td>Effective 4B (PLE)</td>
+        </tr>
+        <tr>
+          <td>google/gemma-4-E4B</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>设备端多模态对话</td>
+        </tr>
+        <tr>
+          <td>gemma-4-26b-a4b</td>
+        </tr>
+        <tr>
+          <td>Gemma4</td>
+        </tr>
+        <tr>
+          <td>26B MoE (4B Active)</td>
+        </tr>
+        <tr>
+          <td>google/gemma-4-26B-A4B-it</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>MoE 多模态对话</td>
+        </tr>
+        <tr>
+          <td>gemma-4-31b</td>
+        </tr>
+        <tr>
+          <td>Gemma4</td>
+        </tr>
+        <tr>
+          <td>31B Dense</td>
+        </tr>
+        <tr>
+          <td>google/gemma-4-31B-IT</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>旗舰多模态(文本+图像+视频帧+音频)</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>能力</th>
+        </tr>
+        <tr>
+          <td>E2B</td>
+        </tr>
+        <tr>
+          <td>E4B</td>
+        </tr>
+        <tr>
+          <td>26B-A4B</td>
+        </tr>
+        <tr>
+          <td>31B</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CPU JIT codegen</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>QkNorm/ValueNorm/DualRoPE/PerLayerEmbed/ColumnSlice 全部走 Phase 3 x86_64/AArch64 lowering (T30/T37)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>GPU codegen (PTX/HIP/MSL)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>三后端 TileLevelFusion/ComputeRoot 已通 (T38)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>PerLayerEmbedding (PLE)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>仅 E2B/E4B 含 PLE;权重 alias + </td>
+          <td>only_if</td>
+          <td> 条件展开 + ColumnSlice JIT (T28.2/T28.3/T30/T37)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SharedKvRef (page 层)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>后 N 层按 </td>
+          <td>num_kv_shared_layers</td>
+          <td> 引用 donor 层 KV page (T39 = P1.1)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SharedKvRef (graph 层)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>graph executor 侧跳过 K/V MatMul,引用 donor 层 K/V tensor (T43)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>FusedQkvNormRope 融合</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>auto_graph 直接构建 + atomic_op_to_kind 契约 (T29/T36/T41/T42)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Vision encoder (SigLIP)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>PatchEmbed/LearnedPos2D + ViT encoder 实现 + 非 stub 测试通过 (T44)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Audio encoder (USM Conformer)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Mel + ConformerBlock + DepthwiseConv1D 实现 + 非 stub 测试通过 (T45)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>E2E 推理数值验证</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>dry-run 通过 (T47)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. Embedding Models (文本向量化)</h3>
+    </section>
+    <section id="s-qwen-series-alibaba" data-section="null">
+      <h4>Qwen Series (Alibaba)</h4>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Dims</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>qwen3-embed</td>
+        </tr>
+        <tr>
+          <td>Qwen3</td>
+        </tr>
+        <tr>
+          <td>2048</td>
+        </tr>
+        <tr>
+          <td>Qwen/Qwen3-Embedding</td>
+        </tr>
+        <tr>
+          <td>qwen/Qwen3-Embedding</td>
+        </tr>
+        <tr>
+          <td>Qwen3 原生向量</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-bge-series-baai" data-section="null">
+      <h4>BGE Series (BAAI)</h4>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Dims</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>bge-m3</td>
+        </tr>
+        <tr>
+          <td>XLM-R</td>
+        </tr>
+        <tr>
+          <td>1024</td>
+        </tr>
+        <tr>
+          <td>BAAI/bge-m3</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Legacy Exception</td>
+          <td>: M4 已有但 M3 仍广泛使用</td>
+        </tr>
+        <tr>
+          <td>bge-m4</td>
+        </tr>
+        <tr>
+          <td>XLM-R-Next</td>
+        </tr>
+        <tr>
+          <td>1536</td>
+        </tr>
+        <tr>
+          <td>BAAI/bge-m4</td>
+        </tr>
+        <tr>
+          <td>Xorbits/bge-m4</td>
+        </tr>
+        <tr>
+          <td>M3 升级版</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h4>E5 Series (intfloat)</h4>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Dims</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>e5-small</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>384</td>
+        </tr>
+        <tr>
+          <td>intfloat/e5-small</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>轻量级嵌入</td>
+        </tr>
+        <tr>
+          <td>e5-base</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>768</td>
+        </tr>
+        <tr>
+          <td>intfloat/e5-base</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>标准嵌入</td>
+        </tr>
+        <tr>
+          <td>e5-large</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>1024</td>
+        </tr>
+        <tr>
+          <td>intfloat/e5-large</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>高精度嵌入</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>M3E Series (moka-ai)</h4>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Dims</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>m3e-base</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>768</td>
+        </tr>
+        <tr>
+          <td>moka-ai/m3e-base</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>中文通用嵌入</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-jina-embeddings-jinaai" data-section="null">
+      <h4>Jina Embeddings (jinaai)</h4>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Dims</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>jina-embeddings-v2-base</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>768</td>
+        </tr>
+        <tr>
+          <td>jinaai/jina-embeddings-v2-base-en</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>英文通用嵌入</td>
+        </tr>
+        <tr>
+          <td>jina-embeddings-v2-small</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>384</td>
+        </tr>
+        <tr>
+          <td>jinaai/jina-embeddings-v2-small-en</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>轻量英文嵌入</td>
+        </tr>
+        <tr>
+          <td>jina-embeddings-v4</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>768</td>
+        </tr>
+        <tr>
+          <td>jinaai/jina-embeddings-v4</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>最新通用嵌入</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Rerank Models (文本重排序)</h3>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>ModelScope Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>qwen3-rerank</td>
+        </tr>
+        <tr>
+          <td>Qwen3</td>
+        </tr>
+        <tr>
+          <td>Qwen/Qwen3-Reranker</td>
+        </tr>
+        <tr>
+          <td>qwen/Qwen3-Reranker</td>
+        </tr>
+        <tr>
+          <td>原生重排序</td>
+        </tr>
+        <tr>
+          <td>bge-reranker-v2-m3</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>BAAI/bge-reranker-v2-m3</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>轻量级中文重排序</td>
+        </tr>
+        <tr>
+          <td>bge-rerank-v3</td>
+        </tr>
+        <tr>
+          <td>XLM-R-Next</td>
+        </tr>
+        <tr>
+          <td>BAAI/bge-reranker-v3</td>
+        </tr>
+        <tr>
+          <td>Xorbits/bge-reranker-v3</td>
+        </tr>
+        <tr>
+          <td>V2 升级版</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Classifier Models (文本分类)</h3>
+      <p>支持带有 classifier head / score head 的序列分类模型。包含 encoder-based (BERT/XLM-R + classifier) 和 decoder-based (LLM + score head) 两种架构。</p>
+      <p>&gt; <strong>NOTE</strong>: 任何带有 <code>classifier.weight</code> / <code>classifier.dense.weight</code> / <code>score.weight</code> / <code>pre_classifier.weight</code> 权重的 HuggingFace 模型都可以通过 <code>Client::new_classifier()</code> 加载。用户自训练的分类模型也完全支持。</p>
+      <table>
+        <tr>
+          <th>Model ID</th>
+        </tr>
+        <tr>
+          <td>Architecture</td>
+        </tr>
+        <tr>
+          <td>Head</td>
+        </tr>
+        <tr>
+          <td>HF Repo</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>bge-reranker-v2-m3</td>
+        </tr>
+        <tr>
+          <td>XlmR</td>
+        </tr>
+        <tr>
+          <td>classifier.weight</td>
+        </tr>
+        <tr>
+          <td>BAAI/bge-reranker-v2-m3</td>
+        </tr>
+        <tr>
+          <td>可作为 2 分类使用</td>
+        </tr>
+        <tr>
+          <td>bge-reranker-v3</td>
+        </tr>
+        <tr>
+          <td>XLM-R-Next</td>
+        </tr>
+        <tr>
+          <td>classifier.weight</td>
+        </tr>
+        <tr>
+          <td>BAAI/bge-reranker-v3</td>
+        </tr>
+        <tr>
+          <td>V2 升级版</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. Weight Loading Specs (Next-Gen)</h3>
+      <p>针对 2026 年新架构的适配规范：</p>
+      <li><strong>Llama 4 (MoE)</strong>:</li>
+      <li>必须支持 <code>experts</code> 路由权重解析。</li>
+      <li>必须处理 Image/Text 多模态输入的 Projector 权重。</li>
+      <li><strong>Qwen3 (Thinking)</strong>:</li>
+      <li>支持 <code>thinking_head</code> 或特殊的 System Prompt 触发权重。</li>
+      <li><strong>Qwen3-ASR/TTS</strong>: 暂不支持音频组件，仅支持 LLM/Embedding 部分。</li>
+    </section>
+  
+    <section id="s-req" data-section="req">
+      <h2>需求 (REQ)</h2>
+
+    <section data-entity-ref="ENT-ARCH-REGISTRY ENT-MODEL-CONFIG" <h3="" data-req-api="POST /client/generate" data-req-entity="ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-001" id="req-model-001">REQ-MODEL-001 (REQ-MODEL-001)
+      <p>ARCH_TABLE 架构令牌别名查找表：维护模型架构名称到内部架构令牌的完整映射，支持 GGUF/safetensors/ONNX 等多种格式的自动架构识别。所有已支持的模型架构必须在 ARCH_TABLE 中有注册条目。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">ARCH_TABLE 架构令牌别名查找表完整</li>
+        <li id="2" data-criterion="2">所有已支持架构在 ARCH_TABLE 中有注册条目</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      </div>
+    </section>
+
+    <section id="test-model-001" data-test="TEST-MODEL-001" data-req-ref="REQ-MODEL-001" data-test-categories="unit" <h3="">TEST-MODEL-001: 模型架构注册自动检测测试<p>验证REQ-MODEL-001相关功能正确性</p>
+      <div id="arch-table-架构令牌别名查找表完整" data-criterion="ARCH_TABLE 架构令牌别名查找表完整">ARCH_TABLE 架构令牌别名查找表完整</div>
+      <div id="所有已支持架构在-arch-table-中有注册条目" data-criterion="所有已支持架构在 ARCH_TABLE 中有注册条目">所有已支持架构在 ARCH_TABLE 中有注册条目</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-model-002" data-req="REQ-MODEL-002" data-req-status="implemented" data-req-domain="model" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /client/generate" data-entity-ref="ENT-COMPILER-GRAPH ENT-AUTO-GRAPH" <h3="">REQ-MODEL-002 (REQ-MODEL-002)
+      <p>Tensor-Name-Driven Graph Builder：基于模型权重张量名称模式自动检测模型架构，并构建对应的 CompilerGraph。所有支持的模型架构必须能通过张量名特征自动构建完整的计算图。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">Tensor-Name-Driven Graph Builder 正确检测张量名模式</li>
+        <li id="2" data-criterion="2">所有支持的模型架构能自动构建 CompilerGraph</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+    <section id="test-model-002" data-test="TEST-MODEL-002" data-req-ref="REQ-MODEL-002" data-test-categories="unit" <h3="">TEST-MODEL-002: 模型架构注册自动检测测试<p>验证REQ-MODEL-002相关功能正确性</p>
+      <div id="tensor-name-driven-graph-builder-正确检测张量名模式" data-criterion="Tensor-Name-Driven Graph Builder 正确检测张量名模式">Tensor-Name-Driven Graph Builder 正确检测张量名模式</div>
+      <div id="所有支持的模型架构能自动构建-compilergraph" data-criterion="所有支持的模型架构能自动构建 CompilerGraph">所有支持的模型架构能自动构建 CompilerGraph</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES" <h3="" data-req-api="POST /client/embed" data-req-entity="ENT-ARCHITECTURE-FEATURES" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-003" id="req-model-003">REQ-MODEL-003 (REQ-MODEL-003)
+      <p>ArchitectureFeatures 模型架构特征推导：从模型配置和权重元数据自动推导 GQA/MLA/MoE/SlidingWindow 等架构特征，为图构建和编译优化提供准确的架构能力描述。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">ArchitectureFeatures 从模型配置正确推导</li>
+        <li id="2" data-criterion="2">GQA/MLA/MoE/SlidingWindow 等特征检测正确</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      </div>
+    </section>
+
+    <section id="test-model-003" data-test="TEST-MODEL-003" data-req-ref="REQ-MODEL-003" data-test-categories="unit" <h3="">TEST-MODEL-003: 模型架构注册自动检测测试<p>验证REQ-MODEL-003相关功能正确性</p>
+      <div id="architecturefeatures-从模型配置正确推导" data-criterion="ArchitectureFeatures 从模型配置正确推导">ArchitectureFeatures 从模型配置正确推导</div>
+      <div id="gqa/mla/moe/slidingwindow-等特征检测正确" data-criterion="GQA/MLA/MoE/SlidingWindow 等特征检测正确">GQA/MLA/MoE/SlidingWindow 等特征检测正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-model-004" data-req="REQ-MODEL-004" data-req-status="implemented" data-req-domain="model" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-GRAPH-TYPE" data-req-api="POST /client/classify" data-entity-ref="ENT-COMPILER-GRAPH ENT-GRAPH-TYPE" <h3="">REQ-MODEL-004 (REQ-MODEL-004)
+      <p>GraphType 模型图类型覆盖：定义并区分 Decoder/Encoder/MoE/MLA 等模型图类型枚举，确保 GraphType 覆盖所有已支持的模型架构类型，为 JIT 编译提供正确的图类型标识。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">GraphType 覆盖所有支持的模型类型</li>
+        <li id="2" data-criterion="2">Decoder/Encoder/MoE/MLA 类型区分正确</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      </div>
+    </section>
+
+    <section id="test-model-004" data-test="TEST-MODEL-004" data-req-ref="REQ-MODEL-004" data-test-categories="unit" <h3="">TEST-MODEL-004: 模型架构注册自动检测测试<p>验证REQ-MODEL-004相关功能正确性</p>
+      <div id="graphtype-覆盖所有支持的模型类型" data-criterion="GraphType 覆盖所有支持的模型类型">GraphType 覆盖所有支持的模型类型</div>
+      <div id="decoder/encoder/moe/mla-类型区分正确" data-criterion="Decoder/Encoder/MoE/MLA 类型区分正确">Decoder/Encoder/MoE/MLA 类型区分正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-RESOLVE-CONFIG" <h3="" data-req-api="POST /client/rerank" data-req-entity="ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-005" id="req-model-005">REQ-MODEL-005 (REQ-MODEL-005)
+      <p>Config resolve 模型参数推导：从模型元数据（GGUF 键值对/safetensors metadata/config.json）正向推导 hidden_size/num_heads/num_layers 等关键模型参数，为图构建和编译提供完整的模型配置。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">Config resolve 从 metadata 正确推导模型参数</li>
+        <li id="2" data-criterion="2">hidden_size/num_heads/num_layers 等关键参数完整</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      </div>
+    </section>
+
+    <section id="test-model-005" data-test="TEST-MODEL-005" data-req-ref="REQ-MODEL-005" data-test-categories="unit" <h3="">TEST-MODEL-005: 模型架构注册自动检测测试<p>验证REQ-MODEL-005相关功能正确性</p>
+      <div id="config-resolve-从-metadata-正确推导模型参数" data-criterion="Config resolve 从 metadata 正确推导模型参数">Config resolve 从 metadata 正确推导模型参数</div>
+      <div id="hidden-size/num-heads/num-layers-等关键参数完整" data-criterion="hidden_size/num_heads/num_layers 等关键参数完整">hidden_size/num_heads/num_layers 等关键参数完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-INTENT-TRACKER" <h3="" data-req-api="POST /client/rerank" data-req-entity="ENT-MODEL-CONFIG,ENT-INTENT-TRACKER" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-006" id="req-model-006">REQ-MODEL-006 (REQ-MODEL-006)
+      <p>Intent Tracker 模型架构注册：将 Intent Tracker 分类模型注册到 ModelArchKey 体系，确保其拥有唯一的架构标识和独立的 GraphType，支持图构建器正确构建 Intent Tracker 推理图。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li>
+        <li id="2" data-criterion="2">ModelArchKey 唯一标识 Intent Tracker 模型</li>
+        <li id="3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      </div>
+    </section>
+
+    <section id="test-model-006" data-test="TEST-MODEL-006" data-req-ref="REQ-MODEL-006" data-test-categories="unit" <h3="">TEST-MODEL-006: 模型架构注册自动检测测试<p>验证REQ-MODEL-006相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="modelarchkey-唯一标识-intent-tracker-模型" data-criterion="ModelArchKey 唯一标识 Intent Tracker 模型">ModelArchKey 唯一标识 Intent Tracker 模型</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+    </section>
+</main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：SUPPORTED_MODELS.html</address>
+  </footer>
+</body>
+</html>

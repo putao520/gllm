@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="10-QUALITY" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"10-QUALITY", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>质量契约 (Quality Contract)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>10-QUALITY</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-质量契约-quality-contract" data-section="null">
+      <h2>质量契约 (Quality Contract)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档是 gllm 测试策略、集成验证规则、Fallback 审计清单、错误处理契约、观测系统的唯一真源。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 测试策略</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 三维测试网格</h4>
+      <p>后端 × 模型 × 功能 的完整覆盖矩阵。</p>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>选项</td>
+        </tr>
+        <tr>
+          <td>后端</td>
+        </tr>
+        <tr>
+          <td>cpu</td>
+          <td>, </td>
+          <td>jit-cuda</td>
+          <td>（</td>
+          <td>jit-hip</td>
+          <td>/</td>
+          <td>jit-metal</td>
+          <td> 未来支持）</td>
+        </tr>
+        <tr>
+          <td>模型类型</td>
+        </tr>
+        <tr>
+          <td>generator</td>
+          <td>, </td>
+          <td>embedding</td>
+          <td>, </td>
+          <td>rerank</td>
+        </tr>
+        <tr>
+          <td>功能模块</td>
+        </tr>
+        <tr>
+          <td>loader</td>
+          <td>, </td>
+          <td>inference</td>
+          <td>, </td>
+          <td>scheduler</td>
+          <td>, </td>
+          <td>quantization</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 命名规则</h4>
+      <table>
+        <tr>
+          <th>格式</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>示例</td>
+        </tr>
+        <tr>
+          <td>TEST-{类型}-{序号}</td>
+        </tr>
+        <tr>
+          <td>测试用例标识</td>
+        </tr>
+        <tr>
+          <td>TEST-BACKEND-001</td>
+        </tr>
+        <tr>
+          <td>类型取值</td>
+        </tr>
+        <tr>
+          <td>BACKEND, LOADER, INFERENCE, SCHEDULER, QUANT, E2E, PERF</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 测试类型</h4>
+      <table>
+        <tr>
+          <th>类型</th>
+        </tr>
+        <tr>
+          <td>目的</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>正向测试</td>
+        </tr>
+        <tr>
+          <td>验证核心功能正常执行</td>
+        </tr>
+        <tr>
+          <td>合法输入</td>
+        </tr>
+        <tr>
+          <td>负向测试</td>
+        </tr>
+        <tr>
+          <td>验证错误场景被正确处理</td>
+        </tr>
+        <tr>
+          <td>非法/无效输入</td>
+        </tr>
+        <tr>
+          <td>边界测试</td>
+        </tr>
+        <tr>
+          <td>验证极限值、空值、临界值</td>
+        </tr>
+        <tr>
+          <td>空字符串、0、最大值</td>
+        </tr>
+        <tr>
+          <td>安全测试</td>
+        </tr>
+        <tr>
+          <td>验证安全机制正确工作</td>
+        </tr>
+        <tr>
+          <td>权限控制、注入防护</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.4" data-section="1.4">
+      <h4>1.4 测试执行规则</h4>
+      <p>E2E 测试涉及真实模型下载、文件 I/O、CPU 推理，必须串行执行。</p>
+      <table>
+        <tr>
+          <th>测试类型</th>
+        </tr>
+        <tr>
+          <td>位置</td>
+        </tr>
+        <tr>
+          <td>执行方式</td>
+        </tr>
+        <tr>
+          <td>并发</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+        <tr>
+          <td>src/</td>
+          <td> 内 </td>
+          <td>#[cfg(test)]</td>
+        </tr>
+        <tr>
+          <td>cargo test --lib</td>
+        </tr>
+        <tr>
+          <td>允许并发</td>
+        </tr>
+        <tr>
+          <td>集成测试</td>
+        </tr>
+        <tr>
+          <td>tests/</td>
+          <td> 目录</td>
+        </tr>
+        <tr>
+          <td>cargo test --test xxx</td>
+        </tr>
+        <tr>
+          <td>取决于 I/O</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_*.rs</td>
+        </tr>
+        <tr>
+          <td>cargo test --test xxx -- --test-threads=1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>禁止并发</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 真实测试铁律</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 禁止 Mock</h4>
+      <strong>正确做法</strong>：使用真实模型文件（safetensors / GGUF / ONNX），执行真实推理，验证输出正确性。
+      <table>
+        <tr>
+          <th>禁止行为</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>Mock 权重</td>
+        </tr>
+        <tr>
+          <td>使用假权重无法验证真实推理</td>
+        </tr>
+        <tr>
+          <td>Mock 模型</td>
+        </tr>
+        <tr>
+          <td>必须使用真实模型文件</td>
+        </tr>
+        <tr>
+          <td>硬编码输出</td>
+        </tr>
+        <tr>
+          <td>输出必须来自真实推理</td>
+        </tr>
+        <tr>
+          <td>assert!(true)</td>
+        </tr>
+        <tr>
+          <td>无意义断言</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 真实推理验证</h4>
+      <table>
+        <tr>
+          <th>验证项</th>
+        </tr>
+        <tr>
+          <td>方法</td>
+        </tr>
+        <tr>
+          <td>生成模型</td>
+        </tr>
+        <tr>
+          <td>输出非空 + 长度合理 + 内容有意义</td>
+        </tr>
+        <tr>
+          <td>Embedding</td>
+        </tr>
+        <tr>
+          <td>维度正确 + 值域合理（非全零）</td>
+        </tr>
+        <tr>
+          <td>Reranker</td>
+        </tr>
+        <tr>
+          <td>分数为有限浮点数 + 排序合理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 Skip 清零规则</h4>
+      <li>网络相关测试：禁止 <code>#[ignore]</code> "需要网络"，网络故障即为测试失败</li>
+      <li>CUDA 测试：允许 <code>#[cfg_attr(not(feature = "jit-cuda"), ignore)]</code></li>
+      <li>暂未实现：禁止 <code>#[ignore]</code> "TODO"，未实现即为失败</li>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 集成验证规则</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 集成测试铁律</h4>
+      <p>每个优化模块必须有集成测试证明"有模块"和"无模块"时执行行为不同。</p>
+      <table>
+        <tr>
+          <th>铁律</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>集成测试必须证明执行行为改变</td>
+        </tr>
+        <tr>
+          <td>单元测试不等于集成测试</td>
+        </tr>
+        <tr>
+          <td>集成测试禁止仅验证日志输出</td>
+        </tr>
+        <tr>
+          <td>assert!(log.contains("skip"))</td>
+          <td> 无效</td>
+        </tr>
+        <tr>
+          <td>集成测试禁止 Mock Executor</td>
+        </tr>
+        <tr>
+          <td>必须使用真实 Executor + 真实 Graph</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 集成测试模板</h4>
+      <p>```rust</p>
+      <p>#[test]</p>
+      <p>fn test_module_integration() {</p>
+      <p>    // Baseline: 无优化</p>
+      <p>    let baseline_result = run_forward_without_optimization();</p>
+      <p>    // Optimized: 有优化</p>
+      <p>    let optimized_result = run_forward_with_optimization();</p>
+      <p>    // 证明优化改变了执行行为</p>
+      <p>    assert_ne!(</p>
+      <p>        baseline_result.execution_trace,</p>
+      <p>        optimized_result.execution_trace,</p>
+      <p>        "优化模块未改变执行行为 — 可能未接入执行路径"</p>
+      <p>    );</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 禁止的测试模式</h4>
+      <table>
+        <tr>
+          <th>禁止模式</th>
+        </tr>
+        <tr>
+          <td>原因</td>
+        </tr>
+        <tr>
+          <td>替代方案</td>
+        </tr>
+        <tr>
+          <td>assert!(log.contains("enabled"))</td>
+        </tr>
+        <tr>
+          <td>日志不等于执行</td>
+        </tr>
+        <tr>
+          <td>验证 forward 输出或执行次数</td>
+        </tr>
+        <tr>
+          <td>仅测试模块内部函数</td>
+        </tr>
+        <tr>
+          <td>内部正确不等于接入正确</td>
+        </tr>
+        <tr>
+          <td>测试完整 Executor 流程</td>
+        </tr>
+        <tr>
+          <td>assert_eq!(callback.priority(), 60)</td>
+        </tr>
+        <tr>
+          <td>只验证元数据不验证效果</td>
+        </tr>
+        <tr>
+          <td>验证回调后 Executor 行为改变</td>
+        </tr>
+        <tr>
+          <td>Mock Executor</td>
+        </tr>
+        <tr>
+          <td>绕过真实集成路径</td>
+        </tr>
+        <tr>
+          <td>使用真实 Executor + 真实 Graph</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Fallback 审计清单</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 SPEC 已授权 Fallback（5 个）</h4>
+      <table>
+        <tr>
+          <th>Fallback</th>
+        </tr>
+        <tr>
+          <td>授权来源</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>HF → ModelScope 下载源切换</td>
+        </tr>
+        <tr>
+          <td>下载管理</td>
+        </tr>
+        <tr>
+          <td>HF 失败时自动尝试 ModelScope</td>
+        </tr>
+        <tr>
+          <td>ONNX Fusion → Atomic</td>
+        </tr>
+        <tr>
+          <td>图优化</td>
+        </tr>
+        <tr>
+          <td>Graph Pattern Matching 不匹配时降级</td>
+        </tr>
+        <tr>
+          <td>HW Fusion → Standalone</td>
+        </tr>
+        <tr>
+          <td>硬件约束</td>
+        </tr>
+        <tr>
+          <td>硬件约束违反时降级</td>
+        </tr>
+        <tr>
+          <td>Reshape / Transpose NOP</td>
+        </tr>
+        <tr>
+          <td>元数据操作</td>
+        </tr>
+        <tr>
+          <td>纯元数据 op 不生成指令</td>
+        </tr>
+        <tr>
+          <td>GGUF 可选字段默认值</td>
+        </tr>
+        <tr>
+          <td>GGUF 元数据</td>
+        </tr>
+        <tr>
+          <td>非必需字段缺失时使用行业标准默认值</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 SPEC 明确禁止的 Fallback（7 类）</h4>
+      <table>
+        <tr>
+          <th>禁止类型</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>JIT Codegen 静默 NOP</td>
+        </tr>
+        <tr>
+          <td>未实现的 op 必须返回 Err</td>
+        </tr>
+        <tr>
+          <td>Scalar 函数调用</td>
+        </tr>
+        <tr>
+          <td>scalar_ops.rs</td>
+          <td> 仅供 SymExec，运行时禁止调用</td>
+        </tr>
+        <tr>
+          <td>PTX SM 版本 Fallback</td>
+        </tr>
+        <tr>
+          <td>SM &lt; 70 必须返回 Err，禁止降级</td>
+        </tr>
+        <tr>
+          <td>Mock / Stub 测试</td>
+        </tr>
+        <tr>
+          <td>必须使用真实模型文件</td>
+        </tr>
+        <tr>
+          <td>静默错误处理</td>
+        </tr>
+        <tr>
+          <td>禁止 </td>
+          <td>let _ =</td>
+          <td>, </td>
+          <td>Err(_)</td>
+          <td>, 无意义 </td>
+          <td>unwrap_or(default)</td>
+        </tr>
+        <tr>
+          <td>内存压力默认值</td>
+        </tr>
+        <tr>
+          <td>get_memory_pressure()</td>
+          <td> 失败必须传播错误</td>
+        </tr>
+        <tr>
+          <td>GPU OOM → CPU 回退</td>
+        </tr>
+        <tr>
+          <td>OOM 必须直接 Halt，禁止降级</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 错误处理契约</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 消除静默失败</h4>
+      <table>
+        <tr>
+          <th>替换</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>let _ = expr</td>
+          <td> → </td>
+          <td>?</td>
+          <td> 或 </td>
+          <td>log::warn!</td>
+        </tr>
+        <tr>
+          <td>所有返回值必须处理</td>
+        </tr>
+        <tr>
+          <td>Err(_)</td>
+          <td> → 具体错误匹配</td>
+        </tr>
+        <tr>
+          <td>禁止吞掉错误</td>
+        </tr>
+        <tr>
+          <td>unwrap_or(default)</td>
+          <td> → </td>
+          <td>?</td>
+          <td> 或显式错误</td>
+        </tr>
+        <tr>
+          <td>禁止默认值掩盖错误</td>
+        </tr>
+        <tr>
+          <td>expect()</td>
+          <td> → </td>
+          <td>Result</td>
+          <td> 返回</td>
+        </tr>
+        <tr>
+          <td>生产代码禁止 panic</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 OOM Halt 截断</h4>
+      <p>```rust</p>
+      <p>pub struct OomHaltError {</p>
+      <p>    pub message: String,</p>
+      <p>    pub fatal: bool,  // true = 硬件 OOM，进程必须 Halt</p>
+      <p>}</p>
+      <p>```</p>
+      <li>物理显存分配失败时必须 <code>log::error!("OOM Halt triggered")</code></li>
+      <li>系统必须当场返回架构级硬件越界错误</li>
+      <li><strong>禁止</strong>退回到 CPU 或执行 FP16 → FP32 降级</li>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 Backend Detection 错误传播</h4>
+      <li><code>detect_backend()</code> 探测失败返回 <code>Err(BackendContextError)</code>，不 panic</li>
+      <li>无 GPU 环境下返回 <code>Ok(CpuBackend)</code> 或 <code>Err</code></li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 观测系统</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 Epilogue 遥测管线</h4>
+      <p>零开销遥测通过 Epilogue（Kernel 尾部指令）寄生在计算结果上。</p>
+      <li><strong>禁止</strong>为主线程新开任何 <code>std::thread</code> 或异步任务做性能监控</li>
+      <li>所有遥测数据由 Kernel 的 Epilogue 生成，嵌在 KV Page Header</li>
+      <li>下次调度器回收页表时零反序列化读回</li>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 KvPageHeader 40B 设计</h4>
+      <p>KvPageHeader 完整结构定义和字段说明见 <code>SPEC/06-RUNTIME.md</code> §8.3。</p>
+      <p>遥测数据质量验证规则：</p>
+      <li>所有字段由 Epilogue 尾段 STG 指令自动写入，禁止独立采集循环</li>
+      <li>下次调度器回收页表时零反序列化读回</li>
+      <li>Epilogue 写入精度: f32 值域内的数值结果必须与标量参考实现一致（误差阈值见 <code>SPEC/02-HARDWARE.md</code> §6 精度表）</li>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 AbsolutePolicy 护栏</h4>
+      <p>系统锁定在单轨 <code>AbsolutePolicy</code>，禁止运行时切换精度模式。</p>
+      <p>决策矩阵：</p>
+      <p>核心系统中不存在 <code>kernel_strategy</code> 传参。QuantType 直接驱动 JIT 生成硬件原生内核，推理过程中无类型判断分支。</p>
+      <table>
+        <tr>
+          <th>条件</th>
+        </tr>
+        <tr>
+          <td>max_batch_size</td>
+        </tr>
+        <tr>
+          <td>admit_prefill</td>
+        </tr>
+        <tr>
+          <td>swap_out</td>
+        </tr>
+        <tr>
+          <td>memory_pressure &gt; 0.9</td>
+        </tr>
+        <tr>
+          <td>current.max(1)</td>
+        </tr>
+        <tr>
+          <td>false</td>
+        </tr>
+        <tr>
+          <td>ceil(pressure * 3)</td>
+        </tr>
+        <tr>
+          <td>kv_fragmentation &gt; 0.5</td>
+        </tr>
+        <tr>
+          <td>current.max(1)</td>
+        </tr>
+        <tr>
+          <td>false</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>正常</td>
+        </tr>
+        <tr>
+          <td>min(256, capacity)</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>6.4 测试用例</h4>
+      <table>
+        <tr>
+          <th>TEST-ID</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验证内容</td>
+        </tr>
+        <tr>
+          <td>TEST-OBS-001</td>
+        </tr>
+        <tr>
+          <td>Epilogue 页头写入完整性</td>
+        </tr>
+        <tr>
+          <td>fragmentation_metric</td>
+          <td> + </td>
+          <td>logits_entropy</td>
+          <td> 为正确正浮点数</td>
+        </tr>
+        <tr>
+          <td>TEST-OBS-002</td>
+        </tr>
+        <tr>
+          <td>AbsolutePolicy 极限压力决策</td>
+        </tr>
+        <tr>
+          <td>memory_pressure=0.95</td>
+          <td> 时 </td>
+          <td>admit_new_prefill=false</td>
+        </tr>
+        <tr>
+          <td>TEST-OBS-003</td>
+        </tr>
+        <tr>
+          <td>静态内核路径不可更改性</td>
+        </tr>
+        <tr>
+          <td>配置中不存在 </td>
+          <td>kernel_strategy</td>
+          <td> 字段</td>
+        </tr>
+        <tr>
+          <td>TEST-ERR-001</td>
+        </tr>
+        <tr>
+          <td>内存压力采集失败传播</td>
+        </tr>
+        <tr>
+          <td>返回 </td>
+          <td>Err</td>
+          <td>，不返回 </td>
+          <td>memory_pressure=0.0</td>
+        </tr>
+        <tr>
+          <td>TEST-ERR-002</td>
+        </tr>
+        <tr>
+          <td>OOM Halt 验证</td>
+        </tr>
+        <tr>
+          <td>当场 Halt + 硬件越界错误，无降级</td>
+        </tr>
+        <tr>
+          <td>TEST-ERR-003</td>
+        </tr>
+        <tr>
+          <td>Backend Detection 不 panic</td>
+        </tr>
+        <tr>
+          <td>无 GPU 环境返回 </td>
+          <td>Ok(Cpu)</td>
+          <td> 或 </td>
+          <td>Err</td>
+        </tr>
+        <tr>
+          <td>TEST-ARCH-004</td>
+        </tr>
+        <tr>
+          <td>KV Scatter Kernel 正确性</td>
+        </tr>
+        <tr>
+          <td>scatter 与逐 head DtoD 写入 bit-exact 一致</td>
+        </tr>
+        <tr>
+          <td>TEST-ARCH-005</td>
+        </tr>
+        <tr>
+          <td>GPU 权重缓存命中</td>
+        </tr>
+        <tr>
+          <td>缓存命中后零 htod 调用，输出不变</td>
+        </tr>
+        <tr>
+          <td>TEST-ARCH-006</td>
+        </tr>
+        <tr>
+          <td>Metal KV 直写正确性</td>
+        </tr>
+        <tr>
+          <td>直写与 dtoh→repack→htod bit-exact 一致</td>
+        </tr>
+        <tr>
+          <td>TEST-ARCH-007</td>
+        </tr>
+        <tr>
+          <td>Paged Attention 三后端一致性</td>
+        </tr>
+        <tr>
+          <td>三后端 attention 输出容差 &lt; 1e-5</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 测试文件清单</h3>
+      <table>
+        <tr>
+          <th>测试文件</th>
+        </tr>
+        <tr>
+          <td>覆盖范围</td>
+        </tr>
+        <tr>
+          <td>test_e2e_embedding.rs</td>
+        </tr>
+        <tr>
+          <td>Embedding E2E</td>
+        </tr>
+        <tr>
+          <td>test_e2e_generator.rs</td>
+        </tr>
+        <tr>
+          <td>Generator E2E</td>
+        </tr>
+        <tr>
+          <td>test_e2e_reranker.rs</td>
+        </tr>
+        <tr>
+          <td>Reranker E2E</td>
+        </tr>
+        <tr>
+          <td>test_gguf_parser.rs</td>
+        </tr>
+        <tr>
+          <td>GGUF 解析</td>
+        </tr>
+        <tr>
+          <td>test_model_config_gguf.rs</td>
+        </tr>
+        <tr>
+          <td>GGUF 配置推导</td>
+        </tr>
+        <tr>
+          <td>test_kv_cache.rs</td>
+        </tr>
+        <tr>
+          <td>KV Cache 管理</td>
+        </tr>
+        <tr>
+          <td>test_paged_attention.rs</td>
+        </tr>
+        <tr>
+          <td>Paged Attention</td>
+        </tr>
+        <tr>
+          <td>test_continuous_batching_flow.rs</td>
+        </tr>
+        <tr>
+          <td>Continuous Batching</td>
+        </tr>
+        <tr>
+          <td>test_client_lifecycle.rs</td>
+        </tr>
+        <tr>
+          <td>Client 生命周期</td>
+        </tr>
+        <tr>
+          <td>test_moe_routing.rs</td>
+        </tr>
+        <tr>
+          <td>MoE 路由</td>
+        </tr>
+        <tr>
+          <td>test_error_handling.rs</td>
+        </tr>
+        <tr>
+          <td>错误处理</td>
+        </tr>
+        <tr>
+          <td>test_performance.rs</td>
+        </tr>
+        <tr>
+          <td>性能基准</td>
+        </tr>
+      </table>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：10-QUALITY.html</address>
+  </footer>
+</body>
+</html>

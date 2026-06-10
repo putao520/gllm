@@ -1,0 +1,1594 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="27-ALGORITHM-TEMPLATE" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"27-ALGORITHM-TEMPLATE", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>27 — 算法模板声明式表达 (Algorithm Template Declarative Expression)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>27-ALGORITHM-TEMPLATE</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s27" data-section="27">
+      <h2>27 — 算法模板声明式表达 (Algorithm Template Declarative Expression)</h2>
+      <p>&gt; <strong>铁律 ARCH-ALGO-TEMPLATE</strong>: 算法实现 = 纯数据模板 + TraceOp 归一管线。禁止手写 emit 函数。禁止绕过 auto_select 发射 VmInstr。</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 问题与设计哲学</h3>
+    </section>
+    <section id="s0.1" data-section="0.1">
+      <h4>§0.1 问题根因</h4>
+      <code>plan_lower.rs</code> 中 12,891 行代码包含 15+ 手写 <code>emit_*_inline</code> 函数，每个函数都是 Rust 命令式代码：
+      <p>```rust</p>
+      <p>// 当前: 手写命令式代码生成</p>
+      <p>fn emit_gemm_blis_inline(prog, m, n, k, ...) {</p>
+      <p>    let pack_b = prog.alloc_vreg(...);</p>
+      <p>    prog.emit(LoopBegin { ... });</p>
+      <p>    for i in 0..mc/mr {</p>
+      <p>        prog.emit(LoopBegin { ... });</p>
+      <p>        // ... 200 行手写 VmInstr 发射</p>
+      <p>    }</p>
+      <p>    prog.emit(LoopEnd);</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>问题</strong>：
+      <p>1. <strong>算法逻辑与代码生成耦合</strong> — BLIS 的 5 层循环嵌套结构硬编码在 Rust 函数中</p>
+      <p>2. <strong>绕过 auto_select 管线</strong> — 手写 emit 函数直接发射 VmInstr，不走 TraceOp → auto_select 统一路径</p>
+      <p>3. <strong>两条割裂路径</strong> — 简单算子走 SymExec → TraceOp → auto_select，结构算子绕过管线直接写 VmInstr</p>
+      <p>4. <strong>无跨算法复用</strong> — naive GEMM、BLIS GEMM、GPU tiled GEMM 各自独立函数，重复 80% 逻辑</p>
+      <p>5. <strong>无法外部编辑</strong> — 添加新算法策略 = 写新 Rust 函数 + 编译，不能数据驱动扩展</p>
+    </section>
+    <section id="s0.2" data-section="0.2">
+      <h4>§0.2 设计目标：归一管线</h4>
+      <strong>核心原则：TraceOp 是唯一 IR，auto_select 是唯一 TraceOp→VmInstr 桥梁。所有算法，无论来源，都经过同一条管线。</strong>
+      <p>```</p>
+      <p>                    ┌─ SymExec (自动提取) ──────────┐</p>
+      <p>                    │   Scalar fn → TraceOp ────────┤</p>
+      <p>TraceOp 来源 ───────┤                               ├→ auto_select → VmInstr → ISA → 机器码</p>
+      <p>                    └─ 模板解释器 (声明式) ──────────┤</p>
+      <p>                        AlgoTemplate → TraceOp ─────┘</p>
+      <p>                                              ↑</p>
+      <p>                                         统一 IR</p>
+      <p>                                    (唯一 TraceOp→VmInstr 桥)</p>
+      <p>```</p>
+      <strong>JIT 从 auto_select 往下是纯执行器</strong>——不知道自己在编译 GEMM 还是 FFT，只看到 TraceOp 流进来，VmInstr 流出去。
+      <strong>三种来源，一种 IR，一条管线。</strong>
+      <table>
+        <tr>
+          <th>来源</th>
+        </tr>
+        <tr>
+          <td>怎么产 TraceOp</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+        </tr>
+        <tr>
+          <td>SymExec</td>
+        </tr>
+        <tr>
+          <td>自动 trace scalar fn</td>
+        </tr>
+        <tr>
+          <td>逐元素/归约/量化</td>
+        </tr>
+        <tr>
+          <td>模板解释器</td>
+        </tr>
+        <tr>
+          <td>按模板数据组装</td>
+        </tr>
+        <tr>
+          <td>GEMM/Attention/MoE/RoPE/Norm</td>
+        </tr>
+        <tr>
+          <td>手动构造</td>
+        </tr>
+        <tr>
+          <td>测试中直接写</td>
+        </tr>
+        <tr>
+          <td>单元测试</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s0.3" data-section="0.3">
+      <h4>§0.3 与 SPEC 26 META 模式的关系</h4>
+      <p>SPEC 26 建立了 META enum 模式用于参数化单一指令：</p>
+      <p>```rust</p>
+      <p>// SPEC 26: 指令级参数化</p>
+      <p>QuantBlockLoad { mode: BlockUnpackMode }  // 7 种解包模式</p>
+      <p>DotProduct { dtype: DotDtype }            // 5 种点积类型</p>
+      <p>```</p>
+      <p>SPEC 27 将 META 模式扩展到 <strong>算法级</strong>：</p>
+      <p>```</p>
+      <p>SPEC 26:  VmInstr + META enum  →  参数化单一指令</p>
+      <p>SPEC 27:  AlgoTemplate + META  →  参数化整个算法结构，输出到统一 TraceOp IR</p>
+      <p>```</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 核心数据模型</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 AlgoTemplate</h4>
+      <p>```rust</p>
+      <p>/// 算法模板 — 纯静态数据，描述算法的循环嵌套结构和算法步骤。</p>
+      <p>///</p>
+      <p>/// 模板解释器遍历步骤树，输出 Vec<traceop>，</traceop></p>
+      <p>/// 然后走统一 auto_lower_trace → VmInstr 管线。</p>
+      <p>///</p>
+      <p>/// 文件位置: algo_templates/*.rs，只包含 static 数据定义，零代码生成逻辑。</p>
+      <p>pub struct AlgoTemplate {</p>
+      <p>    /// 模板唯一标识</p>
+      <p>    pub name: &amp;'static str,</p>
+      <p>    /// 算法族 META — 标识算法类型和策略变体</p>
+      <p>    pub strategy: AlgoStrategy,</p>
+      <p>    /// 设备需求 — 此模板适用的最小设备能力</p>
+      <p>    pub device_req: DeviceReq,</p>
+      <p>    /// 算法步骤树 — 描述循环嵌套和计算步骤</p>
+      <p>    pub steps: &amp;'static [AlgoStep],</p>
+      <p>    /// 参数表 — tile 大小、unroll 因子等</p>
+      <p>    pub params: &amp;'static [(&amp;'static str, AlgoParam)],</p>
+      <p>    /// 依赖的微核定义 (GEMM 类模板)</p>
+      <p>    pub micro_kernel: Option&lt;&amp;'static MicroKernelDef&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 AlgoStrategy — 算法族 META</h4>
+      <p>```rust</p>
+      <p>/// 算法族 META — 类似 BlockUnpackMode，描述算法级策略变体。</p>
+      <p>///</p>
+      <p>/// 每个变体对应一个或多个 AlgoTemplate 实例（不同设备特化）。</p>
+      <p>#[derive(Debug, Clone, Copy, PartialEq, Eq)]</p>
+      <p>pub enum AlgoStrategy {</p>
+      <p>    // ── GEMM ──</p>
+      <p>    GemmNaive,          // Naive 3-loop: ijk, no tiling</p>
+      <p>    GemmBlis,           // BLIS 5-loop: mc/mr + nc/nr + kc + pack_b + micro-kernel</p>
+      <p>    GemmGpuTiled,       // GPU smem tiled: load tile → MMA → store</p>
+      <p>    GemmGpuPipelined,   // GPU async pipeline: cp.async + double buffering</p>
+      <p>    GemmHardwareTile,   // AMX/SME2: hardware tile register (16×16)</p>
+      <p>    // ── Attention ──</p>
+      <p>    AttnMha,            // 标准 MHA: Q×K^T softmax → ×V</p>
+      <p>    AttnGqa,            // GQA: 共享 K/V heads</p>
+      <p>    AttnMla,            // MLA: 低秩吸收 (DeepSeek)</p>
+      <p>    // ── MoE ──</p>
+      <p>    MoeRouterTopk,      // Router GEMV + Top-K dispatch</p>
+      <p>    MoePackedDispatch,  // Packed expert dispatch</p>
+      <p>    // ── Norm ──</p>
+      <p>    NormRms,            // RmsNorm: 3-phase (reduce → finalize → transform)</p>
+      <p>    NormLayer,          // LayerNorm: mean + var + normalize</p>
+      <p>    // ── RoPE ──</p>
+      <p>    RopeStandard,       // 标准 RoPE: cos/sin rotation</p>
+      <p>    RopePartial,        // Partial RoPE (p-RoPE): partial dimension rotation</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 AlgoStep — 算法步骤树</h4>
+      <p>```rust</p>
+      <p>/// 算法步骤 — 模板的主体，描述循环嵌套和计算步骤。</p>
+      <p>///</p>
+      <p>/// 解释器遍历步骤树，将每个步骤翻译为结构化 TraceOp 序列。</p>
+      <p>/// 计算类步骤 (TraceBody/FmaReduce/Softmax) 直接产 TraceOp，</p>
+      <p>/// 结构类步骤 (Loop/LoadPanel/MicroKernel) 组织 TraceOp 的嵌套和上下文。</p>
+      <p>#[derive(Debug, Clone)]</p>
+      <p>pub enum AlgoStep {</p>
+      <p>    // ── 控制结构 ──</p>
+      <p>    /// 顺序执行一组步骤</p>
+      <p>    Seq(&amp;'static [AlgoStep]),</p>
+      <p>    /// 循环: bound/step 从参数表解析</p>
+      <p>    /// 解释器产 TraceOp::Loop { bound, step, body }</p>
+      <p>    Loop {</p>
+      <p>        bound: &amp;'static str,</p>
+      <p>        step: &amp;'static str,</p>
+      <p>        body: &amp;'static [AlgoStep],</p>
+      <p>    },</p>
+      <p>    /// 条件执行: 仅当设备满足 requirement 时执行 body</p>
+      <p>    Conditional {</p>
+      <p>        requirement: DeviceReq,</p>
+      <p>        body: &amp;'static [AlgoStep],</p>
+      <p>    },</p>
+      <p>    // ── 内存操作 (映射到现有 TraceOp) ──</p>
+      <p>    /// 加载矩阵面板 → TraceOp::PanelLoad</p>
+      <p>    LoadPanel {</p>
+      <p>        matrix: MatrixRole,</p>
+      <p>        rows_param: &amp;'static str,</p>
+      <p>        cols_param: &amp;'static str,</p>
+      <p>    },</p>
+      <p>    /// Pack buffer → TraceOp::PackBuffer</p>
+      <p>    PackBuffer {</p>
+      <p>        buffer_name: &amp;'static str,</p>
+      <p>        rows_param: &amp;'static str,</p>
+      <p>        cols_param: &amp;'static str,</p>
+      <p>    },</p>
+      <p>    /// 微核计算: mr × nr × kc MAC 循环</p>
+      <p>    /// 解释器展开 MicroKernelDef 为 TraceOp 序列</p>
+      <p>    MicroKernel,</p>
+      <p>    /// 存储结果 → TraceOp::PanelStore</p>
+      <p>    StoreResult {</p>
+      <p>        rows_param: &amp;'static str,</p>
+      <p>        cols_param: &amp;'static str,</p>
+      <p>    },</p>
+      <p>    // ── GPU 专用 (映射到 TraceOp 扩展) ──</p>
+      <p>    /// TraceOp::SharedMemDeclare</p>
+      <p>    SharedMemDeclare { name: &amp;'static str, size_param: &amp;'static str },</p>
+      <p>    /// TraceOp::AsyncCopyToShared</p>
+      <p>    AsyncCopyToSmem { buffer_name: &amp;'static str, size_param: &amp;'static str },</p>
+      <p>    /// TraceOp::AsyncWaitGroup</p>
+      <p>    AsyncWait { group: u32 },</p>
+      <p>    /// TraceOp::SyncBarrier</p>
+      <p>    Barrier { barrier_name: &amp;'static str },</p>
+      <p>    // ── Tile/Matrix 专用 ──</p>
+      <p>    TileConfig { rows: &amp;'static str, cols: &amp;'static str },</p>
+      <p>    TileMma,</p>
+      <p>    TileRelease,</p>
+      <p>    // ── 计算步骤 (直接产 TraceOp) ──</p>
+      <p>    /// 嵌入已有 TraceOp 序列 (来自 SymExec trace 或手动定义)</p>
+      <p>    TraceBody(&amp;'static [AlgoTraceStep]),</p>
+      <p>    /// 归约: TraceOp::HReduce</p>
+      <p>    Reduce { op: ReduceOp },</p>
+      <p>    /// 激活函数: TraceOp 查表 (Silu→Sigmoid+Mul, Gelu→Exp+...)</p>
+      <p>    Activation { kind: ActivationKind },</p>
+      <p>    /// Softmax 三阶段: reduce_max → exp_sum → normalize</p>
+      <p>    Softmax,</p>
+      <p>    /// 量化反量化: TraceOp + BlockUnpackMode</p>
+      <p>    Dequantize { mode: BlockUnpackMode },</p>
+      <p>    /// 嵌入查找: TraceOp::ScalarLoad + StrideMul + PtrAdd + VecLoadIndexed</p>
+      <p>    EmbeddingGather,</p>
+      <p>    /// MoE Router</p>
+      <p>    MoeRouterGemv { num_experts: &amp;'static str, hidden: &amp;'static str },</p>
+      <p>    MoeTopK { num_experts: &amp;'static str, top_k: &amp;'static str },</p>
+      <p>    /// Epilogue 注入</p>
+      <p>    Epilogue { ops: &amp;'static [EpilogueOp] },</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s1.4" data-section="1.4">
+      <h4>§1.4 AlgoParam — 参数来源</h4>
+      <p>```rust</p>
+      <p>#[derive(Debug, Clone, Copy)]</p>
+      <p>pub enum AlgoParam {</p>
+      <p>    Const(usize),</p>
+      <p>    FromPressureModel(&amp;'static str),</p>
+      <p>    FromDeviceProfile(&amp;'static str),</p>
+      <p>    FromGraph(&amp;'static str),</p>
+      <p>    Derived { base: &amp;'static str, op: ParamArith, operand: usize },</p>
+      <p>}</p>
+      <p>#[derive(Debug, Clone, Copy)]</p>
+      <p>pub enum ParamArith { CeilDiv, Mul, Div, Max, Min }</p>
+      <p>```</p>
+    </section>
+    <section id="s1.5" data-section="1.5">
+      <h4>§1.5 辅助类型</h4>
+      <p>```rust</p>
+      <p>#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]</p>
+      <p>pub enum MatrixRole { A, B, C }</p>
+      <p>#[derive(Debug, Clone, Copy, PartialEq, Eq)]</p>
+      <p>pub enum DeviceReq {</p>
+      <p>    CpuAny,       // 任意 CPU</p>
+      <p>    CpuAvx2,      // AVX2+</p>
+      <p>    CpuAvx512,    // AVX-512+</p>
+      <p>    CpuAmx,       // AMX tile</p>
+      <p>    CpuSme2,      // SME2 tile</p>
+      <p>    GpuSm70,      // Volta</p>
+      <p>    GpuSm80,      // Ampere: cp.async</p>
+      <p>    GpuSm90,      // Hopper: TMA/WGMMA</p>
+      <p>    GpuSm100,     // Blackwell: FP4</p>
+      <p>}</p>
+      <p>impl DeviceReq {</p>
+      <p>    pub fn priority(&amp;self) -&gt; u32 {</p>
+      <p>        match self {</p>
+      <p>            Self::CpuAny =&gt; 0, Self::CpuAvx2 =&gt; 10, Self::CpuAvx512 =&gt; 20,</p>
+      <p>            Self::CpuAmx =&gt; 30, Self::CpuSme2 =&gt; 30,</p>
+      <p>            Self::GpuSm70 =&gt; 40, Self::GpuSm80 =&gt; 50, Self::GpuSm90 =&gt; 60, Self::GpuSm100 =&gt; 70,</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>#[derive(Debug, Clone, Copy)]</p>
+      <p>pub enum EpilogueOp {</p>
+      <p>    BiasAdd, ResidualAdd, Relu, Silu, Gelu,</p>
+      <p>    RmsNorm { eps_param: &amp;'static str },</p>
+      <p>}</p>
+      <p>#[derive(Debug, Clone, Copy)]</p>
+      <p>pub enum ActivationKind { Relu, Silu, Gelu, Tanh, Sigmoid }</p>
+      <p>```</p>
+    </section>
+    <section id="s1.6" data-section="1.6">
+      <h4>§1.6 MicroKernelDef</h4>
+      <p>```rust</p>
+      <p>/// 微核定义 — mr × nr × kc 的内层循环。</p>
+      <p>/// 解释器展开为 TraceOp 序列 (LoadARow/LoadBCol/Fma 重复 mr×nr×k_step 次)。</p>
+      <p>pub struct MicroKernelDef {</p>
+      <p>    pub mr: &amp;'static str,</p>
+      <p>    pub nr: &amp;'static str,</p>
+      <p>    pub k_step: &amp;'static str,</p>
+      <p>    pub steps: &amp;'static [MicroKernelStep],</p>
+      <p>}</p>
+      <p>pub enum MicroKernelStep {</p>
+      <p>    LoadARow,        // TraceOp::VecLoadIndexed (A 面板行)</p>
+      <p>    LoadBCol,        // TraceOp::VecLoadIndexed (B 面板列)</p>
+      <p>    Fma,             // TraceOp::Fma</p>
+      <p>    StoreAccumulator, // TraceOp::VecStoreIndexed</p>
+      <p>    WarpMma,         // TraceOp::WarpMma (GPU 专用)</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 TraceOp 结构型扩展</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 新增 TraceOp 变体</h4>
+      <p>模板解释器产出的 TraceOp 需要扩展以表达结构型操作。这些扩展也服务于 SymExec 路径（结构型算子的 trace 提取）。</p>
+      <p>```rust</p>
+      <p>// 在 <a href="http://trace.rs">trace.rs</a> 的 TraceOp enum 中新增:</p>
+      <p>// ── 循环结构 (模板解释器和 SymExec 共用) ──</p>
+      <p>/// 循环: 迭代 bound 次, body 内使用 slot 引用当前迭代。</p>
+      <p>/// auto_select 处理: 产 LoopBegin/LoopEnd VmInstr。</p>
+      <p>Loop {</p>
+      <p>    bound: BoundExpr,</p>
+      <p>    step_bytes: usize,</p>
+      <p>    body: Vec<traceop>,</traceop></p>
+      <p>},</p>
+      <p>// ── 结构型内存操作 (GEMM/Attention 面板加载) ──</p>
+      <p>/// 矩阵面板加载: 从 base + offset 加载 rows×cols 元素到连续寄存器。</p>
+      <p>/// auto_select 映射: 多条 VecLoad / VecLoadIndexed。</p>
+      <p>PanelLoad {</p>
+      <p>    base: u32,        // slot: 基地址</p>
+      <p>    offset: u32,      // slot: 偏移</p>
+      <p>    matrix: MatrixRole,</p>
+      <p>    rows: usize,</p>
+      <p>    cols: usize,</p>
+      <p>},</p>
+      <p>/// 矩阵面板存储: 将连续寄存器写入 base + offset。</p>
+      <p>/// auto_select 映射: 多条 VecStore。</p>
+      <p>PanelStore {</p>
+      <p>    base: u32,</p>
+      <p>    offset: u32,</p>
+      <p>    matrix: MatrixRole,</p>
+      <p>    rows: usize,</p>
+      <p>    cols: usize,</p>
+      <p>},</p>
+      <p>/// Buffer pack: 将 B 面板重排到连续 scratch buffer。</p>
+      <p>/// auto_select 映射: VecLoad + VecStore 序列。</p>
+      <p>PackBuffer {</p>
+      <p>    src: u32,         // slot: 源地址</p>
+      <p>    dst: u32,         // slot: 目标地址</p>
+      <p>    rows: usize,</p>
+      <p>    cols: usize,</p>
+      <p>    /// 行优先还是列优先 pack</p>
+      <p>    layout: PackLayout,</p>
+      <p>},</p>
+      <p>// ── GPU 结构型 ──</p>
+      <p>/// 共享内存声明</p>
+      <p>SharedMemDeclare {</p>
+      <p>    name: String,</p>
+      <p>    bytes: usize,</p>
+      <p>},</p>
+      <p>/// 异步拷贝到共享内存</p>
+      <p>AsyncCopyToShared {</p>
+      <p>    name: String,</p>
+      <p>    src_offset: u32,</p>
+      <p>    bytes: usize,</p>
+      <p>},</p>
+      <p>/// 等待异步操作组</p>
+      <p>AsyncWaitGroup { n: u32 },</p>
+      <p>/// 同步屏障</p>
+      <p>SyncBarrier { name: String },</p>
+      <p>// ── Tile 操作 ──</p>
+      <p>/// 配置硬件 tile 寄存器</p>
+      <p>TileConfig { rows: usize, cols: usize, dtype: DType },</p>
+      <p>/// Tile MMA: c += a × b</p>
+      <p>TileMma { c: u32, a: u32, b: u32 },</p>
+      <p>/// 释放 tile 资源</p>
+      <p>TileRelease,</p>
+      <p>// ── Softmax 三阶段 ──</p>
+      <p>/// Softmax: reduce_max → exp(x-max) → sum → normalize</p>
+      <p>/// 展开为已有 TraceOp 组合: HReduce(Max) → Sub → Exp → HReduce(Sum) → Div</p>
+      <p>Softmax { src: u32, dst: u32 },</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 auto_select 新增映射</h4>
+      <p>每个新增 TraceOp 变体在 <code>auto_select.rs</code> 的 <code>dispatch_trace_op</code> 中新增一个 match arm：</p>
+      <strong>所有映射走同一个 auto_select 函数，不绕过。</strong>
+      <table>
+        <tr>
+          <th>TraceOp 变体</th>
+        </tr>
+        <tr>
+          <td>auto_select 映射</td>
+        </tr>
+        <tr>
+          <td>VmInstr 输出</td>
+        </tr>
+        <tr>
+          <td>Loop</td>
+        </tr>
+        <tr>
+          <td>循环展开器</td>
+        </tr>
+        <tr>
+          <td>LoopBegin</td>
+          <td> + body + </td>
+          <td>LoopEnd</td>
+        </tr>
+        <tr>
+          <td>PanelLoad</td>
+        </tr>
+        <tr>
+          <td>面板加载器</td>
+        </tr>
+        <tr>
+          <td>多条 </td>
+          <td>VecLoad</td>
+        </tr>
+        <tr>
+          <td>PanelStore</td>
+        </tr>
+        <tr>
+          <td>面板存储器</td>
+        </tr>
+        <tr>
+          <td>多条 </td>
+          <td>VecStore</td>
+        </tr>
+        <tr>
+          <td>PackBuffer</td>
+        </tr>
+        <tr>
+          <td>pack 发射器</td>
+        </tr>
+        <tr>
+          <td>VecLoad</td>
+          <td> + </td>
+          <td>VecStore</td>
+          <td> 序列</td>
+        </tr>
+        <tr>
+          <td>SharedMemDeclare</td>
+        </tr>
+        <tr>
+          <td>GPU smem</td>
+        </tr>
+        <tr>
+          <td>SharedMemAlloc</td>
+        </tr>
+        <tr>
+          <td>AsyncCopyToShared</td>
+        </tr>
+        <tr>
+          <td>GPU async</td>
+        </tr>
+        <tr>
+          <td>SharedMemAsyncStore</td>
+        </tr>
+        <tr>
+          <td>AsyncWaitGroup</td>
+        </tr>
+        <tr>
+          <td>GPU wait</td>
+        </tr>
+        <tr>
+          <td>SharedMemAsyncWaitGroup</td>
+        </tr>
+        <tr>
+          <td>SyncBarrier</td>
+        </tr>
+        <tr>
+          <td>GPU barrier</td>
+        </tr>
+        <tr>
+          <td>WarpBarrierArrive</td>
+          <td> + </td>
+          <td>WarpBarrierWait</td>
+        </tr>
+        <tr>
+          <td>TileConfig</td>
+        </tr>
+        <tr>
+          <td>tile 配置</td>
+        </tr>
+        <tr>
+          <td>TileConfig</td>
+        </tr>
+        <tr>
+          <td>TileMma</td>
+        </tr>
+        <tr>
+          <td>tile 计算</td>
+        </tr>
+        <tr>
+          <td>TileMma</td>
+        </tr>
+        <tr>
+          <td>TileRelease</td>
+        </tr>
+        <tr>
+          <td>tile 释放</td>
+        </tr>
+        <tr>
+          <td>TileRelease</td>
+        </tr>
+        <tr>
+          <td>Softmax</td>
+        </tr>
+        <tr>
+          <td>softmax 展开</td>
+        </tr>
+        <tr>
+          <td>HReduce(Max)</td>
+          <td> + </td>
+          <td>VecBinOp(Sub)</td>
+          <td> + </td>
+          <td>Transcendental(Exp)</td>
+          <td> + </td>
+          <td>HReduce(Sum)</td>
+          <td> + </td>
+          <td>VecBinOp(Div)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 模板解释器</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 解释器契约：产出 TraceOp</h4>
+      <p>```rust</p>
+      <p>/// 模板解释器 — 从纯数据模板生成 TraceOp 序列。</p>
+      <p>///</p>
+      <p>/// 解释器是 TraceOp 的生产者之一 (和 SymExec 平级)。</p>
+      <p>/// 产出的 TraceOp 走统一 auto_lower_trace 管线。</p>
+      <p>///</p>
+      <p>/// 解释器不关心:</p>
+      <p>/// - 最终用什么 ISA 指令 (由 auto_select + ISA lowering 处理)</p>
+      <p>/// - 具体算法语义 (由模板数据描述)</p>
+      <p>pub fn instantiate_template(</p>
+      <p>    template: &amp;AlgoTemplate,</p>
+      <p>    ctx: &amp;AlgoContext,</p>
+      <p>) -&gt; Result&lt;Vec<traceop>, CompilerError&gt; {</traceop></p>
+      <p>    let resolved = resolve_params(template.params, ctx)?;</p>
+      <p>    let mut builder = TraceBuilder::new();</p>
+      <p>    for step in template.steps {</p>
+      <p>        emit_step(step, &amp;resolved, ctx, &amp;mut builder, template.micro_kernel)?;</p>
+      <p>    }</p>
+      <p>    Ok(builder.finish())</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 步骤 → TraceOp 翻译</h4>
+      <p>```rust</p>
+      <p>fn emit_step(</p>
+      <p>    step: &amp;AlgoStep,</p>
+      <p>    params: &amp;ResolvedParams,</p>
+      <p>    ctx: &amp;AlgoContext,</p>
+      <p>    builder: &amp;mut TraceBuilder,</p>
+      <p>    mk: Option&lt;&amp;MicroKernelDef&gt;,</p>
+      <p>) -&gt; Result&lt;(), CompilerError&gt; {</p>
+      <p>    match step {</p>
+      <p>        AlgoStep::Seq(steps) =&gt; {</p>
+      <p>            for s in steps { emit_step(s, params, ctx, builder, mk)?; }</p>
+      <p>        }</p>
+      <p>        AlgoStep::Loop { bound, step, body } =&gt; {</p>
+      <p>            let bound_val = params.resolve_bound(bound, ctx)?;</p>
+      <p>            let step_val = params.resolve(step)?;</p>
+      <p>            let mut body_ops = Vec::new();</p>
+      <p>            let mut body_builder = TraceBuilder::new();</p>
+      <p>            for s in body {</p>
+      <p>                emit_step(s, params, ctx, &amp;mut body_builder, mk)?;</p>
+      <p>            }</p>
+      <p>            builder.push(TraceOp::Loop {</p>
+      <p>                bound: bound_val,</p>
+      <p>                step_bytes: step_val,</p>
+      <p>                body: body_builder.finish(),</p>
+      <p>            });</p>
+      <p>        }</p>
+      <p>        AlgoStep::LoadPanel { matrix, rows_param, cols_param } =&gt; {</p>
+      <p>            let base_slot = builder.current_panel_base(*matrix);</p>
+      <p>            let offset_slot = builder.current_panel_offset(*matrix);</p>
+      <p>            builder.push(TraceOp::PanelLoad {</p>
+      <p>                base: base_slot, offset: offset_slot,</p>
+      <p>                matrix: *matrix,</p>
+      <p>                rows: params.resolve(rows_param)?,</p>
+      <p>                cols: params.resolve(cols_param)?,</p>
+      <p>            });</p>
+      <p>        }</p>
+      <p>        AlgoStep::PackBuffer { buffer_name, rows_param, cols_param } =&gt; {</p>
+      <p>            let src = builder.current_b_panel_slot();</p>
+      <p>            let dst = builder.alloc_scratch_slot(buffer_name);</p>
+      <p>            builder.push(TraceOp::PackBuffer {</p>
+      <p>                src, dst,</p>
+      <p>                rows: params.resolve(rows_param)?,</p>
+      <p>                cols: params.resolve(cols_param)?,</p>
+      <p>                layout: PackLayout::ColMajor, // BLIS B 面板列优先</p>
+      <p>            });</p>
+      <p>        }</p>
+      <p>        AlgoStep::MicroKernel =&gt; {</p>
+      <p>            let mk_def = mk.ok_or("MicroKernel without definition")?;</p>
+      <p>            emit_micro_kernel_as_trace(mk_def, params, builder)?;</p>
+      <p>        }</p>
+      <p>        AlgoStep::TraceBody(trace_steps) =&gt; {</p>
+      <p>            // 已有 TraceOp 序列直接注入</p>
+      <p>            for ts in trace_steps {</p>
+      <p>                builder.push(ts.to_trace_op(builder.slot_map())?);</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>        AlgoStep::Softmax =&gt; {</p>
+      <p>            let src = builder.current_accum_slot();</p>
+      <p>            let dst = builder.alloc_slot();</p>
+      <p>            builder.push(TraceOp::Softmax { src, dst });</p>
+      <p>        }</p>
+      <p>        AlgoStep::Reduce { op } =&gt; {</p>
+      <p>            let src = builder.current_accum_slot();</p>
+      <p>            let dst = builder.alloc_slot();</p>
+      <p>            builder.push(TraceOp::HReduce { src, op: match op {</p>
+      <p>                ReduceOp::Sum =&gt; ReduceKind::Sum,</p>
+      <p>                ReduceOp::Max =&gt; ReduceKind::Max,</p>
+      <p>            }});</p>
+      <p>        }</p>
+      <p>        AlgoStep::Barrier { barrier_name } =&gt; {</p>
+      <p>            builder.push(TraceOp::SyncBarrier { name: barrier_name.to_string() });</p>
+      <p>        }</p>
+      <p>        AlgoStep::AsyncCopyToSmem { buffer_name, size_param } =&gt; {</p>
+      <p>            let bytes = params.resolve(size_param)?;</p>
+      <p>            builder.push(TraceOp::AsyncCopyToShared {</p>
+      <p>                name: buffer_name.to_string(),</p>
+      <p>                src_offset: builder.current_panel_offset(MatrixRole::A),</p>
+      <p>                bytes,</p>
+      <p>            });</p>
+      <p>        }</p>
+      <p>        // ... 其他步骤类似翻译为 TraceOp</p>
+      <p>        _ =&gt; { /* 其余 TraceOp 映射 */ }</p>
+      <p>    }</p>
+      <p>    Ok(())</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 微核 → TraceOp 展开</h4>
+      <p>```rust</p>
+      <p>/// 微核展开: 将 MicroKernelDef 翻译为 TraceOp 序列。</p>
+      <p>/// mr 行 × nr 列 × k_step 的 FMA 循环。</p>
+      <p>fn emit_micro_kernel_as_trace(</p>
+      <p>    mk: &amp;MicroKernelDef,</p>
+      <p>    params: &amp;ResolvedParams,</p>
+      <p>    builder: &amp;mut TraceBuilder,</p>
+      <p>) -&gt; Result&lt;(), CompilerError&gt; {</p>
+      <p>    let mr = params.resolve(<a href="http://mk.mr">mk.mr</a>)?;</p>
+      <p>    let nr = params.resolve(<a href="http://mk.nr">mk.nr</a>)?;</p>
+      <p>    let k_step = params.resolve(mk.k_step)?;</p>
+      <p>    let mut body = Vec::new();</p>
+      <p>    for step in mk.steps {</p>
+      <p>        match step {</p>
+      <p>            MicroKernelStep::LoadARow =&gt; {</p>
+      <p>                body.push(TraceOp::VecLoadIndexed { base: builder.a_slot(), offset: builder.k_offset_slot() });</p>
+      <p>            }</p>
+      <p>            MicroKernelStep::LoadBCol =&gt; {</p>
+      <p>                body.push(TraceOp::VecLoadIndexed { base: builder.b_slot(), offset: builder.k_offset_slot() });</p>
+      <p>            }</p>
+      <p>            MicroKernelStep::Fma =&gt; {</p>
+      <p>                let acc = builder.current_accum_slot();</p>
+      <p>                let a = builder.last_load_a_slot();</p>
+      <p>                let b = builder.last_load_b_slot();</p>
+      <p>                body.push(TraceOp::Fma(acc, a, b));</p>
+      <p>            }</p>
+      <p>            MicroKernelStep::StoreAccumulator =&gt; {</p>
+      <p>                body.push(TraceOp::VecLoadIndexed { base: builder.c_slot(), offset: builder.out_offset_slot() });</p>
+      <p>            }</p>
+      <p>            MicroKernelStep::WarpMma =&gt; {</p>
+      <p>                // GPU: 直接产 TraceOp::TileMma</p>
+      <p>                body.push(TraceOp::TileMma { c: builder.acc_slot(), a: builder.a_slot(), b: builder.b_slot() });</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>    // 微核本身也是 k 维度循环</p>
+      <p>    builder.push(TraceOp::Loop {</p>
+      <p>        bound: BoundExpr::Const(k_step),</p>
+      <p>        step_bytes: params.resolve("elem_bytes")?,</p>
+      <p>        body,</p>
+      <p>    });</p>
+      <p>    Ok(())</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 归一调用入口</h4>
+      <p>```rust</p>
+      <p>/// plan_lower.rs 中的调用方式:</p>
+      <p>/// 所有算法走同一条 auto_lower_trace 管线。</p>
+      <p>fn emit_algo_from_template(</p>
+      <p>    prog: &amp;mut VmProgram,</p>
+      <p>    strategy: AlgoStrategy,</p>
+      <p>    ctx: &amp;LoweringContext,</p>
+      <p>    inputs: &amp;[VRegId],</p>
+      <p>    width: SimdWidth,</p>
+      <p>) -&gt; Result&lt;(), CompilerError&gt; {</p>
+      <p>    // 1. 选择模板</p>
+      <p>    let template = select_template(strategy, ctx)?;</p>
+      <p>    // 2. 解释器产出 TraceOp</p>
+      <p>    let trace_ops = instantiate_template(template, &amp;ctx.into())?;</p>
+      <p>    // 3. 走统一 auto_select 管线 (和 SymExec trace 完全相同的路径)</p>
+      <p>    auto_lower_trace(prog, &amp;trace_ops, inputs, width)?;</p>
+      <p>    Ok(())</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 模板库</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 文件结构</h4>
+      <p>```</p>
+      <p>algo_templates/</p>
+      <p>├── <a href="http://mod.rs">mod.rs</a>          — pub mod 声明 + 注册表 + select_template()</p>
+      <p>├── <a href="http://gemm.rs">gemm.rs</a>         — GEMM 族模板 (5 个)</p>
+      <p>├── <a href="http://attention.rs">attention.rs</a>    — Attention 族模板 (3 个)</p>
+      <p>├── <a href="http://norm.rs">norm.rs</a>         — Norm 族模板 (2 个)</p>
+      <p>├── <a href="http://rope.rs">rope.rs</a>         — RoPE 族模板 (2 个)</p>
+      <p>├── <a href="http://moe.rs">moe.rs</a>          — MoE 族模板 (2 个)</p>
+      <p>└── <a href="http://sampling.rs">sampling.rs</a>     — Sampling 族模板</p>
+      <p>```</p>
+      <p>每个文件只包含 <code>pub static XXX: AlgoTemplate = AlgoTemplate { ... }</code> 纯数据定义。</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 GEMM 模板示例</h4>
+      <p>```rust</p>
+      <p>// algo_templates/gemm.rs</p>
+      <p>pub static GEMM_BLIS: AlgoTemplate = AlgoTemplate {</p>
+      <p>    name: "GemmBlis",</p>
+      <p>    strategy: AlgoStrategy::GemmBlis,</p>
+      <p>    device_req: DeviceReq::CpuAvx2,</p>
+      <p>    steps: &amp;[</p>
+      <p>        AlgoStep::Loop { bound: "m", step: "mc", body: &amp;[</p>
+      <p>            AlgoStep::Loop { bound: "n", step: "nc", body: &amp;[</p>
+      <p>                AlgoStep::Loop { bound: "k", step: "kc", body: &amp;[</p>
+      <p>                    AlgoStep::PackBuffer { buffer_name: "pack_b", rows_param: "kc", cols_param: "nc" },</p>
+      <p>                    AlgoStep::Loop { bound: "mc", step: "mr", body: &amp;[</p>
+      <p>                        AlgoStep::MicroKernel,</p>
+      <p>                    ]},</p>
+      <p>                ]},</p>
+      <p>                AlgoStep::StoreResult { rows_param: "mc", cols_param: "nc" },</p>
+      <p>            ]},</p>
+      <p>        ]},</p>
+      <p>    ],</p>
+      <p>    params: &amp;[</p>
+      <p>        ("m", AlgoParam::FromGraph("m")),</p>
+      <p>        ("n", AlgoParam::FromGraph("n")),</p>
+      <p>        ("k", AlgoParam::FromGraph("k")),</p>
+      <p>        ("mc", AlgoParam::FromPressureModel("mc")),</p>
+      <p>        ("nc", AlgoParam::FromPressureModel("nc")),</p>
+      <p>        ("kc", AlgoParam::FromPressureModel("kc")),</p>
+      <p>        ("mr", AlgoParam::FromDeviceProfile("gemm_mr")),</p>
+      <p>        ("nr", AlgoParam::FromDeviceProfile("gemm_nr")),</p>
+      <p>    ],</p>
+      <p>    micro_kernel: Some(&amp;MICRO_KERNEL_BLIS),</p>
+      <p>};</p>
+      <p>pub static GEMM_NAIVE: AlgoTemplate = AlgoTemplate {</p>
+      <p>    name: "GemmNaive",</p>
+      <p>    strategy: AlgoStrategy::GemmNaive,</p>
+      <p>    device_req: DeviceReq::CpuAny,</p>
+      <p>    steps: &amp;[</p>
+      <p>        AlgoStep::Loop { bound: "m", step: "mr", body: &amp;[</p>
+      <p>            AlgoStep::Loop { bound: "n", step: "nr", body: &amp;[</p>
+      <p>                AlgoStep::TraceBody(&amp;[/* zero acc */]),</p>
+      <p>                AlgoStep::Loop { bound: "k", step: "k_step", body: &amp;[</p>
+      <p>                    AlgoStep::LoadPanel { matrix: MatrixRole::A, rows_param: "mr", cols_param: "k_step" },</p>
+      <p>                    AlgoStep::LoadPanel { matrix: MatrixRole::B, rows_param: "k_step", cols_param: "nr" },</p>
+      <p>                    AlgoStep::MicroKernel,</p>
+      <p>                ]},</p>
+      <p>                AlgoStep::StoreResult { rows_param: "mr", cols_param: "nr" },</p>
+      <p>            ]},</p>
+      <p>        ]},</p>
+      <p>    ],</p>
+      <p>    params: &amp;[</p>
+      <p>        ("m", AlgoParam::FromGraph("m")),</p>
+      <p>        ("n", AlgoParam::FromGraph("n")),</p>
+      <p>        ("k", AlgoParam::FromGraph("k")),</p>
+      <p>        ("mr", AlgoParam::FromDeviceProfile("gemm_mr")),</p>
+      <p>        ("nr", AlgoParam::FromDeviceProfile("gemm_nr")),</p>
+      <p>        ("k_step", AlgoParam::FromDeviceProfile("simd_lanes")),</p>
+      <p>    ],</p>
+      <p>    micro_kernel: Some(&amp;MICRO_KERNEL_NAIVE),</p>
+      <p>};</p>
+      <p>// GEMM_GPU_TILED, GEMM_GPU_PIPELINED, GEMM_AMX_TILE 同理</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>§4.3 Norm 模板示例</h4>
+      <p>```rust</p>
+      <p>// algo_templates/norm.rs</p>
+      <p>pub static NORM_RMS: AlgoTemplate = AlgoTemplate {</p>
+      <p>    name: "NormRms",</p>
+      <p>    strategy: AlgoStrategy::NormRms,</p>
+      <p>    device_req: DeviceReq::CpuAny,</p>
+      <p>    steps: &amp;[</p>
+      <p>        // Phase 1: reduce — x² 累加</p>
+      <p>        AlgoStep::Loop { bound: "dim", step: "simd_lanes", body: &amp;[</p>
+      <p>            AlgoStep::TraceBody(&amp;[</p>
+      <p>                // x² → acc (SymExec 可自动提取的逐元素 trace)</p>
+      <p>            ]),</p>
+      <p>        ]},</p>
+      <p>        AlgoStep::Reduce { op: ReduceOp::Sum },</p>
+      <p>        // Phase 2: finalize — rsqrt(sum/n)</p>
+      <p>        AlgoStep::TraceBody(&amp;[</p>
+      <p>            // 1/sqrt(mean) → scale</p>
+      <p>        ]),</p>
+      <p>        // Phase 3: transform — x * scale</p>
+      <p>        AlgoStep::Loop { bound: "dim", step: "simd_lanes", body: &amp;[</p>
+      <p>            AlgoStep::TraceBody(&amp;[</p>
+      <p>                // x * scale → output</p>
+      <p>            ]),</p>
+      <p>        ]},</p>
+      <p>    ],</p>
+      <p>    params: &amp;[</p>
+      <p>        ("dim", AlgoParam::FromGraph("hidden_dim")),</p>
+      <p>        ("simd_lanes", AlgoParam::FromDeviceProfile("simd_lanes")),</p>
+      <p>    ],</p>
+      <p>    micro_kernel: None,</p>
+      <p>};</p>
+      <p>```</p>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>§4.4 模板注册表</h4>
+      <p>```rust</p>
+      <p>// algo_templates/mod.rs</p>
+      <p>pub static GEMM_TEMPLATES: &amp;[AlgoTemplate] = &amp;[</p>
+      <p>    &amp;GEMM_NAIVE, &amp;GEMM_BLIS, &amp;GEMM_AMX_TILE,</p>
+      <p>    &amp;GEMM_GPU_TILED, &amp;GEMM_GPU_PIPELINED,</p>
+      <p>];</p>
+      <p>pub fn select_template(</p>
+      <p>    strategy: AlgoStrategy,</p>
+      <p>    device: &amp;DeviceProfile,</p>
+      <p>) -&gt; Result&lt;&amp;'static AlgoTemplate, CompilerError&gt; {</p>
+      <p>    let candidates = match strategy_family(strategy) {</p>
+      <p>        StrategyFamily::Gemm =&gt; GEMM_TEMPLATES,</p>
+      <p>        StrategyFamily::Attn =&gt; ATTN_TEMPLATES,</p>
+      <p>        StrategyFamily::Norm =&gt; NORM_TEMPLATES,</p>
+      <p>        // ...</p>
+      <p>    };</p>
+      <p>    candidates.iter()</p>
+      <p>        .filter(|t| t.strategy == strategy &amp;&amp; device.satisfies(t.device_req))</p>
+      <p>        .max_by_key(|t| t.device_req.priority())</p>
+      <p>        .ok_or_else(|| CompilerError::Unsupported(</p>
+      <p>            format!("no template for {:?} on {:?}", strategy, device)</p>
+      <p>        ))</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 归一管线全貌</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 完整数据流</h4>
+      <p>```</p>
+      <p>CompilerGraph (op + dimensions + tensor metadata)</p>
+      <p>  │</p>
+      <p>  ├─ OpClass::Elementwise ──────────────────────┐</p>
+      <p>  │   Scalar fn → SymExec → Vec<traceop> ────────┤</traceop></p>
+      <p>  │                                              │</p>
+      <p>  ├─ OpClass::NormLike ─────────────────────────┤</p>
+      <p>  │   AlgoTemplate(NORM_RMS) → Vec<traceop> ────┤</traceop></p>
+      <p>  │   (TraceBody 内的逐元素 trace 来自 SymExec)   │</p>
+      <p>  │                                              │</p>
+      <p>  ├─ OpClass::Gemm ─────────────────────────────┤</p>
+      <p>  │   AlgoTemplate(GEMM_BLIS) → Vec<traceop> ───┤</traceop></p>
+      <p>  │   (MicroKernel 内的 FMA 来自 SymExec)         │</p>
+      <p>  │                                              │</p>
+      <p>  ├─ OpClass::Injective (RoPE) ─────────────────┤</p>
+      <p>  │   AlgoTemplate(ROPE_STANDARD) → Vec<traceop>─┤</traceop></p>
+      <p>  │                                              │</p>
+      <p>  ├─ OpClass::Gather (QuantGather) ─────────────┤</p>
+      <p>  │   AlgoTemplate(EMBED) or SymExec → TraceOp ──┤</p>
+      <p>  │                                              │</p>
+      <p>  └─ OpClass::Moe ──────────────────────────────┤</p>
+      <p>      AlgoTemplate(MOE_ROUTER) → Vec<traceop> ──┘</traceop></p>
+      <p>                                                    │</p>
+      <p>                                                    ▼</p>
+      <p>                                            auto_lower_trace()</p>
+      <p>                                                    │</p>
+      <p>                                                    ▼</p>
+      <p>                                            Vec<vminstr></vminstr></p>
+      <p>                                                    │</p>
+      <p>                                    ┌───────────────┼───────────────┐</p>
+      <p>                                    ▼               ▼               ▼</p>
+      <p>                              x86_lower      aarch64_lower     gpu_lower</p>
+      <p>                              vmovups        ldr q            ld.global</p>
+      <p>                              vfmadd231      fmla             mma.sync</p>
+      <p>                                    │               │               │</p>
+      <p>                                    └───────────────┼───────────────┘</p>
+      <p>                                                    ▼</p>
+      <p>                                              机器码 (纯执行)</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 TraceOp 来源归一</h4>
+      <strong>三种来源汇聚到同一个 <code>auto_lower_trace()</code> 调用点。</strong> auto_select 不知道也不关心 TraceOp 来自哪里——它只做查表映射。
+      <table>
+        <tr>
+          <th>来源</th>
+        </tr>
+        <tr>
+          <td>产出</td>
+        </tr>
+        <tr>
+          <td>走哪条路</td>
+        </tr>
+        <tr>
+          <td>SymExec::trace(scalar_fn)</td>
+        </tr>
+        <tr>
+          <td>Vec&lt;TraceOp&gt;</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>instantiate_template(template)</td>
+        </tr>
+        <tr>
+          <td>Vec&lt;TraceOp&gt;</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>测试手动构造</td>
+        </tr>
+        <tr>
+          <td>Vec&lt;TraceOp&gt;</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>§5.3 迁移路径</h4>
+      <strong>所有替换遵循同一模式</strong>：选择模板 → 实例化为 TraceOp → <code>auto_lower_trace()</code>。plan_lower.rs 从 12,891 行手写代码变成模板选择+单行调用。
+      <table>
+        <tr>
+          <th>手写函数</th>
+        </tr>
+        <tr>
+          <td>替换方式</td>
+        </tr>
+        <tr>
+          <td>产出</td>
+        </tr>
+        <tr>
+          <td>emit_gemm_naive_inline</td>
+        </tr>
+        <tr>
+          <td>GEMM_NAIVE</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_gemm_blis_inline</td>
+        </tr>
+        <tr>
+          <td>GEMM_BLIS</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_gemm_gpu_tiled_inline</td>
+        </tr>
+        <tr>
+          <td>GEMM_GPU_TILED</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_gemm_gpu_pipelined</td>
+        </tr>
+        <tr>
+          <td>GEMM_GPU_PIPELINED</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_normlike_inline</td>
+        </tr>
+        <tr>
+          <td>NORM_RMS/NORM_LAYER</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_rope_inline</td>
+        </tr>
+        <tr>
+          <td>ROPE_STANDARD/PARTIAL</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_moe_router_gemv_inline</td>
+        </tr>
+        <tr>
+          <td>MOE_ROUTER_TOPK</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_moe_topk_dispatch_inline</td>
+        </tr>
+        <tr>
+          <td>MOE_TOPK</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+        <tr>
+          <td>emit_moe_packed_inline</td>
+        </tr>
+        <tr>
+          <td>MOE_PACKED</td>
+          <td> → TraceOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace()</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.4" data-section="5.4">
+      <h4>§5.4 JIT 纯执行器验证</h4>
+      <strong>JIT 从 auto_select 往下不知道任何算法信息</strong>：
+      <strong>ISA lowering 层从始至终不知道自己在编译什么算法。</strong> 它只是机械地把 VmInstr 翻译成目标架构的机器码。
+      <table>
+        <tr>
+          <th>层</th>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>输出</td>
+        </tr>
+        <tr>
+          <td>知道 "GEMM" 吗</td>
+        </tr>
+        <tr>
+          <td>auto_select</td>
+        </tr>
+        <tr>
+          <td>TraceOp::Fma(acc, a, b)</td>
+        </tr>
+        <tr>
+          <td>VmInstr::Fma { ... }</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+        <tr>
+          <td>auto_select</td>
+        </tr>
+        <tr>
+          <td>TraceOp::PanelLoad { matrix: A }</td>
+        </tr>
+        <tr>
+          <td>多条 </td>
+          <td>VmInstr::VecLoad</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+        <tr>
+          <td>auto_select</td>
+        </tr>
+        <tr>
+          <td>TraceOp::Loop { body }</td>
+        </tr>
+        <tr>
+          <td>LoopBegin</td>
+          <td> + body + </td>
+          <td>LoopEnd</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+        <tr>
+          <td>x86_lower</td>
+        </tr>
+        <tr>
+          <td>VmInstr::Fma</td>
+        </tr>
+        <tr>
+          <td>vfmadd231ps</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+        <tr>
+          <td>x86_lower</td>
+        </tr>
+        <tr>
+          <td>VmInstr::VecLoad</td>
+        </tr>
+        <tr>
+          <td>vmovups</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+        <tr>
+          <td>aarch64_lower</td>
+        </tr>
+        <tr>
+          <td>VmInstr::Fma</td>
+        </tr>
+        <tr>
+          <td>fmla</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+        <tr>
+          <td>gpu_lower</td>
+        </tr>
+        <tr>
+          <td>VmInstr::TileMma</td>
+        </tr>
+        <tr>
+          <td>mma.sync</td>
+        </tr>
+        <tr>
+          <td>不知道</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 REQ 列表</h3>
+    </section>
+    <section id="req-at-001" data-req="REQ-AT-001" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="001" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-001: AlgoTemplate 数据模型
+      <p>定义 <code>AlgoTemplate</code>, <code>AlgoStep</code>, <code>AlgoParam</code>, <code>AlgoStrategy</code>, <code>DeviceReq</code>, <code>MicroKernelDef</code> 纯数据结构。零方法，零代码生成逻辑。</p>
+      <strong>文件</strong>: <code>codegen/vm/algo_template.rs</code>（新）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-001" data-test="TEST-AT-001" data-req-ref="REQ-AT-001" data-test-categories="unit" <h3="">TEST-AT-001: 算法模板声明式表达测试<p>验证REQ-AT-001相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-002" data-req="REQ-AT-002" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="002" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-002: TraceOp 结构型扩展
+      <p>在 <code>trace.rs</code> 新增 TraceOp 变体: <code>Loop</code>, <code>PanelLoad</code>, <code>PanelStore</code>, <code>PackBuffer</code>, <code>SharedMemDeclare</code>, <code>AsyncCopyToShared</code>, <code>AsyncWaitGroup</code>, <code>SyncBarrier</code>, <code>TileConfig</code>, <code>TileMma</code>, <code>TileRelease</code>, <code>Softmax</code>。</p>
+      <strong>文件</strong>: <code>codegen/vm/trace.rs</code>（修改）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-002" data-test="TEST-AT-002" data-req-ref="REQ-AT-002" data-test-categories="unit" <h3="">TEST-AT-002: 算法模板声明式表达测试<p>验证REQ-AT-002相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-003" data-req="REQ-AT-003" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="003" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-003: auto_select 新增映射
+      <p>在 <code>auto_select.rs</code> 为 REQ-AT-002 新增的每个 TraceOp 变体实现 <code>dispatch_trace_op</code> match arm。所有映射产 VmInstr，不绕过管线。</p>
+      <strong>文件</strong>: <code>codegen/vm/auto_select.rs</code>（修改）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-003" data-test="TEST-AT-003" data-req-ref="REQ-AT-003" data-test-categories="unit" <h3="">TEST-AT-003: 算法模板声明式表达测试<p>验证REQ-AT-003相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-004" data-req="REQ-AT-004" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="004" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-004: GEMM 模板库
+      <p>定义 5 个 GEMM 模板: <code>GEMM_NAIVE</code>, <code>GEMM_BLIS</code>, <code>GEMM_AMX_TILE</code>, <code>GEMM_GPU_TILED</code>, <code>GEMM_GPU_PIPELINED</code>。</p>
+      <strong>文件</strong>: <code>codegen/vm/algo_templates/gemm.rs</code>（新）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-004" data-test="TEST-AT-004" data-req-ref="REQ-AT-004" data-test-categories="unit" <h3="">TEST-AT-004: 算法模板声明式表达测试<p>验证REQ-AT-004相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-005" data-req="REQ-AT-005" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="005" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-005: Attention + Norm + RoPE + MoE 模板库
+      <p>定义 Attention (MHA/GQA/MLA)、Norm (RmsNorm/LayerNorm)、RoPE (Standard/Partial)、MoE (Router/TopK/Packed) 模板。</p>
+      <strong>文件</strong>: <code>codegen/vm/algo_templates/attention.rs</code>, <code>norm.rs</code>, <code>rope.rs</code>, <code>moe.rs</code>（新）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-005" data-test="TEST-AT-005" data-req-ref="REQ-AT-005" data-test-categories="unit" <h3="">TEST-AT-005: 算法模板声明式表达测试<p>验证REQ-AT-005相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-006" data-req="REQ-AT-006" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="006" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-006: 模板解释器
+      <p>实现 <code>instantiate_template()</code>: 遍历 AlgoStep 树，翻译为 <code>Vec&lt;TraceOp&gt;</code>。每个 AlgoStep 映射到对应 TraceOp 变体。微核展开为 TraceOp::Loop + Fma 序列。</p>
+      <strong>文件</strong>: <code>codegen/vm/algo_interpreter.rs</code>（新）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-006" data-test="TEST-AT-006" data-req-ref="REQ-AT-006" data-test-categories="unit" <h3="">TEST-AT-006: 算法模板声明式表达测试<p>验证REQ-AT-006相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-007" data-req="REQ-AT-007" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="007" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-007: 模板注册表 + 策略选择
+      <p>实现 <code>select_template()</code>, <code>DeviceReq::priority()</code>, <code>DeviceProfile::satisfies()</code>。</p>
+      <strong>文件</strong>: <code>codegen/vm/algo_templates/mod.rs</code>（新）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-007" data-test="TEST-AT-007" data-req-ref="REQ-AT-007" data-test-categories="unit" <h3="">TEST-AT-007: 算法模板声明式表达测试<p>验证REQ-AT-007相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-008" data-req="REQ-AT-008" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="008" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-008: GEMM emit 函数迁移
+      <code>emit_gemm_inline_with_hook</code> → <code>select_template()</code> + <code>instantiate_template()</code> + <code>auto_lower_trace()</code>。删除 5 个手写 GEMM emit 函数。
+      <strong>文件</strong>: <code>codegen/vm/plan_lower.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-008" data-test="TEST-AT-008" data-req-ref="REQ-AT-008" data-test-categories="unit" <h3="">TEST-AT-008: 算法模板声明式表达测试<p>验证REQ-AT-008相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-009" data-req="REQ-AT-009" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="009" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-009: Norm/RoPE/MoE emit 函数迁移
+      <code>emit_normlike_inline</code>, <code>emit_rope_inline</code>, <code>emit_moe_*_inline</code> → 模板解释器 + <code>auto_lower_trace()</code>。
+      <strong>文件</strong>: <code>codegen/vm/plan_lower.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-009" data-test="TEST-AT-009" data-req-ref="REQ-AT-009" data-test-categories="unit" <h3="">TEST-AT-009: 算法模板声明式表达测试<p>验证REQ-AT-009相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-010" data-req="REQ-AT-010" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="010" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-010: Sampling 模板 + 迁移
+      <p>定义采样管线模板 (Argmax → TemperatureScale → Softmax → TopK → TopP → Multinomial)。迁移手写采样 VmInstr 序列。</p>
+      <strong>文件</strong>: <code>codegen/vm/algo_templates/sampling.rs</code>（新）, <code>plan_lower.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-010" data-test="TEST-AT-010" data-req-ref="REQ-AT-010" data-test-categories="unit" <h3="">TEST-AT-010: 算法模板声明式表达测试<p>验证REQ-AT-010相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-at-011" data-req="REQ-AT-011" data-req-status="implemented" data-req-domain="at" data-req-category="business" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-api="API-ALGO-TEMPLATE" data-section="011" data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="">REQ-AT-011: 验证 — 数值对齐
+      <p>所有迁移后通过 <code>cargo test --lib</code> + E2E 测试验证数值一致。模板产出与原手写 emit 函数语义等价。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">AlgoTemplate 纯数据模型描述算法循环</li>
+        <li id="2" data-criterion="2">TraceOp 结构型扩展正确</li>
+        <li id="3" data-criterion="3">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</li>
+        <li id="4" data-criterion="4">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph" ENT-COMPILER-GRAPH<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-at-011" data-test="TEST-AT-011" data-req-ref="REQ-AT-011" data-test-categories="unit" <h3="">TEST-AT-011: 算法模板声明式表达测试<p>验证REQ-AT-011相关功能正确性</p>
+      <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
+      <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
+      <div id="模板解释器-algostep→vec<traceop>-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
+      <div id="gemm/attention/norm/rope/moe/sampling-模板库完整" data-criterion="GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整">GEMM/Attention/Norm/RoPE/MoE/Sampling 模板库完整</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s7" data-section="7">
+      <h3>§7 实施顺序</h3>
+      <p>```</p>
+      <p>REQ-AT-001 (数据模型)</p>
+      <p>    ↓</p>
+      <p>REQ-AT-002 + 003 (TraceOp 扩展 + auto_select 映射 — 可并行)</p>
+      <p>    ↓</p>
+      <p>REQ-AT-004 + 005 (模板库 — 可并行)</p>
+      <p>    ↓</p>
+      <p>REQ-AT-006 (解释器) + REQ-AT-007 (注册表 — 可并行)</p>
+      <p>    ↓</p>
+      <p>REQ-AT-008 + 009 (GEMM + 其他迁移 — 可并行)</p>
+      <p>    ↓</p>
+      <p>REQ-AT-010 (Sampling)</p>
+      <p>    ↓</p>
+      <p>REQ-AT-011 (验证)</p>
+      <p>```</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 文件结构</h3>
+      <p>```</p>
+      <p>gllm-kernels/src/compiler/</p>
+      <p>├── <a href="http://trace.rs">trace.rs</a>                          — [REQ-AT-002] TraceOp 结构型扩展</p>
+      <p>├── codegen/vm/</p>
+      <p>│   ├── algo_template.rs              — [REQ-AT-001] 数据模型</p>
+      <p>│   ├── algo_interpreter.rs           — [REQ-AT-006] 解释器 (产 TraceOp)</p>
+      <p>│   ├── auto_select.rs                — [REQ-AT-003] 新增 TraceOp→VmInstr 映射</p>
+      <p>│   ├── algo_templates/               — [REQ-AT-004,005,010] 模板库 (纯数据)</p>
+      <p>│   │   ├── <a href="http://mod.rs">mod.rs</a>                    — [REQ-AT-007] 注册表 + 选择</p>
+      <p>│   │   ├── <a href="http://gemm.rs">gemm.rs</a>                   — GEMM 5 模板</p>
+      <p>│   │   ├── <a href="http://attention.rs">attention.rs</a>              — Attention 3 模板</p>
+      <p>│   │   ├── <a href="http://norm.rs">norm.rs</a>                   — Norm 2 模板</p>
+      <p>│   │   ├── <a href="http://rope.rs">rope.rs</a>                   — RoPE 2 模板</p>
+      <p>│   │   ├── <a href="http://moe.rs">moe.rs</a>                    — MoE 2 模板</p>
+      <p>│   │   └── <a href="http://sampling.rs">sampling.rs</a>              — Sampling 模板</p>
+      <p>│   ├── plan_lower.rs                 — [REQ-AT-008,009,010] 大幅瘦身</p>
+      <p>│   └── ...</p>
+      <p>```</p>
+      <strong>归一验证</strong>：<code>grep -rn "auto_lower_trace" plan_lower.rs</code> — 所有算法调用点必须经过这一个函数。
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-ALGO-TEMPLATE" id="ent-algo-template"><h4>ENT-ALGO-TEMPLATE</h4><p>AlgoTemplate — 算法模板 (纯数据模型)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="name" data-type="string" data-required="true" <td="">name<td>string</td><td>是</td><td></td><td>Template identifier (e.g. 'GemmNaive', 'AttnMha')</td></tr><tr data-field="strategy" data-type="string" data-required="true" <td="">strategy<td>string</td><td>是</td>
+<td>AlgoStrategy enum</td><td>Algorithm family variant (GemmNaive/GemmBlis/GemmGpuTiled/AttnMha/AttnGqa/AttnMla)</td></tr><tr data-field="device_req" data-type="string" data-required="true" <td="">device_req<td>string</td><td>是</td><td>DeviceReq enum</td><td>Hardware device requirement</td></tr><tr data-field="steps" data-type="string" data-required="true" <td="">steps<td>string</td><td>是</td><td>&amp;'static [AlgoStep]</td><td>
+Static slice of AlgoStep tree describing loop nesting and computation</td></tr><tr data-field="params" data-type="string" data-required="true" <td="">params<td>string</td><td>是</td><td>&amp;'static [(&amp;'static str, AlgoParam)]</td><td>Static slice of (name, AlgoParam) pairs for template parameterization</td></tr><tr data-field="micro_kernel" data-type="string" data-required="false" <td="">micro_kernel<td>string</td><td>否</td><td>Option&lt;&amp;'static MicroKernelDef&gt;</td><td>
+Optional MicroKernelDef for hardware-tiled inner kernels</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-COMPILER-GRAPH" id="ent-compiler-graph">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-DEVICE-PROFILE" id="ent-device-profile">
+        <h4>ENT-DEVICE-PROFILE</h4>
+        <p>DeviceProfile — 硬件能力探测 (12 Profile)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="arch" data-type="string" data-required="true" <td="">arch<td>string</td><td>是</td><td>MicroArch</td><td>检测到的微架构</td></tr><tr data-field="isa" data-type="string" data-required="true" <td="">isa<td>string</td><td>是</td><td>IsaLevel</td><td>ISA级别 (Scalar/Avx2/Avx512/Avx512Amx/Neon/Sve/Sve2/NeonAmx)</td></tr>
+<tr data-field="peak_gflops_f32" data-type="number" data-required="true" <td="">peak_gflops_f32<td>number</td><td>是</td><td>f64</td><td>峰值单精度GFLOPS</td></tr><tr data-field="peak_bandwidth_gbs" data-type="number" data-required="true" <td="">peak_bandwidth_gbs<td>number</td><td>是</td><td>f64</td><td>峰值内存带宽 (GB/s)</td></tr><tr data-field="physical_cores" data-type="number" data-required="true" <td="">physical_cores<td>number</td><td>是</td><td>usize</td><td>物理核心数</td></tr>
+<tr data-field="logical_cores" data-type="number" data-required="true" <td="">logical_cores<td>number</td><td>是</td><td>usize</td><td>逻辑核心数 (含HT/SMT)</td></tr><tr data-field="quant_capabilities" data-type="string" data-required="true" <td="">quant_capabilities<td>string</td><td>是</td><td>QuantCapability</td><td>量化能力声明</td></tr><tr data-field="isv" data-type="string" data-required="true" <td="">isv<td>string</td><td>是</td><td>IsvCapabilities</td><td>ISV库可用性</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-TRACE-OP" id="ent-trace-op"><h4>ENT-TRACE-OP</h4><p>TraceOp — SSA中间表示算子（enum TraceOp in gllm-kernels/src/compiler/trace.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Input|Const|Add|Sub|Mul|Div|Fma|Neg|Abs|Exp|Sqrt|Rsqrt|Tanh|Recip|Log|Sigmoid|Max|Min|ConditionalBranch|QuantFma|BlockScale|Cast|HReduce|Prefetch|NonTemporalStore|BitExtract|Permute</td><td>枚举变体名</td></tr><tr data-field="input_index" data-type="number" data-required="false" <td="">input_index<td>number</td><td>否</td><td>u32, 仅 Input 变体</td><td>加载第 i 个输入元素</td></tr><tr data-field="const_value" data-type="number" data-required="false" <td="">const_value<td>number</td><td>否</td><td>
+f64, 仅 Const 变体</td><td>浮点常量值</td></tr><tr data-field="left_operand" data-type="number" data-required="false" <td="">left_operand<td>number</td><td>否</td><td>ValueId, 二元运算左操作数</td><td>Add/Sub/Mul/Div/Max/Min 的左操作数</td></tr><tr data-field="right_operand" data-type="number" data-required="false" <td="">right_operand<td>number</td><td>否</td><td>ValueId, 二元运算右操作数</td><td>Add/Sub/Mul/Div/Max/Min 的右操作数</td></tr><tr data-field="fma_third_operand" data-type="number" data-required="false" <td="">
+fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(a,b,c) = a*b+c 的 c</td></tr><tr data-field="reduce_kind" data-type="string" data-required="false" <td="">reduce_kind<td>string</td><td>否</td><td>Sum|Max|Min, 仅 HReduce 变体</td><td>水平归约操作类型</td></tr><tr data-field="quant_precision" data-type="string" data-required="false" <td="">quant_precision<td>string</td><td>否</td><td>QuantPrecision, 仅 QuantFma/Cast 变体</td><td>混合精度 dtype</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section data-api="POST /internal/algo/template" id="post-/internal/algo/template" data-api-type="internal" data-api-name="API-ALGO-TEMPLATE"><h4>POST /internal/algo/template — Algorithm template declare</h4><p>算法模板声明式表达接口，将算法逻辑声明为参数化模板，SymExec trace 提取 ComputePattern，auto_select 自动路由到最优 VmInstr 序列。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：27-ALGORITHM-TEMPLATE.html</address>
+  </footer>
+</body>
+</html>

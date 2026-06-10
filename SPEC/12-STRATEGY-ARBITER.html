@@ -1,0 +1,2637 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head><body><section data-tests-section="" id="testing"><h2>测试用例</h2><div data-test-categories="unit" data-req-ref="REQ-SA-001" data-test="TEST-SA-001" id="test-sa-001"><h4>TEST-SA-001: REQ-SA-001 单元测试</h4><p>TODO: 为 REQ-SA-001 编写测试用例</p></div></section></body>
+  <meta charset="utf-8">
+  <meta content="12-STRATEGY-ARBITER" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"12-STRATEGY-ARBITER", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>策略仲裁器 (Strategy Arbiter)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>12-STRATEGY-ARBITER</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-策略仲裁器-strategy-arbiter" data-section="null">
+      <h2>策略仲裁器 (Strategy Arbiter)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档是 gllm 推理引擎全局优化策略优先级决策的唯一真源。定义 SchedulingMode（延迟/吞吐模式）、GraphProfile（模型图拓扑特征提取）、StrategyArbiter（策略优先级仲裁），及其与 HwOptEngine（<code>02-HARDWARE.md §10</code>）的集成关系。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 动机</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 问题</h4>
+      <p>当前 HwOptEngine 的策略决策完全由<strong>硬件参数</strong>驱动（<code>DeviceProfile</code> + <code>MemoryNetworkSensors</code> + <code>ProbeResult</code>）。这导致两个盲区：</p>
+      <p>1. <strong>使用场景盲区</strong>: 同一硬件上，本地单请求低延迟推理与服务端高吞吐批处理的最优策略完全相反，但 HwOptEngine 无法区分。</p>
+      <p>2. <strong>模型图拓扑盲区</strong>: Dense 大模型（Llama-70B）与 MoE 稀疏模型（DeepSeek-V3）的最优资源分配策略截然不同，但 HwOptEngine 仅通过 <code>ModelConfig</code> 获取标量参数（hidden_dim、num_layers），未分析图级拓扑特征。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 解决方案</h4>
+      <p>引入 <strong>Strategy Arbiter</strong> 作为 HwOptEngine 的前置阶段。Arbiter 输出 <code>StrategyBias</code>——一组归一化的资源配额权重，注入 HwOptEngine 的 CostModel，使所有下游求解器的成本评估函数自动偏向场景最优策略。</p>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 决策链</h4>
+      <p>```</p>
+      <p>SchedulingMode (用户指定)</p>
+      <p>  └→ GraphProfiler (模型图静态分析)</p>
+      <p>       └→ StrategyArbiter (Mode × GraphProfile × DeviceProfile → StrategyBias)</p>
+      <p>            └→ HwOptEngine (StrategyBias 注入 CostModel → HwOptPlan)</p>
+      <p>                 └→ JIT Codegen (生成机器码)</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. SchedulingMode — 推理模式</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 定义</h4>
+      <p>```rust</p>
+      <p>/// 推理引擎的全局优化目标。模型加载时确定，推理全程不可变。</p>
+      <p>pub enum SchedulingMode {</p>
+      <p>    /// 极致单请求延迟：batch=1，所有资源服务唯一请求。</p>
+      <p>    /// 适用场景：本地推理、实时交互、边缘设备。</p>
+      <p>    Latency,</p>
+      <p>    /// 极致吞吐：最大化 tokens/second/dollar。</p>
+      <p>    /// 适用场景：API 服务、批量处理、离线推理。</p>
+      <p>    Throughput,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 API 入口</h4>
+      <p>```rust</p>
+      <p>let client = Client::builder()</p>
+      <p>    .model("Qwen/Qwen3-7B-Instruct")</p>
+      <p>    .scheduling_mode(SchedulingMode::Latency)  // 新增</p>
+      <p>    .build()?;</p>
+      <p>```</p>
+      <strong>默认值</strong>: 不指定时默认 <code>SchedulingMode::Latency</code>。
+      <strong>不可变性</strong>: <code>SchedulingMode</code> 嵌入 <code>HwOptPlan</code>，模型加载时确定，推理期间不可切换。切换模式需 <code>swap_model()</code> 重新加载。
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 模式影响矩阵</h4>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>Latency</td>
+        </tr>
+        <tr>
+          <td>Throughput</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Batch 上限</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>1（固定）</td>
+        </tr>
+        <tr>
+          <td>动态（由 BatchSolver 求解）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>GEMM 形态</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>M=1 GEMV（memory-bound）</td>
+        </tr>
+        <tr>
+          <td>M=batch_size GEMM（compute-bound）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>主瓶颈</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>内存带宽</td>
+        </tr>
+        <tr>
+          <td>计算单元</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>融合收益</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>极高（每字节 = 延迟）</td>
+        </tr>
+        <tr>
+          <td>中等（计算主导时带宽非瓶颈）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>流水线收益</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>极高（隐藏 DRAM 延迟）</td>
+        </tr>
+        <tr>
+          <td>低（计算足以掩盖访存）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>并行度</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>低（M=1 无法切 wave）</td>
+        </tr>
+        <tr>
+          <td>高（大矩阵需饱和全部 SM）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>量化激进度</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>极高（4bit 带宽 ÷ 4）</td>
+        </tr>
+        <tr>
+          <td>适度（精度影响批量质量）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KV Cache 策略</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>全量驻留（单序列）</td>
+        </tr>
+        <tr>
+          <td>PagedAttention + 驱逐</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Speculative Decoding</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>高价值（加速唯一请求）</td>
+        </tr>
+        <tr>
+          <td>低价值（抢占 batch 容量）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>MoE 专家驻留</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>全部常驻（内存充裕）</td>
+        </tr>
+        <tr>
+          <td>激进驱逐（省内存给更多请求）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tensor Parallelism</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>有价值（降单请求延迟）</td>
+        </tr>
+        <tr>
+          <td>可能不如各卡独立 batch</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Prefill 策略</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>尽快完成切 decode</td>
+        </tr>
+        <tr>
+          <td>Chunked Prefill 交织 decode</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>2.4 Roofline 翻转效应</h4>
+      <p>同一模型、同一硬件，两种模式的算术强度分布截然不同：</p>
+      <p>```</p>
+      <p>GEMM Arithmetic Intensity:</p>
+      <p>  AI = 2MNK / ((MK + KN + MN) × elem_bytes)</p>
+      <p>  Latency  (M=1):  AI ≈ 2N/(K+N+1) ≈ 2    → MemoryBound</p>
+      <p>  Throughput (M=64): AI ≈ 128NK/(64K+KN+64N) → ComputeBound</p>
+      <p>```</p>
+      <strong>REQ-ARB-001</strong>: RooflineAnalyzer 必须接收 <code>SchedulingMode</code> 以确定 M 值参与 AI 计算。Latency 模式下 <code>effective_M = 1</code>；Throughput 模式下 <code>effective_M</code> 由 BatchSolver 的预期 batch 大小决定。
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. GraphProfile — 模型图拓扑特征</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 定义</h4>
+      <p>```rust</p>
+      <p>/// 模型图的静态拓扑特征向量。</p>
+      <p>/// 由 GraphProfiler 在模型加载时从 OnnxGraph 一次性提取，不可变。</p>
+      <p>pub struct GraphProfile {</p>
+      <p>    // ── 计算特征 ──</p>
+      <p>    /// 单层总 FLOPs / 单层总参数字节 (ops/byte)</p>
+      <p>    pub compute_density: f64,</p>
+      <p>    /// 模型总参数量 (bytes)</p>
+      <p>    pub total_param_bytes: usize,</p>
+      <p>    // ── 融合机会特征 ──</p>
+      <p>    /// 可融合算子对数 / 总算子数 (0.0~1.0)</p>
+      <p>    pub fusion_opportunity: f64,</p>
+      <p>    /// 平均 epilogue 链长度 (GEMM 后跟的连续 elementwise op 数)</p>
+      <p>    pub avg_epilogue_chain_len: f64,</p>
+      <p>    /// FFN 类型</p>
+      <p>    pub ffn_kind: FfnKind,</p>
+      <p>    // ── 并行度特征 ──</p>
+      <p>    /// MoE 专家数 (Dense 模型 = 0)</p>
+      <p>    pub num_experts: usize,</p>
+      <p>    /// MoE top-k (Dense 模型 = 0)</p>
+      <p>    pub moe_top_k: usize,</p>
+      <p>    /// MoE 层占总层数比例 (0.0~1.0)</p>
+      <p>    pub moe_layer_ratio: f64,</p>
+      <p>    // ── 注意力特征 ──</p>
+      <p>    /// Attention 类型</p>
+      <p>    pub attention_kind: AttentionKind,</p>
+      <p>    /// KV head 数 / Q head 数 (MHA=1.0, GQA&lt;1.0, MQA≈0)</p>
+      <p>    pub kv_q_head_ratio: f64,</p>
+      <p>    /// head_dim</p>
+      <p>    pub head_dim: usize,</p>
+      <p>    // ── 内存特征 ──</p>
+      <p>    /// 每 token KV cache 字节 = 2 × num_kv_heads × head_dim × num_layers × elem_bytes</p>
+      <p>    pub kv_bytes_per_token: usize,</p>
+      <p>    /// 权重复用率 = 每 token 访问的独立权重字节 / 总权重字节</p>
+      <p>    /// Dense=1.0 (每 token 访问全部权重), MoE&lt;1.0 (只访问 top-k 专家)</p>
+      <p>    pub weight_reuse_ratio: f64,</p>
+      <p>    // ── 结构特征 ──</p>
+      <p>    /// 总层数</p>
+      <p>    pub num_layers: usize,</p>
+      <p>    /// hidden_dim</p>
+      <p>    pub hidden_dim: usize,</p>
+      <p>    /// 词表大小</p>
+      <p>    pub vocab_size: usize,</p>
+      <p>    /// 是否有 tied embeddings (input/output 共享权重)</p>
+      <p>    pub tied_embeddings: bool,</p>
+      <p>    /// 残差连接拓扑</p>
+      <p>    pub residual_kind: ResidualKind,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 辅助枚举</h4>
+      <p>```rust</p>
+      <p>pub enum FfnKind {</p>
+      <p>    SwiGLU,       // gate + up + silu + mul + down (Llama/Qwen/DeepSeek)</p>
+      <p>    GeGLU,        // gate + up + gelu + mul + down</p>
+      <p>    ReLU,         // up + relu + down (legacy)</p>
+      <p>    MoESwiGLU,    // MoE routing → per-expert SwiGLU</p>
+      <p>    MoEGeGLU,     // MoE routing → per-expert GeGLU</p>
+      <p>}</p>
+      <p>pub enum AttentionKind {</p>
+      <p>    MHA,          // Multi-Head Attention (KV heads = Q heads)</p>
+      <p>    GQA,          // Grouped-Query Attention (KV heads &lt; Q heads)</p>
+      <p>    MQA,          // Multi-Query Attention (KV heads = 1)</p>
+      <p>    SlidingWindow { window_size: usize },</p>
+      <p>}</p>
+      <p>pub enum ResidualKind {</p>
+      <p>    PreNorm,      // Pre-LN: Norm → Attn → Add → Norm → FFN → Add</p>
+      <p>    PostNorm,     // Post-LN: Attn → Add → Norm → FFN → Add → Norm</p>
+      <p>    DeepNorm,     // DeepNorm: scaled residual</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 提取算法</h4>
+      <p>```rust</p>
+      <p>impl GraphProfiler {</p>
+      <p>    /// 从模型图和配置一次性提取拓扑特征。</p>
+      <p>    pub fn profile(graph: &amp;OnnxGraph, config: &amp;ModelConfig) -&gt; GraphProfile</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>提取来源</strong>:
+      <table>
+        <tr>
+          <th>特征</th>
+        </tr>
+        <tr>
+          <td>提取方式</td>
+        </tr>
+        <tr>
+          <td>compute_density</td>
+        </tr>
+        <tr>
+          <td>遍历 graph 节点统计 FLOPs（GEMM=2MNK, Norm=3H, ElemWise=H）÷ 参数字节</td>
+        </tr>
+        <tr>
+          <td>fusion_opportunity</td>
+        </tr>
+        <tr>
+          <td>遍历 graph 边，统计 (producer, consumer) 匹配融合模式的对数 ÷ 总节点数</td>
+        </tr>
+        <tr>
+          <td>avg_epilogue_chain_len</td>
+        </tr>
+        <tr>
+          <td>对每个 GEMM 节点，沿输出边向前走到第一个非 elementwise 节点，取平均步数</td>
+        </tr>
+        <tr>
+          <td>ffn_kind</td>
+        </tr>
+        <tr>
+          <td>匹配 FFN 子图模式：检测 gate_proj+up_proj+activation+down_proj 的组合</td>
+        </tr>
+        <tr>
+          <td>num_experts</td>
+        </tr>
+        <tr>
+          <td>config.num_experts.unwrap_or(0)</td>
+        </tr>
+        <tr>
+          <td>moe_top_k</td>
+        </tr>
+        <tr>
+          <td>config.num_experts_per_tok.unwrap_or(0)</td>
+        </tr>
+        <tr>
+          <td>moe_layer_ratio</td>
+        </tr>
+        <tr>
+          <td>统计含 MoE routing 子图的层数 ÷ 总层数</td>
+        </tr>
+        <tr>
+          <td>attention_kind</td>
+        </tr>
+        <tr>
+          <td>从 </td>
+          <td>config.num_key_value_heads</td>
+          <td> 与 </td>
+          <td>config.num_attention_heads</td>
+          <td> 推导</td>
+        </tr>
+        <tr>
+          <td>kv_q_head_ratio</td>
+        </tr>
+        <tr>
+          <td>num_kv_heads / num_q_heads</td>
+        </tr>
+        <tr>
+          <td>kv_bytes_per_token</td>
+        </tr>
+        <tr>
+          <td>2 × num_kv_heads × head_dim × num_layers × elem_bytes</td>
+        </tr>
+        <tr>
+          <td>weight_reuse_ratio</td>
+        </tr>
+        <tr>
+          <td>Dense: 1.0; MoE: </td>
+          <td>(shared_params + top_k × expert_params) / total_params</td>
+        </tr>
+        <tr>
+          <td>residual_kind</td>
+        </tr>
+        <tr>
+          <td>匹配残差连接拓扑：Norm 在 Attention 前（PreNorm）还是后（PostNorm）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 模型图原型</h4>
+      <p>基于提取特征，将模型图归类为 <strong>Graph Archetype</strong>（图原型）。原型不是硬分类，而是一个连续空间中的锚点，用于成本模型插值。</p>
+      <p>```rust</p>
+      <p>/// 模型图在优化策略空间中的位置。</p>
+      <p>/// 每个维度是 [0.0, 1.0] 的归一化权重。</p>
+      <p>pub struct GraphArchetype {</p>
+      <p>    /// 计算密集度 (高 = 大 hidden_dim, 长 epilogue 链, Dense)</p>
+      <p>    pub compute_intensive: f64,</p>
+      <p>    /// 内存密集度 (高 = 大 KV cache, 低权重复用, MoE)</p>
+      <p>    pub memory_intensive: f64,</p>
+      <p>    /// 并行可开发度 (高 = 多专家, 大 batch 适应性)</p>
+      <p>    pub parallelism_exploitable: f64,</p>
+      <p>    /// 融合收益度 (高 = 长 epilogue 链, SwiGLU, QKV 可共享)</p>
+      <p>    pub fusion_profitable: f64,</p>
+      <p>    /// 流水线价值度 (高 = 小 GEMM, memory-bound, 深层数)</p>
+      <p>    pub pipeline_valuable: f64,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>REQ-ARB-002</strong>: GraphArchetype 的五个维度之和不要求为 1.0。每个维度独立归一化，表示该维度的绝对强度。
+    </section>
+    <section id="s3.5" data-section="3.5">
+      <h4>3.5 原型推导算法</h4>
+      <p>```</p>
+      <p>compute_intensive:</p>
+      <p>  base = sigmoid((hidden_dim - 2048) / 2048)  // 4096 → 0.73, 8192 → 0.95</p>
+      <p>  boost = avg_epilogue_chain_len / 8.0         // 长链 → 更多计算</p>
+      <p>  penalty = moe_layer_ratio × 0.5             // MoE 降低单路径计算密度</p>
+      <p>  result = clamp(base + boost - penalty, 0.0, 1.0)</p>
+      <p>memory_intensive:</p>
+      <p>  kv_factor = sigmoid((kv_bytes_per_token - 1024) / 4096)</p>
+      <p>  reuse_factor = 1.0 - weight_reuse_ratio     // 低复用 = 高内存压力</p>
+      <p>  result = clamp(kv_factor + reuse_factor, 0.0, 1.0)</p>
+      <p>parallelism_exploitable:</p>
+      <p>  moe_factor = if num_experts &gt; 0 {</p>
+      <p>      sigmoid((num_experts × moe_top_k - 16) / 64)  // 256×6 → 0.99</p>
+      <p>  } else { 0.0 }</p>
+      <p>  batch_factor = 1.0 - compute_intensive × 0.3  // 大 GEMM 已天然并行，不需额外 wave</p>
+      <p>  result = clamp(moe_factor + batch_factor × 0.3, 0.0, 1.0)</p>
+      <p>fusion_profitable:</p>
+      <p>  epilogue = avg_epilogue_chain_len / 6.0</p>
+      <p>  swiglu = if ffn_kind.is_gated() { 0.3 } else { 0.0 }</p>
+      <p>  qkv = if kv_q_head_ratio &lt; 1.0 { 0.2 } else { 0.1 }  // GQA QKV 共享 pack_a 更有价值</p>
+      <p>  norm = if residual_kind == PreNorm { 0.2 } else { 0.0 }  // PreNorm → NormIntoGemm</p>
+      <p>  result = clamp(epilogue + swiglu + qkv + norm, 0.0, 1.0)</p>
+      <p>pipeline_valuable:</p>
+      <p>  small_gemm = sigmoid((2048 - hidden_dim) / 2048)  // 小 hidden → 更需要 pipeline</p>
+      <p>  depth = sigmoid((num_layers - 16) / 32)            // 深层 → 更多 pipeline 机会</p>
+      <p>  memory_bound = memory_intensive × 0.5              // memory-bound → pipeline 价值高</p>
+      <p>  result = clamp(small_gemm + depth × 0.3 + memory_bound, 0.0, 1.0)</p>
+      <p>```</p>
+    </section>
+    <section id="s3.6" data-section="3.6">
+      <h4>3.6 典型模型原型参考</h4>
+      <table>
+        <tr>
+          <th>模型</th>
+        </tr>
+        <tr>
+          <td>compute</td>
+        </tr>
+        <tr>
+          <td>memory</td>
+        </tr>
+        <tr>
+          <td>parallel</td>
+        </tr>
+        <tr>
+          <td>fusion</td>
+        </tr>
+        <tr>
+          <td>pipeline</td>
+        </tr>
+        <tr>
+          <td>Llama-70B (Dense, GQA, 80L)</td>
+        </tr>
+        <tr>
+          <td>0.95</td>
+        </tr>
+        <tr>
+          <td>0.6</td>
+        </tr>
+        <tr>
+          <td>0.2</td>
+        </tr>
+        <tr>
+          <td>0.85</td>
+        </tr>
+        <tr>
+          <td>0.15</td>
+        </tr>
+        <tr>
+          <td>Qwen3-7B (Dense, GQA, 32L)</td>
+        </tr>
+        <tr>
+          <td>0.73</td>
+        </tr>
+        <tr>
+          <td>0.4</td>
+        </tr>
+        <tr>
+          <td>0.15</td>
+        </tr>
+        <tr>
+          <td>0.80</td>
+        </tr>
+        <tr>
+          <td>0.45</td>
+        </tr>
+        <tr>
+          <td>DeepSeek-V3 (MoE 256×6, 60L)</td>
+        </tr>
+        <tr>
+          <td>0.50</td>
+        </tr>
+        <tr>
+          <td>0.90</td>
+        </tr>
+        <tr>
+          <td>0.99</td>
+        </tr>
+        <tr>
+          <td>0.60</td>
+        </tr>
+        <tr>
+          <td>0.35</td>
+        </tr>
+        <tr>
+          <td>Phi-4 (Dense, 3B, 32L)</td>
+        </tr>
+        <tr>
+          <td>0.35</td>
+        </tr>
+        <tr>
+          <td>0.25</td>
+        </tr>
+        <tr>
+          <td>0.10</td>
+        </tr>
+        <tr>
+          <td>0.70</td>
+        </tr>
+        <tr>
+          <td>0.80</td>
+        </tr>
+        <tr>
+          <td>BGE-M3 (Encoder, MHA, 24L)</td>
+        </tr>
+        <tr>
+          <td>0.60</td>
+        </tr>
+        <tr>
+          <td>0.10</td>
+        </tr>
+        <tr>
+          <td>0.05</td>
+        </tr>
+        <tr>
+          <td>0.50</td>
+        </tr>
+        <tr>
+          <td>0.30</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. StrategyArbiter — 策略仲裁器</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 职责</h4>
+      <p>接收 <code>SchedulingMode</code> × <code>GraphArchetype</code> × <code>DeviceProfile</code>，输出 <code>StrategyBias</code>——一组成本模型调制系数，注入 HwOptEngine 使其自动偏向场景最优策略。</p>
+      <strong>核心理念</strong>: Arbiter 不直接决定具体策略（那是 HwOptEngine 各 Solver 的职责），而是通过<strong>调整成本函数的权重</strong>间接影响所有决策。这保持了 HwOptEngine 的 Cost-Model 驱动架构不变。
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 StrategyBias 定义</h4>
+      <p>```rust</p>
+      <p>/// 策略偏置系数。注入 HwOptEngine CostModel，调制成本评估。</p>
+      <p>/// 所有系数 &gt; 0.0，1.0 = 中性，&lt; 1.0 = 偏好（降低该策略成本），&gt; 1.0 = 惩罚（提高成本）。</p>
+      <p>pub struct StrategyBias {</p>
+      <p>    // ── 资源配额偏置 ──</p>
+      <p>    /// 融合族偏置: &lt; 1.0 时 CostModel 低估融合的代价（偏好融合）</p>
+      <p>    pub fusion_cost_scale: f64,</p>
+      <p>    /// 流水线族偏置: &lt; 1.0 时 CostModel 低估 pipeline 的代价（偏好双缓冲/预取）</p>
+      <p>    pub pipeline_cost_scale: f64,</p>
+      <p>    /// 并行族偏置: &lt; 1.0 时 CostModel 低估 wave 分裂的代价（偏好多 wave）</p>
+      <p>    pub parallelism_cost_scale: f64,</p>
+      <p>    // ── 寄存器预算偏置 ──</p>
+      <p>    /// epilogue 深度偏好: &gt; 1.0 时 FusionSolver 更倾向深 epilogue（牺牲 k_depth）</p>
+      <p>    pub epilogue_depth_preference: f64,</p>
+      <p>    /// k_depth 偏好: &gt; 1.0 时 GemmSolver 更倾向深 k pipeline（牺牲 epilogue）</p>
+      <p>    pub k_depth_preference: f64,</p>
+      <p>    // ── 缓存预算偏置 ──</p>
+      <p>    /// KV cache 预算比例调制 (&gt; 1.0 = 给 KV 更多 L2)</p>
+      <p>    pub kv_cache_budget_scale: f64,</p>
+      <p>    /// 权重预取预算比例调制</p>
+      <p>    pub weight_prefetch_budget_scale: f64,</p>
+      <p>    // ── 批处理偏置 ──</p>
+      <p>    /// batch 大小偏好: 0.0 = 永远 batch=1, 1.0 = BatchSolver 自由决策</p>
+      <p>    pub batch_flexibility: f64,</p>
+      <p>    /// decode/prefill 混合比偏置</p>
+      <p>    pub decode_ratio_scale: f64,</p>
+      <p>    // ── MoE 专属偏置 ──</p>
+      <p>    /// 专家驻留激进度: 0.0 = 全部常驻, 1.0 = 激进驱逐</p>
+      <p>    pub expert_eviction_aggressiveness: f64,</p>
+      <p>    /// 专家权重预取优先级: &gt; 1.0 = 更积极预取即将使用的专家</p>
+      <p>    pub expert_prefetch_priority: f64,</p>
+      <p>    // ── 特殊策略偏置 ──</p>
+      <p>    /// 投机解码价值: &gt; 1.0 = 更倾向启用 speculative decoding</p>
+      <p>    pub speculative_decoding_value: f64,</p>
+      <p>    /// 量化激进度: &gt; 1.0 = 更倾向低比特量化</p>
+      <p>    pub quantization_aggressiveness: f64,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 仲裁算法</h4>
+      <p>```rust</p>
+      <p>impl StrategyArbiter {</p>
+      <p>    pub fn arbitrate(</p>
+      <p>        mode: SchedulingMode,</p>
+      <p>        archetype: &amp;GraphArchetype,</p>
+      <p>        profile: &amp;DeviceProfile,</p>
+      <p>    ) -&gt; StrategyBias</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3.1" data-section="4.3.1">
+      <h5>4.3.1 SchedulingMode 基线偏置</h5>
+      <p>首先根据模式生成基线偏置（与模型图无关）：</p>
+      <p>```</p>
+      <p>Latency 基线:</p>
+      <p>  fusion_cost_scale       = 0.5   // 强烈偏好融合（memory-bound 时融合 = 延迟下降）</p>
+      <p>  pipeline_cost_scale     = 0.6   // 偏好流水线（隐藏 DRAM 延迟）</p>
+      <p>  parallelism_cost_scale  = 1.5   // 惩罚多 wave（batch=1 切不动）</p>
+      <p>  epilogue_depth_preference = 1.5 // 深 epilogue（减少中间写回 = 减少延迟）</p>
+      <p>  k_depth_preference      = 1.3   // 偏好双缓冲（隐藏 pack 延迟）</p>
+      <p>  kv_cache_budget_scale   = 0.5   // KV cache 小（单序列）</p>
+      <p>  weight_prefetch_budget_scale = 1.5 // 权重预取重要（memory-bound）</p>
+      <p>  batch_flexibility       = 0.0   // batch=1 固定</p>
+      <p>  decode_ratio_scale      = 1.0   // 单请求无混合比概念</p>
+      <p>  expert_eviction_aggressiveness = 0.0 // 全部常驻</p>
+      <p>  expert_prefetch_priority = 0.5  // 不需要激进预取</p>
+      <p>  speculative_decoding_value = 1.5 // 高价值</p>
+      <p>  quantization_aggressiveness = 1.5 // 激进量化</p>
+      <p>Throughput 基线:</p>
+      <p>  fusion_cost_scale       = 1.0   // 中性（compute-bound 时融合收益有限）</p>
+      <p>  pipeline_cost_scale     = 1.3   // 轻微惩罚（计算足以掩盖）</p>
+      <p>  parallelism_cost_scale  = 0.5   // 强烈偏好并行（喂满硬件）</p>
+      <p>  epilogue_depth_preference = 0.8 // 浅 epilogue（省寄存器给 GEMM tile）</p>
+      <p>  k_depth_preference      = 0.8   // 轻度降低（compute-bound 不需要深 pipeline）</p>
+      <p>  kv_cache_budget_scale   = 1.5   // KV cache 大（多序列）</p>
+      <p>  weight_prefetch_budget_scale = 0.8 // 权重自然被 batch 复用</p>
+      <p>  batch_flexibility       = 1.0   // BatchSolver 自由决策</p>
+      <p>  decode_ratio_scale      = 1.0   // 混合比自由</p>
+      <p>  expert_eviction_aggressiveness = 0.8 // 适度驱逐</p>
+      <p>  expert_prefetch_priority = 1.5  // 激进预取（下一 batch 可能用）</p>
+      <p>  speculative_decoding_value = 0.3 // 低价值</p>
+      <p>  quantization_aggressiveness = 0.8 // 适度</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3.2" data-section="4.3.2">
+      <h5>4.3.2 GraphArchetype 调制</h5>
+      <p>在基线偏置上，根据模型图原型做乘法调制：</p>
+      <p>```</p>
+      <p>// 融合族调制</p>
+      <p>bias.fusion_cost_scale *= lerp(1.0, 0.6, archetype.fusion_profitable)</p>
+      <p>// fusion_profitable 高 → 融合代价进一步降低 → 更偏好融合</p>
+      <p>// 流水线族调制</p>
+      <p>bias.pipeline_cost_scale *= lerp(1.0, 0.6, archetype.pipeline_valuable)</p>
+      <p>// pipeline_valuable 高 → pipeline 代价进一步降低</p>
+      <p>// 并行族调制</p>
+      <p>bias.parallelism_cost_scale *= lerp(1.0, 0.5, archetype.parallelism_exploitable)</p>
+      <p>// parallelism_exploitable 高 → 并行代价进一步降低</p>
+      <p>// 寄存器竞争调制 (融合 vs 流水线的寄存器分配)</p>
+      <p>reg_tension = archetype.fusion_profitable - archetype.pipeline_valuable</p>
+      <p>if reg_tension &gt; 0.0:</p>
+      <p>    // 融合更有价值 → 寄存器给 epilogue</p>
+      <p>    bias.epilogue_depth_preference *= 1.0 + reg_tension × 0.5</p>
+      <p>    bias.k_depth_preference *= 1.0 - reg_tension × 0.3</p>
+      <p>else:</p>
+      <p>    // 流水线更有价值 → 寄存器给 k_depth</p>
+      <p>    bias.k_depth_preference *= 1.0 + (-reg_tension) × 0.5</p>
+      <p>    bias.epilogue_depth_preference *= 1.0 - (-reg_tension) × 0.3</p>
+      <p>// MoE 调制</p>
+      <p>if archetype.parallelism_exploitable &gt; 0.5:  // MoE 模型</p>
+      <p>    bias.expert_eviction_aggressiveness *= lerp(1.0, 1.5, archetype.memory_intensive)</p>
+      <p>    bias.expert_prefetch_priority *= lerp(1.0, 2.0, archetype.memory_intensive)</p>
+      <p>    // 内存密集的 MoE → 更激进驱逐 + 更激进预取</p>
+      <p>// KV cache 调制</p>
+      <p>bias.kv_cache_budget_scale *= lerp(1.0, 1.5, archetype.memory_intensive)</p>
+      <p>// 量化调制</p>
+      <p>bias.quantization_aggressiveness *= lerp(1.0, 1.3, archetype.memory_intensive)</p>
+      <p>// 内存密集 → 更激进量化</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3.3" data-section="4.3.3">
+      <h5>4.3.3 硬件特征微调</h5>
+      <p>最后根据硬件特征做最终微调：</p>
+      <p>```</p>
+      <p>// GPU 有海量寄存器 → 寄存器竞争缓解</p>
+      <p>if profile.is_gpu():</p>
+      <p>    bias.epilogue_depth_preference *= 1.2  // GPU 可以更深 epilogue</p>
+      <p>    bias.k_depth_preference *= 1.2         // GPU 可以更深 pipeline</p>
+      <p>    // 二者同时提升因为 GPU 寄存器充裕</p>
+      <p>// CPU 寄存器紧张 → 竞争加剧</p>
+      <p>if profile.num_simd_regs &lt;= 16:</p>
+      <p>    reg_scarcity = 1.0 - (profile.num_simd_regs as f64 / 32.0)</p>
+      <p>    bias.epilogue_depth_preference *= 1.0 + reg_scarcity × 0.3</p>
+      <p>    bias.k_depth_preference *= 1.0 - reg_scarcity × 0.2</p>
+      <p>    // 寄存器少 → 更倾向 epilogue（融合直接省带宽）而非 pipeline（需要额外 buffer）</p>
+      <p>// 大 L1 → 融合更自由</p>
+      <p>l1_richness = (profile.cache_sizes.0 as f64 / 65536.0).min(2.0)</p>
+      <p>bias.fusion_cost_scale *= 1.0 / l1_richness.sqrt()</p>
+      <p>// 大 L1 → TileLevelFusion scratch 更充裕 → 融合代价更低</p>
+      <p>// 高带宽设备 → pipeline 价值降低</p>
+      <p>if profile.is_gpu():</p>
+      <p>    bias.pipeline_cost_scale *= 1.2  // HBM 带宽高，pipeline 隐藏的延迟占比小</p>
+      <p>```</p>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 完整仲裁签名</h4>
+      <p>```rust</p>
+      <p>impl StrategyArbiter {</p>
+      <p>    /// 主入口。模型加载时调用一次。</p>
+      <p>    pub fn arbitrate(</p>
+      <p>        mode: SchedulingMode,</p>
+      <p>        archetype: &amp;GraphArchetype,</p>
+      <p>        profile: &amp;DeviceProfile,</p>
+      <p>    ) -&gt; StrategyBias {</p>
+      <p>        let mut bias = Self::mode_baseline(mode);</p>
+      <p>        Self::apply_archetype_modulation(&amp;mut bias, archetype);</p>
+      <p>        Self::apply_hardware_adjustment(&amp;mut bias, profile);</p>
+      <p>        bias.validate();  // 确保所有系数 &gt; 0.0</p>
+      <p>        bias</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. HwOptEngine 集成 — Solver Bias-Aware 完整算法</h3>
+      <p>&gt; <strong>SSOT 声明</strong>: 本节定义每个 Solver 的 bias-aware 完整算法。当本节与 <code>02-HARDWARE.md §10</code> 的原始 Solver 定义冲突时，以本节为准。本节是原始定义的<strong>超集</strong>——在原始算法的每个决策点插入 StrategyBias 调制，但不改变算法结构。</p>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 扩展后的 solve() 签名</h4>
+      <p>```rust</p>
+      <p>impl HwOptEngine {</p>
+      <p>    pub fn solve(</p>
+      <p>        profile: &amp;DeviceProfile,</p>
+      <p>        sensors: &amp;MemoryNetworkSensors,</p>
+      <p>        probe: &amp;ProbeResult,</p>
+      <p>        model: &amp;ModelConfig,</p>
+      <p>        bias: &amp;StrategyBias,    // 新增: Arbiter 输出</p>
+      <p>    ) -&gt; Result&lt;HwOptPlan, OptError&gt; {</p>
+      <p>        // Level 0</p>
+      <p>        let effective_m = estimate_batch_size(bias.batch_flexibility, profile, model);</p>
+      <p>        let roofline = RooflineAnalyzer::analyze(profile, model, effective_m);</p>
+      <p>        let cache_plan = CacheBudgetSolver::solve(profile, sensors, model, bias);</p>
+      <p>        // Level 1</p>
+      <p>        let gemm_plan = GemmSolver::solve(profile, &amp;roofline, &amp;cache_plan, bias);</p>
+      <p>        let attn_plan = AttentionSolver::solve(profile, &amp;cache_plan, &amp;roofline);</p>
+      <p>        // AttentionSolver 不受 bias 影响（纯硬件决策）</p>
+      <p>        // Level 2</p>
+      <p>        let fusion_plan = FusionSolver::solve(&amp;gemm_plan, &amp;cache_plan, &amp;roofline, bias);</p>
+      <p>        let parallel_plan = ParallelismSolver::solve(profile, &amp;gemm_plan, &amp;cache_plan, bias);</p>
+      <p>        // Level 3</p>
+      <p>        let batch_plan = BatchSolver::solve(&amp;parallel_plan, &amp;cache_plan, model, bias);</p>
+      <p>        // Level 4</p>
+      <p>        let feature_plan = FeatureRouter::route(</p>
+      <p>            profile, &amp;gemm_plan, &amp;fusion_plan, &amp;attn_plan,</p>
+      <p>            &amp;parallel_plan, &amp;batch_plan, bias,</p>
+      <p>        );</p>
+      <p>        // Level 5: 循环依赖校正 (仅 Throughput 模式)</p>
+      <p>        let plan = Self::maybe_correct(roofline, cache_plan, gemm_plan, ...);</p>
+      <p>        Ok(plan)</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 RooflineAnalyzer (Level 0) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>effective_m: usize</code>。
+      <p>```rust</p>
+      <p>struct RooflineInput {</p>
+      <p>    profile: &amp;DeviceProfile,</p>
+      <p>    model: &amp;ModelConfig,</p>
+      <p>    effective_m: usize,     // 新增: 来自 estimate_batch_size()</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>算法变更点</strong>: 算术强度计算中所有 M 替换为 <code>effective_m</code>。
+      <p>```</p>
+      <p>AI(GEMM) = 2 × effective_m × N × K / ((effective_m × K + K × N + effective_m × N) × elem_bytes)</p>
+      <p>// Latency: effective_m = 1 → AI ≈ 2 → MemoryBound</p>
+      <p>// Throughput: effective_m = 64 → AI ≈ 128 → ComputeBound</p>
+      <p>```</p>
+      <strong>输出不变</strong>: <code>RooflineResult</code> 结构体不变。
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 CacheBudgetSolver (Level 0) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>bias: &amp;StrategyBias</code>。
+      <p>```rust</p>
+      <p>struct CacheBudgetInput {</p>
+      <p>    profile: &amp;DeviceProfile,</p>
+      <p>    sensors: &amp;MemoryNetworkSensors,</p>
+      <p>    model_bytes: usize,</p>
+      <p>    kv_bytes_per_token: usize,</p>
+      <p>    hidden_bytes: usize,</p>
+      <p>    bias: &amp;StrategyBias,    // 新增</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>完整 bias-aware 算法</strong> (替代 <code>02-HARDWARE.md §10.5</code> 的 CPU 缓存预算算法):
+      <p>```</p>
+      <p>// ── L1 分配 (不受 bias 影响) ──</p>
+      <p>l1_tile_budget    = L1 × 0.75    // GEMM tile</p>
+      <p>l1_fusion_scratch = L1 × 0.25    // TileLevelFusion scratch</p>
+      <p>// ── L2 分配 (bias 调制) ──</p>
+      <p>raw_kv     = 0.40 × bias.kv_cache_budget_scale</p>
+      <p>raw_weight = 0.35 × bias.weight_prefetch_budget_scale</p>
+      <p>raw_act    = 0.25  // activation 不受 bias 直接调制</p>
+      <p>total = raw_kv + raw_weight + raw_act</p>
+      <p>// 归一化: 总和 &gt; 1.0 时按比例缩放; ≤ 1.0 时 activation 吃剩余</p>
+      <p>if total &gt; 1.0:</p>
+      <p>    kv_ratio     = raw_kv / total</p>
+      <p>    weight_ratio = raw_weight / total</p>
+      <p>    act_ratio    = raw_act / total</p>
+      <p>else:</p>
+      <p>    kv_ratio     = raw_kv</p>
+      <p>    weight_ratio = raw_weight</p>
+      <p>    act_ratio    = 1.0 - raw_kv - raw_weight</p>
+      <p>l2_total = max(sensors.l2_cache_bytes, profile.cache_sizes.1)</p>
+      <p>kv_budget     = l2_total × kv_ratio</p>
+      <p>weight_budget = l2_total × weight_ratio</p>
+      <p>activation    = l2_total × act_ratio</p>
+      <p>// ── L3 分配 (不受 bias 影响) ──</p>
+      <p>// 原算法不变</p>
+      <p>// ── GPU HBM 分配 (不受 bias 影响) ──</p>
+      <p>// 原算法不变</p>
+      <p>// ── 动态调节: RooflineAnalyzer 结果叠加 ──</p>
+      <p>// 原逻辑: MemoryBound 时 kv_budget 提升到 50%</p>
+      <p>// 本调节在 bias 调制之后执行, 与 bias 效果叠加</p>
+      <p>```</p>
+      <strong>具体数值推演</strong>:
+      <p>```</p>
+      <p>Latency mode (bias: kv=0.5, weight=1.5):</p>
+      <p>  raw_kv     = 0.40 × 0.5  = 0.20</p>
+      <p>  raw_weight = 0.35 × 1.5  = 0.525</p>
+      <p>  raw_act    = 0.25</p>
+      <p>  total = 0.975 (&lt; 1.0)</p>
+      <p>  → kv = 20%, weight = 52.5%, act = 1.0 - 0.20 - 0.525 = 27.5%</p>
+      <p>Throughput mode (bias: kv=1.5, weight=0.8):</p>
+      <p>  raw_kv     = 0.40 × 1.5  = 0.60</p>
+      <p>  raw_weight = 0.35 × 0.8  = 0.28</p>
+      <p>  raw_act    = 0.25</p>
+      <p>  total = 1.13 (&gt; 1.0, 需归一化)</p>
+      <p>  → kv = 0.60/1.13 = 53.1%, weight = 0.28/1.13 = 24.8%, act = 0.25/1.13 = 22.1%</p>
+      <p>```</p>
+    </section>
+    <section id="s5.4" data-section="5.4">
+      <h4>5.4 GemmSolver (Level 1) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>bias: &amp;StrategyBias</code>。
+      <p>```rust</p>
+      <p>struct GemmSolverInput {</p>
+      <p>    profile: &amp;DeviceProfile,</p>
+      <p>    constraints: &amp;CompilerConstraints,</p>
+      <p>    roofline: &amp;RooflineClass,</p>
+      <p>    cache_budget: &amp;CacheBudgetPlan,</p>
+      <p>    elem_bytes: usize,</p>
+      <p>    bias: &amp;StrategyBias,    // 新增</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>完整 bias-aware 算法</strong>:
+      <p>```</p>
+      <p>// ── 步骤 1: 候选枚举 (原算法不变) ──</p>
+      <p>for mr in [4, 6, 8, 10, 12, 14, 16]:</p>
+      <p>    for nr in [8, 12, 16, 24, 32]:</p>
+      <p>        nr_vecs = ceil(nr / simd_width_elems)</p>
+      <p>        acc = mr × nr_vecs</p>
+      <p>        if acc + 2 + 2 ≤ num_simd_regs:</p>
+      <p>            candidates.push(GemmCandidate { mr, nr, ... })</p>
+      <p>// ── 步骤 2: k_depth 候选集合 (⚠️ 受 bias.k_depth_preference 影响) ──</p>
+      <p>k_depth_candidates =</p>
+      <p>    if bias.k_depth_preference &gt;= 1.5:</p>
+      <p>        [1, 2, 4]              // 强偏好 → 扩展到 4（如果寄存器允许）</p>
+      <p>    elif bias.k_depth_preference &gt;= 0.8:</p>
+      <p>        [1, 2]                 // 默认范围</p>
+      <p>    else:</p>
+      <p>        [1]                    // 弱偏好 → 固定为 1</p>
+      <p>// ── 步骤 3: 成本评估 (⚠️ T_overhead 受 bias.pipeline_cost_scale 调制) ──</p>
+      <p>for candidate in candidates:</p>
+      <p>    for k_depth in k_depth_candidates:</p>
+      <p>        // 检查寄存器硬约束: k_depth &gt; 1 需要额外 double-buffer 寄存器</p>
+      <p>        if k_depth &gt; 1:</p>
+      <p>            extra_regs = k_depth  // 每级流水线需要 1 个额外 buffer 寄存器</p>
+      <p>            if candidate.acc_regs + 2 + 2 + extra_regs &gt; num_simd_regs:</p>
+      <p>                continue  // 寄存器不够，跳过此 k_depth</p>
+      <p>        // 成本公式 (bias-aware 版本)</p>
+      <p>        T_compute = (2 × mr × nr × KC) / (peak_fma × simd_efficiency)</p>
+      <p>        T_memory  = ((mr × KC + KC × nr) × elem_bytes) / peak_bw × (1 - l1_hit)</p>
+      <p>        T_overhead = k_depth × prefetch_latency × bias.pipeline_cost_scale  // ← bias 注入点</p>
+      <p>        cost = max(T_compute, T_memory) + T_overhead</p>
+      <p>        candidates_scored.push((candidate, k_depth, cost))</p>
+      <p>// ── 步骤 4: 选择最优候选 ──</p>
+      <p>best = candidates_scored.min_by(|a, b| a.cost.partial_cmp(&amp;b.cost))</p>
+      <p>// ── 步骤 5: max_epilogue_depth 计算 (⚠️ 受 bias.epilogue_depth_preference 调制) ──</p>
+      <p>scratch_regs = num_simd_regs - best.acc_regs - 2 - 2 - best.k_depth</p>
+      <p>base_max_epilogue = (scratch_regs as f64 / 1.5).floor() as usize</p>
+      <p>// epilogue_depth_preference &gt; 1.0 时：允许更深 epilogue，可能导致 NR 缩减</p>
+      <p>// epilogue_depth_preference &lt; 1.0 时：限制 epilogue 深度，把寄存器留给其他用途</p>
+      <p>effective_max_epilogue = ((base_max_epilogue as f64) × bias.epilogue_depth_preference)</p>
+      <p>    .round() as usize</p>
+      <p>effective_max_epilogue = effective_max_epilogue.max(1).min(scratch_regs)</p>
+      <p>// 硬约束: 最小 1 (至少一层 epilogue)，最大 = scratch_regs (物理上限)</p>
+      <p>// ── 步骤 6: NR 缩减决策 (如果 epilogue 需求超出 scratch) ──</p>
+      <p>// 当 effective_max_epilogue &gt; base_max_epilogue 且 scratch 不够时:</p>
+      <p>//   缩减 NR → 释放累加器寄存器 → 转为 scratch</p>
+      <p>// 原算法逻辑不变，只是 max_epilogue_depth 的值被 bias 调制了</p>
+      <p>// ── 步骤 7: 策略路由 (原算法不变) ──</p>
+      <p>strategy = select_gemm_strategy_cost_based(profile, best, ...)</p>
+      <p>```</p>
+      <strong>输出</strong>: <code>GemmPlan</code> 结构体不变，但以下字段的数值被 bias 影响:
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>受影响的 bias</td>
+        </tr>
+        <tr>
+          <td>效果</td>
+        </tr>
+        <tr>
+          <td>k_depth</td>
+        </tr>
+        <tr>
+          <td>k_depth_preference</td>
+        </tr>
+        <tr>
+          <td>pref↑ → 更深 k_depth</td>
+        </tr>
+        <tr>
+          <td>pf_distance</td>
+        </tr>
+        <tr>
+          <td>间接 (通过 k_depth)</td>
+        </tr>
+        <tr>
+          <td>k_depth↑ → pf_distance↑</td>
+        </tr>
+        <tr>
+          <td>max_epilogue_depth</td>
+        </tr>
+        <tr>
+          <td>epilogue_depth_preference</td>
+        </tr>
+        <tr>
+          <td>pref↑ → 允许更深 epilogue</td>
+        </tr>
+        <tr>
+          <td>mr</td>
+          <td>, </td>
+          <td>nr</td>
+        </tr>
+        <tr>
+          <td>pipeline_cost_scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → pipeline 便宜 → 可能选更小 tile 腾出寄存器给 pipeline</td>
+        </tr>
+        <tr>
+          <td>scratch_regs</td>
+        </tr>
+        <tr>
+          <td>间接 (通过 k_depth + epilogue)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.5" data-section="5.5">
+      <h4>5.5 FusionSolver (Level 2) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>bias: &amp;StrategyBias</code>。
+      <p>```rust</p>
+      <p>struct FusionSolverInput {</p>
+      <p>    gemm_plan: &amp;GemmPlan,</p>
+      <p>    cache_plan: &amp;CacheBudgetPlan,</p>
+      <p>    roofline: &amp;RooflineResult,</p>
+      <p>    num_simd_regs: usize,</p>
+      <p>    l1_cache_bytes: usize,</p>
+      <p>    bias: &amp;StrategyBias,    // 新增</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>完整 bias-aware 算法</strong>:
+      <p>```</p>
+      <p>// ── 步骤 1: max_epilogue_depth (已被 GemmSolver 调制，直接读取) ──</p>
+      <p>max_epilogue = gemm_plan.max_epilogue_depth  // 已含 bias 效果</p>
+      <p>// ── 步骤 2: EpilogueInjection 深度决策 (原算法不变) ──</p>
+      <p>for depth in (1..=max_epilogue).rev():</p>
+      <p>    required = sum(TraceOp::register_cost(&amp;epilogue_ops[..depth]))</p>
+      <p>    if required ≤ gemm_plan.scratch_regs:</p>
+      <p>        selected_depth = depth</p>
+      <p>        break</p>
+      <p>// ── 步骤 3: TileLevelFusion vs ComputeRoot (⚠️ 受 bias.fusion_cost_scale 调制) ──</p>
+      <p>// 原算法: threshold = cache_plan.l1_tile_budget × 0.75</p>
+      <p>// bias-aware: threshold 乘以 fusion_cost_scale</p>
+      <p>effective_tile_threshold = (cache_plan.l1_tile_budget as f64 × 0.75 × bias.fusion_cost_scale) as usize</p>
+      <p>predecessor_output_bytes = hidden_bytes × tile_rows</p>
+      <p>if predecessor_output_bytes &gt; effective_tile_threshold:</p>
+      <p>    TileLevelFusion</p>
+      <p>    // fusion_cost_scale &lt; 1.0 → threshold 降低 → 更多情况触发 TileLevelFusion</p>
+      <p>    // 效果: 偏好融合时，更小的输出也会嵌入 MC 循环而非 ComputeRoot</p>
+      <p>else:</p>
+      <p>    ComputeRoot</p>
+      <p>// ── 步骤 4: FFNBlock 融合路径选择 (原算法不变) ──</p>
+      <p>// scratch 寄存器够 → GateSiLUInject，不够 → SeparateGemm</p>
+      <p>// 注意: scratch_regs 已被 epilogue_depth_preference 间接影响</p>
+      <p>if gemm_plan.scratch_regs &gt;= 1:</p>
+      <p>    ffn_strategy = GateSiLUInject</p>
+      <p>else:</p>
+      <p>    ffn_strategy = SeparateGemm</p>
+      <p>// ── 步骤 5: 融合收益评估 (⚠️ 受 bias.fusion_cost_scale 调制) ──</p>
+      <p>// 对每个潜在融合点, 计算调制后的净收益</p>
+      <p>for (producer, consumer) in fusion_candidates:</p>
+      <p>    raw_savings = fusion_savings(mode, ops)  // 原公式: 中间 tensor 写回字节数</p>
+      <p>    adjusted_savings = raw_savings / bias.fusion_cost_scale</p>
+      <p>    // fusion_cost_scale &lt; 1.0 → savings 被 1/0.5 = 2× 放大</p>
+      <p>    raw_cost = fusion_overhead(mode, ops)    // 寄存器占用 + L1 压力</p>
+      <p>    adjusted_cost = raw_cost                 // cost 侧不调制 (只调制 savings 侧)</p>
+      <p>    if adjusted_savings &gt; adjusted_cost:</p>
+      <p>        apply fusion</p>
+      <p>    else:</p>
+      <p>        keep standalone</p>
+      <p>// ── 步骤 6: CrossLayerResidual 和 QkvSharedInput (原算法不变) ──</p>
+      <p>cross_layer_residual_enabled = gemm_plan.scratch_regs &gt;= 4</p>
+      <p>qkv_shared_input_enabled = true  // 始终启用（零额外寄存器开销）</p>
+      <p>norm_into_gemm_enabled = true    // 始终启用</p>
+      <p>```</p>
+      <strong>输出</strong>: <code>FusionPlan</code> 结构体不变，但以下字段的数值被 bias 影响:
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>受影响的 bias</td>
+        </tr>
+        <tr>
+          <td>效果</td>
+        </tr>
+        <tr>
+          <td>max_epilogue_depth</td>
+        </tr>
+        <tr>
+          <td>epilogue_depth_preference</td>
+          <td> (通过 GemmPlan)</td>
+        </tr>
+        <tr>
+          <td>pref↑ → 更深 epilogue</td>
+        </tr>
+        <tr>
+          <td>tile_fusion_threshold</td>
+        </tr>
+        <tr>
+          <td>fusion_cost_scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → 阈值降低 → 更多 TileFusion</td>
+        </tr>
+        <tr>
+          <td>ffn_strategy</td>
+        </tr>
+        <tr>
+          <td>epilogue_depth_preference</td>
+          <td> (通过 scratch_regs)</td>
+        </tr>
+        <tr>
+          <td>pref↑ → scratch 可能更少 → 可能 SeparateGemm</td>
+        </tr>
+        <tr>
+          <td>fusions[].strategy</td>
+        </tr>
+        <tr>
+          <td>fusion_cost_scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → 净收益放大 → 更多融合被接受</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.6" data-section="5.6">
+      <h4>5.6 ParallelismSolver (Level 2) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>bias: &amp;StrategyBias</code>。
+      <p>```rust</p>
+      <p>struct ParallelismSolverInput {</p>
+      <p>    profile: &amp;DeviceProfile,</p>
+      <p>    gemm_plan: &amp;GemmPlan,</p>
+      <p>    cache_plan: &amp;CacheBudgetPlan,</p>
+      <p>    bias: &amp;StrategyBias,    // 新增</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>完整 bias-aware GPU 算法</strong>:
+      <p>```</p>
+      <p>sm_total = profile.compute_units</p>
+      <p>wave_count_candidates = [1, 2, 4]</p>
+      <p>best_wave = 1</p>
+      <p>best_cost = f64::MAX</p>
+      <p>for wc in wave_count_candidates:</p>
+      <p>    if wc &gt; sm_total / 16:  // min 16 SM per wave</p>
+      <p>        break</p>
+      <p>    sm_per = sm_total / wc</p>
+      <p>    min_tokens = sm_per × warp_size × occupancy_target</p>
+      <p>    // 同步成本: wave 越多，barrier 越贵</p>
+      <p>    // 基础模型: 每个 wave 边界一次 barrier, 延迟 = wc × 2μs</p>
+      <p>    sync_cost = (wc as f64) × 2.0  // 微秒</p>
+      <p>    // ⚠️ bias 注入点: parallelism_cost_scale 调制同步成本</p>
+      <p>    adjusted_sync_cost = sync_cost × bias.parallelism_cost_scale</p>
+      <p>    // parallelism_cost_scale &lt; 1.0 → 同步看起来更便宜 → 更倾向多 wave</p>
+      <p>    // 并行收益: wave 越多，SM 利用率越高（假设 batch 足够大）</p>
+      <p>    parallel_benefit = (wc as f64).ln() × sm_total as f64 × 0.1  // 对数收益递减</p>
+      <p>    wave_score = parallel_benefit - adjusted_sync_cost</p>
+      <p>    if wave_score &gt; -best_cost:  // 注意: 最小化负 score = 最大化 score</p>
+      <p>        best_wave = wc</p>
+      <p>        best_cost = -wave_score</p>
+      <p>// Latency mode: parallelism_cost_scale = 1.5</p>
+      <p>//   → sync_cost × 1.5 → 同步更贵 → 倾向 wave=1</p>
+      <p>// Throughput + MoE: parallelism_cost_scale = 0.25</p>
+      <p>//   → sync_cost × 0.25 → 同步几乎免费 → 倾向 wave=4</p>
+      <p>```</p>
+      <strong>CPU NUMA</strong>: 原算法不变。CPU 的 wave_count 直接等于 NUMA 节点数，不受 bias 影响（硬件物理拓扑决定）。
+      <strong>输出</strong>: <code>ParallelPlan</code> 结构体不变。
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>受影响的 bias</td>
+        </tr>
+        <tr>
+          <td>效果</td>
+        </tr>
+        <tr>
+          <td>wave_count</td>
+        </tr>
+        <tr>
+          <td>parallelism_cost_scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → 更多 wave</td>
+        </tr>
+        <tr>
+          <td>min_batch_tokens_per_wave</td>
+        </tr>
+        <tr>
+          <td>间接 (通过 wave_count)</td>
+        </tr>
+        <tr>
+          <td>wave↑ → 每 wave 需要更少 tokens</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.7" data-section="5.7">
+      <h4>5.7 BatchSolver (Level 3) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>bias: &amp;StrategyBias</code>。
+      <p>```rust</p>
+      <p>struct BatchSolverInput {</p>
+      <p>    parallel_plan: &amp;ParallelPlan,</p>
+      <p>    cache_plan: &amp;CacheBudgetPlan,</p>
+      <p>    model: &amp;ModelConfig,</p>
+      <p>    bias: &amp;StrategyBias,    // 新增</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>完整 bias-aware 算法</strong>:
+      <p>```</p>
+      <p>// ── 步骤 1: batch 大小上限 (⚠️ 受 bias.batch_flexibility 硬约束) ──</p>
+      <p>// batch_flexibility = 0.0 是唯一的硬约束切入点（Latency mode）</p>
+      <p>if bias.batch_flexibility == 0.0:</p>
+      <p>    max_batch_tokens = 1                // 严格 batch=1</p>
+      <p>    decode_slots = 1</p>
+      <p>    max_chunks_per_batch = 1</p>
+      <p>    → 直接返回 BatchPlan，跳过后续所有逻辑</p>
+      <p>else:</p>
+      <p>    // base_max 来自 KV cache 内存预算</p>
+      <p>    base_max = cache_plan.hbm_max_pages.unwrap_or(cache_plan.l3_kv_cold_budget / kv_per_page)</p>
+      <p>    max_batch_tokens = (base_max as f64 × bias.batch_flexibility).round() as usize</p>
+      <p>    max_batch_tokens = max_batch_tokens.max(1)</p>
+      <p>// ── 步骤 2: decode/prefill 混合比 (⚠️ 受 bias.decode_ratio_scale 调制) ──</p>
+      <p>base_ratio_cap = 0.6  // 原算法默认值</p>
+      <p>effective_ratio_cap = (base_ratio_cap × bias.decode_ratio_scale).min(1.0)</p>
+      <p>// decode_ratio_scale &gt; 1.0 → decode 可占更大比例 → prefill 进展变慢</p>
+      <p>// ── 步骤 3: Chunk 大小和黄金尺寸 (原算法不变) ──</p>
+      <p>// adaptive_chunk_size() 和同号合并策略不受 bias 影响</p>
+      <p>// 这些决策由 ProbeResult 的黄金尺寸驱动</p>
+      <p>// ── 步骤 4: decode_slots (受 max_batch_tokens 间接影响) ──</p>
+      <p>decode_budget = min(max_batch_tokens, floor(max_batch_tokens × effective_ratio_cap))</p>
+      <p>decode_slots = decode_budget  // 每个 decode 序列 = 1 token</p>
+      <p>```</p>
+      <strong>输出</strong>: <code>BatchPlan</code> 结构体不变。
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>受影响的 bias</td>
+        </tr>
+        <tr>
+          <td>效果</td>
+        </tr>
+        <tr>
+          <td>decode_ratio_cap</td>
+        </tr>
+        <tr>
+          <td>decode_ratio_scale</td>
+        </tr>
+        <tr>
+          <td>scale↑ → decode 占比上限更高</td>
+        </tr>
+        <tr>
+          <td>decode_slots</td>
+        </tr>
+        <tr>
+          <td>batch_flexibility</td>
+          <td> + </td>
+          <td>decode_ratio_scale</td>
+        </tr>
+        <tr>
+          <td>flex=0 → 1, flex=1 → 自由</td>
+        </tr>
+        <tr>
+          <td>max_chunk_size</td>
+        </tr>
+        <tr>
+          <td>不受影响</td>
+        </tr>
+        <tr>
+          <td>由 ProbeResult 驱动</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.8" data-section="5.8">
+      <h4>5.8 FeatureRouter (Level 4) — bias-aware</h4>
+      <strong>变更</strong>: 输入增加 <code>bias: &amp;StrategyBias</code>。
+      <p>```rust</p>
+      <p>fn route(</p>
+      <p>    profile: &amp;DeviceProfile,</p>
+      <p>    gemm_plan: &amp;GemmPlan,</p>
+      <p>    fusion_plan: &amp;FusionPlan,</p>
+      <p>    attn_plan: &amp;AttentionPlan,</p>
+      <p>    parallel_plan: &amp;ParallelPlan,</p>
+      <p>    batch_plan: &amp;BatchPlan,</p>
+      <p>    bias: &amp;StrategyBias,    // 新增</p>
+      <p>) -&gt; FeaturePlan</p>
+      <p>```</p>
+      <strong>bias 影响的特性决策</strong>:
+      <p>```</p>
+      <p>// ── Speculative Decoding 启用决策 ──</p>
+      <p>// 原算法: benefit = estimate_spec_benefit(model, attn_plan)</p>
+      <p>//         cost = estimate_spec_cost(batch_plan)  // draft model 抢占 batch 容量</p>
+      <p>//         enabled = benefit &gt; cost</p>
+      <p>// bias-aware 版本:</p>
+      <p>raw_benefit = estimate_spec_benefit(model, attn_plan)</p>
+      <p>adjusted_benefit = raw_benefit × bias.speculative_decoding_value</p>
+      <p>// speculative_decoding_value = 1.5 (Latency) → 收益放大 1.5× → 更倾向启用</p>
+      <p>// speculative_decoding_value = 0.3 (Throughput) → 收益缩小 → 不太启用</p>
+      <p>raw_cost = estimate_spec_cost(batch_plan)</p>
+      <p>// cost 不调制</p>
+      <p>spec_decoding_enabled = adjusted_benefit &gt; raw_cost</p>
+      <p>// ── 量化策略决策 ──</p>
+      <p>// 原算法: 在候选量化方案中选 cost 最优</p>
+      <p>// bias-aware: 量化的收益乘以 quantization_aggressiveness</p>
+      <p>for quant_level in [INT8, INT4, FP4]:</p>
+      <p>    raw_quant_benefit = bandwidth_savings(quant_level)</p>
+      <p>    adjusted_quant_benefit = raw_quant_benefit × bias.quantization_aggressiveness</p>
+      <p>    quant_cost = precision_loss(quant_level)  // 不调制</p>
+      <p>    quant_candidates.push((quant_level, adjusted_quant_benefit - quant_cost))</p>
+      <p>selected_quant = quant_candidates.max_by(|a, b| a.1.partial_cmp(&amp;b.1))</p>
+      <p>// ── 其他特性 (不受 bias 影响) ──</p>
+      <p>// Avx512Fma, NeonBf16, Wgmma, Tma2D 等硬件特性</p>
+      <p>// 纯硬件决策，不受 StrategyBias 影响</p>
+      <p>```</p>
+    </section>
+    <section id="s5.9" data-section="5.9">
+      <h4>5.9 MoE 模块消费 — bias-aware</h4>
+      <strong>ExpertThermalManager</strong> 消费 <code>expert_eviction_aggressiveness</code>:
+      <p>```rust</p>
+      <p>impl ExpertThermalManager {</p>
+      <p>    fn effective_eviction_threshold(&amp;self) -&gt; u64 {</p>
+      <p>        if self.adaptive_eviction {</p>
+      <p>            let adaptive = self.working_set.adaptive_threshold(self.memory_pressure);</p>
+      <p>            // ⚠️ bias 调制: aggressiveness 高 → 阈值低 → 更容易驱逐</p>
+      <p>            let bias_factor = 1.0 / (1.0 + self.eviction_aggressiveness);</p>
+      <p>            // aggressiveness = 0.0 → factor = 1.0 → 阈值不变（全部常驻）</p>
+      <p>            // aggressiveness = 1.0 → factor = 0.5 → 阈值减半（更激进驱逐）</p>
+      <p>            // aggressiveness = 2.0 → factor = 0.33 → 阈值缩到 1/3</p>
+      <p>            (adaptive as f64 × bias_factor) as u64</p>
+      <p>        } else {</p>
+      <p>            self.eviction_streak_threshold</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>ExpertWeightPrefetcher</strong> 消费 <code>expert_prefetch_priority</code>:
+      <p>```rust</p>
+      <p>impl ExpertWeightPrefetcher {</p>
+      <p>    fn proactive_warmup(&amp;mut self, candidates: &amp;[(usize, f64)]) {</p>
+      <p>        // 原算法: 按 revival_probability 排序，预取 top-N</p>
+      <p>        // bias-aware: 预取数量乘以 expert_prefetch_priority</p>
+      <p>        let base_prefetch_count = 2;  // 默认预取 2 个候选</p>
+      <p>        let effective_count = ((base_prefetch_count as f64) × self.prefetch_priority)</p>
+      <p>            .round() as usize;</p>
+      <p>        // prefetch_priority = 0.5 → 预取 1 个</p>
+      <p>        // prefetch_priority = 2.85 → 预取 5~6 个</p>
+      <p>        for (expert_idx, _prob) in candidates.iter().take(effective_count) {</p>
+      <p>            self.initiate_async_prefetch(*expert_idx);</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>如何传递 bias 到 MoE 模块</strong>:
+      <p>```rust</p>
+      <p>// 在 Executor 初始化时:</p>
+      <p>let moe_thermal = ExpertThermalManager::new(config)</p>
+      <p>    .with_adaptive_eviction(window_size)</p>
+      <p>    .with_eviction_aggressiveness(hw_opt_plan.strategy_bias.expert_eviction_aggressiveness);</p>
+      <p>let moe_prefetcher = ExpertWeightPrefetcher::new(config)</p>
+      <p>    .with_prefetch_priority(hw_opt_plan.strategy_bias.expert_prefetch_priority);</p>
+      <p>```</p>
+    </section>
+    <section id="s5.10" data-section="5.10">
+      <h4>5.10 HwOptPlan 扩展</h4>
+      <p>```rust</p>
+      <p>pub struct HwOptPlan {</p>
+      <p>    // 原有字段 (§10.14)</p>
+      <p>    pub roofline: RooflineResult,</p>
+      <p>    pub gemm: GemmPlan,</p>
+      <p>    pub cache: CacheBudgetPlan,</p>
+      <p>    pub fusion: FusionPlan,</p>
+      <p>    pub attention: AttentionPlan,</p>
+      <p>    pub parallel: ParallelPlan,</p>
+      <p>    pub batch: BatchPlan,</p>
+      <p>    pub features: FeaturePlan,</p>
+      <p>    // 新增: 溯源信息</p>
+      <p>    pub inference_mode: SchedulingMode,</p>
+      <p>    pub graph_archetype: GraphArchetype,</p>
+      <p>    pub strategy_bias: StrategyBias,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>REQ-ARB-003</strong>: <code>inference_mode</code>、<code>graph_archetype</code>、<code>strategy_bias</code> 嵌入 HwOptPlan 以便下游模块溯源决策依据。这三个字段均为只读。
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 决策链完整流程</h3>
+      <p>```</p>
+      <p>Client::builder()</p>
+      <p>    .model("DeepSeek/DeepSeek-V3")</p>
+      <p>    .scheduling_mode(SchedulingMode::Throughput)      // ① 用户指定模式</p>
+      <p>    .build()?</p>
+      <p>  → Loader 加载模型文件</p>
+      <p>  → ModelConfig 从元数据提取标量参数                   // ② 标量配置</p>
+      <p>  → ArchitectureResolver 解析 OnnxGraph               // ③ 模型图构建</p>
+      <p>  → GraphProfiler::profile(graph, config)             // ④ 拓扑特征提取</p>
+      <p>      → GraphProfile { num_experts: 256, moe_top_k: 6, ... }</p>
+      <p>  → GraphArchetype::derive(profile)                    // ⑤ 原型推导</p>
+      <p>      → { compute: 0.50, memory: 0.90, parallel: 0.99, fusion: 0.60, pipeline: 0.35 }</p>
+      <p>  → StrategyArbiter::arbitrate(Throughput, archetype, device)  // ⑥ 仲裁</p>
+      <p>      → StrategyBias {</p>
+      <p>            fusion_cost_scale: 0.64,       // Throughput 中性 × MoE 融合较低</p>
+      <p>            pipeline_cost_scale: 1.17,     // Throughput 轻惩罚</p>
+      <p>            parallelism_cost_scale: 0.25,  // Throughput 强偏好 × MoE 极高并行</p>
+      <p>            expert_eviction: 1.2,          // 适度驱逐</p>
+      <p>            expert_prefetch: 2.7,          // 极激进预取</p>
+      <p>            batch_flexibility: 1.0,        // 自由</p>
+      <p>            ...</p>
+      <p>        }</p>
+      <p>  → HwOptEngine::solve(profile, sensors, probe, config, bias)  // ⑦ 参数求解</p>
+      <p>      → GemmSolver: 被 parallelism bias 影响 → 选择较小 tile 让出 SM 给更多 wave</p>
+      <p>      → ParallelismSolver: parallelism_cost_scale=0.25 → 选择 4 wave</p>
+      <p>      → FusionSolver: fusion_cost_scale=0.64 → 中等融合深度</p>
+      <p>      → BatchSolver: batch_flexibility=1.0 → 大 batch 自由决策</p>
+      <p>  → HwOptPlan { inference_mode: Throughput, ... }      // ⑧ 最终计划</p>
+      <p>  → JIT Codegen 生成机器码                              // ⑨ 编译</p>
+      <p>```</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 约束与铁律</h3>
+    </section>
+    <section id="req-arb-001" data-req="REQ-ARB-001" data-req-status="implemented" data-req-domain="arb" data-req-category="business" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-section="004" data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-req-api="API-STRATEGY-ARBITER">REQ-ARB-001: SchedulingMode 不可变
+      <p>SchedulingMode 在 Client::builder().build() 时确定并嵌入 HwOptPlan，推理全程不可切换。切换模式需 swap_model() 重新加载，因为不同模式下 JIT 编译产物因 Roofline 翻转效应而完全不同。</p>
+      <code>SchedulingMode</code> 在 <code>Client::builder().build()</code> 时确定，推理期间不可切换。切换模式需 <code>swap_model()</code> 重新加载，因为 JIT 编译产物因模式不同而不同。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">SchedulingMode 不可变: 从 batch_size 推导</li>
+        <li id="2" data-criterion="2">Arbiter 不直接决策: 返回 bias 向量</li>
+        <li id="3" data-criterion="3">所有系数正数: 数值稳定性保证</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile" ENT-GRAPH-PROFILE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias" ENT-STRATEGY-BIAS<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine" ENT-HW-OPT-ENGINE<="" a="">
+      
+      
+      </a></a></a></div>
+    </section>
+    <section id="test-arb-001" data-test="TEST-ARB-001" data-req-ref="REQ-ARB-001" data-test-categories="unit" <h3="">TEST-ARB-001: 策略仲裁器测试<p>验证REQ-ARB-001相关功能正确性</p>
+      <div id="schedulingmode-不可变:-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
+      <div id="arbiter-不直接决策:-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
+      <div id="所有系数正数:-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-arb-002" data-req="REQ-ARB-002" data-req-status="implemented" data-req-domain="arb" data-req-category="business" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-section="005" data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-req-api="API-STRATEGY-ARBITER">REQ-ARB-002: Arbiter 不直接决策
+      <p>Arbiter 只输出 <code>StrategyBias</code>（成本调制系数），不直接选择具体策略（如"使用 FA3"或"k_depth=2"）。具体决策始终由 HwOptEngine 的各 Solver 通过 Cost-Model 做出。Arbiter 通过调制成本函数间接影响决策方向。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">SchedulingMode 不可变: 从 batch_size 推导</li>
+        <li id="2" data-criterion="2">Arbiter 不直接决策: 返回 bias 向量</li>
+        <li id="3" data-criterion="3">所有系数正数: 数值稳定性保证</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile" ENT-GRAPH-PROFILE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias" ENT-STRATEGY-BIAS<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine" ENT-HW-OPT-ENGINE<="" a="">
+      
+      
+      </a></a></a></div>
+    </section>
+    <section id="test-arb-002" data-test="TEST-ARB-002" data-req-ref="REQ-ARB-002" data-test-categories="unit" <h3="">TEST-ARB-002: 策略仲裁器测试<p>验证REQ-ARB-002相关功能正确性</p>
+      <div id="schedulingmode-不可变:-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
+      <div id="arbiter-不直接决策:-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
+      <div id="所有系数正数:-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-arb-003" data-req="REQ-ARB-003" data-req-status="implemented" data-req-domain="arb" data-req-category="business" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-section="006" data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-req-api="API-STRATEGY-ARBITER">REQ-ARB-003: 所有系数正数
+      <p>StrategyBias 的所有字段必须大于 0.0，防止 CostModel 除零或项消失。batch_flexibility = 0.0 是唯一例外，表示"硬约束 batch=1"语义。validate() 使用 clamp 而非 panic 确保数值稳定性。</p>
+      <code>StrategyBias</code> 的所有字段必须 &gt; 0.0。0.0 会导致 CostModel 除零或项消失。<code>batch_flexibility = 0.0</code> 是唯一例外，表示"硬约束 batch=1"。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">SchedulingMode 不可变: 从 batch_size 推导</li>
+        <li id="2" data-criterion="2">Arbiter 不直接决策: 返回 bias 向量</li>
+        <li id="3" data-criterion="3">所有系数正数: 数值稳定性保证</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile" ENT-GRAPH-PROFILE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias" ENT-STRATEGY-BIAS<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine" ENT-HW-OPT-ENGINE<="" a="">
+      
+      
+      </a></a></a></div>
+    </section>
+    <section id="test-arb-003" data-test="TEST-ARB-003" data-req-ref="REQ-ARB-003" data-test-categories="unit" <h3="">TEST-ARB-003: 策略仲裁器测试<p>验证REQ-ARB-003相关功能正确性</p>
+      <div id="schedulingmode-不可变:-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
+      <div id="arbiter-不直接决策:-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
+      <div id="所有系数正数:-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-arb-004" data-req="REQ-ARB-004" data-req-status="implemented" data-req-domain="arb" data-req-category="business" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-section="007" data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-req-api="API-STRATEGY-ARBITER">REQ-ARB-004: GraphProfile 一次性提取
+      <p>GraphProfiler::profile() 在模型加载时从 OnnxGraph 和 ModelConfig 一次性提取完整拓扑特征向量（计算密度、融合机会、并行度、注意力特征等），结果嵌入 HwOptPlan，推理期间不重新提取。</p>
+      <code>GraphProfiler::profile()</code> 在模型加载时调用一次，结果嵌入 <code>HwOptPlan</code>。推理期间不重新提取。图结构在推理期间不变。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">SchedulingMode 不可变: 从 batch_size 推导</li>
+        <li id="2" data-criterion="2">Arbiter 不直接决策: 返回 bias 向量</li>
+        <li id="3" data-criterion="3">所有系数正数: 数值稳定性保证</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile" ENT-GRAPH-PROFILE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias" ENT-STRATEGY-BIAS<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine" ENT-HW-OPT-ENGINE<="" a="">
+      
+      
+      </a></a></a></div>
+    </section>
+    <section id="test-arb-004" data-test="TEST-ARB-004" data-req-ref="REQ-ARB-004" data-test-categories="unit" <h3="">TEST-ARB-004: 策略仲裁器测试<p>验证REQ-ARB-004相关功能正确性</p>
+      <div id="schedulingmode-不可变:-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
+      <div id="arbiter-不直接决策:-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
+      <div id="所有系数正数:-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-arb-005" data-req="REQ-ARB-005" data-req-status="implemented" data-req-domain="arb" data-req-category="business" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-section="008" data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-req-api="API-STRATEGY-ARBITER">REQ-ARB-005: 禁止绕过 Arbiter
+      <p>下游模块禁止根据 <code>SchedulingMode</code> 做直接 if/else 分支决策。所有模式差异必须通过 <code>StrategyBias</code> 传导。</p>
+      <p>```rust</p>
+      <p>// ❌ 禁止</p>
+      <p>if hw_opt_plan.inference_mode == Latency {</p>
+      <p>    max_batch = 1;</p>
+      <p>}</p>
+      <p>// ✅ 正确</p>
+      <p>max_batch = (base_max as f64 × hw_opt_plan.strategy_bias.batch_flexibility) as usize;</p>
+      <p>```</p>
+      <strong>理由</strong>: 直接 if/else 会绕过 CostModel，导致策略决策碎片化。StrategyBias 是策略影响的唯一通道。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">SchedulingMode 不可变: 从 batch_size 推导</li>
+        <li id="2" data-criterion="2">Arbiter 不直接决策: 返回 bias 向量</li>
+        <li id="3" data-criterion="3">所有系数正数: 数值稳定性保证</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile" ENT-GRAPH-PROFILE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias" ENT-STRATEGY-BIAS<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine" ENT-HW-OPT-ENGINE<="" a="">
+      
+      
+      </a></a></a></div>
+    </section>
+    <section id="test-arb-005" data-test="TEST-ARB-005" data-req-ref="REQ-ARB-005" data-test-categories="unit" <h3="">TEST-ARB-005: 策略仲裁器测试<p>验证REQ-ARB-005相关功能正确性</p>
+      <div id="schedulingmode-不可变:-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
+      <div id="arbiter-不直接决策:-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
+      <div id="所有系数正数:-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-arb-006" data-req="REQ-ARB-006" data-req-status="implemented" data-req-domain="arb" data-req-category="business" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-section="009" data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-req-api="API-STRATEGY-ARBITER">REQ-ARB-006: 与 JIT 缓存协议一致
+      <p>StrategyBias 影响 JIT 编译产物，因此 <code>ModelJitCache</code> 的缓存 key 必须包含 <code>SchedulingMode</code>：</p>
+      <p>```</p>
+      <p>cache_key = device_fingerprint + model_id + inference_mode</p>
+      <p>```</p>
+      <p>同一模型在 Latency 和 Throughput 模式下的 JIT 缓存互不复用。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">SchedulingMode 不可变: 从 batch_size 推导</li>
+        <li id="2" data-criterion="2">Arbiter 不直接决策: 返回 bias 向量</li>
+        <li id="3" data-criterion="3">所有系数正数: 数值稳定性保证</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile" ENT-GRAPH-PROFILE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias" ENT-STRATEGY-BIAS<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine" ENT-HW-OPT-ENGINE<="" a="">
+      
+      
+      </a></a></a></div>
+    </section>
+    <section id="test-arb-006" data-test="TEST-ARB-006" data-req-ref="REQ-ARB-006" data-test-categories="unit" <h3="">TEST-ARB-006: 策略仲裁器测试<p>验证REQ-ARB-006相关功能正确性</p>
+      <div id="schedulingmode-不可变:-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
+      <div id="arbiter-不直接决策:-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
+      <div id="所有系数正数:-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s8" data-section="8">
+      <h3>8. 实现位置</h3>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>文件</td>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>SchedulingMode</td>
+        </tr>
+        <tr>
+          <td>src/client.rs</td>
+        </tr>
+        <tr>
+          <td>枚举定义 + Builder 集成</td>
+        </tr>
+        <tr>
+          <td>GraphProfile</td>
+        </tr>
+        <tr>
+          <td>src/graph/profile.rs</td>
+          <td> (新增)</td>
+        </tr>
+        <tr>
+          <td>拓扑特征提取</td>
+        </tr>
+        <tr>
+          <td>GraphArchetype</td>
+        </tr>
+        <tr>
+          <td>src/graph/profile.rs</td>
+        </tr>
+        <tr>
+          <td>原型推导</td>
+        </tr>
+        <tr>
+          <td>StrategyArbiter</td>
+        </tr>
+        <tr>
+          <td>src/engine/arbiter.rs</td>
+          <td> (新增)</td>
+        </tr>
+        <tr>
+          <td>仲裁算法</td>
+        </tr>
+        <tr>
+          <td>StrategyBias</td>
+        </tr>
+        <tr>
+          <td>src/engine/arbiter.rs</td>
+        </tr>
+        <tr>
+          <td>偏置结构</td>
+        </tr>
+        <tr>
+          <td>HwOptEngine::solve()</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels </td>
+          <td>src/compiler/planner.rs</td>
+        </tr>
+        <tr>
+          <td>扩展签名 + bias 注入</td>
+        </tr>
+        <tr>
+          <td>CostModel</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels </td>
+          <td>src/compiler/fusion/cost_model.rs</td>
+        </tr>
+        <tr>
+          <td>bias 调制点</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 下游消费映射表</h3>
+      <table>
+        <tr>
+          <th>消费方</th>
+        </tr>
+        <tr>
+          <td>消费的 StrategyBias 字段</td>
+        </tr>
+        <tr>
+          <td>影响</td>
+        </tr>
+        <tr>
+          <td>RooflineAnalyzer</td>
+        </tr>
+        <tr>
+          <td>SchedulingMode</td>
+          <td> → effective_M</td>
+        </tr>
+        <tr>
+          <td>算术强度分类翻转</td>
+        </tr>
+        <tr>
+          <td>GemmSolver</td>
+        </tr>
+        <tr>
+          <td>pipeline_cost_scale</td>
+          <td>, </td>
+          <td>k_depth_preference</td>
+          <td>, </td>
+          <td>epilogue_depth_preference</td>
+        </tr>
+        <tr>
+          <td>GEMM 微内核参数</td>
+        </tr>
+        <tr>
+          <td>CacheBudgetSolver</td>
+        </tr>
+        <tr>
+          <td>kv_cache_budget_scale</td>
+          <td>, </td>
+          <td>weight_prefetch_budget_scale</td>
+        </tr>
+        <tr>
+          <td>缓存预算分配</td>
+        </tr>
+        <tr>
+          <td>FusionSolver</td>
+        </tr>
+        <tr>
+          <td>fusion_cost_scale</td>
+          <td>, </td>
+          <td>epilogue_depth_preference</td>
+        </tr>
+        <tr>
+          <td>融合深度和模式选择</td>
+        </tr>
+        <tr>
+          <td>ParallelismSolver</td>
+        </tr>
+        <tr>
+          <td>parallelism_cost_scale</td>
+        </tr>
+        <tr>
+          <td>wave 数量</td>
+        </tr>
+        <tr>
+          <td>BatchSolver</td>
+        </tr>
+        <tr>
+          <td>batch_flexibility</td>
+          <td>, </td>
+          <td>decode_ratio_scale</td>
+        </tr>
+        <tr>
+          <td>batch 大小和混合比</td>
+        </tr>
+        <tr>
+          <td>FeatureRouter</td>
+        </tr>
+        <tr>
+          <td>speculative_decoding_value</td>
+          <td>, </td>
+          <td>quantization_aggressiveness</td>
+        </tr>
+        <tr>
+          <td>特性启用决策</td>
+        </tr>
+        <tr>
+          <td>ExpertThermalManager</td>
+        </tr>
+        <tr>
+          <td>expert_eviction_aggressiveness</td>
+        </tr>
+        <tr>
+          <td>驱逐阈值</td>
+        </tr>
+        <tr>
+          <td>ExpertWeightPrefetcher</td>
+        </tr>
+        <tr>
+          <td>expert_prefetch_priority</td>
+        </tr>
+        <tr>
+          <td>预取优先级</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 数学基础与辅助函数</h3>
+      <p>本节定义 SPEC 中所有公式使用的辅助函数。实现必须严格使用这些定义，禁止替换为近似形式。</p>
+    </section>
+    <section id="s10.1" data-section="10.1">
+      <h4>10.1 sigmoid (标准逻辑函数)</h4>
+      <p>```rust</p>
+      <p>fn sigmoid(x: f64) -&gt; f64 {</p>
+      <p>    1.0 / (1.0 + (-x).exp())</p>
+      <p>}</p>
+      <p>```</p>
+      <p>值域: (0.0, 1.0)。当 x=0 → 0.5，x=5 → 0.993，x=-5 → 0.007。</p>
+      <strong>注意</strong>: §3.5 中部分 sigmoid 输入可能为负值（例如 <code>(2048 - hidden_dim) / 2048</code> 当 hidden_dim=4096 时输入为 -1.0 → 输出 0.27），这是预期行为。
+    </section>
+    <section id="s10.2" data-section="10.2">
+      <h4>10.2 lerp (线性插值)</h4>
+      <p>```rust</p>
+      <p>fn lerp(a: f64, b: f64, t: f64) -&gt; f64 {</p>
+      <p>    a + t * (b - a)</p>
+      <p>}</p>
+      <p>```</p>
+      <p>当 t=0.0 → a，t=1.0 → b，t=0.5 → (a+b)/2。t 不要求在 [0,1] 内，但本 SPEC 中所有 t 均来自 GraphArchetype 维度（已 clamp 到 [0,1]）。</p>
+    </section>
+    <section id="s10.3" data-section="10.3">
+      <h4>10.3 clamp</h4>
+      <p>```rust</p>
+      <p>fn clamp(x: f64, min: f64, max: f64) -&gt; f64 {</p>
+      <p>    x.max(min).min(max)</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>11. StrategyBias 字段值域与验证</h3>
+    </section>
+    <section id="s11.1" data-section="11.1">
+      <h4>11.1 字段合法范围</h4>
+      <p>每个 StrategyBias 字段有明确的合法范围。超出范围的值在 <code>validate()</code> 中被 clamp（不是 panic/error），因为 Arbiter 是数值计算，浮点累积偏差是正常现象。</p>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>最小值</td>
+        </tr>
+        <tr>
+          <td>最大值</td>
+        </tr>
+        <tr>
+          <td>含义</td>
+        </tr>
+        <tr>
+          <td>fusion_cost_scale</td>
+        </tr>
+        <tr>
+          <td>0.2</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>0.2 = 融合代价被低估 5×（极度偏好融合）</td>
+        </tr>
+        <tr>
+          <td>pipeline_cost_scale</td>
+        </tr>
+        <tr>
+          <td>0.2</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>同上</td>
+        </tr>
+        <tr>
+          <td>parallelism_cost_scale</td>
+        </tr>
+        <tr>
+          <td>0.1</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>0.1 = MoE 极端场景可达</td>
+        </tr>
+        <tr>
+          <td>epilogue_depth_preference</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>0.3 = 极度抑制 epilogue</td>
+        </tr>
+        <tr>
+          <td>k_depth_preference</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>0.3 = 极度抑制 pipeline</td>
+        </tr>
+        <tr>
+          <td>kv_cache_budget_scale</td>
+        </tr>
+        <tr>
+          <td>0.2</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>L2 预算倍率</td>
+        </tr>
+        <tr>
+          <td>weight_prefetch_budget_scale</td>
+        </tr>
+        <tr>
+          <td>0.2</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>L2 预算倍率</td>
+        </tr>
+        <tr>
+          <td>batch_flexibility</td>
+        </tr>
+        <tr>
+          <td>0.0</td>
+        </tr>
+        <tr>
+          <td>1.0</td>
+        </tr>
+        <tr>
+          <td>0.0 = batch=1 硬约束</td>
+        </tr>
+        <tr>
+          <td>decode_ratio_scale</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>2.0</td>
+        </tr>
+        <tr>
+          <td>decode/prefill 混合比倍率</td>
+        </tr>
+        <tr>
+          <td>expert_eviction_aggressiveness</td>
+        </tr>
+        <tr>
+          <td>0.0</td>
+        </tr>
+        <tr>
+          <td>2.0</td>
+        </tr>
+        <tr>
+          <td>0.0 = 全部常驻</td>
+        </tr>
+        <tr>
+          <td>expert_prefetch_priority</td>
+        </tr>
+        <tr>
+          <td>0.1</td>
+        </tr>
+        <tr>
+          <td>5.0</td>
+        </tr>
+        <tr>
+          <td>5.0 = 极激进预取</td>
+        </tr>
+        <tr>
+          <td>speculative_decoding_value</td>
+        </tr>
+        <tr>
+          <td>0.1</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>收益倍率</td>
+        </tr>
+        <tr>
+          <td>quantization_aggressiveness</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>3.0</td>
+        </tr>
+        <tr>
+          <td>量化倾向倍率</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.2" data-section="11.2">
+      <h4>11.2 validate() 实现</h4>
+      <p>```rust</p>
+      <p>impl StrategyBias {</p>
+      <p>    /// clamp 所有字段到合法范围。不 panic，不返回 error。</p>
+      <p>    pub fn validate(&amp;mut self) {</p>
+      <p>        self.fusion_cost_scale = self.fusion_cost_scale.clamp(0.2, 3.0);</p>
+      <p>        self.pipeline_cost_scale = self.pipeline_cost_scale.clamp(0.2, 3.0);</p>
+      <p>        self.parallelism_cost_scale = self.parallelism_cost_scale.clamp(0.1, 3.0);</p>
+      <p>        self.epilogue_depth_preference = self.epilogue_depth_preference.clamp(0.3, 3.0);</p>
+      <p>        self.k_depth_preference = self.k_depth_preference.clamp(0.3, 3.0);</p>
+      <p>        self.kv_cache_budget_scale = self.kv_cache_budget_scale.clamp(0.2, 3.0);</p>
+      <p>        self.weight_prefetch_budget_scale = self.weight_prefetch_budget_scale.clamp(0.2, 3.0);</p>
+      <p>        self.batch_flexibility = self.batch_flexibility.clamp(0.0, 1.0);</p>
+      <p>        self.decode_ratio_scale = self.decode_ratio_scale.clamp(0.3, 2.0);</p>
+      <p>        self.expert_eviction_aggressiveness = self.expert_eviction_aggressiveness.clamp(0.0, 2.0);</p>
+      <p>        self.expert_prefetch_priority = self.expert_prefetch_priority.clamp(0.1, 5.0);</p>
+      <p>        self.speculative_decoding_value = self.speculative_decoding_value.clamp(0.1, 3.0);</p>
+      <p>        self.quantization_aggressiveness = self.quantization_aggressiveness.clamp(0.3, 3.0);</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>REQ-ARB-010</strong>: <code>validate()</code> 使用 clamp 而非 panic。Arbiter 是数值管线，边界值是合法的极端策略，不是错误。
+    </section>
+    <section id="s12" data-section="12">
+      <h3>12. Throughput 模式 effective_M 循环依赖解决</h3>
+    </section>
+    <section id="s12.1" data-section="12.1">
+      <h4>12.1 问题</h4>
+      <p>RooflineAnalyzer（Level 0）需要 <code>effective_M</code> 计算算术强度，但精确的 batch size 由 BatchSolver（Level 3）决定。这形成循环依赖。</p>
+    </section>
+    <section id="s12.2" data-section="12.2">
+      <h4>12.2 解决方案: 两阶段求解</h4>
+      <p>```</p>
+      <p>阶段 1: 使用估算 M 完成初始求解</p>
+      <p>  estimated_M = estimate_batch_size(mode, profile, model)</p>
+      <p>  roofline = RooflineAnalyzer::analyze(profile, model, estimated_M)</p>
+      <p>  → 完成 Level 0~4 全部求解 → 初始 HwOptPlan</p>
+      <p>阶段 2: 用初始 BatchPlan 的实际 batch size 校正（仅当偏差显著时）</p>
+      <p>  actual_M = initial_plan.batch.decode_slots</p>
+      <p>  if abs(actual_M - estimated_M) / estimated_M &gt; 0.5:  // 偏差超过 50%</p>
+      <p>      重新用 actual_M 跑 RooflineAnalyzer → 重新求解（最多 1 轮校正）</p>
+      <p>```</p>
+    </section>
+    <section id="s12.3" data-section="12.3">
+      <h4>12.3 estimate_batch_size() 估算函数</h4>
+      <p>```rust</p>
+      <p>fn estimate_batch_size(mode: SchedulingMode, profile: &amp;DeviceProfile, model: &amp;ModelConfig) -&gt; usize {</p>
+      <p>    match mode {</p>
+      <p>        SchedulingMode::Latency =&gt; 1,  // 永远是 1，无需估算</p>
+      <p>        SchedulingMode::Throughput =&gt; {</p>
+      <p>            // 目标: GPU 内存的 60% 给 KV cache + 权重，剩余给 batch</p>
+      <p>            // batch_M ≈ remaining_memory / (kv_per_token × max_seq_len)</p>
+      <p>            // 保守估算: min(64, gpu_memory_gb × 4)</p>
+      <p>            // CPU: min(32, num_cores × 2)</p>
+      <p>            if profile.is_gpu() {</p>
+      <p>                let gpu_mem_gb = profile.total_memory_bytes() / (1 &lt;&lt; 30);</p>
+      <p>                (gpu_mem_gb * 4).min(256).max(8) as usize</p>
+      <p>            } else {</p>
+      <p>                let cores = profile.num_cores();</p>
+      <p>                (cores * 2).min(64).max(4)</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>REQ-ARB-011</strong>: Throughput 模式使用两阶段求解打破循环依赖。Latency 模式 effective_M=1，无循环。校正最多执行 1 轮，禁止迭代收敛。
+    </section>
+    <section id="s13" data-section="13">
+      <h3>13. CacheBudget 归一化公式</h3>
+      <p>完整算法见 §5.3 CacheBudgetSolver bias-aware 算法。此处保留 REQ 索引。</p>
+      <strong>REQ-ARB-012</strong>: activation 预算不受 bias 直接调制。activation 始终 = L2 × (1 - kv_ratio - weight_ratio)，作为 kv 和 weight 调制的被动结果。完整公式和数值推演见 §5.3。
+    </section>
+    <section id="s14" data-section="14">
+      <h3>14. CostModel 注入方向规则</h3>
+      <strong>核心原则</strong>: StrategyBias 的 <code>*_cost_scale</code> 系列字段遵循统一语义——<strong>乘到代价侧，除到收益侧</strong>。
+      <p>```</p>
+      <p>代价侧 (越低越好):</p>
+      <p>  adjusted_cost = base_cost × bias.*_cost_scale</p>
+      <p>  // cost_scale &lt; 1.0 → 代价降低 → Solver 更倾向选择该策略</p>
+      <p>收益侧 (越高越好):</p>
+      <p>  adjusted_benefit = base_benefit × (1.0 / bias.*_cost_scale)</p>
+      <p>  // cost_scale &lt; 1.0 → 1/scale &gt; 1.0 → 收益放大 → Solver 更倾向选择该策略</p>
+      <p>```</p>
+      <strong>方向一致性</strong>: 对于同一个 bias 字段，代价侧和收益侧的调制方向必须一致。<code>fusion_cost_scale = 0.5</code> 意味着"融合的代价减半"和"融合的收益翻倍"，二者效果相同。
+    </section>
+    <section id="s14.1" data-section="14.1">
+      <h4>14.1 各 Solver 注入方向表</h4>
+      <strong>REQ-ARB-013</strong>: 此表是 CostModel 注入的权威映射。实现时必须按此表的注入方式和方向执行，禁止自行设计注入点。
+      <table>
+        <tr>
+          <th>Solver</th>
+        </tr>
+        <tr>
+          <td>注入点</td>
+        </tr>
+        <tr>
+          <td>bias 字段</td>
+        </tr>
+        <tr>
+          <td>注入方式</td>
+        </tr>
+        <tr>
+          <td>效果</td>
+        </tr>
+        <tr>
+          <td>GemmSolver</td>
+        </tr>
+        <tr>
+          <td>T_overhead (pipeline setup)</td>
+        </tr>
+        <tr>
+          <td>pipeline_cost_scale</td>
+        </tr>
+        <tr>
+          <td>T_overhead × scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → pipeline 便宜 → 偏好深 k_depth</td>
+        </tr>
+        <tr>
+          <td>GemmSolver</td>
+        </tr>
+        <tr>
+          <td>k_depth 候选范围</td>
+        </tr>
+        <tr>
+          <td>k_depth_preference</td>
+        </tr>
+        <tr>
+          <td>pref&gt;1.0 → 扩展候选</td>
+        </tr>
+        <tr>
+          <td>pref↑ → 更多 k_depth 选项</td>
+        </tr>
+        <tr>
+          <td>GemmSolver</td>
+        </tr>
+        <tr>
+          <td>max_epilogue_depth</td>
+        </tr>
+        <tr>
+          <td>epilogue_depth_preference</td>
+        </tr>
+        <tr>
+          <td>base × pref</td>
+        </tr>
+        <tr>
+          <td>pref↑ → 允许更深 epilogue</td>
+        </tr>
+        <tr>
+          <td>FusionSolver</td>
+        </tr>
+        <tr>
+          <td>fusion_savings</td>
+        </tr>
+        <tr>
+          <td>fusion_cost_scale</td>
+        </tr>
+        <tr>
+          <td>savings × (1/scale)</td>
+        </tr>
+        <tr>
+          <td>scale↓ → 收益放大 → 偏好融合</td>
+        </tr>
+        <tr>
+          <td>FusionSolver</td>
+        </tr>
+        <tr>
+          <td>TileFusion 阈值</td>
+        </tr>
+        <tr>
+          <td>fusion_cost_scale</td>
+        </tr>
+        <tr>
+          <td>threshold × scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → 阈值降低 → 更多 TileFusion</td>
+        </tr>
+        <tr>
+          <td>CacheBudgetSolver</td>
+        </tr>
+        <tr>
+          <td>L2 kv 比例</td>
+        </tr>
+        <tr>
+          <td>kv_cache_budget_scale</td>
+        </tr>
+        <tr>
+          <td>0.40 × scale</td>
+        </tr>
+        <tr>
+          <td>scale↑ → KV 预算更大</td>
+        </tr>
+        <tr>
+          <td>CacheBudgetSolver</td>
+        </tr>
+        <tr>
+          <td>L2 weight 比例</td>
+        </tr>
+        <tr>
+          <td>weight_prefetch_budget_scale</td>
+        </tr>
+        <tr>
+          <td>0.35 × scale</td>
+        </tr>
+        <tr>
+          <td>scale↑ → 权重预取预算更大</td>
+        </tr>
+        <tr>
+          <td>ParallelismSolver</td>
+        </tr>
+        <tr>
+          <td>sync_cost</td>
+        </tr>
+        <tr>
+          <td>parallelism_cost_scale</td>
+        </tr>
+        <tr>
+          <td>sync_cost × scale</td>
+        </tr>
+        <tr>
+          <td>scale↓ → 同步便宜 → 更多 wave</td>
+        </tr>
+        <tr>
+          <td>BatchSolver</td>
+        </tr>
+        <tr>
+          <td>max_batch_size</td>
+        </tr>
+        <tr>
+          <td>batch_flexibility</td>
+        </tr>
+        <tr>
+          <td>base × flex</td>
+        </tr>
+        <tr>
+          <td>flex=0 → batch=1</td>
+        </tr>
+        <tr>
+          <td>BatchSolver</td>
+        </tr>
+        <tr>
+          <td>decode_ratio_cap</td>
+        </tr>
+        <tr>
+          <td>decode_ratio_scale</td>
+        </tr>
+        <tr>
+          <td>cap × scale</td>
+        </tr>
+        <tr>
+          <td>scale↑ → decode 占比上限更高</td>
+        </tr>
+        <tr>
+          <td>FeatureRouter</td>
+        </tr>
+        <tr>
+          <td>spec_decoding benefit</td>
+        </tr>
+        <tr>
+          <td>speculative_decoding_value</td>
+        </tr>
+        <tr>
+          <td>benefit × value</td>
+        </tr>
+        <tr>
+          <td>value↑ → 更倾向启用</td>
+        </tr>
+        <tr>
+          <td>FeatureRouter</td>
+        </tr>
+        <tr>
+          <td>quant benefit</td>
+        </tr>
+        <tr>
+          <td>quantization_aggressiveness</td>
+        </tr>
+        <tr>
+          <td>benefit × aggr</td>
+        </tr>
+        <tr>
+          <td>aggr↑ → 更倾向低比特</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s15" data-section="15">
+      <h3>15. 黄金测试向量</h3>
+      <p>以下测试向量用于验证 Arbiter 实现的正确性。每个向量给出输入和期望的 StrategyBias 关键字段值（±10% 容差）。</p>
+    </section>
+    <section id="s15.1" data-section="15.1">
+      <h4>15.1 测试辅助: 标准 DeviceProfile</h4>
+      <p>```</p>
+      <p>CPU_AVX2:    { is_gpu: false, num_simd_regs: 16, cache_sizes: (32768, 262144, 8388608) }</p>
+      <p>CPU_AVX512:  { is_gpu: false, num_simd_regs: 32, cache_sizes: (49152, 1048576, 33554432) }</p>
+      <p>GPU_A100:    { is_gpu: true,  num_simd_regs: 255, total_memory: 80GB }</p>
+      <p>```</p>
+    </section>
+    <section id="s15.2" data-section="15.2">
+      <h4>15.2 向量 1: Llama-70B + Latency + CPU_AVX2</h4>
+      <p>```</p>
+      <p>GraphArchetype: { compute: 0.95, memory: 0.60, parallel: 0.20, fusion: 0.85, pipeline: 0.15 }</p>
+      <p>阶段 1 — mode_baseline(Latency):</p>
+      <p>  fusion_cost_scale = 0.5</p>
+      <p>  pipeline_cost_scale = 0.6</p>
+      <p>  parallelism_cost_scale = 1.5</p>
+      <p>  epilogue_depth_preference = 1.5</p>
+      <p>  k_depth_preference = 1.3</p>
+      <p>  batch_flexibility = 0.0</p>
+      <p>阶段 2 — archetype 调制:</p>
+      <p>  fusion_cost_scale = 0.5 × lerp(1.0, 0.6, 0.85) = 0.5 × 0.66 = 0.33 → clamp → 0.33</p>
+      <p>  pipeline_cost_scale = 0.6 × lerp(1.0, 0.6, 0.15) = 0.6 × 0.94 = 0.564</p>
+      <p>  parallelism_cost_scale = 1.5 × lerp(1.0, 0.5, 0.20) = 1.5 × 0.90 = 1.35</p>
+      <p>  reg_tension = 0.85 - 0.15 = 0.70 &gt; 0:</p>
+      <p>    epilogue_depth_preference = 1.5 × (1.0 + 0.70 × 0.5) = 1.5 × 1.35 = 2.025</p>
+      <p>    k_depth_preference = 1.3 × (1.0 - 0.70 × 0.3) = 1.3 × 0.79 = 1.027</p>
+      <p>阶段 3 — 硬件微调 (CPU_AVX2, num_simd_regs=16):</p>
+      <p>  reg_scarcity = 1.0 - 16/32 = 0.5</p>
+      <p>  epilogue_depth_preference = 2.025 × (1.0 + 0.5 × 0.3) = 2.025 × 1.15 = 2.329</p>
+      <p>  k_depth_preference = 1.027 × (1.0 - 0.5 × 0.2) = 1.027 × 0.90 = 0.924</p>
+      <p>  l1_richness = (32768 / 65536).min(2.0) = 0.5</p>
+      <p>  fusion_cost_scale = 0.33 × 1.0/sqrt(0.5) = 0.33 × 1.414 = 0.467</p>
+      <p>  not GPU → pipeline_cost_scale 不变 = 0.564</p>
+      <p>期望结果 (±10%):</p>
+      <p>  fusion_cost_scale ≈ 0.47</p>
+      <p>  pipeline_cost_scale ≈ 0.56</p>
+      <p>  parallelism_cost_scale ≈ 1.35</p>
+      <p>  epilogue_depth_preference ≈ 2.33</p>
+      <p>  k_depth_preference ≈ 0.92</p>
+      <p>  batch_flexibility = 0.0 (精确)</p>
+      <p>解读: 极度偏好融合 (0.47)，深 epilogue (2.33)，batch=1 固定。</p>
+      <p>符合预期: Llama-70B + Latency → memory-bound GEMV，融合每省一字节 = 省一 cycle。</p>
+      <p>```</p>
+    </section>
+    <section id="s15.3" data-section="15.3">
+      <h4>15.3 向量 2: DeepSeek-V3 + Throughput + GPU_A100</h4>
+      <p>```</p>
+      <p>GraphArchetype: { compute: 0.50, memory: 0.90, parallel: 0.99, fusion: 0.60, pipeline: 0.35 }</p>
+      <p>阶段 1 — mode_baseline(Throughput):</p>
+      <p>  fusion_cost_scale = 1.0</p>
+      <p>  pipeline_cost_scale = 1.3</p>
+      <p>  parallelism_cost_scale = 0.5</p>
+      <p>  epilogue_depth_preference = 0.8</p>
+      <p>  k_depth_preference = 0.8</p>
+      <p>  batch_flexibility = 1.0</p>
+      <p>  expert_eviction_aggressiveness = 0.8</p>
+      <p>  expert_prefetch_priority = 1.5</p>
+      <p>阶段 2 — archetype 调制:</p>
+      <p>  fusion_cost_scale = 1.0 × lerp(1.0, 0.6, 0.60) = 1.0 × 0.76 = 0.76</p>
+      <p>  pipeline_cost_scale = 1.3 × lerp(1.0, 0.6, 0.35) = 1.3 × 0.86 = 1.118</p>
+      <p>  parallelism_cost_scale = 0.5 × lerp(1.0, 0.5, 0.99) = 0.5 × 0.505 = 0.253</p>
+      <p>  reg_tension = 0.60 - 0.35 = 0.25 &gt; 0:</p>
+      <p>    epilogue_depth_preference = 0.8 × (1.0 + 0.25 × 0.5) = 0.8 × 1.125 = 0.90</p>
+      <p>    k_depth_preference = 0.8 × (1.0 - 0.25 × 0.3) = 0.8 × 0.925 = 0.74</p>
+      <p>  MoE (parallel &gt; 0.5):</p>
+      <p>    expert_eviction = 0.8 × lerp(1.0, 1.5, 0.90) = 0.8 × 1.45 = 1.16</p>
+      <p>    expert_prefetch = 1.5 × lerp(1.0, 2.0, 0.90) = 1.5 × 1.90 = 2.85</p>
+      <p>  kv_cache_budget_scale = 1.5 × lerp(1.0, 1.5, 0.90) = 1.5 × 1.45 = 2.175</p>
+      <p>  quantization_aggressiveness = 0.8 × lerp(1.0, 1.3, 0.90) = 0.8 × 1.27 = 1.016</p>
+      <p>阶段 3 — 硬件微调 (GPU_A100):</p>
+      <p>  is_gpu → epilogue_depth_preference = 0.90 × 1.2 = 1.08</p>
+      <p>  is_gpu → k_depth_preference = 0.74 × 1.2 = 0.888</p>
+      <p>  is_gpu → pipeline_cost_scale = 1.118 × 1.2 = 1.342</p>
+      <p>  not CPU (num_simd_regs &gt; 16) → 无寄存器稀缺调制</p>
+      <p>  l1_richness: GPU 的 cache_sizes.0 视为 shared_mem, 这里假设 49152</p>
+      <p>    l1_richness = (49152 / 65536).min(2.0) = 0.75</p>
+      <p>    fusion_cost_scale = 0.76 / sqrt(0.75) = 0.76 / 0.866 = 0.878</p>
+      <p>期望结果 (±10%):</p>
+      <p>  fusion_cost_scale ≈ 0.88</p>
+      <p>  pipeline_cost_scale ≈ 1.34</p>
+      <p>  parallelism_cost_scale ≈ 0.25</p>
+      <p>  epilogue_depth_preference ≈ 1.08</p>
+      <p>  k_depth_preference ≈ 0.89</p>
+      <p>  batch_flexibility = 1.0 (精确)</p>
+      <p>  expert_eviction ≈ 1.16</p>
+      <p>  expert_prefetch ≈ 2.85</p>
+      <p>解读: 极度偏好并行 (0.25)，极激进专家预取 (2.85)，pipeline 惩罚 (1.34)。</p>
+      <p>符合预期: MoE 256 专家 + Throughput → wave 最大化，专家权重异步预取。</p>
+      <p>```</p>
+    </section>
+    <section id="s15.4" data-section="15.4">
+      <h4>15.4 向量 3: Phi-4 (3B) + Latency + CPU_AVX512</h4>
+      <p>```</p>
+      <p>GraphArchetype: { compute: 0.35, memory: 0.25, parallel: 0.10, fusion: 0.70, pipeline: 0.80 }</p>
+      <p>阶段 1 — mode_baseline(Latency):</p>
+      <p>  fusion_cost_scale = 0.5</p>
+      <p>  pipeline_cost_scale = 0.6</p>
+      <p>  k_depth_preference = 1.3</p>
+      <p>  epilogue_depth_preference = 1.5</p>
+      <p>阶段 2 — archetype 调制:</p>
+      <p>  fusion_cost_scale = 0.5 × lerp(1.0, 0.6, 0.70) = 0.5 × 0.72 = 0.36</p>
+      <p>  pipeline_cost_scale = 0.6 × lerp(1.0, 0.6, 0.80) = 0.6 × 0.68 = 0.408</p>
+      <p>  parallelism_cost_scale = 1.5 × lerp(1.0, 0.5, 0.10) = 1.5 × 0.95 = 1.425</p>
+      <p>  reg_tension = 0.70 - 0.80 = -0.10 &lt; 0:</p>
+      <p>    k_depth_preference = 1.3 × (1.0 + 0.10 × 0.5) = 1.3 × 1.05 = 1.365</p>
+      <p>    epilogue_depth_preference = 1.5 × (1.0 - 0.10 × 0.3) = 1.5 × 0.97 = 1.455</p>
+      <p>阶段 3 — 硬件微调 (CPU_AVX512, num_simd_regs=32):</p>
+      <p>  num_simd_regs &gt; 16 → 无寄存器稀缺调制</p>
+      <p>  l1_richness = (49152 / 65536).min(2.0) = 0.75</p>
+      <p>  fusion_cost_scale = 0.36 / sqrt(0.75) = 0.36 / 0.866 = 0.416</p>
+      <p>  not GPU → pipeline_cost_scale 不变 = 0.408</p>
+      <p>期望结果 (±10%):</p>
+      <p>  fusion_cost_scale ≈ 0.42</p>
+      <p>  pipeline_cost_scale ≈ 0.41</p>
+      <p>  k_depth_preference ≈ 1.37</p>
+      <p>  epilogue_depth_preference ≈ 1.46</p>
+      <p>  batch_flexibility = 0.0 (精确)</p>
+      <p>解读: 融合和流水线几乎等权偏好 (0.42 vs 0.41)，pipeline 略优先获得寄存器 (k_depth 1.37 &gt; epilogue 1.46 的相对偏移较小)。</p>
+      <p>符合预期: 小模型 + Latency → memory-bound，GEMM 小所以 pipeline 和 fusion 都极重要。</p>
+      <p>```</p>
+    </section>
+    <section id="s15.5" data-section="15.5">
+      <h4>15.5 向量 4: Qwen3-7B + Throughput + GPU_A100</h4>
+      <p>```</p>
+      <p>GraphArchetype: { compute: 0.73, memory: 0.40, parallel: 0.15, fusion: 0.80, pipeline: 0.45 }</p>
+      <p>阶段 1 — mode_baseline(Throughput):</p>
+      <p>  fusion_cost_scale = 1.0</p>
+      <p>  parallelism_cost_scale = 0.5</p>
+      <p>  batch_flexibility = 1.0</p>
+      <p>  speculative_decoding_value = 0.3</p>
+      <p>阶段 2 — archetype 调制:</p>
+      <p>  fusion_cost_scale = 1.0 × lerp(1.0, 0.6, 0.80) = 1.0 × 0.68 = 0.68</p>
+      <p>  parallelism_cost_scale = 0.5 × lerp(1.0, 0.5, 0.15) = 0.5 × 0.925 = 0.463</p>
+      <p>  not MoE (parallel &lt; 0.5) → 无专家调制</p>
+      <p>阶段 3 — 硬件微调 (GPU_A100):</p>
+      <p>  fusion_cost_scale: l1_richness = 0.75, 0.68 / 0.866 = 0.785</p>
+      <p>期望结果 (±10%):</p>
+      <p>  fusion_cost_scale ≈ 0.79</p>
+      <p>  parallelism_cost_scale ≈ 0.46</p>
+      <p>  batch_flexibility = 1.0 (精确)</p>
+      <p>  speculative_decoding_value ≈ 0.3</p>
+      <p>解读: 中度偏好融合 (0.79)，中度偏好并行 (0.46)。</p>
+      <p>符合预期: Dense 7B + Throughput + GPU → 平衡策略，GEMM 够大不需要极端偏向。</p>
+      <p>```</p>
+    </section>
+    <section id="s15.6" data-section="15.6">
+      <h4>15.6 测试验证规则</h4>
+      <strong>REQ-ARB-014</strong>: 实现必须包含上述 4 个黄金测试向量作为单元测试。每个 StrategyBias 字段的实际值与期望值的偏差不超过 ±10%。测试失败意味着仲裁算法实现有误。
+      <p>```rust</p>
+      <p>#[test]</p>
+      <p>fn test_golden_vector_llama70b_latency_cpu_avx2() {</p>
+      <p>    let archetype = GraphArchetype {</p>
+      <p>        compute_intensive: 0.95,</p>
+      <p>        memory_intensive: 0.60,</p>
+      <p>        parallelism_exploitable: 0.20,</p>
+      <p>        fusion_profitable: 0.85,</p>
+      <p>        pipeline_valuable: 0.15,</p>
+      <p>    };</p>
+      <p>    let profile = DeviceProfile::test_cpu_avx2();</p>
+      <p>    let bias = StrategyArbiter::arbitrate(SchedulingMode::Latency, &amp;archetype, &amp;profile);</p>
+      <p>    assert_approx(bias.fusion_cost_scale, 0.47, 0.10);</p>
+      <p>    assert_approx(bias.pipeline_cost_scale, 0.56, 0.10);</p>
+      <p>    assert_approx(bias.parallelism_cost_scale, 1.35, 0.10);</p>
+      <p>    assert_approx(bias.epilogue_depth_preference, 2.33, 0.10);</p>
+      <p>    assert_approx(bias.k_depth_preference, 0.92, 0.10);</p>
+      <p>    assert_eq!(bias.batch_flexibility, 0.0);</p>
+      <p>}</p>
+      <p>fn assert_approx(actual: f64, expected: f64, tolerance_ratio: f64) {</p>
+      <p>    let diff = (actual - expected).abs();</p>
+      <p>    let max_diff = expected.abs() * tolerance_ratio;</p>
+      <p>    assert!(diff &lt;= max_diff,</p>
+      <p>        "expected ≈{expected}, got {actual} (diff {diff} &gt; tolerance {max_diff})");</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s16" data-section="16">
+      <h3>16. 常见实现错误与反模式</h3>
+    </section>
+    <section id="s16.1" data-section="16.1">
+      <h4>16.1 ❌ 注入方向搞反</h4>
+      <p>```rust</p>
+      <p>// ❌ 错误: fusion_cost_scale &lt; 1.0 时反而提高了融合代价</p>
+      <p>effective_savings = fusion_savings × bias.fusion_cost_scale;  // 应该是 ÷</p>
+      <p>// ✅ 正确: fusion_cost_scale &lt; 1.0 时融合收益放大</p>
+      <p>effective_savings = fusion_savings × (1.0 / bias.fusion_cost_scale);</p>
+      <p>// 或等价地: effective_savings = fusion_savings / bias.fusion_cost_scale;</p>
+      <p>```</p>
+    </section>
+    <section id="s16.2" data-section="16.2">
+      <h4>16.2 ❌ 直接读 SchedulingMode 做分支</h4>
+      <p>```rust</p>
+      <p>// ❌ 错误: 绕过 StrategyBias</p>
+      <p>if plan.inference_mode == SchedulingMode::Latency {</p>
+      <p>    self.max_batch = 1;</p>
+      <p>    self.disable_continuous_batching();</p>
+      <p>}</p>
+      <p>// ✅ 正确: 通过 bias 传导</p>
+      <p>self.max_batch = (base_max as f64 * plan.strategy_bias.batch_flexibility) as usize;</p>
+      <p>// Latency mode: batch_flexibility = 0.0 → max_batch = 0 → 实际 max(1, 0) = 1</p>
+      <p>```</p>
+      <strong>注意</strong>: <code>batch_flexibility = 0.0</code> 会导致 <code>max_batch = 0</code>，调用方必须 <code>max(1, computed)</code>。
+    </section>
+    <section id="s16.3" data-section="16.3">
+      <h4>16.3 ❌ validate() 改为 panic</h4>
+      <p>```rust</p>
+      <p>// ❌ 错误: 数值计算边界值不应 panic</p>
+      <p>fn validate(&amp;self) -&gt; Result&lt;(), ArbiterError&gt; {</p>
+      <p>    if self.fusion_cost_scale &lt;= 0.0 { return Err(...); }</p>
+      <p>}</p>
+      <p>// ✅ 正确: clamp 到合法范围</p>
+      <p>fn validate(&amp;mut self) {</p>
+      <p>    self.fusion_cost_scale = self.fusion_cost_scale.clamp(0.2, 3.0);</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s16.4" data-section="16.4">
+      <h4>16.4 ❌ sigmoid 用错形式</h4>
+      <p>```rust</p>
+      <p>// ❌ 错误: 用 tanh 代替 sigmoid</p>
+      <p>fn sigmoid(x: f64) -&gt; f64 { x.tanh() }  // 值域 (-1, 1)，不是 (0, 1)</p>
+      <p>// ❌ 错误: 用 ReLU 代替 sigmoid</p>
+      <p>fn sigmoid(x: f64) -&gt; f64 { x.max(0.0).min(1.0) }  // 线性 clamp，不是 S 曲线</p>
+      <p>// ✅ 正确: 标准逻辑函数</p>
+      <p>fn sigmoid(x: f64) -&gt; f64 { 1.0 / (1.0 + (-x).exp()) }</p>
+      <p>```</p>
+    </section>
+    <section id="s16.5" data-section="16.5">
+      <h4>16.5 ❌ GraphArchetype 维度相加归一化</h4>
+      <p>```rust</p>
+      <p>// ❌ 错误: 五维之和归一化为 1.0</p>
+      <p>let total = c + m + p + f + pl;</p>
+      <p>archetype.compute_intensive = c / total;</p>
+      <p>// 这会丢失绝对强度信息！五维独立，不要求和为 1.0</p>
+      <p>// ✅ 正确: 每个维度独立 clamp 到 [0, 1]</p>
+      <p>archetype.compute_intensive = clamp(compute_raw, 0.0, 1.0);</p>
+      <p>archetype.memory_intensive = clamp(memory_raw, 0.0, 1.0);</p>
+      <p>// 五维之和可以 &gt; 1.0 也可以 &lt; 1.0</p>
+      <p>```</p>
+    </section>
+    <section id="s17" data-section="17">
+      <h3>17. 关联文档</h3>
+      <table>
+        <tr>
+          <th>文档</th>
+        </tr>
+        <tr>
+          <td>关系</td>
+        </tr>
+        <tr>
+          <td>02-HARDWARE.md §10</td>
+          <td> HwOptEngine</td>
+        </tr>
+        <tr>
+          <td>Arbiter 输出注入 HwOptEngine</td>
+        </tr>
+        <tr>
+          <td>04-API-DESIGN.md §2</td>
+          <td> Client Builder</td>
+        </tr>
+        <tr>
+          <td>SchedulingMode</td>
+          <td> API 入口</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+        </tr>
+        <tr>
+          <td>MoE/SpecDecoding 模块消费 StrategyBias</td>
+        </tr>
+        <tr>
+          <td>06-RUNTIME.md §3</td>
+          <td> ContinuousBatcher</td>
+        </tr>
+        <tr>
+          <td>batch 策略受 </td>
+          <td>batch_flexibility</td>
+          <td> 影响</td>
+        </tr>
+        <tr>
+          <td>DOCS/scheduling/jit-cache-protocol.md</td>
+        </tr>
+        <tr>
+          <td>JIT 缓存 key 包含 SchedulingMode</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s18" data-section="18">
+      <h3>18. Integration Trace — 真实调用链追踪</h3>
+      <p>&gt; <strong>NO_ISLAND_MODULE 合规</strong>: 以下是从用户 API 到最终消费的完整调用链，每一跳标明文件和函数。</p>
+      <p>```</p>
+      <p>Client::builder()</p>
+      <p>    .model("Qwen/Qwen3-7B")</p>
+      <p>    .scheduling_mode(SchedulingMode::Throughput)    ← src/client.rs:ClientBuilder::inference_mode()</p>
+      <p>    .build()                                       ← src/client.rs:ClientBuilder::build()</p>
+      <p>  │</p>
+      <p>  └→ ClientBuilder::build_state(model_id, kind, inference_mode)   ← src/client.rs</p>
+      <p>       │</p>
+      <p>       ├── [1] Loader 加载模型 → ModelConfig 提取</p>
+      <p>       │   └→ ModelConfig::from_loader()           ← src/model_config.rs</p>
+      <p>       │</p>
+      <p>       ├── [2] GraphProfiler::profile(&amp;model_config)    ← src/graph/profile.rs</p>
+      <p>       │   └→ GraphProfile { hidden_dim, num_experts, ffn_kind, ... }</p>
+      <p>       │</p>
+      <p>       ├── [3] GraphArchetype::derive(&amp;graph_profile)   ← src/graph/profile.rs</p>
+      <p>       │   └→ GraphArchetype { compute: 0.73, memory: 0.40, ... }</p>
+      <p>       │</p>
+      <p>       ├── [4] ArbiterHwView::from(device_profile)      ← src/engine/arbiter.rs</p>
+      <p>       │</p>
+      <p>       ├── [5] StrategyArbiter::arbitrate(mode, &amp;archetype, &amp;hw_view)  ← src/engine/arbiter.rs</p>
+      <p>       │   └→ StrategyBias { fusion_cost_scale: 0.79, parallelism: 0.46, ... }</p>
+      <p>       │</p>
+      <p>       ├── [6] 转换 gllm::StrategyBias → gllm_kernels::StrategyBias   ← src/client.rs</p>
+      <p>       │</p>
+      <p>       ├── [7] init_global_execution_plan_with_bias(&amp;kernels_bias)</p>
+      <p>       │   └→ gllm-kernels/src/compiler/planner.rs:EXECUTION_PLAN.get_or_init()</p>
+      <p>       │       └→ HwOptEngine::solve(ir, profile, &amp;bias)</p>
+      <p>       │           ├── solve_cache_budget(..., &amp;bias)     // L2 kv/weight 比例调制</p>
+      <p>       │           ├── solve_gemm(..., &amp;bias)              // k_depth + epilogue 调制</p>
+      <p>       │           ├── solve_fusion(..., &amp;bias)            // tile_threshold 调制</p>
+      <p>       │           ├── solve_parallelism(..., &amp;bias)       // wave_count 调制</p>
+      <p>       │           ├── solve_batch(..., &amp;bias)             // batch_flexibility 调制</p>
+      <p>       │           └── solve_features(..., &amp;bias)          // spec_decoding 调制</p>
+      <p>       │</p>
+      <p>       └── [8] BackendContext::new()                      ← 此后 JIT 编译使用已注入 bias 的 ExecutionPlan</p>
+      <p>```</p>
+      <strong>验证命令</strong> (grep 确认非测试调用):
+      <p>```bash</p>
+      <p>grep -rn "StrategyArbiter::arbitrate|arbitrate_cpu" src/ | grep -v test | grep -v "mod tests"</p>
+      <p>grep -rn "init_global_execution_plan_with_bias" src/ | grep -v test</p>
+      <p>grep -rn "StrategyBias" src/ | grep -v test | grep -v "mod tests" | grep -v "///" | grep -v "pub struct|pub use"</p>
+      <p>```</p>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-GRAPH-PROFILE" id="ent-graph-profile"><h4>ENT-GRAPH-PROFILE</h4><p>GraphProfile — 图拓扑特征</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="compute_density" data-type="number" data-required="true" <td="">compute_density<td>number</td><td>是</td><td>f64</td><td>Compute density (FLOPs/byte)</td></tr><tr data-field="fusion_opportunity" data-type="number" data-required="true" <td="">fusion_opportunity<td>
+number</td><td>是</td><td>f64</td><td>Fusion opportunity score</td></tr><tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>Number of transformer layers</td></tr><tr data-field="hidden_dim" data-type="number" data-required="true" <td="">hidden_dim<td>number</td><td>是</td><td>usize</td><td>Hidden dimension size</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td>
+<td>是</td><td>usize</td><td>Vocabulary size</td></tr><tr data-field="tied_embeddings" data-type="boolean" data-required="true" <td="">tied_embeddings<td>boolean</td><td>是</td><td></td><td>Whether input/output embeddings share weights</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-HW-OPT-ENGINE" id="ent-hw-opt-engine"><h4>ENT-HW-OPT-ENGINE</h4>
+        <p>HwOptEngine — 硬件优化引擎 (消费 StrategyBias, 通过 Cost-Model 做出策略决策)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="device_profile" data-type="string" data-required="true" <td="">device_profile<td>string</td><td>是</td><td>DeviceProfile</td><td>硬件能力探测 (12 Profile)</td></tr><tr data-field="strategy_bias" data-type="string" data-required="true" <td="">strategy_bias<td>string</td><td>是</td><td>StrategyBias</td><td>成本调制系数 (由 StrategyArbiter 产出)</td></tr>
+<tr data-field="fusion_plan" data-type="string" data-required="true" <td="">fusion_plan<td>string</td><td>是</td><td>FusionPlan</td><td>融合规划 (由 FusionEngine 产出)</td></tr><tr data-field="cost_model" data-type="string" data-required="true" <td="">cost_model<td>string</td><td>是</td><td>CostModel</td><td>成本模型 (消费 StrategyBias 做决策)</td></tr><tr data-field="solver_result" data-type="string" data-required="false" <td="">solver_result<td>string</td><td>否</td><td>SolverResult</td><td>
+各 Solver 的决策结果</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-SCHEDULING-MODE" id="ent-scheduling-mode"><h4>ENT-SCHEDULING-MODE</h4><p>SchedulingMode — 推理模式枚举 (InferenceMode in Rust, Latency/Throughput)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>Latency|Throughput</td><td>调度模式变体: Latency(极端单请求延迟) 或 Throughput(最大吞吐)</td></tr>
+<tr data-field="is_immutable" data-type="boolean" data-required="true" <td="">is_immutable<td>boolean</td><td>是</td><td></td><td>模型加载时确定，会话生命周期内不可变</td></tr><tr data-field="default" data-type="string" data-required="true" <td="">default<td>string</td><td>是</td><td>Latency</td><td>默认模式: Latency (batch=1, 所有资源服务单请求)</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-STRATEGY-ARBITER" id="ent-strategy-arbiter"><h4>ENT-STRATEGY-ARBITER</h4><p>StrategyArbiter — 策略仲裁器 (InferenceMode x GraphArchetype x Hardware -&gt; StrategyBias)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="mode" data-type="string" data-required="true" <td="">mode<td>string</td><td>是</td><td></td><td>推理模式 (Latency/Throughput)</td></tr>
+<tr data-field="archetype" data-type="string" data-required="true" <td="">archetype<td>string</td><td>是</td><td></td><td>图架构原型 (GraphArchetype)</td></tr><tr data-field="hw" data-type="string" data-required="true" <td="">hw<td>string</td><td>是</td><td></td><td>硬件视图 (ArbiterHwView)</td></tr><tr data-field="output" data-type="string" data-required="true" <td="">output<td>string</td><td>是</td><td></td><td>输出 StrategyBias 成本调制系数</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-STRATEGY-BIAS" id="ent-strategy-bias"><h4>ENT-STRATEGY-BIAS</h4><p>StrategyBias — 成本调制偏置系数 (12个f64字段调制HwOptEngine各Solver决策)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="fusion_cost_scale" data-type="number" data-required="true" <td="">fusion_cost_scale<td>number</td><td>是</td><td>[0.2,3.0]</td><td>融合成本缩放: &lt;1.0放大节省, &gt;1.0抑制融合</td></tr>
+<tr data-field="kv_cache_budget_scale" data-type="number" data-required="true" <td="">kv_cache_budget_scale<td>number</td><td>是</td><td>[0.2,3.0]</td><td>KV cache L2预算缩放</td></tr><tr data-field="batch_flexibility" data-type="number" data-required="true" <td="">batch_flexibility<td>number</td><td>是</td><td>[0.0,1.0]</td><td>批灵活性: 0.0=硬约束batch=1, 1.0=默认</td></tr><tr data-field="expert_eviction_aggressiveness" data-type="number" data-required="true" <td="">expert_eviction_aggressiveness<td>
+number</td><td>是</td><td>[0.0,2.0]</td><td>MoE专家驱逐激进程度: 0.0=全驻留, 2.0=激进驱逐</td></tr><tr data-field="expert_prefetch_priority" data-type="number" data-required="true" <td="">expert_prefetch_priority<td>number</td><td>是</td><td>[0.1,5.0]</td><td>MoE专家预取优先级: &gt;1.0=更激进预取</td></tr><tr data-field="quantization_aggressiveness" data-type="number" data-required="true" <td="">quantization_aggressiveness<td>number</td><td>是</td><td>[0.3,3.0]</td><td>量化激进度系数</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-SYSTEM-TOPOLOGY" id="ent-system-topology"><h4>ENT-SYSTEM-TOPOLOGY</h4><p>SystemTopology — 系统级硬件拓扑 (CPU+GPU聚合, 一次性探测, 运行时固定)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="cpu" data-type="string" data-required="true" <td="">cpu<td>string</td><td>是</td><td></td><td>CPU拓扑 (CpuTopology: core_count, numa, cache_bytes)</td></tr><tr data-field="gpu" data-type="string" data-required="false" <td="">gpu<td>
+string</td><td>否</td><td></td><td>GPU拓扑 (None=CPU-only)</td></tr><tr data-field="sensors" data-type="string" data-required="true" <td="">sensors<td>string</td><td>是</td><td></td><td>底层传感器读数 (MemoryNetworkSensors)</td></tr><tr data-field="profile" data-type="string" data-required="true" <td="">profile<td>string</td><td>是</td><td></td><td>DeviceProfile (gllm-kernels)</td></tr><tr data-field="constraints" data-type="string" data-required="true" <td="">constraints<td>string</td><td>是</td><td>
+</td><td>JIT编译器约束变量 (CompilerConstraints)</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section data-req-entity="ENT-STRATEGY-ARBITER" data-req-category="architecture" data-req-domain="sa" data-req-status="implemented" data-req="REQ-SA-001" id="req-sa-001" data-req-api="API-STRATEGY-ARBITER"><h3>REQ-SA-001 REQ-SA-001: StrategyArbiter 自适应融合成本调节</h3><p>StrategyArbiter 自适应融合成本调节：fusion_cost_scale 根据融合收益动态调整；负 fusion_profitable 导致 lerp 增加 fusion_cost_scale 高于基线；L1 cache 大小影响 richness 评分。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-api="POST /internal/strategy/arbitrate" id="post-/internal/strategy/arbitrate" data-api-type="internal" data-api-name="API-STRATEGY-ARBITER"><h4>POST /internal/strategy/arbitrate — StrategyArbiter arbitrate</h4><p>策略仲裁接口，综合 GraphProfile、StrategyBias、HwOptEngine 决定最优编译策略。自适应融合成本调节，多策略候选排序与选择。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：12-STRATEGY-ARBITER.html</address>
+  </footer>
+</body>
+</html>

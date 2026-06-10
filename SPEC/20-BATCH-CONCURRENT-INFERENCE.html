@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="">
+<head>
+  <meta charset="utf-8">
+  <meta content="20-BATCH-CONCURRENT-INFERENCE" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"20-BATCH-CONCURRENT-INFERENCE", "dependencies":[], "children":[] }
+  </script>
+
+</head><body>
+  <header data-spec-header="">
+    <h1>批量并发推理 — M 维度统一架构 (Batch Concurrent Inference)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>20-BATCH-CONCURRENT-INFERENCE</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-批量并发推理-m-维度统一架构-batch-concurrent-inference" data-section="null">
+      <h2>批量并发推理 — M 维度统一架构 (Batch Concurrent Inference)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档定义 gllm 从 <code>batch_size=1</code> 扩展到 <code>batch_size=N</code> 的统一推理架构。</p>
+      <p>&gt; 核心原则: <strong>多序列 forward 是 M 维度更大的单序列 forward，不是另一种模型。</strong></p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>0. 核心洞察</h3>
+    </section>
+    <section id="s0.1" data-section="0.1">
+      <h4>0.1 batch_size=1 是 batch_size=N 的特例</h4>
+      <p>当前 mega-kernel 的 forward pass 处理 <code>M × K</code> 矩阵乘法：</p>
+      <p>```</p>
+      <p>单序列 decode:  M = 1</p>
+      <p>单序列 prefill: M = prompt_len</p>
+      <p>多序列 decode:  M = num_active_seqs</p>
+      <p>多序列 prefill: M = sum(prompt_lens)</p>
+      <p>```</p>
+      <p>GEMM、FFN、Norm — 这些层对 M 维度 uniform，不关心 token 属于哪条序列。</p>
+      <p>只有 Attention 需要 per-token 查找所属序列的 KV cache。</p>
+      <strong>结论</strong>: batch 并发不是新系统，是 M 维度从 1 变成 total_tokens + Attention 增加 per-token seq_id 查找。
+    </section>
+    <section id="s0.2" data-section="0.2">
+      <h4>0.2 与 vLLM/SGLang 的本质区别</h4>
+      <strong>核心差异</strong>: 它们每 step 做 1 次 kernel dispatch × N 层 = 大量 host↔device 往返。
+      <p>我们 1 次 CALL 完成全部序列的 prefill + decode 全生命周期，零 host 介入。</p>
+      <table>
+        <tr>
+          <th>功能</th>
+        </tr>
+        <tr>
+          <td>vLLM/SGLang</td>
+        </tr>
+        <tr>
+          <td>gllm</td>
+        </tr>
+        <tr>
+          <td>推理调度</td>
+        </tr>
+        <tr>
+          <td>Python 逐 step dispatch，每 step 独立 kernel launch</td>
+        </tr>
+        <tr>
+          <td>单次 CALL 完成 M 条序列全部生成</td>
+        </tr>
+        <tr>
+          <td>Prefill/Decode 混合</td>
+        </tr>
+        <tr>
+          <td>两个不同 kernel + 运行时切换</td>
+        </tr>
+        <tr>
+          <td>同一 mega-kernel，M 维度自然变化</td>
+        </tr>
+        <tr>
+          <td>Variable-length Attn</td>
+        </tr>
+        <tr>
+          <td>FlashInfer CSR indptr 运行时数组</td>
+        </tr>
+        <tr>
+          <td>JIT 编译的 per-token seq_id 查找指令</td>
+        </tr>
+        <tr>
+          <td>PagedAttention</td>
+        </tr>
+        <tr>
+          <td>block_table 2D 数组 + Python 构建</td>
+        </tr>
+        <tr>
+          <td>VmInstr::PageTableAddr 一条机器指令</td>
+        </tr>
+        <tr>
+          <td>Per-seq sampling</td>
+        </tr>
+        <tr>
+          <td>Python 控制流</td>
+        </tr>
+        <tr>
+          <td>JIT 编译的 per-seq argmax</td>
+        </tr>
+        <tr>
+          <td>KV 共享</td>
+        </tr>
+        <tr>
+          <td>RadixAttention trie</td>
+        </tr>
+        <tr>
+          <td>KvPrefixIndex + CoW 页映射（已实现）</td>
+        </tr>
+        <tr>
+          <td>Stop condition</td>
+        </tr>
+        <tr>
+          <td>外层 Python 循环检查</td>
+        </tr>
+        <tr>
+          <td>JIT CheckStopCondition 内嵌</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s0.3" data-section="0.3">
+      <h4>0.3 已有的 batch 基础设施</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>已有能力</td>
+        </tr>
+        <tr>
+          <td>批量化改造</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>MegaKernelFn ABI</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>batch_size</td>
+          <td> (arg 5), </td>
+          <td>page_table_ptr</td>
+          <td> (arg 21)</td>
+        </tr>
+        <tr>
+          <td>batch_size 从忽略变为驱动 forward M 维度</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SymDim + emit_loop</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>BoundExpr::Symbolic</td>
+          <td> 完整符号维度循环</td>
+        </tr>
+        <tr>
+          <td>batch_size 是另一个 SymDim，与 seq_len 同等</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>VmInstr</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>PageTableAddr</td>
+          <td>, </td>
+          <td>PageTableKVWrite</td>
+          <td>, </td>
+          <td>StoreToken</td>
+          <td>, </td>
+          <td>CheckStopCondition</td>
+          <td>, </td>
+          <td>Argmax</td>
+        </tr>
+        <tr>
+          <td>seq_index</td>
+          <td> 参数化（当前固定 0）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>MegaKernelBufferLayout</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ping/pong activation + logits + sampling</td>
+        </tr>
+        <tr>
+          <td>M 维度 sizing 改为 total_tokens</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ContinuousBatcher</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>多请求调度 + decode 优先 + prefill backfill</td>
+        </tr>
+        <tr>
+          <td>返回扩展为 BatchContext</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>PagedScheduler</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>多请求页管理 + </td>
+          <td>get_page_table()</td>
+        </tr>
+        <tr>
+          <td>批量导出拼接页表</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>RaggedCompaction</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>三阶段 compact/execute/scatter + RequestActiveMask</td>
+        </tr>
+        <tr>
+          <td>接入 mega-kernel active mask</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>EpilogueSubsystem</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>批量遥测 per-request decision array</td>
+        </tr>
+        <tr>
+          <td>已是 batch-ready</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>VariantRegistry</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>机制级编译分发 + constraint relaxation</td>
+        </tr>
+        <tr>
+          <td>新增 batch_size 维度</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KvPrefixIndex</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>token 级 radix tree + prefix match + CoW</td>
+        </tr>
+        <tr>
+          <td>已支持多请求 KV 共享</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KV Optimizer</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>per-page importance + PrecisionTier</td>
+        </tr>
+        <tr>
+          <td>已是 batch-ready</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SessionKvCache</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>per-session finalized_position + cross-turn reuse</td>
+        </tr>
+        <tr>
+          <td>per-seq session offset</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. BatchContext — flat memory block</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 设计原则</h4>
+      <p>JIT 代码只能访问 raw 指针 + 编译时已知 offset。BatchContext 是一块 <strong>flat memory</strong>，</p>
+      <p>不是 Rust struct（不能有 <code>Vec</code>、<code>String</code>、指针间接）。JIT 编译时知道每个字段的精确偏移。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 内存布局</h4>
+      <p>```</p>
+      <p>BatchContext flat memory layout (由 Executor 分配):</p>
+      <p>Offset  Field                      Size                   说明</p>
+      <p>──────  ──────────────────────────  ─────────────────────  ──────────────────────</p>
+      <p>0       num_seqs                   4 bytes (u32)          活跃序列数</p>
+      <p>4       max_decode_steps           4 bytes (u32)          最大剩余 decode 步数</p>
+      <p>8       total_prefill_tokens       4 bytes (u32)          sum(prompt_lens)</p>
+      <p>12      pad                        4 bytes</p>
+      <p>16      input_ids_flat_ptr         8 bytes (*const u32)   所有序列 prompt 拼接</p>
+      <p>24      output_tokens_flat_ptr     8 bytes (*mut u32)     所有序列输出拼接</p>
+      <p>32      positions_ptr              8 bytes (*const u32)   位置数组</p>
+      <p>40      page_table_flat_ptr        8 bytes (*const u32)   所有序列页表拼接</p>
+      <p>48      kv_pool_base               8 bytes (*const u8)    KV 物理池基址</p>
+      <p>56      sampling_params_ptr        8 bytes (*const u32)   packed: [temp, top_k, top_p, eos] × N</p>
+      <p>64      hook_ctx_ptr               8 bytes (*const u8)    SG shared memory (共享)</p>
+      <p>72      callback_table_ptr         8 bytes (*const u8)    callback table (共享)</p>
+      <p>80      seq_meta_base              ── per-seq 数组起始 ──</p>
+      <p>  +seq_idx × SEQ_META_STRIDE:</p>
+      <p>    +0   prompt_len                4 bytes (u32)          0 = 纯 decode</p>
+      <p>    +4   kv_len                    4 bytes (u32)          已有 KV token 数</p>
+      <p>    +8   rope_pos_offset           4 bytes (u32)          session resume 偏移</p>
+      <p>   +12   max_new_tokens            4 bytes (u32)          该序列最大生成 token 数 (&gt;0)</p>
+      <p>   +16   session_position          4 bytes (u32)          0 = 新序列</p>
+      <p>   +20   page_table_offset         4 bytes (u32)          该序列在 page_table_flat 中的起始</p>
+      <p>   +24   page_table_len            4 bytes (u32)          该序列页表条目数</p>
+      <p>   +28   fused_hidden_offset       4 bytes (u32)          多模态注入偏移</p>
+      <p>   +32   num_mm_tokens             4 bytes (u32)          多模态 token 数</p>
+      <p>   +36   active_flag               4 bytes (u32)          1=活跃, 0=已完成</p>
+      <p>   +40   seq_position              4 bytes (u32)          当前 decode 位置 (运行时更新)</p>
+      <p>   +44   gen_count                 4 bytes (u32)          已生成 token 数 (运行时更新)</p>
+      <p>   +48   last_sampled_token        4 bytes (u32)          上次采样结果 (运行时更新)</p>
+      <p>   +52   output_offset             4 bytes (u32)          该序列在 output_tokens_flat 中的起始偏移</p>
+      <p>  SEQ_META_STRIDE = 56 bytes (对齐到 64)</p>
+      <p>```</p>
+      <strong>关键</strong>: 所有 per-seq 元数据通过 <code>seq_meta_base + seq_idx × SEQ_META_STRIDE</code> 访问（SEQ_META_STRIDE = 56 bytes，见上方物理布局表推导：14 个 u32 字段 = 56 bytes）。
+      <p>JIT 编译时知道 offset，运行时只读一个 u32。</p>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 构建流程</h4>
+      <p>```</p>
+      <p>ContinuousBatcher.build_batch()</p>
+      <p>  → ScheduledBatch { requests, seq_offsets, draft_steps }</p>
+      <p>     ↓</p>
+      <p>Executor.build_batch_context(scheduled_batch):</p>
+      <p>  1. 分配 flat memory block (大小 = 固定头 + num_seqs × 52)</p>
+      <p>  2. PagedScheduler.get_page_table(req) × N → 拼接 page_table_flat + 填充 page_table_offset/len</p>
+      <p>  3. session_position[seq] → rope_pos_offset, session_position (复用 SessionKvCache)</p>
+      <p>  4. request.sampling_params → packed sampling_params</p>
+      <p>  5. seq_offsets → input_ids_flat 拼接</p>
+      <p>  6. waste_ratio → compact_required 标记 (驱动 RaggedCompaction)</p>
+      <p>     ↓</p>
+      <p>  BatchContext (flat memory block ptr 传入 mega-kernel ABI)</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. Mega-Kernel 统一 generate 循环</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 当前单序列结构</h4>
+      <p>```</p>
+      <p>compile() 当前产出:</p>
+      <p>  Phase 0: Load ABI params</p>
+      <p>  Phase 1: Compute derived values (prompt_len_bytes, input_base)</p>
+      <p>  Phase 2: LoopBegin { bound: max_new_tokens }         ← generate 循环</p>
+      <p>  Phase 3: Compute input_ptr = input_base + gen_offset  ← 单序列: 固定偏移</p>
+      <p>  层循环融合组: emit_fusion_groups (融合组序列由图拓扑推导)</p>
+      <p>  Argmax/StoreToken 融合组: Argmax → sample</p>
+      <p>  StoreToken: StoreToken</p>
+      <p>  CheckStopCondition 融合组: CheckStopCondition</p>
+      <p>  generate loop end: LoopEnd</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 统一 batch 结构</h4>
+      <p>```</p>
+      <p>编译时已知:</p>
+      <li>SEQ_META_STRIDE = 56</li>
+      <li>seq_meta_base offset in BatchContext</li>
+      <li>各 per-seq field offset (prompt_len=0, kv_len=4, ...)</li>
+      <p>运行时生成:</p>
+      <p>Phase 0: Load ABI params (不变)</p>
+      <p>Phase 1: Compute derived values</p>
+      <p>         + 从 AbiArg(5) 加载 batch_size → SymDimSlotMap["batch_size"]</p>
+      <p>         + 从 arg 22 加载 batch_ctx_ptr → 基址寄存器</p>
+      <p>         + 如果 batch_ctx_ptr == NULL → 跳转到 Phase 1.Legacy (当前单序列逻辑)</p>
+      <p>Phase 1.Legacy: (向后兼容, batch_ctx_ptr == NULL 时执行)</p>
+      <p>         当前 Phase 0-3 + 融合组逻辑不变, goto DONE</p>
+      <p>Phase 2: Prefill — M = total_prefill_tokens</p>
+      <p>         + M_prefill = load [batch_ctx + 8] (total_prefill_tokens)</p>
+      <p>         + if M_prefill == 0 → 跳到层循环融合组 (全部 decode)</p>
+      <p>         + input_ptr = load [batch_ctx + 16] (input_ids_flat_ptr)</p>
+      <p>         + M = M_prefill → SymDim("prefill_M")</p>
+      <p>         + emit_fusion_groups (融合组序列由图拓扑推导)</p>
+      <p>             Attention 内部: per-token seq_id 查找 (§3)</p>
+      <p>         + per-seq argmax on last token of each sequence's prompt</p>
+      <p>         + per-seq store: first_sampled_token[seq] = argmax(logits[seq_last_token])</p>
+      <p>         + per-seq update: gen_count[seq] = 1, seq_position[seq] = prompt_len[seq]</p>
+      <p>Phase 3: Decode Step Loop</p>
+      <p>         + max_steps = load [batch_ctx + 4] (max_decode_steps)</p>
+      <p>         + LoopBegin { bound: max_steps }</p>
+      <p>         + num_active = compute from active_flag array</p>
+      <p>         + if num_active == 0 → break</p>
+      <p>         + M = num_active → SymDim("decode_M")</p>
+      <p>         + 构建 decode input_ids: last_sampled_token[seq] × num_active</p>
+      <p>         + emit_fusion_groups (融合组序列由图拓扑推导)</p>
+      <p>             Attention 内部: per-token seq_id 查找 (§3)</p>
+      <p>         + per-seq argmax, store, update seq_position/gen_count/last_sampled_token</p>
+      <p>         + per-seq CheckStopCondition (eos match or gen_count &gt;= max_new_tokens)</p>
+      <p>         + per-seq: if stopped → active_flag[seq] = 0</p>
+      <p>         + LoopEnd</p>
+      <p>层循环融合组（decode 路径）: DONE — return total_generated_count</p>
+      <p>```</p>
+      <strong>关键</strong>: Phase 2 (Prefill) 和 Phase 3 (Decode) 的 <code>emit_fusion_groups</code> 是<strong>同一个 forward pass 函数</strong>，
+      <p>只是 M 维度不同。GEMM、FFN、Norm 完全不关心 M 里面是几条序列。</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 batch_size=1 时的行为</h4>
+      <p>当 <code>batch_ctx_ptr == NULL</code>:</p>
+      <li>走 Phase 1.Legacy → 当前单序列代码路径</li>
+      <li>零行为变更，零性能影响</li>
+      <p>当 <code>batch_ctx_ptr != NULL</code> 但 <code>num_seqs == 1</code>:</p>
+      <li>Phase 2: M = prompt_lens[0]（和当前一样）</li>
+      <li>Phase 3: M = 1, step 循环跑 max_new_tokens 次（和当前一样）</li>
+      <li>等价于当前行为，仅多几条 seq_id 查找指令（可优化掉）</li>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>2.4 Scratchpad 布局 (M 维度参数化)</h4>
+      <p>```</p>
+      <p>MegaKernelBufferLayout 扩展:</p>
+      <p>  Activation A (ping): max_M × hidden         ← M 维度参数化</p>
+      <p>  Activation B (pong): max_M × hidden         ← M 维度参数化</p>
+      <p>  Logits:              max_M × vocab_size     ← M 维度参数化</p>
+      <p>  Sampling workspace:  vocab_size × 4         ← 固定大小</p>
+      <p>  SG data:             hidden × 2             ← 固定大小</p>
+      <p>  RoPE cache:          max_total × head_dim × 2  ← 共享 (按最大序列)</p>
+      <p>```</p>
+      <code>max_M</code> 在编译时由 Variant 的 <code>golden_size</code> 决定，运行时通过 SymDim 读取实际 M 值。
+      <p>Prefill 阶段 M = total_prefill_tokens，Decode 阶段 M = num_active_seqs。</p>
+      <p>Activation 复用同一块 buffer，两个阶段不重叠（时序互斥）。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Attention Per-Token seq_id 查找</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 核心机制</h4>
+      <p>GEMM / FFN / Norm 对 M 维度 uniform，不需要知道 token 属于哪条序列。</p>
+      <p>只有 Attention 需要 per-token 查找 seq_id 以定位该序列的 KV cache。</p>
+      <p>在 Prefill 阶段，token_i 属于哪条序列由 <code>prompt_lens</code> 累积推导:</p>
+      <p>```</p>
+      <p>seq_id[token_i] = 最小的 s 使得 cumsum(prompt_lens)[s] &gt; token_i</p>
+      <p>```</p>
+      <p>在 Decode 阶段，M = num_active_seqs，token_i 直接对应第 i 条活跃序列。</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 JIT 编译的 seq_id 查找</h4>
+      <p>Prefill 阶段 — cumsum 搜索:</p>
+      <p>```asm</p>
+      <p>; 输入: rax = token_index (0..M_prefill)</p>
+      <p>; 输出: rcx = seq_id</p>
+      <p>xor ecx, ecx                    ; seq_id = 0</p>
+      <p>mov edx, [batch_ctx + seq_meta_base + 0]  ; cumulative = prompt_lens[0]</p>
+      <p>.loop:</p>
+      <p>  cmp rax, rdx</p>
+      <p>  jl  .found</p>
+      <p>  inc ecx</p>
+      <p>  mov edx, [batch_ctx + seq_meta_base + ecx*52 + 0]  ; prompt_lens[seq_id+1]</p>
+      <p>  add edx, edx_prev              ; cumulative += prompt_lens[next]</p>
+      <p>  jmp .loop</p>
+      <p>.found:</p>
+      <p>; rcx = seq_id</p>
+      <p>```</p>
+      <p>Decode 阶段 — 直接映射:</p>
+      <p>```asm</p>
+      <p>; token_i → seq_id = active_seq_ids[token_i]</p>
+      <p>; (active_seq_ids 是 compact 后的活跃序列索引数组，在 scratchpad 中维护)</p>
+      <p>mov ecx, [active_seq_ids + rax * 4]</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 PageTableAddr 扩展</h4>
+      <p>当前 <code>VmInstr::PageTableAddr</code> 的 <code>seq_index: Option&lt;VRegId&gt;</code> 固定为 <code>None</code>（单序列）。</p>
+      <p>改为接受 seq_id 寄存器后:</p>
+      <p>```asm</p>
+      <p>; 计算 seq_id 对应的 KV 物理地址</p>
+      <p>; rcx = seq_id, eax = token_pos (该序列内的逻辑位置)</p>
+      <p>mov edx, [batch_ctx + seq_meta_base + rcx*52 + 20]  ; pt_offset = page_table_offset[seq]</p>
+      <p>mov esi, eax</p>
+      <p>shr esi, PAGE_SHIFT                                 ; logical_page = pos &gt;&gt; shift</p>
+      <p>mov r8d, [page_table_flat + rdx + rsi*4]           ; phys_page = pt_flat[pt_offset + logical_page]</p>
+      <p>imul r8d, PAGE_BYTES</p>
+      <p>add r8, kv_pool_base                                ; final_addr</p>
+      <p>```</p>
+      <strong>不需要新增 VmInstr</strong>。只需 <code>PageTableAddr.seq_index</code> 从 <code>None</code> 改为 <code>Some(VRegId)</code>，
+      <p>JIT 生成多一条 pt_offset 读取指令。</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 KV 写入</h4>
+      <p>每层 forward 需要将当前 token 的 K/V 写入该序列对应的 KV cache page。</p>
+      <p>Prefill 阶段每条序列写 prompt_len 条 KV，Decode 阶段每条写 1 条。</p>
+      <p>写入地址通过 <code>PageTableAddr</code> + <code>seq_id</code> 计算，和读取同一套寻址逻辑。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Per-Sequence 采样与停止</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 Per-Sequence Argmax</h4>
+      <p>Prefill 阶段: 每条序列取自己 prompt 最后一行的 logits 做 argmax。</p>
+      <p>Decode 阶段: 每条序列取自己那行 logits 做 argmax。</p>
+      <p>Logits 布局: <code>[M, vocab_size]</code>。每条序列的 logits 行在 M 维度中有固定偏移。</p>
+      <p>argmax 只扫描该序列对应的行，结果写入 <code>last_sampled_token[seq]</code>。</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 Per-Sequence Stop Check</h4>
+      <p>```</p>
+      <p>for seq in 0..num_seqs:</p>
+      <p>  if active_flag[seq] == 0: continue</p>
+      <p>  if last_sampled_token[seq] == eos_token_ids[seq]:</p>
+      <p>    active_flag[seq] = 0</p>
+      <p>  if gen_count[seq] &gt;= max_new_tokens[seq]:</p>
+      <p>    active_flag[seq] = 0</p>
+      <p>```</p>
+      <p>全部在 JIT 机器码中完成。序列完成后从 active 集合移除，M 维度缩小。</p>
+      <p>全序列完成后 generate 循环自然终止。</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 Per-Sequence 采样参数</h4>
+      <p>从 <code>sampling_params_ptr</code> 读取 packed 参数:</p>
+      <p>```</p>
+      <p>[temperature_u32, top_k, top_p_u32, eos_token_id] × num_seqs</p>
+      <p>stride = 16 bytes</p>
+      <p>```</p>
+      <p>JIT 编译时知道 stride，运行时 <code>mov edx, [sampling_params + seq * 16]</code> 读取。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. ABI 扩展</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 当前 ABI (23 参数)</h4>
+      <p>&gt; <strong>SSOT</strong>: 完整 23 参数定义见 <code>GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.5</code> 和 <code>SPEC/15-GPU-HOST-GLUE.md</code>。</p>
+      <p>```</p>
+      <p>arg 0:  input_ids_ptr      *const u32    → rdi</p>
+      <p>arg 1:  weight_blob_ptr    *const u8     → rsi</p>
+      <p>arg 2:  kv_cache_ptr       *mut u8       → rdx</p>
+      <p>arg 3:  positions_ptr      *const u32    → rcx</p>
+      <p>arg 4:  aux_ptr            *const u8     → r8</p>
+      <p>arg 5:  batch_size         usize         → r9</p>
+      <p>arg 6:  prompt_len         usize         → [rbp+16]</p>
+      <p>...</p>
+      <p>arg 20: callback_table_ptr *const u8     → [rbp+128]</p>
+      <p>arg 21: page_table_ptr     *const u32    → [rbp+136]</p>
+      <p>arg 22: batch_ctx_ptr      *const u8     → [rbp+144]</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 新增参数</h4>
+      <code>batch_ctx_ptr</code> 是 23 参数 ABI 的 arg 22（与 <code>page_table_ptr</code> arg 21 同批次扩展，见 SPEC/18 REQ-PA-001）。
+      <li><code>batch_ctx_ptr == NULL</code> → 单序列模式，走 Phase 1.Legacy（当前逻辑不变）</li>
+      <li><code>batch_ctx_ptr != NULL</code> → batch 模式，从 flat memory 读取所有 per-seq 元数据</li>
+      <strong>向后兼容</strong>: 现有所有调用点传 NULL 即可，零行为变更。
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 复用已有参数</h4>
+      <p>batch 模式下，arg 6/9/10/11/13/17 从直接使用变为忽略（从 batch_ctx 读取 per-seq 值）。</p>
+      <table>
+        <tr>
+          <th>需求</th>
+        </tr>
+        <tr>
+          <td>已有参数</td>
+        </tr>
+        <tr>
+          <td>batch 模式下的用途</td>
+        </tr>
+        <tr>
+          <td>batch 循环</td>
+        </tr>
+        <tr>
+          <td>arg 5 </td>
+          <td>batch_size</td>
+        </tr>
+        <tr>
+          <td>从忽略变为驱动 forward M 维度</td>
+        </tr>
+        <tr>
+          <td>per-seq 状态</td>
+        </tr>
+        <tr>
+          <td>arg 7 </td>
+          <td>scratchpad</td>
+        </tr>
+        <tr>
+          <td>scratchpad 内 M 维度参数化</td>
+        </tr>
+        <tr>
+          <td>页表</td>
+        </tr>
+        <tr>
+          <td>arg 21 </td>
+          <td>page_table_ptr</td>
+        </tr>
+        <tr>
+          <td>从单序列页表变为 batch 拼接页表的 fallback</td>
+        </tr>
+        <tr>
+          <td>per-seq sampling</td>
+        </tr>
+        <tr>
+          <td>batch_ctx 内 </td>
+          <td>sampling_params_ptr</td>
+        </tr>
+        <tr>
+          <td>替代 arg 9/10/11 的单序列参数</td>
+        </tr>
+        <tr>
+          <td>per-seq prompt_len</td>
+        </tr>
+        <tr>
+          <td>batch_ctx 内 </td>
+          <td>seq_meta.prompt_len</td>
+        </tr>
+        <tr>
+          <td>替代 arg 6 的单序列参数</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. Variant 扩展</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 VariantKey 新增 batch 维度</h4>
+      <p>```rust</p>
+      <p>pub struct VariantKey {</p>
+      <p>    // ... 已有字段 ...</p>
+      <p>    /// Batch M 维度上界 (决定 activation sizing)</p>
+      <p>    /// None = 单序列 (当前行为)</p>
+      <p>    /// Some(golden_batch) = batch 模式, M 上界 = golden_batch</p>
+      <p>    pub batch_golden_size: Option&lt;usize&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>不同 <code>batch_golden_size</code> 编译出不同 scratchpad 布局。复用 <code>SeqHistogram + GoldenBucket</code></p>
+      <p>对 batch 维度做装筒，与 seq_len 维度同等处理。</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 Variant 选择</h4>
+      <p>```</p>
+      <p>Executor.select_variant_for_batch(scheduled_batch):</p>
+      <p>  golden_batch = GoldenBucket.collapse_to_golden(num_seqs)</p>
+      <p>  key = VariantKey { batch_golden_size: Some(golden_batch), ... }</p>
+      <p>  registry.find_closest(&amp;key)</p>
+      <p>```</p>
+      <p>batch_size=1 时 <code>batch_golden_size = None</code> → 走当前 Single variant。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 组件连线</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 ContinuousBatcher → BatchContext</h4>
+      <p>```rust</p>
+      <p>impl Executor {</p>
+      <p>    fn build_batch_context(&amp;self, batch: &amp;ScheduledBatch) -&gt; Vec&lt;u8&gt; {</p>
+      <p>        // 分配 flat memory: 固定头 80 bytes + num_seqs × 52</p>
+      <p>        let layout_size = 80 + batch.requests.len() * 64; // 52 padded to 64</p>
+      <p>        let mut ctx = vec![0u8; layout_size];</p>
+      <p>        // 填充头部</p>
+      <p>        write_u32(&amp;mut ctx, 0, batch.requests.len() as u32);    // num_seqs</p>
+      <p>        write_u32(&amp;mut ctx, 4, max_decode_steps);                // max_decode_steps</p>
+      <p>        write_u32(&amp;mut ctx, 8, total_prefill_tokens);            // total_prefill_tokens</p>
+      <p>        // 填充指针 (指向 caller 分配的 buffer)</p>
+      <p>        write_ptr(&amp;mut ctx, 16, input_ids_flat.as_ptr());</p>
+      <p>        write_ptr(&amp;mut ctx, 24, output_tokens_flat.as_mut_ptr());</p>
+      <p>        write_ptr(&amp;mut ctx, 32, positions.as_ptr());</p>
+      <p>        write_ptr(&amp;mut ctx, 40, page_table_flat.as_ptr());</p>
+      <p>        write_ptr(&amp;mut ctx, 48, kv_pool_base);</p>
+      <p>        write_ptr(&amp;mut ctx, 56, sampling_params.as_ptr());</p>
+      <p>        write_ptr(&amp;mut ctx, 64, hook_ctx_ptr);</p>
+      <p>        write_ptr(&amp;mut ctx, 72, callback_table_ptr);</p>
+      <p>        // 填充 per-seq 元数据 (从 PagedScheduler / SessionKvCache / running seqs 读取)</p>
+      <p>        for (i, req_id) in batch.requests.iter().enumerate() {</p>
+      <p>            let base = 80 + i * 64;</p>
+      <p>            write_u32(&amp;mut ctx, base + 0, prompt_lens[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 4, kv_lens[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 8, rope_pos_offsets[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 12, max_new_tokens[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 16, session_positions[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 20, page_table_offsets[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 24, page_table_lens[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 28, fused_hidden_offsets[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 32, num_mm_tokens[i]);</p>
+      <p>            write_u32(&amp;mut ctx, base + 36, 1); // active_flag = 1</p>
+      <p>            write_u32(&amp;mut ctx, base + 40, prompt_lens[i]); // seq_position = prompt_len</p>
+      <p>            write_u32(&amp;mut ctx, base + 44, 0); // gen_count = 0</p>
+      <p>            write_u32(&amp;mut ctx, base + 48, 0); // last_sampled_token = placeholder</p>
+      <p>        }</p>
+      <p>        ctx</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 Executor batch 推理路径</h4>
+      <p>```rust</p>
+      <p>impl Executor {</p>
+      <p>    pub fn generate_batch(&amp;self, requests: &amp;[GenerateRequest]) -&gt; Vec<generateresult> {</generateresult></p>
+      <p>        let (batch, ctx_mem) = self.build_batch_context(&amp;scheduled_batch);</p>
+      <p>        let generated = unsafe {</p>
+      <p>            (mega.entry_fn)(</p>
+      <p>                input_ids_flat.as_ptr(),      // arg 0: flat input</p>
+      <p>                mega.weight_blob.as_ptr(),     // arg 1: 权重</p>
+      <p>                kv_pool_base as *mut u8,       // arg 2: KV pool</p>
+      <p>                positions.as_ptr(),            // arg 3: 位置</p>
+      <p>                std::ptr::null(),              // arg 4: aux</p>
+      <p>                batch.requests.len(),          // arg 5: batch_size → 现在用于 forward</p>
+      <p>                0,                             // arg 6: prompt_len → 忽略 (从 ctx 读取)</p>
+      <p>                scratchpad.as_mut_ptr(),       // arg 7: scratchpad</p>
+      <p>                output_tokens_flat.as_mut_ptr(), // arg 8: flat output</p>
+      <p>                0, 0, 0,                       // arg 9-11: sampling → 忽略 (从 ctx 读取)</p>
+      <p>                0,                             // arg 12: max_new_tokens → 忽略</p>
+      <p>                0,                             // arg 13: eos_token_id → 忽略</p>
+      <p>                0,                             // arg 14: output_mode</p>
+      <p>                std::ptr::null(),              // arg 15: hook_ctx → 忽略 (从 ctx 读取)</p>
+      <p>                std::ptr::null_mut(),          // arg 16: telemetry</p>
+      <p>                0,                             // arg 17: session_position → 忽略</p>
+      <p>                std::ptr::null(),              // arg 18: fused_hidden → 忽略 (从 ctx 读取)</p>
+      <p>                0,                             // arg 19: num_mm_tokens → 忽略</p>
+      <p>                std::ptr::null(),              // arg 20: callback_table → 忽略 (从 ctx 读取)</p>
+      <p>                std::ptr::null(),              // arg 21: page_table → 忽略 (从 ctx 读取)</p>
+      <p>                ctx_mem.as_ptr(),              // arg 22: batch_ctx_ptr → NEW</p>
+      <p>            )</p>
+      <p>        };</p>
+      <p>        // 从 ctx_mem 中读取 per-seq 结果 (gen_count, output tokens)</p>
+      <p>        self.collect_batch_results(&amp;ctx_mem, output_tokens_flat)</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 compile() 改造</h4>
+      <p>```</p>
+      <p>改造点:</p>
+      <p>1. Phase 0: 加载 arg 22 → if NULL → goto Legacy (当前逻辑分支)</p>
+      <p>2. Phase 1: 从 batch_ctx 读取 num_seqs, total_prefill_tokens, max_decode_steps</p>
+      <p>3. Phase 2 (新增): Prefill forward, M = total_prefill_tokens</p>
+      <li>embed: GatherLoad 从 input_ids_flat, 按 prompt_lens 分段</li>
+      <li>Attention: per-token seq_id 查找 (§3)</li>
+      <li>per-seq argmax + store + update seq_meta</li>
+      <p>4. Phase 3 (改造): Decode step loop</p>
+      <li>M = num_active (从 active_flag 数组计算)</li>
+      <li>构建 decode input: last_sampled_token × num_active</li>
+      <li>forward (M 维度)</li>
+      <li>per-seq argmax + store + check stop + update active_flag</li>
+      <p>5. 层循环融合组（decode 路径）: Return</p>
+      <p>```</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. REQ 清单</h3>
+      <p>&gt; <strong>实现状态 (2026-05-25 审计)</strong>: 全部 10 个 REQ 已实现。</p>
+      <table data-req-index="">
+        <tr>
+          <th>REQ</th>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>实现位置</td>
+        </tr>
+        <tr>
+          <td>BCI-001</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>src/engine/batch_context.rs</td>
+        </tr>
+        <tr>
+          <td>BCI-002</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>mega_kernel.rs</td>
+          <td> KernelContext offset 0x88 + Phase 0.5 分支</td>
+        </tr>
+        <tr>
+          <td>BCI-003</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels/.../mega_kernel_emit.rs</td>
+          <td> Phase 2 (Prefill) + Phase 3 (Decode)</td>
+        </tr>
+        <tr>
+          <td>BCI-004</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>VmInstr::BatchSeqIdLookup</td>
+          <td> + </td>
+          <td>seq_mapping_ptr</td>
+          <td> (BCI6)</td>
+        </tr>
+        <tr>
+          <td>BCI-005</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>VmInstr::PageTableAddr.seq_pt_offset: Option&lt;VRegId&gt;</td>
+        </tr>
+        <tr>
+          <td>BCI-006</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>温度分支 + Per-seq argmax/softmax + </td>
+          <td>BatchPerSeqStopCheck</td>
+        </tr>
+        <tr>
+          <td>BCI-007</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>src/scheduler/batcher.rs</td>
+          <td> </td>
+          <td>build_batch_with_prep()</td>
+          <td> → </td>
+          <td>BatchPrepData</td>
+        </tr>
+        <tr>
+          <td>BCI-008</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Client::generate_batch()</td>
+          <td> → </td>
+          <td>Executor::generate_batch()</td>
+          <td> → </td>
+          <td>MegaKernelExecutor::generate_batch()</td>
+        </tr>
+        <tr>
+          <td>BCI-009</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>VariantKey.batch_golden_size</td>
+          <td> + </td>
+          <td>find_closest()</td>
+        </tr>
+        <tr>
+          <td>BCI-010</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>MegaKernelBufferLayout</td>
+          <td> M 维度参数化</td>
+        </tr>
+      </table>
+    </section>
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="001" data-req-api="API-BATCH-CONTEXT" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-001" id="req-bci-001">REQ-BCI-001: BatchContext flat memory 布局 ✅
+      <p>定义 BatchContext 的 flat memory 布局（80 字节固定头 + num_seqs x 56 字节 per-seq 元数据），由 Executor 在构建时从 PagedScheduler、SessionKvCache 和运行中序列收集所有 per-seq 信息，拼接到一块 JIT 可直接通过偏移量访问的连续内存中。</p>
+      <li>定义 <code>BATCH_CTX_HEADER_SIZE = 80</code>, <code>SEQ_META_STRIDE = 56</code> (14 × u32 fields)</li>
+      <li>定义 per-seq 字段 offset: <code>PROMPT_LEN=0, KV_LEN=4, ROPE_POS_OFFSET=8, ...</code></li>
+      <li>Executor 构建函数: <code>build_batch_context(ScheduledBatch) -&gt; Vec&lt;u8&gt;</code></li>
+      <li>从 PagedScheduler 批量收集页表</li>
+      <li>从 SessionKvCache 收集 session_position</li>
+      <li>从 running sequences 收集 kv_len, prompt_len</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-001" data-test="TEST-BCI-001" data-req-ref="REQ-BCI-001" data-test-categories="unit" <h3="">TEST-BCI-001: 批量并发推理统一架构测试<p>验证REQ-BCI-001相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-bci-002" data-req="REQ-BCI-002" data-req-status="implemented" data-req-domain="bci" data-req-category="business" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-section="002" data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-req-api="API-BATCH-CONTEXT">REQ-BCI-002: ABI arg 22 batch_ctx_ptr + 向后兼容 ✅
+      <p>在 MegaKernelFn 的 23 参数 ABI 中新增 arg 22（batch_ctx_ptr），传入 BatchContext flat memory 的基地址。当 batch_ctx_ptr 为 NULL 时走 Phase 1.Legacy 单序列路径，实现零行为变更的向后兼容。</p>
+      <li><code>MegaKernelFn</code> 新增 arg 22: <code>*const u8</code> (batch_ctx_ptr)</li>
+      <li><code>MEGA_KERNEL_PARAMS</code> 和 <code>MEGA_KERNEL_STACK_OFFSETS</code> 追加 → <code>[rbp+144]</code></li>
+      <li>JIT 代码: <code>batch_ctx_ptr == NULL</code> → Phase 1.Legacy (当前单序列逻辑，零行为变更)</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-002" data-test="TEST-BCI-002" data-req-ref="REQ-BCI-002" data-test-categories="unit" <h3="">TEST-BCI-002: 批量并发推理统一架构测试<p>验证REQ-BCI-002相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-bci-003" data-req="REQ-BCI-003" data-req-status="implemented" data-req-domain="bci" data-req-category="business" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-section="003" data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-req-api="API-BATCH-CONTEXT">REQ-BCI-003: Mega-Kernel generate 循环 M 维度统一 ✅
+      <p>将 mega-kernel 的 generate 循环从单序列扩展为 batch 统一结构：新增 Phase 2（Prefill，M = total_prefill_tokens）和改造 Phase 3（Decode step loop，M = num_active），batch_ctx_ptr 为 NULL 时走原有单序列逻辑。</p>
+      <li>Phase 2 (Prefill): <code>M = total_prefill_tokens</code> → SymDim("prefill_M")</li>
+      <li>Phase 3 (Decode): step loop, <code>M = num_active</code> → SymDim("decode_M")</li>
+      <li>Phase 1.Legacy: batch_ctx_ptr == NULL 时走当前逻辑</li>
+      <li>emit_fusion_groups 不变 — forward pass 对 M uniform</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-003" data-test="TEST-BCI-003" data-req-ref="REQ-BCI-003" data-test-categories="unit" <h3="">TEST-BCI-003: 批量并发推理统一架构测试<p>验证REQ-BCI-003相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-bci-004" data-req="REQ-BCI-004" data-req-status="implemented" data-req-domain="bci" data-req-category="business" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-section="004" data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-req-api="API-ATTENTION-BATCH">REQ-BCI-004: Attention per-token seq_id 查找 ✅
+      <p>实现 Attention 层的 per-token seq_id 查找机制：Prefill 阶段通过 cumsum(prompt_lens) 搜索确定 token 归属的序列，Decode 阶段通过 active_seq_ids 数组直接映射，用于定位该序列在 page_table_flat 中的偏移以访问正确的 KV cache。</p>
+      <li>Prefill 阶段: cumsum(prompt_lens) 搜索确定 token 属于哪条序列</li>
+      <li>Decode 阶段: active_seq_ids 直接映射</li>
+      <li>seq_id 用于定位 page_table_offset[seq] → 该序列的 KV cache</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-004" data-test="TEST-BCI-004" data-req-ref="REQ-BCI-004" data-test-categories="unit" <h3="">TEST-BCI-004: 批量并发推理统一架构测试<p>验证REQ-BCI-004相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="005" data-req-api="API-ATTENTION-BATCH" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-005" id="req-bci-005">REQ-BCI-005: PageTableAddr seq_index 参数化 ✅
+      <p>将 VmInstr::PageTableAddr 的 seq_index 字段从固定 None 改为接受运行时 seq_id 寄存器，使 KV 读取和写入地址计算支持 per-sequence 页表偏移，实现多序列共享同一个 page_table_flat 数组。</p>
+      <li><code>VmInstr::PageTableAddr.seq_index</code> 从 <code>None</code> 改为 <code>Some(VRegId)</code></li>
+      <li>JIT 地址计算: <code>page_table_flat[pt_offsets[seq] + logical_page]</code></li>
+      <li>KV 写入同套寻址逻辑</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-005" data-test="TEST-BCI-005" data-req-ref="REQ-BCI-005" data-test-categories="unit" <h3="">TEST-BCI-005: 批量并发推理统一架构测试<p>验证REQ-BCI-005相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-bci-006" data-req="REQ-BCI-006" data-req-status="implemented" data-req-domain="bci" data-req-category="business" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-section="006" data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-req-api="API-SAMPLING-BATCH">REQ-BCI-006: Per-Sequence 采样与停止 JIT 实现 ✅
+      <p>在 JIT 机器码中实现 per-sequence 采样和停止条件检查：每个序列独立读取自己的采样参数（temperature/top_k/top_p/eos），对 logits 对应行执行采样，检查 eos 匹配或 gen_count 达到上限后将 active_flag 置零。</p>
+      <li>Logits 布局 <code>[M, vocab_size]</code> — per-seq 行偏移</li>
+      <li>采样管线 (per-seq, 从 <code>sampling_params_ptr + seq × 16</code> 读取参数):</li>
+      <li>temperature == 0: Argmax (greedy)</li>
+      <li>temperature &gt; 0: TemperatureScale → Softmax (ReduceMax + ExpSum + Normalize) → TopK → TopP → Multinomial</li>
+      <li>采样结果写入两处:</li>
+      <li><code>seq_meta[seq].last_sampled_token</code> (offset +48) — 下一步 decode 的输入</li>
+      <li><code>output_tokens_flat[output_offset + gen_count]</code> — 最终输出 (output_offset 从 seq_meta +52 读取)</li>
+      <li>CheckStopCondition: eos match or gen_count &gt;= max_new_tokens</li>
+      <li>active_flag 更新: 序列完成后从活跃集合移除</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-006" data-test="TEST-BCI-006" data-req-ref="REQ-BCI-006" data-test-categories="unit" <h3="">TEST-BCI-006: 批量并发推理统一架构测试<p>验证REQ-BCI-006相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="007" data-req-api="API-SAMPLING-BATCH" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-007" id="req-bci-007">REQ-BCI-007: ContinuousBatcher 产出扩展 ✅
+      <p>扩展 ContinuousBatcher.build_batch() 的返回类型为 (ScheduledBatch, BatchPrepData)，其中 BatchPrepData 包含 prompt_lens、kv_lens、session_positions、sampling_params、page_tables 等构建 BatchContext 所需的全部中间数据。</p>
+      <li><code>build_batch()</code> 返回 <code>(ScheduledBatch, BatchPrepData)</code> — prep data 包含所有构建 BatchContext 所需的中间数据</li>
+      <li>BatchPrepData: prompt_lens, kv_lens, session_positions, sampling_params, page_tables</li>
+      <li>复用 SeqHistogram + GoldenBucket 进行形状分组</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-007" data-test="TEST-BCI-007" data-req-ref="REQ-BCI-007" data-test-categories="unit" <h3="">TEST-BCI-007: 批量并发推理统一架构测试<p>验证REQ-BCI-007相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="008" data-req-api="POST /client/generate_batch" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-008" id="req-bci-008">REQ-BCI-008: Executor batch 推理路径 ✅
+      <p>实现从 Client 到 MegaKernelExecutor 的完整 batch 推理路径：generate_batch() 公共 API 接收多请求，构建 BatchContext，以 arg 22 传入 mega-kernel，单次 CALL 完成所有序列的 prefill + decode 全生命周期，最后从 ctx_mem 收集 per-seq 结果。</p>
+      <li><code>generate_batch()</code> 公共 API (Client 层多请求并发)</li>
+      <li>Scratchpad 分配: M 维度参数化，max_M × hidden</li>
+      <li>RoPE cache: 按最大序列的 max_total 预填充</li>
+      <li>Output tokens: flat 布局，per-seq 按 prompt_len + max_new_tokens 分段</li>
+      <li>从 ctx_mem 收集 per-seq 结果</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-008" data-test="TEST-BCI-008" data-req-ref="REQ-BCI-008" data-test-categories="unit" <h3="">TEST-BCI-008: 批量并发推理统一架构测试<p>验证REQ-BCI-008相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-req-api="POST /internal/batch/concurrent_run" id="req-bci-009" data-req="REQ-BCI-009" data-req-status="implemented" data-req-domain="bci" data-req-category="business" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-section="009" data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="">REQ-BCI-009: VariantKey batch 维度扩展 ✅
+      <p>在 VariantKey 中新增 batch_golden_size 字段，batch_size=1 时为 None 走 Single variant，batch_size=N 时通过 GoldenBucket 装筒映射到最近的 golden size，复用 VariantRegistry.find_closest() 的 constraint relaxation 机制。</p>
+      <li><code>VariantKey</code> 新增 <code>batch_golden_size: Option&lt;usize&gt;</code></li>
+      <li>batch_size=1 → None (当前 Single variant)</li>
+      <li>batch_size=N → Some(golden_bucket) (Batch variant)</li>
+      <li>GoldenBucket 装筒与 seq_len 维度同等处理</li>
+      <li>复用 <code>VariantRegistry.find_closest()</code> constraint relaxation</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-009" data-test="TEST-BCI-009" data-req-ref="REQ-BCI-009" data-test-categories="unit" <h3="">TEST-BCI-009: 批量并发推理统一架构测试<p>验证REQ-BCI-009相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-req-api="POST /internal/batch/concurrent_run" id="req-bci-010" data-req="REQ-BCI-010" data-req-status="implemented" data-req-domain="bci" data-req-category="business" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-section="010" data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="">REQ-BCI-010: MegaKernelBufferLayout M 维度参数化 ✅
+      <p>扩展 MegaKernelBufferLayout 的 activation 和 logits sizing 从固定 max_seq_len 改为 max_M 参数化，Prefill 阶段 M = total_prefill_tokens、Decode 阶段 M = num_active_seqs，RoPE cache 保持按最大序列长度不变。</p>
+      <li><code>from_graph_geometry_batched(geo, max_M, max_seq_len)</code> — 新增 max_M 参数</li>
+      <li>Activation sizing: <code>max_M × hidden</code> (替代 <code>max_seq_len × hidden</code>)</li>
+      <li>Logits sizing: <code>max_M × vocab_size</code> (替代 <code>max_seq_len × vocab_size</code>)</li>
+      <li>RoPE cache: max_seq_len × head_dim × 2 (不变，按最长序列)</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">BatchContext flat memory 布局正确</li>
+        <li id="2" data-criterion="2">Per-token seq_id 查找替代 CSR indptr</li>
+        <li id="3" data-criterion="3">单次 CALL 完成 M 条序列全生命周期</li>
+        <li id="4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler" ENT-PAGED-SCHEDULER<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache" ENT-KV-CACHE<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-bci-010" data-test="TEST-BCI-010" data-req-ref="REQ-BCI-010" data-test-categories="unit" <h3="">TEST-BCI-010: 批量并发推理统一架构测试<p>验证REQ-BCI-010相关功能正确性</p>
+      <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
+      <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
+      <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-hgal-001" data-req="REQ-HGAL-001" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="011" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-001: HGAL 页面生命周期管理 ✅</h4>
+      <p>HGAL 页面生命周期管理：warm_until 从 swap_in_time 推导（warm_until 为 None 时自动计算）；select_coldest_lir 在所有页面 recency 相同时仍返回有效页面；页面状态 Standby/Warm/Protected 转换。</p>
+      <ul><li><code>warm_until</code> 为 None 时从 <code>swap_in_time + warmup_duration</code> 推导</li><li><code>select_coldest_lir</code> 在所有页面 recency 相同时返回任意有效页面</li><li>Standby 页面不触发 group protection</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>warm_until 从 swap_in_time 正确推导</li><li>select_coldest_lir 在 recency 相同时返回有效页面</li><li>Standby 状态不触发 group protection</li></ol></div>
+    </section>
+
+    <section id="req-hgal-002" data-req="REQ-HGAL-002" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="012" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-002: HGAL 紧急换出与组优先级 ✅</h4>
+      <p>HGAL 紧急换出路径与组优先级计算：compute_group_priority 在页面缺少 metadata 时仍能计算有效优先级；group_has_protection 在 metadata 缺失或 Standby 状态时返回 false。</p>
+      <ul><li><code>compute_group_priority</code> 对缺失 metadata 的页面不 panic</li><li><code>group_has_protection</code> 在 metadata 缺失时返回 false</li><li><code>group_has_protection</code> 在 Standby 状态时返回 false</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>compute_group_priority 在 metadata 缺失时不 panic</li><li>group_has_protection(metadata=absent) = false</li><li>group_has_protection(state=Standby) = false</li></ol></div>
+    </section>
+
+    <section id="req-hgal-003" data-req="REQ-HGAL-003" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="013" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-003: HGAL 受害者选择与 Prefill 去重 ✅</h4>
+      <p>HGAL 受害者组选择与 Prefill 去重：on_prefill_chunk_complete 对组内页面去重；select_victim_groups 在所有组 pinned 时返回空；unpicked 组优先于 pinned 组被选为受害者。</p>
+      <ul><li><code>on_prefill_chunk_complete</code> 对组内页面去重</li><li><code>select_victim_groups</code> 在所有组 pinned 时返回空</li><li>unpicked 组优先于 pinned 组被选为受害者</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>prefill chunk 完成后组内页面无重复</li><li>所有组 pinned 时受害者列表为空</li><li>unpicked 组优先于 pinned 组</li></ol></div>
+    </section>
+
+    <section id="req-hgal-004" data-req="REQ-HGAL-004" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="014" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-004: HGAL Expert/Dense 权重页管理 ✅</h4>
+      <p>HGAL Expert 与 Dense 权重页管理：register_expert_then_dense 同层注册后 free 移除全部页面；free_dense_layer_weight_pages 对缺失层为 noop。</p>
+      <ul><li>同层 expert+dense 注册后 free 移除全部页面（含 dense）</li><li><code>free_dense_layer_weight_pages</code> 对缺失层为 noop</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>expert+dense 同层 free 移除全部页面</li><li>缺失层 free 为 noop</li></ol></div>
+    </section>
+
+    <section id="req-hgal-005" data-req="REQ-HGAL-005" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="015" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-005: HGAL 换入换出状态正确性 ✅</h4>
+      <p>HGAL 换入换出状态正确性：零 warmup 时 warm_until 等于 swap_in_time；完整 swap_in→swap_out 周期后页面状态正确。</p>
+      <ul><li>零 warmup 时 <code>warm_until == swap_in_time</code></li><li>swap_in→swap_out 完整周期后页面状态正确</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>零 warmup 时 warm_until 等于 swap_in_time</li><li>swap_in/swap_out 周期后状态一致</li></ol></div>
+    </section>
+
+    <section id="req-hgal-006" data-req="REQ-HGAL-006" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="016" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-006: HGAL Working Set 检测 ✅</h4>
+      <p>HGAL Working Set 检测：零阈值时所有近期页面提升为 Active；Protected 页面过期后降级为 Standby。</p>
+      <ul><li>零阈值时所有近期访问页面提升为 Active</li><li>Protected 页面过期后降级为 Standby</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>零阈值时近期页面均为 Active</li><li>Protected 过期降级为 Standby</li></ol></div>
+    </section>
+
+    <section id="req-hgal-007" data-req="REQ-HGAL-007" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="017" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-007: HGAL Dense 层权重页计数与访问标记 ✅</h4>
+      <p>HGAL Dense 层权重页计数与访问标记：无 dense 组时 num_dense_layer_weight_pages 返回零；所有页面 protected 时 select_victim_weight_pages 返回空；mark_accessed 为未知页面创建 metadata。</p>
+      <ul><li>无 dense 组时 <code>num_dense_layer_weight_pages</code> 返回零</li><li>所有页面 protected 时 <code>select_victim_weight_pages</code> 返回空</li><li><code>mark_accessed</code> 为未知页面创建 metadata</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>无 dense 组时计数为零</li><li>全 protected 时受害者为空</li><li>mark_accessed 为未知页面创建 metadata</li></ol></div>
+    </section>
+
+    <section id="req-hgal-008" data-req="REQ-HGAL-008" data-req-status="implemented" data-req-domain="hgal" data-req-category="technical" data-req-entity="ENT-PAGED-SCHEDULER" data-section="018" data-entity-ref="ENT-HGAL" data-req-api="API-HGAL">
+      <h4>REQ-HGAL-008: HGAL 组移除与页面状态更新 ✅</h4>
+      <p>HGAL 组移除与页面状态更新：remove_group 不影响页面 metadata；update_page_state_to_free 不清除 recency；compute_eviction_priority 对无 layer_idx 的 expert 权重页正确计算。</p>
+      <ul><li><code>remove_group</code> 不影响页面 metadata</li><li><code>update_page_state_to_free</code> 不清除 recency</li><li><code>compute_eviction_priority</code> 对无 layer_idx 的 expert 页正确计算</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>组移除后页面 metadata 保留</li><li>页面状态更新为 free 时 recency 保留</li><li>expert 页无 layer_idx 时 eviction priority 正确</li></ol></div>
+    </section>
+
+    <section data-req-api="POST /internal/fault/recover" id="req-fault-001" data-req="REQ-FAULT-001" data-req-status="implemented" data-req-domain="fault" data-req-category="technical" data-req-entity="ENT-FAULT-HANDLER" data-section="019" data-entity-ref="ENT-FAULT-HANDLER">
+      <h4>REQ-FAULT-001: MoE Fault Handler 基础 ✅</h4>
+      <p>MoE Fault Handler 基础：handle_fault 处理 expert 权重缺失故障，负内存压力总是接受；complete_restoration 完成恢复后清理状态；stats 正确统计故障次数和恢复时间。</p>
+      <ul><li><code>handle_fault</code> 处理 expert 权重缺失故障</li><li>负内存压力总是接受（紧急恢复路径）</li><li><code>complete_restoration</code> 完成后清理 in_flight 状态</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>handle_fault 正确记录故障</li><li>负内存压力总是接受</li><li>complete_restoration 清理状态</li></ol></div>
+    </section>
+
+    <section data-req-api="POST /internal/fault/recover" id="req-fault-002" data-req="REQ-FAULT-002" data-req-status="implemented" data-req-domain="fault" data-req-category="technical" data-req-entity="ENT-FAULT-HANDLER" data-section="020" data-entity-ref="ENT-FAULT-HANDLER">
+      <h4>REQ-FAULT-002: MoE Fault 恢复追踪 ✅</h4>
+      <p>MoE Fault 恢复追踪：OOB expert 的 complete_restoration 不追踪恢复；stats 在无故障时 avg_recovery_us 为零；suspended_request_count 在恢复完成后归零。</p>
+      <ul><li>OOB expert <code>complete_restoration</code> 不追踪恢复</li><li>无故障时 <code>avg_recovery_us</code> 为零</li><li><code>suspended_request_count</code> 在恢复完成后归零</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>OOB expert 不追踪恢复</li><li>无故障时统计为零</li><li>恢复完成后挂起计数归零</li></ol></div>
+    </section>
+
+    <section data-req-api="POST /internal/fault/recover" id="req-fault-003" data-req="REQ-FAULT-003" data-req-status="implemented" data-req-domain="fault" data-req-category="technical" data-req-entity="ENT-FAULT-HANDLER" data-section="021" data-entity-ref="ENT-FAULT-HANDLER">
+      <h4>REQ-FAULT-003: MoE Thundering Herd 防护 ✅</h4>
+      <p>MoE Thundering Herd 防护：多个请求同时触发同一 expert 的 fault 时，第一个 fault 的 weight_source 胜出，后续请求挂起等待；恢复后唤醒所有挂起请求。</p>
+      <ul><li>多个并发 fault 对同一 expert，第一个 <code>weight_source</code> 胜出</li><li>后续请求挂起等待</li><li>恢复后唤醒所有挂起请求</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>并发 fault 只有第一个进入恢复</li><li>后续请求正确挂起</li><li>恢复后唤醒所有挂起请求</li></ol></div>
+    </section>
+
+    <section data-req-api="POST /internal/fault/recover" id="req-fault-004" data-req="REQ-FAULT-004" data-req-status="implemented" data-req-domain="fault" data-req-category="technical" data-req-entity="ENT-FAULT-HANDLER" data-section="022" data-entity-ref="ENT-FAULT-HANDLER">
+      <h4>REQ-FAULT-004: MoE Fault 统计一致性 ✅</h4>
+      <p>MoE Fault 统计一致性：complete_restoration 后的步骤不影响恢复统计；is_restoration_pending 在恢复完成后返回 false；expert_fault_count 正确计数。</p>
+      <ul><li><code>complete_restoration</code> 后步骤不影响恢复统计</li><li><code>is_restoration_pending</code> 在完成后返回 false</li><li><code>expert_fault_count</code> 正确计数</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>恢复完成后统计不再变化</li><li>is_restoration_pending 返回 false</li><li>expert_fault_count 与实际故障数一致</li></ol></div>
+    </section>
+
+    <section data-req-api="POST /internal/fault/recover" id="req-fault-005" data-req="REQ-FAULT-005" data-req-status="implemented" data-req-domain="fault" data-req-category="technical" data-req-entity="ENT-FAULT-HANDLER" data-section="023" data-entity-ref="ENT-FAULT-HANDLER">
+      <h4>REQ-FAULT-005: MoE Fault Handler 大规模验证 ✅</h4>
+      <p>MoE Fault Handler 大规模验证：256 expert 场景下的扩展性验证，确保故障处理、恢复追踪、Thundering Herd 防护在大量 expert 下仍然正确。</p>
+      <ul><li>256 expert 场景下扩展性验证</li><li>故障处理、恢复、Thundering Herd 在大规模下正确</li></ul>
+      <div data-criteria=""><h5>验收标准</h5><ol><li>256 expert 场景下所有功能正确</li><li>故障处理线性扩展</li></ol></div>
+    </section>
+
+    <section id="s9" data-section="9">
+      <h3>9. 实施依赖图</h3>
+      <p>```</p>
+      <p>REQ-BCI-002 (ABI arg 22)</p>
+      <p>    │</p>
+      <p>REQ-BCI-001 (BatchContext flat layout)</p>
+      <p>    │</p>
+      <p>REQ-BCI-010 (BufferLayout M 维度参数化)</p>
+      <p>    │</p>
+      <p>REQ-BCI-003 (generate 循环 M 维度统一)</p>
+      <p>    ├── REQ-BCI-004 (Attention seq_id 查找)</p>
+      <p>    ├── REQ-BCI-005 (PageTableAddr seq_index)</p>
+      <p>    └── REQ-BCI-006 (Per-Seq 采样停止)</p>
+      <p>         │</p>
+      <p>REQ-BCI-007 (Batcher 产出扩展)</p>
+      <p>REQ-BCI-009 (Variant batch 维度)</p>
+      <p>         │</p>
+      <p>REQ-BCI-008 (Executor batch 连线)</p>
+      <p>```</p>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 与现有 SPEC 的交叉引用</h3>
+      <table data-req-index="">
+        <tr>
+          <th>本文档 REQ</th>
+        </tr>
+        <tr>
+          <td>影响的已有组件</td>
+        </tr>
+        <tr>
+          <td>改造性质</td>
+        </tr>
+        <tr>
+          <td>BCI-001</td>
+        </tr>
+        <tr>
+          <td>Executor</td>
+        </tr>
+        <tr>
+          <td>新增 </td>
+          <td>build_batch_context()</td>
+        </tr>
+        <tr>
+          <td>BCI-002</td>
+        </tr>
+        <tr>
+          <td>MegaKernelFn</td>
+          <td>, </td>
+          <td>MEGA_KERNEL_PARAMS</td>
+        </tr>
+        <tr>
+          <td>+1 ABI 参数</td>
+        </tr>
+        <tr>
+          <td>BCI-003</td>
+        </tr>
+        <tr>
+          <td>compile()</td>
+          <td> Phase 0-3 + 融合组</td>
+        </tr>
+        <tr>
+          <td>Phase 1.Legacy + Phase 2/3 新增</td>
+        </tr>
+        <tr>
+          <td>BCI-004</td>
+        </tr>
+        <tr>
+          <td>compile()</td>
+          <td> Attention</td>
+        </tr>
+        <tr>
+          <td>新增 seq_id 查找逻辑</td>
+        </tr>
+        <tr>
+          <td>BCI-005</td>
+        </tr>
+        <tr>
+          <td>VmInstr::PageTableAddr</td>
+        </tr>
+        <tr>
+          <td>seq_index 参数化</td>
+        </tr>
+        <tr>
+          <td>BCI-006</td>
+        </tr>
+        <tr>
+          <td>Argmax/StoreToken/CheckStopCondition 融合组</td>
+        </tr>
+        <tr>
+          <td>per-seq 偏移</td>
+        </tr>
+        <tr>
+          <td>BCI-007</td>
+        </tr>
+        <tr>
+          <td>ContinuousBatcher</td>
+        </tr>
+        <tr>
+          <td>返回类型扩展</td>
+        </tr>
+        <tr>
+          <td>BCI-008</td>
+        </tr>
+        <tr>
+          <td>Executor</td>
+          <td>, </td>
+          <td>Client</td>
+        </tr>
+        <tr>
+          <td>新增 </td>
+          <td>generate_batch()</td>
+          <td> API</td>
+        </tr>
+        <tr>
+          <td>BCI-009</td>
+        </tr>
+        <tr>
+          <td>VariantKey</td>
+          <td>, </td>
+          <td>VariantRegistry</td>
+        </tr>
+        <tr>
+          <td>新增 batch_golden_size</td>
+        </tr>
+        <tr>
+          <td>BCI-010</td>
+        </tr>
+        <tr>
+          <td>MegaKernelBufferLayout</td>
+        </tr>
+        <tr>
+          <td>max_M 参数化</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-BATCH-CONTEXT" id="ent-batch-context"><h4>ENT-BATCH-CONTEXT</h4><p>BatchContext — 批量并发推理上下文（struct BatchContext in gllm/src/engine/batch_context.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_seqs" data-type="number" data-required="true" <td="">num_seqs<td>number</td><td>是</td><td>usize, 当前序列数</td><td>当前批次中的活跃序列数</td></tr>
+<tr data-field="max_batch_size" data-type="number" data-required="true" <td="">max_batch_size<td>number</td><td>是</td><td>usize, &gt;= num_seqs</td><td>最大批次容量（SPEC 32 扩展区大小依据）</td></tr><tr data-field="has_v2_extension" data-type="boolean" data-required="true" <td="">has_v2_extension<td>boolean</td><td>是</td><td>SPEC 32 扩展区是否存在</td><td>是否包含 SPEC 32 扩展区</td></tr><tr data-field="data_size" data-type="number" data-required="true" <td="">data_size<td>number</td><td>是</td><td>字节</td><td>
+flat memory buffer 总大小</td></tr><tr data-field="seq_mapping_len" data-type="number" data-required="false" <td="">seq_mapping_len<td>number</td><td>否</td><td>Vec&lt;u32&gt; 长度</td><td>per-token seq_mapping 长度</td></tr><tr data-field="header_size" data-type="number" data-required="false" <td="">header_size<td>number</td><td>否</td><td>96 字节</td><td>固定头大小</td></tr><tr data-field="seq_meta_stride" data-type="number" data-required="false" <td="">seq_meta_stride<td>number</td><td>否</td><td>
+64 字节</td><td>per-seq 元数据步长</td></tr><tr data-field="extension_size" data-type="number" data-required="false" <td="">extension_size<td>number</td><td>否</td><td>96 字节</td><td>SPEC 32 扩展区大小</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-KV-CACHE" id="ent-kv-cache">
+        <h4>ENT-KV-CACHE</h4>
+        <p>KvCache — KV缓存数据结构</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="num_kv_heads" data-type="number" data-required="true" <td="">num_kv_heads<td>number</td><td>是</td><td>usize</td><td>KV注意力头数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">
+head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度</td></tr><tr data-field="kv_dtype" data-type="string" data-required="true" <td="">kv_dtype<td>string</td><td>是</td><td>DType</td><td>KV cache元素dtype</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>usize</td><td>
+页大小 (tokens per page)</td></tr><tr data-field="num_kv_shared_layers" data-type="number" data-required="true" <td="">num_kv_shared_layers<td>number</td><td>是</td><td>usize</td><td>SharedKvRef共享KV层数</td></tr><tr data-field="is_mla" data-type="boolean" data-required="true" <td="">is_mla<td>boolean</td><td>是</td><td></td><td>是否为MLA模型</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-MEGA-KERNEL-FN" id="ent-mega-kernel-fn">
+        <h4>ENT-MEGA-KERNEL-FN</h4>
+        <p>MegaKernelFn — 唯一编译产物 ABI (23+参数函数指针)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="entry_fn" data-type="string" data-required="true" <td="">entry_fn<td>string</td><td>是</td><td>MegaKernelFn = unsafe extern "C" fn(*const u8) -&gt; u32</td><td>JIT编译产物函数指针</td></tr><tr data-field="weight_layout" data-type="string" data-required="true" <td="">weight_layout<td>string</td><td>是</td><td>WeightLayout</td><td>
+权重blob中每个tensor的偏移布局</td></tr><tr data-field="buffer_layout" data-type="string" data-required="true" <td="">buffer_layout<td>string</td><td>是</td><td>BufferLayout</td><td>运行时缓冲布局 (activation/logits/sampling)</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小 (logits每行元素数)</td></tr><tr data-field="hidden" data-type="number" data-required="true" <td="">hidden<td>number</td><td>是</td><td>usize</td><td>
+隐藏维度 (SG scratchpad需要)</td></tr><tr data-field="elem_bytes" data-type="number" data-required="true" <td="">elem_bytes<td>number</td><td>是</td><td>usize</td><td>每元素字节数 (compute dtype)</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>编译时max_seq_len (KV cache层步长)</td></tr><tr data-field="mtp_depth" data-type="number" data-required="true" <td="">mtp_depth<td>number</td><td>是</td><td>usize</td><td>
+MTP预测深度 (0=禁用)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-PAGED-SCHEDULER" id="ent-paged-scheduler">
+        <h4>ENT-PAGED-SCHEDULER</h4>
+        <p>PagedScheduler — PagedAttention调度器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>usize</td><td>页大小 (tokens per block)</td></tr><tr data-field="total_blocks" data-type="number" data-required="true" <td="">total_blocks<td>number</td><td>是</td><td>usize</td><td>总物理页数</td></tr>
+<tr data-field="used_blocks" data-type="number" data-required="true" <td="">used_blocks<td>number</td><td>是</td><td>usize</td><td>已使用页数</td></tr><tr data-field="num_block_tables" data-type="number" data-required="true" <td="">num_block_tables<td>number</td><td>是</td><td>usize</td><td>活跃请求块表数量</td></tr><tr data-field="hgal" data-type="string" data-required="true" <td="">hgal<td>string</td><td>是</td><td>HGALScheduler</td><td>HGAL调度器实例</td></tr>
+<tr data-field="prefix_index" data-type="string" data-required="true" <td="">prefix_index<td>string</td><td>是</td><td>KvPrefixIndex</td><td>KV前缀索引 (trie)</td></tr><tr data-field="memory_manager" data-type="string" data-required="true" <td="">memory_manager<td>string</td><td>是</td><td>GlobalMemoryManager</td><td>三级内存管理器 (L1 GPU/L2 CPU/L3 NVMe)</td></tr><tr data-field="vllm_state" data-type="string" data-required="false" <td="">vllm_state<td>string</td><td>否</td><td>
+Option&lt;Scheduler2024State&gt;</td><td>vLLM 2024调度器状态</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-SEQUENCE-GROUP" id="ent-sequence-group"><h4>ENT-SEQUENCE-GROUP</h4><p>SequenceGroup — 同一请求的页组 (gang调度, 整组驱逐避免碎片)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="id" data-type="number" data-required="true" <td="">id<td>number</td><td>是</td><td>RequestId</td><td>请求唯一标识</td></tr><tr data-field="pages" data-type="string" data-required="true" <td="">pages<td>string</td><td>是</td><td>Vec&lt;PageId&gt;</td>
+<td>该组拥有的页 ID 列表</td></tr><tr data-field="state" data-type="string" data-required="true" <td="">state<td>string</td><td>是</td><td>Running|Swapped|Paused</td><td>组状态</td></tr><tr data-field="access_count" data-type="number" data-required="true" <td="">access_count<td>number</td><td>是</td><td></td><td>访问计数 (IRR 驱动驱逐)</td></tr><tr data-field="is_pinned" data-type="boolean" data-required="true" <td="">is_pinned<td>boolean</td><td>是</td><td></td><td>是否钉住 (prefill 期间免疫驱逐)</td></tr>
+<tr data-field="context_len" data-type="number" data-required="true" <td="">context_len<td>number</td><td>是</td><td></td><td>序列上下文总 token 数</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+      
+    </section>
+<section data-entity-model-type="relational" data-entity="ENT-FAULT-HANDLER" id="ent-fault-handler"><h3>ENT-FAULT-HANDLER MoE Fault Handler</h3><table data-entity-table="ENT-FAULT-HANDLER"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-required="true" data-type="number" data-field="max_faulty_experts"><td>max_faulty_experts</td><td>number</td><td>是</td><td></td><td>最大容许故障专家数</td></tr><tr data-required="true" data-type="string" data-field="recovery_policy"><td>recovery_policy</td><td>string</td><td>是</td><td></td><td>故障恢复策略（skip/fallback/retry/redistribute）</td></tr><tr data-required="true" data-type="number" data-field="num_faulty"><td>num_faulty</td><td>number</td><td>是</td><td></td><td>故障专家数</td></tr><tr data-required="false" data-type="number" data-field="timeout_threshold"><td>timeout_threshold</td><td>number</td><td>否</td><td></td><td>超时阈值（秒）</td></tr><tr data-required="false" data-type="boolean" data-field="auto_retry"><td>auto_retry</td><td>boolean</td><td>否</td><td></td><td>是否自动重试故障专家</td></tr></table></section><section id="post-/internal/scheduler/build-batch" data-api="POST /internal/scheduler/build_batch" data-api-type="internal" data-api-name="API-SCHEDULER-BATCH"><h4>POST /internal/scheduler/build_batch — ContinuousBatcher::build_batch()</h4><p>连续批处理构建 API，从等待队列中选取请求组装执行批次</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="RequestQueue" data-required="true" data-param="queue"><td>queue</td><td>RequestQueue</td><td>是</td><td>请求等待队列</td></tr><tr data-type="usize" data-required="true" data-param="kv_budget"><td>kv_budget</td><td>usize</td><td>是</td><td>KV Cache 预算</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="ExecutionBatch"><td>200</td><td>成功</td><td>ExecutionBatch</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section id="post-/internal/scheduler/add-sequence" data-api="POST /internal/scheduler/add_sequence" data-api-type="internal" data-api-name="API-PAGED-SCHEDULER"><h4>POST /internal/scheduler/add_sequence — PagedScheduler::add_sequence()</h4><p>分页调度器 API，添加新序列到分页调度器管理</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="Sequence" data-required="true" data-param="sequence"><td>sequence</td><td>Sequence</td><td>是</td><td>待调度序列</td></tr><tr data-type="u32" data-required="false" data-param="priority"><td>priority</td><td>u32</td><td>否</td><td>调度优先级</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="SequenceHandle"><td>200</td><td>成功</td><td>SequenceHandle</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section data-api="POST /internal/batch_context/build" id="post-/internal/batch-context/build" data-api-type="internal" data-api-name="API-BATCH-CONTEXT"><h4>POST /internal/batch_context/build — BatchContext build</h4><p>批量并发推理上下文构建接口，管理 M 维度（sequence slot）的资源分配与生命周期。支持 prefill/decode 混合批、动态序列加入/移除、KV cache 页面分配。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section data-api="POST /internal/attention/batch" id="post-/internal/attention/batch" data-api-type="internal" data-api-name="API-ATTENTION-BATCH"><h4>POST /internal/attention/batch — Attention per-token seq_id</h4><p>注意力批处理 per-token seq_id 映射接口，支持同一 batch 内不同序列的 token 混合调度。提供 position id 映射、KV cache slot 分配、attention mask 生成。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section data-api="POST /internal/sampling/batch" id="post-/internal/sampling/batch" data-api-type="internal" data-api-name="API-SAMPLING-BATCH"><h4>POST /internal/sampling/batch — Per-sequence sampling</h4><p>Per-sequence 采样接口，每个序列在 batch 内独立执行采样逻辑。支持 temperature/top_p/top_k/min_p 等采样策略，保证序列间采样状态隔离。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section>
+<section data-api="POST /internal/hgal/manage" id="post-/internal/hgal/manage" data-api-type="internal" data-api-name="API-HGAL"><h4>POST /internal/hgal/manage — HGAL page management</h4><p>HGAL 页面管理接口，管理 KV cache 页面的分配、换入换出、受害者选择、Working Set 检测。支持 Expert/Dense 权重页、组优先级、紧急换出。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：20-BATCH-CONCURRENT-INFERENCE.html</address>
+  </footer>
+<section data-tests-section="" id="testing"><h2>测试用例</h2><div data-test-categories="unit" data-req-ref="REQ-HGAL-001" data-test="TEST-HGAL-001" id="test-hgal-001"><h4>TEST-HGAL-001: REQ-HGAL-001 单元测试</h4><p>TODO: 为 REQ-HGAL-001 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-002" data-test="TEST-HGAL-002" id="test-hgal-002"><h4>TEST-HGAL-002: REQ-HGAL-002 单元测试</h4><p>TODO: 为 REQ-HGAL-002 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-003" data-test="TEST-HGAL-003" id="test-hgal-003"><h4>TEST-HGAL-003: REQ-HGAL-003 单元测试</h4><p>TODO: 为 REQ-HGAL-003 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-004" data-test="TEST-HGAL-004" id="test-hgal-004"><h4>TEST-HGAL-004: REQ-HGAL-004 单元测试</h4><p>TODO: 为 REQ-HGAL-004 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-005" data-test="TEST-HGAL-005" id="test-hgal-005"><h4>TEST-HGAL-005: REQ-HGAL-005 单元测试</h4><p>TODO: 为 REQ-HGAL-005 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-006" data-test="TEST-HGAL-006" id="test-hgal-006"><h4>TEST-HGAL-006: REQ-HGAL-006 单元测试</h4><p>TODO: 为 REQ-HGAL-006 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-007" data-test="TEST-HGAL-007" id="test-hgal-007"><h4>TEST-HGAL-007: REQ-HGAL-007 单元测试</h4><p>TODO: 为 REQ-HGAL-007 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-HGAL-008" data-test="TEST-HGAL-008" id="test-hgal-008"><h4>TEST-HGAL-008: REQ-HGAL-008 单元测试</h4><p>TODO: 为 REQ-HGAL-008 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-FAULT-001" data-test="TEST-FAULT-001" id="test-fault-001"><h4>TEST-FAULT-001: REQ-FAULT-001 单元测试</h4><p>TODO: 为 REQ-FAULT-001 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-FAULT-002" data-test="TEST-FAULT-002" id="test-fault-002"><h4>TEST-FAULT-002: REQ-FAULT-002 单元测试</h4><p>TODO: 为 REQ-FAULT-002 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-FAULT-003" data-test="TEST-FAULT-003" id="test-fault-003"><h4>TEST-FAULT-003: REQ-FAULT-003 单元测试</h4><p>TODO: 为 REQ-FAULT-003 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-FAULT-004" data-test="TEST-FAULT-004" id="test-fault-004"><h4>TEST-FAULT-004: REQ-FAULT-004 单元测试</h4><p>TODO: 为 REQ-FAULT-004 编写测试用例</p></div><div data-test-categories="unit" data-req-ref="REQ-FAULT-005" data-test="TEST-FAULT-005" id="test-fault-005"><h4>TEST-FAULT-005: REQ-FAULT-005 单元测试</h4><p>TODO: 为 REQ-FAULT-005 编写测试用例</p></div></section></body>
+</html>

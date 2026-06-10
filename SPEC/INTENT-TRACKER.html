@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="INTENT-TRACKER" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"INTENT-TRACKER", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>Signal-Aware Intent Tracker — 自定义分类模型集成协议</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>INTENT-TRACKER</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-signal-aware-intent-tracker-自定义分类模型集成协议" data-section="null">
+      <h2>Signal-Aware Intent Tracker — 自定义分类模型集成协议</h2>
+      <p>&gt; <strong>SSOT</strong>: 本文档定义 gllm 集成 SignalIntentTracker 自定义分类模型的唯一真源。</p>
+      <p>&gt; <strong>关联需求</strong>: <code>SPEC/01-REQUIREMENTS.md §15</code> REQ-INTENT-001..003, <code>SPEC/SUPPORTED_MODELS.md §4</code> REQ-MODEL-006</p>
+      <p>&gt; <strong>关联上层 API</strong>: <code>SPEC/04-API-DESIGN.md §3.10</code> Intent Recall SDK</p>
+      <p>&gt; <strong>关联 JIT 管线</strong>: <code>SPEC/01-JIT-PIPELINE.md</code>, <code>SPEC/04-OPERATORS.md</code>, <code>SPEC/03-GRAPH-IR.md</code></p>
+      <p>&gt; <strong>遵守铁律</strong>: ARCH-FULL-JIT、ARCH-CPU-GPU-UNIFIED、NO_SILENT_FALLBACK、NO_ISLAND_MODULE、DRY</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 动机</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 为什么需要自定义分类模型</h4>
+      <p>gllm 已支持标准 HuggingFace classifier 模型（BERT + Linear head）。但实际业务中存在<strong>非标准分类架构</strong>：</p>
+      <li>自定义 attention 机制（非标准 transformer 层）</li>
+      <li>多信号融合（文本 embedding + 结构化信号）</li>
+      <li>多任务输出（task_type + difficulty 同时预测）</li>
+      <li>固定 KV cache + 循环覆盖（状态追踪，非序列生成）</li>
+      <p>SignalIntentTracker 就是这类模型：3.65M 参数，接收预编码 768 维 embedding 序列，输出 3 类任务类型 + 4 类难度。gllm 应能以统一的 JIT 管线高效执行此类模型。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 与现有 Intent Recall SDK 的关系</h4>
+      <strong>协同工作流</strong>: Intent Recall SDK 提供 encoder，Intent Tracker 提供 classifier。两者可组合为端到端管线。
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>Intent Recall SDK</td>
+        </tr>
+        <tr>
+          <td>Intent Tracker (本文档)</td>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>从 LLM 中间层抽取 hidden</td>
+        </tr>
+        <tr>
+          <td>独立分类模型推理</td>
+        </tr>
+        <tr>
+          <td>模型</td>
+        </tr>
+        <tr>
+          <td>复用已有 LLM 权重</td>
+        </tr>
+        <tr>
+          <td>独立的 3.65M 模型</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>原始文本</td>
+        </tr>
+        <tr>
+          <td>预编码 embedding 序列</td>
+        </tr>
+        <tr>
+          <td>输出</td>
+        </tr>
+        <tr>
+          <td>中间层 embedding 向量</td>
+        </tr>
+        <tr>
+          <td>分类 logits (task + difficulty)</td>
+        </tr>
+        <tr>
+          <td>关系</td>
+        </tr>
+        <tr>
+          <td>可作为 Tracker 的上游</td>
+        </tr>
+        <tr>
+          <td>消费 encoder 输出</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 模型架构</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 信号流</h4>
+      <p>```</p>
+      <p>预编码 embeddings (B, T, 768)</p>
+      <p>  + role_embedding (B, T, 768)</p>
+      <p>  → info_weight = MLP(e_t) → (B, T) 连续值 0-1</p>
+      <p>  → Q = W_q(e), K = W_k(e), V = W_v(e) * info_weight</p>
+      <p>  → Multi-head Attention (4×192, causal, recency bias)</p>
+      <p>  → Dual-path context (gate * last + (1-gate) * aggregated)</p>
+      <p>  → classifier_input = [e_last, context, scalar_features, signal_emb]</p>
+      <p>  → task_logits (B, 3), difficulty_logits (B, 4)</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 参数清单</h4>
+      <table>
+        <tr>
+          <th>模块</th>
+        </tr>
+        <tr>
+          <td>权重名</td>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>参数量</td>
+        </tr>
+        <tr>
+          <td>InfoWeightEstimator</td>
+        </tr>
+        <tr>
+          <td>info_estimator.net.*</td>
+        </tr>
+        <tr>
+          <td>768→512→128→1</td>
+        </tr>
+        <tr>
+          <td>~460K</td>
+        </tr>
+        <tr>
+          <td>Role Embedding</td>
+        </tr>
+        <tr>
+          <td>role_emb.weight</td>
+        </tr>
+        <tr>
+          <td>(2, 768)</td>
+        </tr>
+        <tr>
+          <td>1.5K</td>
+        </tr>
+        <tr>
+          <td>W_q</td>
+        </tr>
+        <tr>
+          <td>W_q.weight/bias</td>
+        </tr>
+        <tr>
+          <td>(768, 768)</td>
+        </tr>
+        <tr>
+          <td>~590K</td>
+        </tr>
+        <tr>
+          <td>W_k</td>
+        </tr>
+        <tr>
+          <td>W_k.weight/bias</td>
+        </tr>
+        <tr>
+          <td>(768, 768)</td>
+        </tr>
+        <tr>
+          <td>~590K</td>
+        </tr>
+        <tr>
+          <td>W_v</td>
+        </tr>
+        <tr>
+          <td>W_v.weight/bias</td>
+        </tr>
+        <tr>
+          <td>(768, 768)</td>
+        </tr>
+        <tr>
+          <td>~590K</td>
+        </tr>
+        <tr>
+          <td>Per-head LayerNorm</td>
+        </tr>
+        <tr>
+          <td>per_head_norm.*</td>
+        </tr>
+        <tr>
+          <td>(192,)</td>
+        </tr>
+        <tr>
+          <td>0.8K</td>
+        </tr>
+        <tr>
+          <td>Context LayerNorm</td>
+        </tr>
+        <tr>
+          <td>context_norm.*</td>
+        </tr>
+        <tr>
+          <td>(768,)</td>
+        </tr>
+        <tr>
+          <td>1.5K</td>
+        </tr>
+        <tr>
+          <td>Recency scale</td>
+        </tr>
+        <tr>
+          <td>recency_scale</td>
+        </tr>
+        <tr>
+          <td>scalar</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>Context gate</td>
+        </tr>
+        <tr>
+          <td>context_gate</td>
+        </tr>
+        <tr>
+          <td>scalar</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>Signal Encoder</td>
+        </tr>
+        <tr>
+          <td>signal_encoder.*</td>
+        </tr>
+        <tr>
+          <td>11→128→128→64</td>
+        </tr>
+        <tr>
+          <td>~17K</td>
+        </tr>
+        <tr>
+          <td>Task Classifier</td>
+        </tr>
+        <tr>
+          <td>task_classifier.*</td>
+        </tr>
+        <tr>
+          <td>1602→384→192→3</td>
+        </tr>
+        <tr>
+          <td>~680K</td>
+        </tr>
+        <tr>
+          <td>Difficulty Classifier</td>
+        </tr>
+        <tr>
+          <td>difficulty_classifier.*</td>
+        </tr>
+        <tr>
+          <td>1602→384→192→4</td>
+        </tr>
+        <tr>
+          <td>~680K</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Total</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>~3.65M</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 自定义算子</h4>
+      <p>以下算子超出标准 transformer 操作，需要注册到 gllm JIT 管线：</p>
+      <strong>关键</strong>: 无需新增原子算子。所有操作由已有算子组合实现，gllm JIT 融合管线负责优化。
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>对应 OpKind</td>
+        </tr>
+        <tr>
+          <td>InfoWeightModulation</td>
+        </tr>
+        <tr>
+          <td>V = W_v(e) * sigmoid(MLP(e))</td>
+        </tr>
+        <tr>
+          <td>复合：MatMul + ElementWise(Sigmoid) + Mul</td>
+        </tr>
+        <tr>
+          <td>RecencyBias</td>
+        </tr>
+        <tr>
+          <td>scores -= sigmoid(scale) * age_matrix</td>
+        </tr>
+        <tr>
+          <td>复合：ElementWise(Sigmoid) + BroadcastSub</td>
+        </tr>
+        <tr>
+          <td>DualPathContext</td>
+        </tr>
+        <tr>
+          <td>gate * context_last + (1-gate) * weighted_mean</td>
+        </tr>
+        <tr>
+          <td>复合：ElementWise(Sigmoid) + Reduce(Mean) + LinearCombination</td>
+        </tr>
+        <tr>
+          <td>CausalAttention</td>
+        </tr>
+        <tr>
+          <td>标准 causal scaled dot-product (4-head)</td>
+        </tr>
+        <tr>
+          <td>复用 Attention OpKind + reshape</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 集成设计</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 ModelArchKey 注册</h4>
+      <p>```rust</p>
+      <p>// src/graph/model_arch.rs</p>
+      <p>ModelArchKey {</p>
+      <p>    family: "signal-intent-tracker",</p>
+      <p>    variant: "v9",</p>
+      <p>    backend: Backend::Cpu, // 或 Gpu</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 GraphType</h4>
+      <p>```rust</p>
+      <p>// 新增 GraphType 变体</p>
+      <p>enum GraphType {</p>
+      <p>    // ... 已有变体 ...</p>
+      <p>    SignalIntentTracker {</p>
+      <p>        num_heads: usize,        // 4</p>
+      <p>        head_dim: usize,         // 192</p>
+      <p>        num_tasks: usize,        // 3</p>
+      <p>        num_difficulties: usize, // 4</p>
+      <p>        signal_dim: usize,       // 11</p>
+      <p>        signal_hidden_dim: usize,// 64</p>
+      <p>        max_seq_len: usize,      // 32</p>
+      <p>    },</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 图构建器</h4>
+      <p>```rust</p>
+      <p>fn build_signal_intent_tracker_graph(</p>
+      <p>    graph: &amp;mut CompilerGraph,</p>
+      <p>    weights: &amp;TensorMap,</p>
+      <p>    config: &amp;SignalIntentTrackerConfig,</p>
+      <p>) -&gt; GraphType {</p>
+      <p>    // 1. 输入节点: embeddings (B, T, 768), roles (B, T), signals (B, 11),</p>
+      <p>    //    seq_lens (B,), context_turns (B,)</p>
+      <p>    // 2. Role embedding: embeddings = embeddings + role_emb[roles]</p>
+      <p>    // 3. InfoWeight: info_w = sigmoid(MLP(embeddings)) → (B, T)</p>
+      <p>    // 4. Q/K/V projections + info_weight modulation on V</p>
+      <p>    // 5. Multi-head reshape: (B, T, 768) → (B, 4, T, 192)</p>
+      <p>    // 6. Causal scaled dot-product attention + recency bias</p>
+      <p>    // 7. Per-head LayerNorm + concat</p>
+      <p>    // 8. Dual-path context aggregation</p>
+      <p>    // 9. Signal encoding + feature concatenation</p>
+      <p>    // 10. Task + difficulty classifier heads</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 输入格式</h4>
+      <p>与标准 classifier 不同，输入不是 token id 而是 <strong>预编码 embedding</strong>：</p>
+      <p>```rust</p>
+      <p>struct TrackerInput {</p>
+      <p>    embeddings: Tensor,    // (B, T, 768) bf16/f32</p>
+      <p>    roles: Tensor,         // (B, T) i64, 0=user 1=assistant</p>
+      <p>    signals: Tensor,       // (B, 11) bf16/f32, 10 bool + context_dependence</p>
+      <p>    seq_lens: Tensor,      // (B,) i64</p>
+      <p>    context_turns: Tensor, // (B,) bf16/f32</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.5" data-section="3.5">
+      <h4>3.5 权重加载</h4>
+      <p>从 PyTorch safetensors 加载，权重名映射：</p>
+      <p>```rust</p>
+      <p>// PyTorch 名 → gllm tensor 名</p>
+      <p>"info_estimator.net.0.weight" → "info_net_fc0_weight"</p>
+      <p>"W_q.weight"                  → "w_q_weight"</p>
+      <p>"task_classifier.0.weight"    → "task_fc0_weight"</p>
+      <p>// ...</p>
+      <p>```</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 API 设计</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 公共 API</h4>
+      <p>```rust</p>
+      <p>impl Client {</p>
+      <p>    /// 加载 SignalIntentTracker 模型</p>
+      <p>    fn new_intent_tracker(model_path: &amp;str) -&gt; Result<intenttracker>;</intenttracker></p>
+      <p>    /// 单次推理：预编码 embedding → 分类结果</p>
+      <p>    fn classify_turn(</p>
+      <p>        &amp;self,</p>
+      <p>        embeddings: &amp;[Vec&lt;f32&gt;],  // T 个 768 维向量</p>
+      <p>        roles: &amp;[u8],             // T 个角色标记</p>
+      <p>        signals: &amp;[f32; 11],      // 行为信号</p>
+      <p>        seq_len: usize,</p>
+      <p>        context_turns: f32,</p>
+      <p>    ) -&gt; Result<classification>;</classification></p>
+      <p>    /// 批量推理</p>
+      <p>    fn classify_turns_batch(</p>
+      <p>        &amp;self,</p>
+      <p>        batch: &amp;[TrackerInput],</p>
+      <p>    ) -&gt; Result&lt;Vec<classification>&gt;;</classification></p>
+      <p>}</p>
+      <p>struct Classification {</p>
+      <p>    task_type: TaskType,        // arch_refactor / code_deploy / debugging</p>
+      <p>    task_confidence: f32,</p>
+      <p>    difficulty: u8,             // 0-3</p>
+      <p>    difficulty_confidence: f32,</p>
+      <p>    info_weights: Vec&lt;f32&gt;,     // 每个 turn 的信息量权重</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 端到端管线（encoder + tracker）</h4>
+      <p>```rust</p>
+      <p>impl Client {</p>
+      <p>    /// 原始文本 → 编码 → 分类（完整管线）</p>
+      <p>    fn classify_conversation_turn(</p>
+      <p>        &amp;self,</p>
+      <p>        encoder: &amp;Client,       // encoder 模型（ModernBERT）</p>
+      <p>        tracker: &amp;IntentTracker, // tracker 模型</p>
+      <p>        turn_texts: &amp;[&amp;str],</p>
+      <p>        roles: &amp;[u8],</p>
+      <p>        signals: &amp;[f32; 11],</p>
+      <p>    ) -&gt; Result<classification> {</classification></p>
+      <p>        // 1. encoder.encode(turn_texts) → embeddings</p>
+      <p>        // 2. tracker.classify_turn(embeddings, roles, signals, ...)</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 JIT 编译策略</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 融合机会</h4>
+      <table>
+        <tr>
+          <th>融合组</th>
+        </tr>
+        <tr>
+          <td>算子链</td>
+        </tr>
+        <tr>
+          <td>融合模式</td>
+        </tr>
+        <tr>
+          <td>InfoWeight</td>
+        </tr>
+        <tr>
+          <td>Linear→LN→ReLU→Drop→Linear→LN→ReLU→Drop→Linear→Sigmoid</td>
+        </tr>
+        <tr>
+          <td>LoopFusion</td>
+        </tr>
+        <tr>
+          <td>QKV Proj</td>
+        </tr>
+        <tr>
+          <td>Q_proj + K_proj + V_proj</td>
+        </tr>
+        <tr>
+          <td>QkvSharedInput</td>
+        </tr>
+        <tr>
+          <td>Attention</td>
+        </tr>
+        <tr>
+          <td>Q@K/scale + recency_bias + softmax @ V</td>
+        </tr>
+        <tr>
+          <td>FusedAttention (扩展: recency bias 作为 Epilogue)</td>
+        </tr>
+        <tr>
+          <td>DualPath</td>
+        </tr>
+        <tr>
+          <td>gate*squeeze + (1-gate)*reduce + LN</td>
+        </tr>
+        <tr>
+          <td>LoopFusion</td>
+        </tr>
+        <tr>
+          <td>Classifier</td>
+        </tr>
+        <tr>
+          <td>concat → Linear→LN→ReLU→Drop→Linear→LN→ReLU→Drop→Linear</td>
+        </tr>
+        <tr>
+          <td>LoopFusion + NormIntoGemm</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 性能预估</h4>
+      <li>3.65M 参数，bf16 推理</li>
+      <li>CPU (AVX-512): &lt; 0.5ms/batch</li>
+      <li>GPU (CUDA): &lt; 0.1ms/batch</li>
+      <li>主要开销在 encoder 侧（311M ModernBERT），tracker 侧可忽略</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 REQ 清单</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ ID</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>优先级</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-001" data-req="REQ-SIT-001" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-001</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-002" data-req="REQ-SIT-002" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-002</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-003" data-req="REQ-SIT-003" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-003</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-004" data-req="REQ-SIT-004" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-004</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-005" data-req="REQ-SIT-005" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-005</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-006" data-req="REQ-SIT-006" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-006</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-007" data-req="REQ-SIT-007" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-007</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-008" data-req="REQ-SIT-008" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-008</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+
+<section data-req-api="POST /client/intent_tracker/track" id="req-sit-009" data-req="REQ-SIT-009" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER"><h3>REQ-SIT-009</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+<section id="test-sit-001" data-test="TEST-SIT-001" data-req-ref="REQ-SIT-001" data-test-categories="unit" <h3="">TEST-SIT-001: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-001相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>ModelArchKey</td>
+          <td> 注册 + </td>
+          <td>GraphType::SignalIntentTracker</td>
+          <td> 定义</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-002" data-test="TEST-SIT-002" data-req-ref="REQ-SIT-002" data-test-categories="unit" <h3="">TEST-SIT-002: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-002相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>build_signal_intent_tracker_graph()</td>
+          <td> 图构建器</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-003" data-test="TEST-SIT-003" data-req-ref="REQ-SIT-003" data-test-categories="unit" <h3="">TEST-SIT-003: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-003相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>权重加载（safetensors 名映射）</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-004" data-test="TEST-SIT-004" data-req-ref="REQ-SIT-004" data-test-categories="unit" <h3="">TEST-SIT-004: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-004相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>new_intent_tracker()</td>
+          <td> API</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-005" data-test="TEST-SIT-005" data-req-ref="REQ-SIT-005" data-test-categories="unit" <h3="">TEST-SIT-005: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-005相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>classify_turn()</td>
+          <td> 单次推理</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-006" data-test="TEST-SIT-006" data-req-ref="REQ-SIT-006" data-test-categories="unit" <h3="">TEST-SIT-006: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-006相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>classify_turns_batch()</td>
+          <td> 批量推理</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-007" data-test="TEST-SIT-007" data-req-ref="REQ-SIT-007" data-test-categories="unit" <h3="">TEST-SIT-007: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-007相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>端到端管线（encoder + tracker）</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-008" data-test="TEST-SIT-008" data-req-ref="REQ-SIT-008" data-test-categories="unit" <h3="">TEST-SIT-008: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-008相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>GPU codegen (PTX) 支持</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <td data-criteria=""><ol><li id="1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key" ENT-MODEL-ARCH-KEY<="" a="">
+      
+      
+      </a></div>
+        
+    <section id="test-sit-009" data-test="TEST-SIT-009" data-req-ref="REQ-SIT-009" data-test-categories="unit" <h3="">TEST-SIT-009: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-009相关功能正确性</p>
+      <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
+      <div id="multi-head-attention-+-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
+      <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>量化支持 (bf16/fp16/int8)</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-COMPILER-GRAPH" id="ent-compiler-graph">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-GRAPH-TYPE" id="ent-graph-type"><h4>ENT-GRAPH-TYPE</h4>
+        <p>GraphType — 融合图类型枚举 (按图拓扑推导, 编译器不按模型类型分支)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>enum variant name</td><td>图类型变体名 (由 GraphTopologyAnalysis 从 OpKind 存在性推导)</td></tr><tr data-field="has_generate_loop" data-type="boolean" data-required="false" <td="">has_generate_loop<td>boolean</td><td>否</td><td>GraphTopologyAnalysis</td><td>图含 Argmax 生成循环 (拓扑推导)</td></tr>
+<tr data-field="needs_persistent_kv" data-type="boolean" data-required="false" <td="">needs_persistent_kv<td>boolean</td><td>否</td><td>GraphTopologyAnalysis</td><td>图需要持久 KV cache (拓扑推导)</td></tr><tr data-field="output_mode" data-type="string" data-required="false" <td="">output_mode<td>string</td><td>否</td><td>OutputMode</td><td>输出模式裁剪 (BUILD 阶段设置)</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-INTENT-TRACKER" id="ent-intent-tracker"><h4>ENT-INTENT-TRACKER</h4>
+        <p>IntentTracker — Signal-Aware 意图追踪模型 (3.65M 自定义分类器, 预编码 embedding 输入)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="config" data-type="string" data-required="true" <td="">config<td>string</td><td>是</td><td>IntentTrackerConfig</td><td>意图追踪模型配置</td></tr><tr data-field="weights" data-type="string" data-required="true" <td="">weights<td>string</td><td>是</td><td>HashMap&lt;String, Vec&lt;f32&gt;&gt;</td><td>模型权重 (从 safetensors 加载)</td></tr>
+<tr data-field="weight_shapes" data-type="string" data-required="true" <td="">weight_shapes<td>string</td><td>是</td><td>HashMap&lt;String, Vec&lt;usize&gt;&gt;</td><td>权重形状映射</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-MODEL-ARCH-KEY" id="ent-model-arch-key"><h4>ENT-MODEL-ARCH-KEY</h4><p>ModelArchKey — 架构特征键（struct ArchitectureFeatures in gllm/src/arch/auto_graph_fragments/types.inc.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="family" data-type="string" data-required="true" <td="">family<td>string</td><td>是</td><td>Decoder|Encoder</td><td>权重拓扑族（BUILD 阶段策略选择器）</td></tr>
+<tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>模型层数</td></tr><tr data-field="norm_type" data-type="string" data-required="true" <td="">norm_type<td>string</td><td>是</td><td>RmsNorm|LayerNorm</td><td>归一化类型</td></tr><tr data-field="ffn_type" data-type="string" data-required="true" <td="">ffn_type<td>string</td><td>是</td><td>SwiGLU|GeGLU|Standard|MoE</td><td>FFN 类型</td></tr>
+<tr data-field="is_moe" data-type="boolean" data-required="true" <td="">is_moe<td>boolean</td><td>是</td><td></td><td>是否为 MoE 架构</td></tr><tr data-field="is_mla" data-type="boolean" data-required="false" <td="">is_mla<td>boolean</td><td>否</td><td></td><td>是否为 MLA（Multi-head Latent Attention）</td></tr><tr data-field="is_vision" data-type="boolean" data-required="false" <td="">is_vision<td>boolean</td><td>否</td><td></td><td>是否含视觉编码器</td></tr>
+<tr data-field="is_audio" data-type="boolean" data-required="false" <td="">is_audio<td>boolean</td><td>否</td><td></td><td>是否含音频编码器</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+</main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：INTENT-TRACKER.html</address>
+  </footer>
+</body>
+</html>
