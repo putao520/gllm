@@ -17,6 +17,7 @@ use gllm_kernels::compiler::mega_kernel_abi::BusinessConfig;
 use gllm_kernels::types::DType;
 
 use crate::manifest::TensorRole;
+use crate::model_config::{ArchHints, HiddenAct};
 use super::resolve::ResolvedConfig;
 
 include!("auto_graph_fragments/types.inc.rs");

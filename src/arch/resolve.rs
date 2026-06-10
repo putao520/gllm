@@ -61,6 +61,12 @@ pub struct ResolvedConfig {
 
     /// LayerNorm / RMSNorm epsilon (from model config, typically 1e-12 for BERT, 1e-5 for GPT)
     pub norm_eps: f32,
+
+    // ── BUILD-stage architecture hints (REQ-MC-EXT-001..007) ──
+    pub qk_norm: bool,
+    pub value_norm: bool,
+    pub embedding_scale_factor: f32,
+    pub mla_use_unabsorbed: bool,
 }
 
 impl ResolvedConfig {
@@ -89,6 +95,10 @@ impl ResolvedConfig {
             final_logit_softcapping: g.final_logit_softcapping,
             feed_forward_lengths: None, // populated in GGUF path from per-layer metadata
             norm_eps: g.norm_eps,
+            qk_norm: g.qk_norm,
+            value_norm: g.value_norm,
+            embedding_scale_factor: g.embedding_scale_factor,
+            mla_use_unabsorbed: g.mla_use_unabsorbed,
             extra,
         }
     }
@@ -467,6 +477,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let template = "layers: ${num_hidden_layers}, hidden: ${hidden_size}, dtype: ${dtype}";
@@ -1196,6 +1210,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -1262,6 +1280,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -1309,6 +1331,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let mut extra = HashMap::new();
@@ -1592,6 +1618,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -1636,6 +1666,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -1844,6 +1878,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let cloned = original.clone();
         assert_eq!(cloned.num_hidden_layers, original.num_hidden_layers);
@@ -2346,6 +2384,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("num_hidden_layers"));
@@ -2512,6 +2554,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.dtype, "f32");
@@ -2556,6 +2602,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert!((config.global_rope_theta - 1000000.0).abs() < f64::EPSILON);
@@ -3064,6 +3114,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -3195,6 +3249,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -3246,6 +3304,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.dtype, "bf16");
@@ -3290,6 +3352,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.dtype, "f16");
@@ -3334,6 +3400,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let mut extra = HashMap::new();
@@ -3896,6 +3966,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -3990,6 +4064,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Verify every field
         assert_eq!(config.num_hidden_layers, 64);
@@ -4555,6 +4633,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.attention_pattern, pattern);
@@ -4599,6 +4681,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         for i in 0..6 {
@@ -4645,6 +4731,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.global_head_dim, 128);
@@ -4689,6 +4779,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.sliding_window, 8192);
@@ -5241,6 +5335,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         let cloned = config.clone();
@@ -6013,6 +6111,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         // Act
@@ -6346,6 +6448,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         let mut extra = HashMap::new();
@@ -6655,6 +6761,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
         assert_eq!(config.num_hidden_layers, 0);
@@ -6936,6 +7046,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         // Act
@@ -7274,6 +7388,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         // Act
@@ -7324,6 +7442,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
 
         // Act
@@ -7638,6 +7760,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -7915,6 +8041,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let cloned = config.clone();
@@ -7978,6 +8108,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -8182,6 +8316,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -8272,6 +8410,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let cloned = config.clone();
@@ -8953,6 +9095,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -9002,6 +9148,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -9292,6 +9442,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act & Assert: validation passes with only required fields.
         assert!(validate_config(&config).is_ok());
@@ -9510,6 +9664,10 @@ mod tests {
             norm_eps: 1e-5,
             final_logit_softcapping: None,
             feed_forward_lengths: None,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act & Assert: exercise every getter path
         // get_int covers: num_hidden_layers, hidden_size, num_attention_heads,
@@ -9694,6 +9852,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -9747,6 +9909,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -9796,6 +9962,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());
@@ -9965,6 +10135,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = ResolvedConfig::from_geometry(&geometry, HashMap::new());

@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use gllm_kernels::compiler::{
-    CompiledLayer, CompilerGraph, InferenceCompiler, BusinessConfig, OpKind, OutputMode,
+    CompiledLayer, CompilerGraph, InferenceCompiler, OpKind,
     SymDim,
 };
 use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
@@ -157,13 +157,7 @@ impl EmbedLookupOnlyGraph {
 
         let config = CompileConfig {
             max_seq_len,
-            business_config: BusinessConfig {
-                output_modes: vec![OutputMode::EncodeToLayer {
-                    anchor_layer: 0,
-                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-                }],
-                ..BusinessConfig::default()
-            },
+            debug_jit: false,
             hetero: None,
         };
         let mut compiler = InferenceCompiler::new();
@@ -426,13 +420,7 @@ impl KProjOnlyGraph {
 
         let norm_config = CompileConfig {
             max_seq_len,
-            business_config: BusinessConfig {
-                output_modes: vec![OutputMode::EncodeToLayer {
-                    anchor_layer: 0,
-                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-                }],
-                ..BusinessConfig::default()
-            },
+            debug_jit: false,
             hetero: None,
         };
         let mut compiler = InferenceCompiler::new();
@@ -476,13 +464,7 @@ impl KProjOnlyGraph {
 
         let gemm_config = CompileConfig {
             max_seq_len,
-            business_config: BusinessConfig {
-                output_modes: vec![OutputMode::EncodeToLayer {
-                    anchor_layer: 0,
-                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-                }],
-                ..BusinessConfig::default()
-            },
+            debug_jit: false,
             hetero: None,
         };
         let gemm_compiled = compiler

@@ -231,6 +231,10 @@ impl GeneratorForwardConfig {
                 mla_d_c: 0,
                 mla_d_rope: 0,
                 mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
             }),
             rope: RoPEConfig {
                 theta: 10000.0,
@@ -447,6 +451,10 @@ impl AttentionTopology {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         Self::bidirectional(geometry)
     }
@@ -618,6 +626,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         })
     }
 

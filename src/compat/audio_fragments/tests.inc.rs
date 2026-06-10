@@ -18,7 +18,7 @@ mod tests {
     ) -> gllm_kernels::compiler::CompiledLayer {
         let config = CompileConfig {
             max_seq_len,
-            business_config: BusinessConfig::default(),
+            debug_jit: false,
             hetero: None,
         };
         compiler
@@ -284,7 +284,7 @@ mod tests {
 
         let config = small_config();
         let weights = std::sync::Arc::new(build_random_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder =
             UsmConformerEncoder::new(config.clone(), weights, ids.audio_token_id).expect("new ok");
 
@@ -997,6 +997,7 @@ mod tests {
         let packed = pack_for_graph(&g, weights);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let compiled = compile_test_graph(&mut compiler, g, seq);
+        eprintln!("[FF1-DBG] scratchpad_bytes={} seq={} hidden={}", compiled.scratchpad_bytes, seq, hidden);
         let input: Vec<f32> = (0..seq * hidden).map(|i| (i as f32 * 0.001).sin()).collect();
         let mut out = vec![0.0f32; seq * hidden];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(65536)];
@@ -1007,6 +1008,36 @@ mod tests {
                 1, seq,
                 out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr(),
             );
+        }
+        // Dump scratch regions for debugging NaN
+        let scratch_f32 = unsafe { std::slice::from_raw_parts(scratch.as_ptr() as *const f32, scratch.len() / 4) };
+        // Check ff1_act (offset 0, size 4096 = 1024 f32 elements)
+        let act_nan: Vec<_> = (0..1024).filter(|&i| !scratch_f32[i].is_finite()).collect();
+        eprintln!("[FF1-DBG] ff1_act NaN count: {}, first indices: {:?}", act_nan.len(), &act_nan[..act_nan.len().min(10)]);
+        // Dump first 16 ff1_act values for sanity check
+        for i in 0..16.min(1024) {
+            eprintln!("[FF1-DBG] ff1_act[{}] = {}", i, scratch_f32[i]);
+        }        // Scalar reference: compute ff1_proj = ff1_act × ff1_out_w
+        let inter = 128;
+        let act_data = &scratch_f32[0..seq * inter];
+        let ow_data: &[f32] = weights.get_audio_tensor("ff1_out_w").unwrap();
+        eprintln!("[FF1-DBG] ow_data len={}, act_data len={}", ow_data.len(), act_data.len());
+        // Compute expected ff1_proj[0..4] via scalar GEMM: C[m,n] = A[m,k] * B[k,n]
+        for r in 0..2 {
+            for c in 0..4 {
+                let mut sum = 0.0f32;
+                for p in 0..inter {
+                    sum += act_data[r * inter + p] * ow_data[p * hidden + c];
+                }
+                let actual_idx = 1024 + r * hidden + c; // ff1_proj offset in scratch_f32
+                eprintln!("[FF1-DBG] ref ff1_proj[{},{}] = {} actual = {}", r, c, sum, scratch_f32[actual_idx]);
+            }
+        }
+        let proj_nan: Vec<_> = (1024..1536).filter(|&i| !scratch_f32[i].is_finite()).collect();
+        eprintln!("[FF1-DBG] ff1_proj NaN count: {}, first indices: {:?}", proj_nan.len(), &proj_nan[..proj_nan.len().min(50)]);
+        // Dump first few output values
+        for (i, &v) in out.iter().enumerate().take(16) {
+            eprintln!("[FF1-DBG] out[{}] = {}", i, v);
         }
         for (i, &v) in out.iter().enumerate() {
             assert!(v.is_finite(), "subgraph NaN at {i}: {v}");
@@ -1680,7 +1711,7 @@ mod tests {
     fn try_build_usm_returns_encoder_when_all_weights_present() {
         let config = small_config();
         let weights = build_random_weights(&config);
-        let ids = crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults();
+        let ids = crate::compat::multimodal::MultimodalTokenIds::fallback_multimodal_token_ids();
         let result = try_build_usm_from_tensors(&config, ids, |name| {
             weights.get_audio_tensor(name).map(|d| {
                 let shape = weights.audio_tensor_shape(name).unwrap().to_vec();
@@ -1696,7 +1727,7 @@ mod tests {
     #[test]
     fn try_build_usm_returns_none_when_weight_missing() {
         let config = small_config();
-        let ids = crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults();
+        let ids = crate::compat::multimodal::MultimodalTokenIds::fallback_multimodal_token_ids();
         // Return None for every tensor name
         let result = try_build_usm_from_tensors(&config, ids, |_name| None);
         assert!(result.is_ok(), "try_build must not error on missing weight");
@@ -1707,7 +1738,7 @@ mod tests {
     #[test]
     fn try_build_usm_returns_error_on_shape_mismatch() {
         let config = small_config();
-        let ids = crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults();
+        let ids = crate::compat::multimodal::MultimodalTokenIds::fallback_multimodal_token_ids();
         let result = try_build_usm_from_tensors(&config, ids, |_name| {
             // Return data with wrong length (3 elements but shape says [2,2]=4)
             Some((vec![1.0f32, 2.0, 3.0], vec![2, 2]))

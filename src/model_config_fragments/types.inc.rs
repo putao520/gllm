@@ -6,8 +6,9 @@ pub struct MlaConfig {
     pub d_c: usize,
     /// Decoupled RoPE dimension (DeepSeek V3 = 64)
     pub d_rope: usize,
-    /// Un-absorbed prefill threshold (tokens; short prefill ≤ this → KV restore path)
-    pub unabsorbed_threshold: usize,
+    /// Un-absorbed prefill threshold (tokens; short prefill ≤ this → KV restore path).
+    /// None → analyze_architecture() derives default (4096 for DeepSeek V3).
+    pub unabsorbed_threshold: Option<usize>,
 }
 
 /// Model geometric constants — single source of truth.
@@ -101,6 +102,19 @@ pub struct ModelGeometry {
     pub mla_d_rope: usize,
     /// Un-absorbed prefill threshold. 0 = not MLA.
     pub mla_unabsorbed_threshold: usize,
+
+    // ── BUILD-stage architecture hints (REQ-MC-EXT-001..007) ──
+    // Resolved from ModelConfig Option fields — None → default value.
+    // These are BUILD-stage only — the JIT compiler never reads them.
+
+    /// Q/K normalization without learnable weight.
+    pub qk_norm: bool,
+    /// V normalization without learnable weight.
+    pub value_norm: bool,
+    /// Embedding scale factor. 0.0 = no scaling.
+    pub embedding_scale_factor: f32,
+    /// MLA un-absorbed prefill routing.
+    pub mla_use_unabsorbed: bool,
 }
 
 impl ModelGeometry {
@@ -132,8 +146,15 @@ impl ModelGeometry {
             rope_interleaved: config.rope_interleaved,
             global_rope_theta: config.global_rope_theta.unwrap_or(0.0) as f64,
             rope_partial_ratio: config.rope_partial_ratio.unwrap_or(1.0),
-            // Global partial: 0.25 when dual-RoPE is active (Gemma 4 p-RoPE), else 1.0
-            rope_partial_ratio_global: if config.global_rope_theta.unwrap_or(0.0) > 0.0 { 0.25 } else { 1.0 },
+            // Global partial: prefer explicit rope_partial_ratio_global from config,
+            // else derive from dual-RoPE signals (global_rope_theta present → use rope_partial_ratio, default 0.25).
+            rope_partial_ratio_global: config.rope_partial_ratio_global.unwrap_or_else(|| {
+                if config.global_rope_theta.unwrap_or(0.0) > 0.0 {
+                    config.rope_partial_ratio.unwrap_or(0.25)
+                } else {
+                    1.0
+                }
+            }),
             attention_pattern: config.attention_pattern.clone().unwrap_or_default(),
             sliding_window: config.sliding_window.unwrap_or(0),
             num_kv_shared_layers: config.num_kv_shared_layers.unwrap_or(0),
@@ -153,7 +174,11 @@ impl ModelGeometry {
             hidden_act: config.hidden_act.clone(),
             mla_d_c: config.mla_config.as_ref().map(|c| c.d_c).unwrap_or(0),
             mla_d_rope: config.mla_config.as_ref().map(|c| c.d_rope).unwrap_or(0),
-            mla_unabsorbed_threshold: config.mla_config.as_ref().map(|c| c.unabsorbed_threshold).unwrap_or(0),
+            mla_unabsorbed_threshold: config.mla_config.as_ref().and_then(|c| c.unabsorbed_threshold).unwrap_or(0),
+            qk_norm: config.qk_norm.unwrap_or(false),
+            value_norm: config.value_norm.unwrap_or(false),
+            embedding_scale_factor: config.embedding_scale_factor.unwrap_or(0.0),
+            mla_use_unabsorbed: config.mla_use_unabsorbed.unwrap_or(false),
         }
     }
 
@@ -345,6 +370,28 @@ impl HiddenAct {
     }
 }
 
+/// BUILD-stage architecture hints from ModelConfig.
+///
+/// Carries config-driven hints to `analyze_architecture()`, replacing
+/// `arch_name == "gemma4"` string matching. All fields are Option —
+/// when None, analyze_architecture() derives defaults from tensor topology.
+///
+/// Per SPEC/39 §0.1.6: these are BUILD-stage only — the JIT compiler
+/// never reads ModelConfig or ArchHints.
+#[derive(Debug, Clone, Default)]
+pub struct ArchHints {
+    /// Q/K normalization (L2 + sqrt(d) scale, no learnable weight).
+    pub qk_norm: Option<bool>,
+    /// V normalization (pure RMS, no gamma).
+    pub value_norm: Option<bool>,
+    /// Embedding scale factor (>0 → scale embeddings).
+    pub embedding_scale_factor: Option<f32>,
+    /// FFN activation type from config.json hidden_activation.
+    pub hidden_act: Option<HiddenAct>,
+    /// MLA un-absorbed prefill routing.
+    pub mla_use_unabsorbed: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub hidden_size: usize,
@@ -441,4 +488,34 @@ pub struct ModelConfig {
     /// When Some with >1 distinct values, indicates heterogeneous layer structure
     /// (e.g., Gemma 4 E2B: layers 0-14 = 6144, layers 15-34 = 12288).
     pub feed_forward_lengths: Option<Vec<usize>>,
+
+    // ── BUILD-stage architecture hints (REQ-MC-EXT-001..007) ──
+    // These Option fields are read from config.json / GGUF metadata.
+    // When None, analyze_architecture() derives defaults from tensor topology.
+    // These are BUILD-stage only — the JIT compiler never reads them.
+
+    /// Q/K normalization without learnable weight (pure L2 + sqrt(d) scale).
+    /// config.json: `qk_norm` (future HF field). GGUF: `attention.qk_norm`.
+    /// Default: derived from tensor absence (no AttentionQNorm/KNorm weight → true for Gemma 4).
+    pub qk_norm: Option<bool>,
+
+    /// V normalization without learnable weight (pure RMS, no gamma).
+    /// config.json: `value_norm` (future HF field). GGUF: `attention.value_norm`.
+    /// Default: false.
+    pub value_norm: Option<bool>,
+
+    /// Embedding scale factor: multiply embeddings by this value.
+    /// config.json: `embedding_scale_factor`. GGUF: `embedding.scale_factor`.
+    /// >0 → has_embedding_scale=true. Default: 0.0 (no scaling).
+    pub embedding_scale_factor: Option<f32>,
+
+    /// Global attention layer RoPE partial rotation ratio (Gemma 4: 0.25 = p-RoPE).
+    /// config.json: `rope_parameters.full_attention.partial_rotary_factor`. GGUF: `rope.global.partial_ratio`.
+    /// When None, derived from global_rope_theta presence + rope_partial_ratio fallback.
+    pub rope_partial_ratio_global: Option<f32>,
+
+    /// MLA un-absorbed prefill routing (gllm extension).
+    /// config.json: `mla_use_unabsorbed`. GGUF: `attention.mla.use_unabsorbed`.
+    /// Default: false.
+    pub mla_use_unabsorbed: Option<bool>,
 }

@@ -613,7 +613,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     pub fn rerank_pair(&mut self, query: &str, document: &str) -> ExecutorResult<Vec<f32>> {
-        let is_generative = self.model_ctx.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
+        // Generative reranker: uses token generation (yes/no) for scoring.
+        // Derived from manifest.kind (service mode), not arch_family.
+        // A decoder-based reranker generates yes/no tokens; an encoder-based reranker
+        // uses a classifier head. The distinction is service-mode driven, not architecture driven.
+        let is_generative = matches!(self.model_ctx.manifest.kind, crate::manifest::ModelKind::Reranker)
+            && self.model_ctx.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
         let tokens = if is_generative {
             self.model_ctx.tokenizer.encode(&format!("{} {}", query, document), self.model_ctx.add_special_tokens)?
         } else {

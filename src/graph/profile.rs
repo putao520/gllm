@@ -425,6 +425,11 @@ mod tests {
             use_double_wide_mlp: None,
             add_special_tokens: None,
             feed_forward_lengths: None,
+            qk_norm: None,
+            value_norm: None,
+            embedding_scale_factor: None,
+            rope_partial_ratio_global: None,
+            mla_use_unabsorbed: None,
         }
     }
 
@@ -822,7 +827,7 @@ mod tests {
         c.mla_config = Some(MlaConfig {
             d_c: 512,
             d_rope: 64,
-            unabsorbed_threshold: 256,
+            unabsorbed_threshold: Some(256),
         });
         let p = GraphProfiler::profile(&c);
         // MLA: (d_c + d_rope) * num_layers * 4
@@ -1245,7 +1250,7 @@ mod tests {
         c.mla_config = Some(MlaConfig {
             d_c: 512,
             d_rope: 64,
-            unabsorbed_threshold: 256,
+            unabsorbed_threshold: Some(256),
         });
         let p = GraphProfiler::profile(&c);
         assert_eq!(p.kv_bytes_per_token, 0);
@@ -1258,7 +1263,7 @@ mod tests {
         c.mla_config = Some(MlaConfig {
             d_c: 768,
             d_rope: 128,
-            unabsorbed_threshold: 512,
+            unabsorbed_threshold: Some(512),
         });
         let p = GraphProfiler::profile(&c);
         let expected = (768 + 128) * c.num_hidden_layers * std::mem::size_of::<f32>();

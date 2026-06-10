@@ -324,7 +324,7 @@ macro_rules! impl_gpu_backend {
                     let args = super::gpu_helpers::build_mega_kernel_args(
                         ids_gpu, weight_gpu, 0, pos_gpu,
                         0, 1, seq_len, sp_gpu, 0,
-                        0, 0, 0, 1, 0, 3, // output_mode=3 EncodeToLayer
+                        0, 0, 0, 1, 0,
                         0, 0, 0, 0, 0, 0,
                         0,
                         0,
@@ -373,7 +373,7 @@ macro_rules! impl_gpu_backend {
                     let args = super::gpu_helpers::build_mega_kernel_args(
                         ids_gpu, weight_gpu, 0, pos_gpu,
                         0, 1, seq_len, sp_gpu, 0,
-                        0, 0, 0, 1, 0, 3, // output_mode=3 EncodeToLayer
+                        0, 0, 0, 1, 0,
                         0, 0, 0, 0, 0, 0,
                         0,
                         0,
@@ -546,7 +546,7 @@ macro_rules! impl_gpu_backend {
 // Encoder forward helper — DEPRECATED (SPEC/39)
 // ---------------------------------------------------------------------------
 // SPEC/39: encoder models now use the unified mega-kernel path via
-// execute_encode() with output_mode_selector=3. This dead code remains until
+// execute_encode(). This dead code remains until
 // the Backend trait is cleaned up to remove rerank_forward_gpu_pure and
 // classify_forward_gpu_pure.
 

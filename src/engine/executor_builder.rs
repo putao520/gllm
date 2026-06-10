@@ -51,13 +51,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             )));
         }
 
-        let position_encoding = match manifest.kind {
-            ModelKind::Embedding | ModelKind::Reranker | ModelKind::Classifier
-                if model_config.rope_theta <= 0.0 =>
-            {
-                PositionEncoding::None
-            }
-            _ => PositionEncoding::Rope,
+        // Position encoding derived from rope_theta, not manifest.kind.
+        // rope_theta > 0 → model has RoPE weights → Rope.
+        // rope_theta <= 0 → no RoPE → None (absolute position embeddings handled by graph builder).
+        // SPEC/39: topology-driven, not kind-driven.
+        let position_encoding = if model_config.rope_theta > 0.0 {
+            PositionEncoding::Rope
+        } else {
+            PositionEncoding::None
         };
 
         let geometry = Arc::new(crate::model_config::ModelGeometry::from_config(
@@ -108,9 +109,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let memory_manager = GlobalMemoryManager::new_with_capacities(
             total_blocks, total_blocks.saturating_mul(10), total_blocks.saturating_mul(100),
         );
-        let topology = match manifest.kind {
-            ModelKind::Chat => super::executor::AttentionTopology::causal(geometry.clone()),
-            _ => super::executor::AttentionTopology::bidirectional(geometry.clone()),
+        // Attention topology derived from architecture family (weight-topology-driven),
+        // not from manifest.kind (service mode). This is a BUILD-stage Strategy Pattern
+        // decision — selecting which topology config to pass to the compiler at model load
+        // time. The JIT compiler itself never branches on family; it compiles whatever
+        // graph topology it receives (SPEC/39 §0.1: compiler = feed graph → JIT).
+        // Decoder → causal mask; Encoder → bidirectional mask.
+        let topology = match manifest.family() {
+            crate::manifest::ArchFamily::Decoder => super::executor::AttentionTopology::causal(geometry.clone()),
+            crate::manifest::ArchFamily::Encoder => super::executor::AttentionTopology::bidirectional(geometry.clone()),
         };
 
         let sg_ring_buffer = std::sync::Arc::new(
@@ -620,104 +627,45 @@ mod tests {
 
     // ========================================================================
     // Pure computation: position encoding determination logic
-    // (mirrors the match in build_loader_context)
+    // (mirrors the if/else in build_loader_context)
+    // SPEC/39: derived from rope_theta, not manifest.kind.
     // ========================================================================
 
-    fn determine_position_encoding(
-        kind: crate::manifest::ModelKind,
-        rope_theta: f64,
-    ) -> PositionEncoding {
-        match kind {
-            crate::manifest::ModelKind::Embedding
-            | crate::manifest::ModelKind::Reranker
-            | crate::manifest::ModelKind::Classifier
-                if rope_theta <= 0.0 =>
-            {
-                PositionEncoding::None
-            }
-            _ => PositionEncoding::Rope,
+    fn determine_position_encoding(rope_theta: f64) -> PositionEncoding {
+        if rope_theta > 0.0 {
+            PositionEncoding::Rope
+        } else {
+            PositionEncoding::None
         }
     }
 
     #[test]
-    fn position_encoding_chat_always_rope() {
-        // Arrange: Chat model with rope_theta = 0 (edge case)
-        let kind = crate::manifest::ModelKind::Chat;
-        // Act
-        let encoding = determine_position_encoding(kind, 0.0);
-        // Assert: Chat always uses Rope regardless of theta
-        assert_eq!(encoding, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_chat_positive_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Chat,
-            10000.0,
-        );
-        assert_eq!(encoding, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_embedding_zero_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Embedding,
-            0.0,
-        );
+    fn position_encoding_zero_theta() {
+        let encoding = determine_position_encoding(0.0);
         assert_eq!(encoding, PositionEncoding::None);
     }
 
     #[test]
-    fn position_encoding_embedding_negative_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Embedding,
-            -100.0,
-        );
+    fn position_encoding_negative_theta() {
+        let encoding = determine_position_encoding(-100.0);
         assert_eq!(encoding, PositionEncoding::None);
     }
 
     #[test]
-    fn position_encoding_embedding_positive_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Embedding,
-            10000.0,
-        );
+    fn position_encoding_positive_theta() {
+        let encoding = determine_position_encoding(10000.0);
         assert_eq!(encoding, PositionEncoding::Rope);
     }
 
     #[test]
-    fn position_encoding_reranker_zero_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Reranker,
-            0.0,
-        );
-        assert_eq!(encoding, PositionEncoding::None);
-    }
-
-    #[test]
-    fn position_encoding_reranker_positive_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Reranker,
-            500000.0,
-        );
+    fn position_encoding_large_theta() {
+        let encoding = determine_position_encoding(500000.0);
         assert_eq!(encoding, PositionEncoding::Rope);
     }
 
     #[test]
-    fn position_encoding_classifier_zero_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Classifier,
-            0.0,
-        );
-        assert_eq!(encoding, PositionEncoding::None);
-    }
-
-    #[test]
-    fn position_encoding_classifier_positive_theta() {
-        let encoding = determine_position_encoding(
-            crate::manifest::ModelKind::Classifier,
-            100.0,
-        );
+    fn position_encoding_small_positive_theta() {
+        let encoding = determine_position_encoding(100.0);
         assert_eq!(encoding, PositionEncoding::Rope);
     }
 
@@ -927,6 +875,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let kind = crate::manifest::ModelKind::Chat;
 
@@ -957,6 +909,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let kind = crate::manifest::ModelKind::Embedding;
 
@@ -985,6 +941,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let kind = crate::manifest::ModelKind::Reranker;
 
@@ -1680,6 +1640,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         let rope = RoPEConfig {
             theta: geometry.rope_theta,
@@ -1714,6 +1678,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         assert!(geometry.is_moe());
         assert_eq!(geometry.num_experts, 64);
@@ -1736,6 +1704,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         assert!(!geometry.is_moe());
     }
@@ -1761,6 +1733,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None,
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         assert_eq!(geometry.kv_dim(), 8 * 64);
         assert!(!geometry.is_mla());
@@ -1784,6 +1760,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None,
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         assert!(geometry.is_mla());
         assert_eq!(geometry.kv_dim(), 512 + 64);
@@ -2478,6 +2458,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let topo = AttentionTopology::causal(geometry.clone());
         assert_eq!(topo.mask_type, super::super::executor::AttentionMaskType::Causal);
@@ -2898,6 +2882,10 @@ mod tests {
             rope_scaling: None, final_logit_softcapping: None,
             hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let kv_cfg = KvCacheConfig {
             geometry,

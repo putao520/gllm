@@ -337,17 +337,16 @@ impl<E: Element> CudaBackend<E> {
         let block = (warp_size, 1u32, 1u32);
         let grid = (1u32, 1u32, 1u32);
 
-        // Prepare 23 parameter array (cuLaunchKernel takes **void = array of pointers-to-arguments)
+        // Prepare 22 parameter array (cuLaunchKernel takes **void = array of pointers-to-arguments)
         let mut positions: Vec<u32> = (0..(prompt_len + max_new_tokens) as u32).collect();
         let batch_size: usize = 1;
         let temperature_u32 = temperature.to_bits();
         let top_p_u32 = top_p.to_bits();
-        let output_mode_selector: usize = 0; // Generate
 
         // page_table_ptr: device pointer to u32 page table array, or NULL for contiguous KV
         let pt_ptr = page_table_device.unwrap_or(0);
 
-        let args: [*mut std::ffi::c_void; 23] = [
+        let args: [*mut std::ffi::c_void; 22] = [
             &input_ids.as_ptr() as *const _ as *mut std::ffi::c_void,             // 0: input_ids_ptr
             &weight_blob_device as *const _ as *mut std::ffi::c_void,              // 1: weight_blob_ptr
             &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 2: kv_cache_ptr
@@ -362,15 +361,14 @@ impl<E: Element> CudaBackend<E> {
             &top_p_u32 as *const _ as *mut std::ffi::c_void,                       // 11: top_p_u32
             &max_new_tokens as *const _ as *mut std::ffi::c_void,                  // 12: max_new_tokens
             &eos_token_id as *const _ as *mut std::ffi::c_void,                    // 13: eos_token_id
-            &output_mode_selector as *const _ as *mut std::ffi::c_void,            // 14: output_mode_selector
-            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 15: hook_ctx_ptr
-            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 16: telemetry_ptr
-            &0usize as *const _ as *mut std::ffi::c_void,                           // 17: session_position
-            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 18: fused_hidden_ptr
-            &0usize as *const _ as *mut std::ffi::c_void,                           // 19: num_mm_tokens
-            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 20: callback_table_ptr
-            &pt_ptr as *const _ as *mut std::ffi::c_void,                          // 21: page_table_ptr (0 = contiguous KV)
-            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 22: batch_ctx_ptr (NULL = single-seq legacy)
+            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 14: hook_ctx_ptr
+            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 15: telemetry_ptr
+            &0usize as *const _ as *mut std::ffi::c_void,                           // 16: session_position
+            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 17: fused_hidden_ptr
+            &0usize as *const _ as *mut std::ffi::c_void,                           // 18: num_mm_tokens
+            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 19: callback_table_ptr
+            &pt_ptr as *const _ as *mut std::ffi::c_void,                          // 20: page_table_ptr (0 = contiguous KV)
+            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 21: batch_ctx_ptr (NULL = single-seq legacy)
         ];
 
         let stream = self.device.default_stream();
@@ -1878,6 +1876,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         // Act
         let bidir = AttentionTopology::bidirectional(geometry.clone());
@@ -1933,6 +1935,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let swap = crate::engine::executor::SwapConfig {
             enable_swap: true,
@@ -1996,6 +2002,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let a = KvCacheConfig {
             geometry: geometry.clone(),
@@ -2360,6 +2370,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 0, mla_d_rope: 0, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let a = KvCacheConfig {
             geometry: geometry.clone(),
@@ -2572,6 +2586,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         };
         // Act
         let config = AttentionHeadConfig::from_geometry(&geometry);
@@ -2646,6 +2664,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 0, mla_d_rope: 0, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let config = KvCacheConfig {
             geometry,
@@ -2820,6 +2842,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 0, mla_d_rope: 0, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let config = KvCacheConfig {
             geometry,
@@ -2852,6 +2878,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 512, mla_d_rope: 64, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let config = KvCacheConfig {
             geometry,
@@ -2886,6 +2916,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 0, mla_d_rope: 0, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let config = KvCacheConfig {
             geometry,
@@ -3463,6 +3497,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 0, mla_d_rope: 0, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let config = KvCacheConfig {
             geometry,
@@ -3530,6 +3568,10 @@ mod tests {
             hidden_size_per_layer_input: 0, position_offset: None, rope_scaling: None,
             final_logit_softcapping: None, hidden_act: None,
             mla_d_c: 0, mla_d_rope: 0, mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         });
         let config = KvCacheConfig {
             geometry,

@@ -63,7 +63,6 @@ impl MegaKernelExecutor {
                 0, // top_p=0
                 1, // max_new_tokens=1
                 self.eos_token_id as usize,
-                0,                    // output_mode_selector: Generate
                 std::ptr::null(),     // hook_ctx_ptr
                 std::ptr::null_mut(), // telemetry
                 0,                    // session_position
@@ -155,7 +154,6 @@ impl MegaKernelExecutor {
                 0,
                 1,
                 self.eos_token_id as usize,
-                0,
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 0,
@@ -176,7 +174,7 @@ impl MegaKernelExecutor {
         })
     }
 
-    /// Execute mega-kernel in EncodeToLayer mode (output_mode_selector = 3).
+    /// Execute mega-kernel in EncodeToLayer mode (forward pass only, no generate loop).
     ///
     /// Runs a single forward pass through all layers, then extracts the hidden
     /// state from the activation buffer. The mega-kernel skips the generate loop
@@ -244,7 +242,6 @@ impl MegaKernelExecutor {
                 0, // top_p bits (unused)
                 1, // max_new_tokens = 1 (minimal)
                 self.eos_token_id as usize,
-                3,                    // output_mode_selector: EncodeToLayer
                 std::ptr::null(),     // hook_ctx_ptr: null
                 std::ptr::null_mut(), // telemetry: null
                 0,                    // session_position: new
@@ -340,7 +337,6 @@ impl MegaKernelExecutor {
                 0,
                 1, // max_new_tokens = 1 (one iteration for forward pass)
                 self.eos_token_id as usize,
-                1, // output_mode_selector: ClassifyBinary
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 0,
@@ -387,7 +383,7 @@ impl MegaKernelExecutor {
 
     /// HR score_tokens: dot-product between last-token hidden state and target token embeddings.
     ///
-    /// Runs a single forward pass (output_mode_selector = 4), then reads logits from
+    /// Runs a single forward pass, then reads logits from
     /// the scratchpad logits region for each target_token_id.
     /// Returns Vec<f32> with one score per target token.
     pub fn execute_score_tokens(
@@ -442,7 +438,6 @@ impl MegaKernelExecutor {
                 0, 0, 0,
                 1,
                 self.eos_token_id as usize,
-                4, // output_mode_selector: ScoreTokens
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 0,
@@ -478,7 +473,7 @@ impl MegaKernelExecutor {
 
     /// HR encode_at_layer / Intent encode_intent: forward pass truncated at anchor_layer.
     ///
-    /// Runs a single forward pass (output_mode_selector = 5), stopping at anchor_layer.
+    /// Runs a single forward pass, stopping at anchor_layer.
     /// Returns the hidden state from the anchor layer as flat f32.
     pub fn execute_encode_at_layer(
         &self,
@@ -533,7 +528,6 @@ impl MegaKernelExecutor {
                 0, 0, 0,
                 1,
                 self.eos_token_id as usize,
-                5, // output_mode_selector: EncodeToLayer
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 anchor_layer, // session_position repurposed as anchor_layer for EncodeToLayer
@@ -831,7 +825,7 @@ impl MegaKernelExecutor {
         // We reuse the mega-kernel weight_blob — same weights, same layout.
         // But compile a fresh forward-only graph via InferenceCompiler::compile_graph.
         // This requires the original CompilerGraph, which we do not store.
-        // Instead, we run the mega-kernel with output_mode_selector=3 (encode mode)
+        // Instead, we run the mega-kernel in encode mode (forward pass only)
         // which runs the forward pass and returns gen_counter (skips argmax/generate).
 
         let prompt_len = prompt_tokens.len();
@@ -864,7 +858,7 @@ impl MegaKernelExecutor {
             }
         }
 
-        // Run with output_mode_selector=3 (encode) — forward pass only, no generate loop logic
+        // Run forward pass only, no generate loop logic
         let _result = unsafe {
             // R1: Build KernelContext
             let mut ctx = KernelContext::zeroed();
@@ -886,7 +880,6 @@ impl MegaKernelExecutor {
                 0,
                 1, // max_new_tokens=1
                 self.eos_token_id as usize,
-                3, // output_mode_selector=3 (encode!)
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 0,

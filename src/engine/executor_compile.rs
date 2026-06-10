@@ -216,8 +216,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             crate::loader::name_map::TensorNameMap::build_from_names(&all_names, tie_embed);
         let (auto_role_index, _) =
             crate::loader::build_tensor_role_index(ext_shapes.keys().map(|s| s.as_str()));
+        let hints = crate::model_config::ArchHints {
+            qk_norm: model_config.qk_norm,
+            value_norm: model_config.value_norm,
+            embedding_scale_factor: model_config.embedding_scale_factor,
+            hidden_act: model_config.hidden_act.clone(),
+            mla_use_unabsorbed: model_config.mla_use_unabsorbed,
+        };
         let auto_features = crate::arch::auto_graph::analyze_architecture(
-            &auto_role_index, ext_shapes, Some(&manifest.arch),
+            &auto_role_index, ext_shapes, Some(&manifest.arch), Some(&hints),
         );
         let (weight_ptrs, weight_sizes, weight_shapes) =
             Self::convert_ext_to_canonical(ext_ptrs, ext_sizes, ext_shapes, &name_map);
@@ -431,30 +438,22 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             })
     }
 
-    /// Build BusinessConfig from model geometry, features, and manifest.
+    /// Build BusinessConfig from model geometry and manifest.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn build_business_config(
         geometry: &crate::model_config::ModelGeometry,
         model_config: &ModelConfig,
         manifest: &crate::manifest::ModelManifest,
-        auto_features: &crate::arch::auto_graph::ArchitectureFeatures,
         eos_id: u32,
         qtap_cfg: &gllm_kernels::compiler::graph::QTapGraphConfig,
     ) -> gllm_kernels::compiler::BusinessConfig {
-        use gllm_kernels::compiler::mega_kernel_abi::FfnActivation;
         use gllm_kernels::compiler::BusinessConfig;
 
         let max_new_tokens_default = model_config.max_position_embeddings;
-        // is_single_pass: derived from topology (post-norm = no Argmax = single-pass)
-        // and user config (manifest.kind = service mode choice, not compiler assumption).
-        let is_single_pass = auto_features.is_post_norm
-            || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
 
-        let ffn_act = match geometry.hidden_act.as_ref().map(|a| a.as_str()).unwrap_or("") {
-            "gelu_new" | "gelu_pytorch_tanh" | "gelu" => FfnActivation::GeGLU,
-            _ => FfnActivation::SwiGLU,
-        };
-        let sg = if !is_single_pass {
+        // SgConfig: only needed for generative models (BUILD strategy decision).
+        // Non-generative modes (Embedding/Reranker/Classifier) never need SG.
+        let sg = if matches!(manifest.kind, crate::manifest::ModelKind::Chat) {
             Some(gllm_kernels::compiler::mega_kernel_abi::SgConfig {
                 detect_layer: geometry.num_layers / 2,
                 detect_offset: 0,
@@ -465,18 +464,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             None
         };
         let output_modes = Self::build_output_modes(
-            manifest, is_single_pass, max_new_tokens_default, eos_id,
+            manifest, max_new_tokens_default, eos_id,
         );
 
         let mut cfg = BusinessConfig {
-            has_head_rms_norm: auto_features.has_head_rms_norm,
-            head_rms_norm_eps: geometry.norm_eps,
-            ffn_activation: ffn_act,
-            has_qk_norm: auto_features.has_qk_norm,
-            has_value_norm: auto_features.has_value_norm,
-            value_norm_eps: geometry.norm_eps,
-            logit_softcapping: geometry.final_logit_softcapping,
-            embedding_scale: auto_features.has_embedding_scale.then_some((geometry.hidden_size as f32).sqrt()),
             semantic_gatekeeper: sg,
             output_modes,
             ..BusinessConfig::default()
@@ -489,41 +480,26 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
         cfg.debug_jit = debug_jit;
 
-        // Layer 7: MTP config
-        cfg.mtp_config = model_config.mtp_depth.filter(|&d| d > 0).map(|depth| {
-            gllm_kernels::compiler::MtpKernelConfig {
-                depth,
-                hidden_size: geometry.hidden_size,
-                vocab_size: geometry.vocab_size,
-            }
-        });
         cfg
     }
 
-    /// Build output_modes vector based on model kind (service mode) and single-pass topology.
+    /// Build output_modes vector based on manifest kind (BUILD strategy decision).
+    /// The BUILD stage knows the service mode (Generator/Chat/Embedding/Reranker/Classifier)
+    /// and directly selects the appropriate OutputMode — no intermediate variables needed.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn build_output_modes(
         manifest: &crate::manifest::ModelManifest,
-        is_single_pass: bool,
         max_new_tokens: usize,
         eos_id: u32,
     ) -> Vec<gllm_kernels::compiler::mega_kernel_abi::OutputMode> {
         use gllm_kernels::compiler::mega_kernel_abi::{OutputMode, PoolMode};
         use crate::manifest::ModelKind;
 
-        if is_single_pass {
-            match manifest.kind {
-                ModelKind::Embedding => vec![OutputMode::EncodeToLayer { anchor_layer: 0, pool_mode: PoolMode::MeanPool }],
-                ModelKind::Reranker => vec![OutputMode::EncodeToLayer { anchor_layer: 0, pool_mode: PoolMode::ClsToken }],
-                ModelKind::Classifier => vec![OutputMode::ClassifyMultiway { label_token_ids: vec![] }],
-                _ => vec![OutputMode::Generate { max_new_tokens, eos_token_id: eos_id }],
-            }
-        } else {
-            match manifest.kind {
-                ModelKind::Embedding => vec![OutputMode::EncodeToLayer { anchor_layer: 0, pool_mode: PoolMode::MeanPool }],
-                ModelKind::Reranker => vec![OutputMode::ClassifyBinary { positive_token_id: 0, negative_token_id: 0 }],
-                _ => vec![OutputMode::Generate { max_new_tokens, eos_token_id: eos_id }],
-            }
+        match manifest.kind {
+            ModelKind::Embedding => vec![OutputMode::EncodeToLayer { anchor_layer: 0, pool_mode: PoolMode::MeanPool }],
+            ModelKind::Reranker => vec![OutputMode::ClassifyBinary { positive_token_id: 0, negative_token_id: 0 }],
+            ModelKind::Classifier => vec![OutputMode::ClassifyMultiway { label_token_ids: vec![] }],
+            ModelKind::Chat => vec![OutputMode::Generate { max_new_tokens, eos_token_id: eos_id }],
         }
     }
 
@@ -675,13 +651,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             auto_features.num_segments = hc.num_segments;
             auto_features.sliding_per_segment = hc.sliding_per_segment;
         }
-        // SPEC/39: is_single_pass drives business config (output modes, SG gating)
-        // but NOT compilation branching. Derived from topology (is_post_norm) not Family enum.
-        let is_single_pass = auto_features.is_post_norm
-            || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
+        // BusinessConfig is built from manifest kind (BUILD strategy) — no topology derivation needed.
 
         let business_config = Self::build_business_config(
-            geometry, model_config, manifest, &auto_features, eos_id, qtap_cfg,
+            geometry, model_config, manifest, eos_id, qtap_cfg,
         );
 
         let (weight_dtypes, weight_quant_types) =
@@ -713,7 +686,7 @@ mod tests {
     use crate::engine::executor_types::{AttentionMaskType, AttentionTopology, KvCacheHandle, LogitsHandle, SequenceInput};
     use crate::manifest::ModelKind;
     use crate::model_config::ModelGeometry;
-    use gllm_kernels::compiler::mega_kernel_abi::{FfnActivation, MtpKernelConfig, OutputMode, PoolMode};
+    use gllm_kernels::compiler::mega_kernel_abi::{MtpKernelConfig, OutputMode, PoolMode};
     use std::borrow::Cow;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -754,6 +727,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         }
     }
 
@@ -1227,9 +1204,9 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn build_output_modes_encoder_embedding() {
+    fn build_output_modes_embedding_encode_to_layer() {
         let manifest = make_manifest(ModelKind::Embedding);
-        let modes = TestExec::build_output_modes(&manifest, true, 100, 2);
+        let modes = TestExec::build_output_modes(&manifest, 100, 2);
         assert_eq!(modes.len(), 1);
         match &modes[0] {
             OutputMode::EncodeToLayer { anchor_layer, pool_mode: PoolMode::MeanPool } => {
@@ -1240,62 +1217,9 @@ mod tests {
     }
 
     #[test]
-    fn build_output_modes_encoder_reranker() {
+    fn build_output_modes_reranker() {
         let manifest = make_manifest(ModelKind::Reranker);
-        let modes = TestExec::build_output_modes(&manifest, true, 100, 2);
-        assert_eq!(modes.len(), 1);
-        match &modes[0] {
-            OutputMode::EncodeToLayer { anchor_layer, pool_mode: PoolMode::ClsToken } => {
-                assert_eq!(*anchor_layer, 0);
-            }
-            _ => panic!("expected EncodeToLayer with ClsToken"),
-        }
-    }
-
-    #[test]
-    fn build_output_modes_encoder_classifier() {
-        let manifest = make_manifest(ModelKind::Classifier);
-        let modes = TestExec::build_output_modes(&manifest, true, 100, 2);
-        assert_eq!(modes.len(), 1);
-        match &modes[0] {
-            OutputMode::ClassifyMultiway { label_token_ids } => {
-                assert!(label_token_ids.is_empty());
-            }
-            _ => panic!("expected ClassifyMultiway"),
-        }
-    }
-
-    #[test]
-    fn build_output_modes_encoder_chat_generates() {
-        let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, true, 512, 42);
-        assert_eq!(modes.len(), 1);
-        match &modes[0] {
-            OutputMode::Generate { max_new_tokens, eos_token_id } => {
-                assert_eq!(*max_new_tokens, 512);
-                assert_eq!(*eos_token_id, 42);
-            }
-            _ => panic!("expected Generate"),
-        }
-    }
-
-    #[test]
-    fn build_output_modes_decoder_embedding() {
-        let manifest = make_manifest(ModelKind::Embedding);
-        let modes = TestExec::build_output_modes(&manifest, false, 100, 2);
-        assert_eq!(modes.len(), 1);
-        match &modes[0] {
-            OutputMode::EncodeToLayer { anchor_layer, pool_mode: PoolMode::MeanPool } => {
-                assert_eq!(*anchor_layer, 0);
-            }
-            _ => panic!("expected EncodeToLayer with MeanPool"),
-        }
-    }
-
-    #[test]
-    fn build_output_modes_decoder_reranker() {
-        let manifest = make_manifest(ModelKind::Reranker);
-        let modes = TestExec::build_output_modes(&manifest, false, 100, 2);
+        let modes = TestExec::build_output_modes(&manifest, 100, 2);
         assert_eq!(modes.len(), 1);
         match &modes[0] {
             OutputMode::ClassifyBinary { positive_token_id, negative_token_id } => {
@@ -1307,9 +1231,50 @@ mod tests {
     }
 
     #[test]
-    fn build_output_modes_decoder_chat_generates() {
+    fn build_output_modes_classifier() {
+        let manifest = make_manifest(ModelKind::Classifier);
+        let modes = TestExec::build_output_modes(&manifest, 100, 2);
+        assert_eq!(modes.len(), 1);
+        match &modes[0] {
+            OutputMode::ClassifyMultiway { label_token_ids } => {
+                assert!(label_token_ids.is_empty());
+            }
+            _ => panic!("expected ClassifyMultiway"),
+        }
+    }
+
+    #[test]
+    #[test]
+    fn build_output_modes_chat_generates() {
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, false, 1024, 50256);
+        let modes = TestExec::build_output_modes(&manifest, 512, 42);
+        assert_eq!(modes.len(), 1);
+        match &modes[0] {
+            OutputMode::Generate { max_new_tokens, eos_token_id } => {
+                assert_eq!(*max_new_tokens, 512);
+                assert_eq!(*eos_token_id, 42);
+            }
+            _ => panic!("expected Generate"),
+        }
+    }
+
+    #[test]
+    fn build_output_modes_embedding() {
+        let manifest = make_manifest(ModelKind::Embedding);
+        let modes = TestExec::build_output_modes(&manifest, 100, 2);
+        assert_eq!(modes.len(), 1);
+        match &modes[0] {
+            OutputMode::EncodeToLayer { anchor_layer, pool_mode: PoolMode::MeanPool } => {
+                assert_eq!(*anchor_layer, 0);
+            }
+            _ => panic!("expected EncodeToLayer with MeanPool"),
+        }
+    }
+
+    #[test]
+    fn build_output_modes_chat_large_values() {
+        let manifest = make_manifest(ModelKind::Chat);
+        let modes = TestExec::build_output_modes(&manifest, 1024, 50256);
         assert_eq!(modes.len(), 1);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, eos_token_id } => {
@@ -1321,21 +1286,23 @@ mod tests {
     }
 
     #[test]
-    fn build_output_modes_decoder_classifier_generates() {
+    fn build_output_modes_classifier_multiway() {
         let manifest = make_manifest(ModelKind::Classifier);
-        let modes = TestExec::build_output_modes(&manifest, false, 100, 1);
-        // Decoder Classifier falls through to _ => Generate
+        let modes = TestExec::build_output_modes(&manifest, 100, 1);
+        // Classifier always maps to ClassifyMultiway (BUILD strategy decision)
         assert_eq!(modes.len(), 1);
         match &modes[0] {
-            OutputMode::Generate { .. } => {}
-            _ => panic!("expected Generate for decoder classifier"),
+            OutputMode::ClassifyMultiway { label_token_ids } => {
+                assert!(label_token_ids.is_empty());
+            }
+            _ => panic!("expected ClassifyMultiway for classifier"),
         }
     }
 
     #[test]
     fn build_output_modes_zero_max_new_tokens() {
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, false, 0, 0);
+        let modes = TestExec::build_output_modes(&manifest, 0, 0);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, eos_token_id } => {
                 assert_eq!(*max_new_tokens, 0);
@@ -1348,7 +1315,7 @@ mod tests {
     #[test]
     fn build_output_modes_large_max_new_tokens() {
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, false, usize::MAX, u32::MAX);
+        let modes = TestExec::build_output_modes(&manifest, usize::MAX, u32::MAX);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, eos_token_id } => {
                 assert_eq!(*max_new_tokens, usize::MAX);
@@ -1717,7 +1684,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build_output_modes: all ModelKind x encoder/decoder combinations
+    // build_output_modes: all ModelKind coverage
     // ======================================================================
 
     #[test]
@@ -1726,14 +1693,8 @@ mod tests {
 
         for &kind in &kinds {
             let manifest = make_manifest(kind);
-
-            // Encoder path
-            let encoder_modes = TestExec::build_output_modes(&manifest, true, 100, 2);
-            assert_eq!(encoder_modes.len(), 1, "encoder modes should have exactly 1 entry for {:?}", kind);
-
-            // Decoder path
-            let decoder_modes = TestExec::build_output_modes(&manifest, false, 100, 2);
-            assert_eq!(decoder_modes.len(), 1, "decoder modes should have exactly 1 entry for {:?}", kind);
+            let modes = TestExec::build_output_modes(&manifest, 100, 2);
+            assert_eq!(modes.len(), 1, "modes should have exactly 1 entry for {:?}", kind);
         }
     }
 
@@ -1911,21 +1872,17 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn build_output_modes_reranker_encoder_vs_decoder() {
+    fn build_output_modes_reranker_is_classify_binary() {
+        // Reranker always maps to ClassifyBinary (BUILD strategy decision,
+        // no encoder/decoder distinction).
         let manifest = make_manifest(ModelKind::Reranker);
+        let modes = TestExec::build_output_modes(&manifest, 100, 2);
 
-        let encoder_modes = TestExec::build_output_modes(&manifest, true, 100, 2);
-        let decoder_modes = TestExec::build_output_modes(&manifest, false, 100, 2);
-
-        // Encoder reranker: EncodeToLayer with ClsToken
-        match &encoder_modes[0] {
-            OutputMode::EncodeToLayer { pool_mode: PoolMode::ClsToken, .. } => {}
-            other => panic!("expected EncodeToLayer/ClsToken, got {:?}", other),
-        }
-
-        // Decoder reranker: ClassifyBinary
-        match &decoder_modes[0] {
-            OutputMode::ClassifyBinary { .. } => {}
+        match &modes[0] {
+            OutputMode::ClassifyBinary { positive_token_id, negative_token_id } => {
+                assert_eq!(*positive_token_id, 0);
+                assert_eq!(*negative_token_id, 0);
+            }
             other => panic!("expected ClassifyBinary, got {:?}", other),
         }
     }
@@ -2164,9 +2121,6 @@ mod tests {
         use gllm_kernels::compiler::BusinessConfig;
         let cfg = BusinessConfig::default();
         assert!(!cfg.guardrail_enabled);
-        assert!(!cfg.has_head_rms_norm);
-        assert!(!cfg.has_qk_norm);
-        assert!(!cfg.has_value_norm);
         assert!(!cfg.session_enabled);
         assert!(!cfg.multimodal_enabled);
         assert!(!cfg.debug_jit);
@@ -2179,49 +2133,6 @@ mod tests {
         assert!(cfg.semantic_gatekeeper.is_none());
         assert!(cfg.intent_anchor_layer.is_none());
         assert!(cfg.cot_step_hook.is_none());
-        assert!(cfg.logit_softcapping.is_none());
-        assert!(cfg.embedding_scale.is_none());
-        assert!(cfg.mtp_config.is_none());
-    }
-
-    #[test]
-    fn business_config_default_ffn_activation_swiglu() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let cfg = BusinessConfig::default();
-        assert_eq!(cfg.ffn_activation, FfnActivation::SwiGLU);
-    }
-
-    #[test]
-    fn business_config_default_eps_values() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let cfg = BusinessConfig::default();
-        assert!((cfg.head_rms_norm_eps - 1e-6).abs() < 1e-10);
-        assert!((cfg.value_norm_eps - 1e-6).abs() < 1e-10);
-    }
-
-    // ======================================================================
-    // FfnActivation Debug and Copy semantics
-    // ======================================================================
-
-    #[test]
-    fn ffn_activation_debug_format() {
-        assert_eq!(format!("{:?}", FfnActivation::SwiGLU), "SwiGLU");
-        assert_eq!(format!("{:?}", FfnActivation::GeGLU), "GeGLU");
-        assert_eq!(format!("{:?}", FfnActivation::Gelu), "Gelu");
-    }
-
-    #[test]
-    fn ffn_activation_equality() {
-        assert_eq!(FfnActivation::SwiGLU, FfnActivation::SwiGLU);
-        assert_ne!(FfnActivation::SwiGLU, FfnActivation::GeGLU);
-        assert_ne!(FfnActivation::GeGLU, FfnActivation::Gelu);
-    }
-
-    #[test]
-    fn ffn_activation_copy() {
-        let a = FfnActivation::GeGLU;
-        let b = a; // Copy
-        assert_eq!(a, b);
     }
 
     // ======================================================================
@@ -2568,61 +2479,6 @@ mod tests {
     // BusinessConfig manual construction with fields
     // ======================================================================
 
-    #[test]
-    fn business_config_manual_with_mtp() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let mtp = MtpKernelConfig {
-            depth: 2,
-            hidden_size: 256,
-            vocab_size: 32000,
-        };
-        let cfg = BusinessConfig {
-            mtp_config: Some(mtp),
-            ..BusinessConfig::default()
-        };
-        assert!(cfg.mtp_config.is_some());
-        let m = cfg.mtp_config.unwrap();
-        assert_eq!(m.depth, 2);
-        assert_eq!(m.hidden_size, 256);
-        assert_eq!(m.vocab_size, 32000);
-    }
-
-    #[test]
-    fn business_config_with_qk_norm() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let cfg = BusinessConfig {
-            has_qk_norm: true,
-            has_value_norm: true,
-            value_norm_eps: 1e-5,
-            ..BusinessConfig::default()
-        };
-        assert!(cfg.has_qk_norm);
-        assert!(cfg.has_value_norm);
-        assert!((cfg.value_norm_eps - 1e-5).abs() < 1e-10);
-    }
-
-    #[test]
-    fn business_config_geglu_activation() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let cfg = BusinessConfig {
-            ffn_activation: FfnActivation::GeGLU,
-            ..BusinessConfig::default()
-        };
-        assert_eq!(cfg.ffn_activation, FfnActivation::GeGLU);
-    }
-
-    #[test]
-    fn business_config_with_embedding_scale() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let scale = (256.0f32).sqrt();
-        let cfg = BusinessConfig {
-            embedding_scale: Some(scale),
-            ..BusinessConfig::default()
-        };
-        assert!(cfg.embedding_scale.is_some());
-        assert!((cfg.embedding_scale.unwrap() - scale).abs() < 1e-5);
-    }
-
     // ======================================================================
     // LogitsHandle construction and Debug
     // ======================================================================
@@ -2731,17 +2587,6 @@ mod tests {
     }
 
     #[test]
-    fn business_config_logit_softcapping_override() {
-        use gllm_kernels::compiler::BusinessConfig;
-        let cfg = BusinessConfig {
-            logit_softcapping: Some(30.0),
-            ..BusinessConfig::default()
-        };
-        assert!(cfg.logit_softcapping.is_some());
-        assert!((cfg.logit_softcapping.unwrap() - 30.0).abs() < 1e-5);
-    }
-
-    #[test]
     fn business_config_debug_jit_override() {
         use gllm_kernels::compiler::BusinessConfig;
         let cfg = BusinessConfig {
@@ -2762,24 +2607,6 @@ mod tests {
             ..BusinessConfig::default()
         };
         assert_eq!(cfg.output_modes.len(), 2);
-    }
-
-    // ======================================================================
-    // FfnActivation: ordering and exhaustive variant coverage
-    // ======================================================================
-
-    #[test]
-    fn ffn_activation_all_variants_distinct() {
-        let variants = [FfnActivation::SwiGLU, FfnActivation::GeGLU, FfnActivation::Gelu];
-        for i in 0..variants.len() {
-            for j in 0..variants.len() {
-                if i == j {
-                    assert_eq!(variants[i], variants[j]);
-                } else {
-                    assert_ne!(variants[i], variants[j]);
-                }
-            }
-        }
     }
 
     // ======================================================================
@@ -3100,7 +2927,7 @@ mod tests {
     #[test]
     fn build_output_modes_single_token_generation() {
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, false, 1, 2);
+        let modes = TestExec::build_output_modes(&manifest, 1, 2);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, .. } => assert_eq!(*max_new_tokens, 1),
             _ => panic!("expected Generate"),
@@ -4151,7 +3978,7 @@ mod tests {
     #[test]
     fn build_output_modes_max_new_tokens_usize_max() {
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, false, usize::MAX, 2);
+        let modes = TestExec::build_output_modes(&manifest, usize::MAX, 2);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, .. } => assert_eq!(*max_new_tokens, usize::MAX),
             _ => panic!("expected Generate"),
@@ -4580,6 +4407,10 @@ mod tests {
             mla_d_c: 512,
             mla_d_rope: 64,
             mla_unabsorbed_threshold: 256,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
             ..make_geometry()
         };
         assert_eq!(geo.mla_unabsorbed_threshold, 256);
@@ -4825,14 +4656,14 @@ mod tests {
     }
 
     // ======================================================================
-    // build_output_modes: encoder with ModelKind::Chat falls to Generate
+    // build_output_modes: Chat maps to Generate
     // ======================================================================
 
     #[test]
-    fn build_output_modes_encoder_chat_falls_to_generate() {
-        // Encoder + Chat is not a special combination, falls through to Generate
+    fn build_output_modes_chat_maps_to_generate() {
+        // Chat always maps to Generate (BUILD strategy decision)
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, true, 256, 3);
+        let modes = TestExec::build_output_modes(&manifest, 256, 3);
         assert_eq!(modes.len(), 1);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, eos_token_id } => {
@@ -5031,14 +4862,14 @@ mod tests {
     }
 
     // ======================================================================
-    // build_output_modes: encoder unknown ModelKind falls to Generate
+    // build_output_modes: Chat explicitly maps to Generate
     // ======================================================================
 
     #[test]
-    fn build_output_modes_encoder_unknown_kind_falls_to_generate() {
-        // ModelKind::Chat on 无 Argmax 的图 falls through to _ => Generate
+    fn build_output_modes_chat_explicitly_generates() {
+        // Chat is the only generative ModelKind, explicitly mapped to Generate
         let manifest = make_manifest(ModelKind::Chat);
-        let modes = TestExec::build_output_modes(&manifest, true, 128, 7);
+        let modes = TestExec::build_output_modes(&manifest, 128, 7);
         assert_eq!(modes.len(), 1);
         match &modes[0] {
             OutputMode::Generate { max_new_tokens, eos_token_id } => {
@@ -5064,16 +4895,6 @@ mod tests {
         assert!(geo.is_mla());
         // kv_dim = d_c + d_rope = 256 + 0 = 256
         assert_eq!(geo.kv_dim(), 256);
-    }
-
-    // ======================================================================
-    // FfnActivation: Debug output matches variant name exactly
-    // ======================================================================
-
-    #[test]
-    fn ffn_activation_gelu_debug_exact() {
-        let debug = format!("{:?}", FfnActivation::Gelu);
-        assert_eq!(debug, "Gelu");
     }
 
     // ======================================================================
@@ -6195,19 +6016,18 @@ mod tests {
     }
 
     // ======================================================================
-    // build_output_modes: encoder with ModelKind::Embedding returns EncodeToLayer
-    // with anchor_layer=0 explicitly
+    // build_output_modes: Embedding returns EncodeToLayer with anchor_layer=0
     // ======================================================================
 
     #[test]
-    fn build_output_modes_encoder_embedding_anchor_layer_zero() {
+    fn build_output_modes_embedding_anchor_layer_zero() {
         // Arrange
         let manifest = make_manifest(ModelKind::Embedding);
 
         // Act
-        let modes = TestExec::build_output_modes(&manifest, true, 4096, 2);
+        let modes = TestExec::build_output_modes(&manifest, 4096, 2);
 
-        // Assert: encoder Embedding always uses anchor_layer=0 and MeanPool
+        // Assert: Embedding always uses anchor_layer=0 and MeanPool
         match &modes[0] {
             OutputMode::EncodeToLayer { anchor_layer, pool_mode } => {
                 assert_eq!(*anchor_layer, 0);

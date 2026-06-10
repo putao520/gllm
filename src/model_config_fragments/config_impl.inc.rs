@@ -409,7 +409,7 @@ impl ModelConfig {
                 feed_forward_lengths,
                 reader.kv_lora_rank().map(|d_c| {
                     let d_rope = reader.qk_rope_head_dim().unwrap_or(64) as usize;
-                    MlaConfig { d_c: d_c as usize, d_rope, unabsorbed_threshold: 4096 }
+                    MlaConfig { d_c: d_c as usize, d_rope, unabsorbed_threshold: None }
                 }),
                 optional_gguf_usize(reader.mtp_depth(), "mtp_depth")?,
             )
@@ -522,6 +522,13 @@ impl ModelConfig {
             feed_forward_lengths,
             use_double_wide_mlp: None,
             add_special_tokens: None, // GGUF has no add_special_tokens concept, default true downstream
+            // ── BUILD-stage architecture hints (REQ-MC-EXT-001..007) ──
+            // GGUF path: these will be populated in C4; for now default None.
+            qk_norm: None,
+            value_norm: None,
+            embedding_scale_factor: None,
+            rope_partial_ratio_global: None,
+            mla_use_unabsorbed: None,
         };
         apply_tensor_derived(base, derived)
     }
@@ -814,7 +821,11 @@ impl ModelConfig {
                 MlaConfig {
                     d_c,
                     d_rope,
-                    unabsorbed_threshold: 4096,
+                    unabsorbed_threshold: find_usize(value, &[
+                        "mla_use_unabsorbed_threshold",
+                        "attention.mla.unabsorbed_threshold",
+                        "text_config.mla_use_unabsorbed_threshold",
+                    ]),
                 }
             });
 
@@ -890,7 +901,7 @@ impl ModelConfig {
             }),
             _ => {
                 if vision_config.is_some() || audio_config.is_some() {
-                    Some(crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults())
+                    Some(crate::compat::multimodal::MultimodalTokenIds::fallback_multimodal_token_ids())
                 } else {
                     None
                 }
@@ -941,6 +952,20 @@ impl ModelConfig {
             feed_forward_lengths: None, // JSON config path doesn't expose per-layer FFN sizes
             use_double_wide_mlp: find_bool(value, &["use_double_wide_mlp"]),
             add_special_tokens: find_bool(value, &["add_bos_token", "add_special_tokens"]),
+            // ── BUILD-stage architecture hints (REQ-MC-EXT-001..007) ──
+            qk_norm: find_bool(value, &["qk_norm", "attention.qk_norm",
+                "text_config.qk_norm", "text_config.attention.qk_norm"]),
+            value_norm: find_bool(value, &["value_norm", "attention.value_norm",
+                "text_config.value_norm", "text_config.attention.value_norm"]),
+            embedding_scale_factor: find_f32(value, &["embedding_scale_factor",
+                "text_config.embedding_scale_factor"]),
+            rope_partial_ratio_global: find_f32(value, &[
+                "rope_parameters.full_attention.partial_rotary_factor",
+                "text_config.rope_parameters.full_attention.partial_rotary_factor",
+            ]),
+            mla_use_unabsorbed: find_bool(value, &["mla_use_unabsorbed",
+                "attention.mla.use_unabsorbed",
+                "text_config.mla_use_unabsorbed"]),
         })
     }
 

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use gllm_kernels::compiler::{
-    CompilerGraph, InferenceCompiler, BusinessConfig, OpKind, OutputMode,
+    CompilerGraph, InferenceCompiler, OpKind,
     ShapeBinding, SymDim, TensorId,
 };
 use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
@@ -749,13 +749,7 @@ pub fn vision_encode(
     let hidden = config.hidden_size;
     let mk_config = CompileConfig {
         max_seq_len: num_patches,
-        business_config: BusinessConfig {
-            output_modes: vec![OutputMode::EncodeToLayer {
-                anchor_layer: 0,
-                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-            }],
-            ..BusinessConfig::default()
-        },
+        debug_jit: false,
         hetero: None,
     };
     let mut compiler = InferenceCompiler::new();
@@ -1063,13 +1057,7 @@ mod tests {
     ) -> gllm_kernels::compiler::CompiledLayer {
         let config = CompileConfig {
             max_seq_len,
-            business_config: BusinessConfig {
-                output_modes: vec![OutputMode::EncodeToLayer {
-                    anchor_layer: 0,
-                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-                }],
-                ..BusinessConfig::default()
-            },
+            debug_jit: false,
             hetero: None,
         };
         compiler
@@ -1184,7 +1172,7 @@ mod tests {
         let mut compiler = InferenceCompiler::new();
         let mk_config = CompileConfig {
             max_seq_len: config.num_patches(),
-            business_config: BusinessConfig::default(),
+            debug_jit: false,
             hetero: None,
         };
         let _compiled = compiler
@@ -1520,7 +1508,7 @@ mod tests {
         let mut compiler = InferenceCompiler::new();
         let mk_config = CompileConfig {
             max_seq_len: config.num_patches(),
-            business_config: BusinessConfig::default(),
+            debug_jit: false,
             hetero: None,
         };
         let compiled = compiler.compile_mega_kernel_from_graph(graph, &mk_config, None).expect("compile").layer_code;
@@ -1573,7 +1561,7 @@ mod tests {
     #[test]
     fn siglip_encoder_new_detects_missing_weight() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let weights = Arc::new(OwnedVisionWeights::new());
         let err = SigLipEncoder::new(config, weights, ids).unwrap_err();
         assert!(format!("{err}").contains("missing"));
@@ -1583,7 +1571,7 @@ mod tests {
     fn siglip_encoder_integrates_with_multimodal_context() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
 
         let encoder = SigLipEncoder::new(config.clone(), weights, ids)
             .expect("SigLipEncoder::new must succeed");
@@ -1617,7 +1605,7 @@ mod tests {
     fn siglip_encoder_rejects_audio_request() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let err = encoder
             .encode_audio(&EncoderMedia::Raw(vec![]))
@@ -1629,7 +1617,7 @@ mod tests {
     fn siglip_encoder_rejects_unresolved_media_modes() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -1646,7 +1634,7 @@ mod tests {
     #[test]
     fn try_build_siglip_returns_none_when_tensor_missing() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let populated = populate_weights(&config);
         let mut call_count = 0;
         let result = try_build_siglip_from_tensors(&config, ids, |name| {
@@ -1667,7 +1655,7 @@ mod tests {
     #[test]
     fn try_build_siglip_succeeds_when_all_tensors_present() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let populated = populate_weights(&config);
         let result = try_build_siglip_from_tensors(&config, ids, |name| {
             populated
@@ -2012,7 +2000,7 @@ mod tests {
     fn decode_pixels_raw_correct_size() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -2038,7 +2026,7 @@ mod tests {
     fn decode_pixels_raw_wrong_size() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         // 10 bytes instead of 3*14*14*4 = 2352 bytes.
@@ -2052,7 +2040,7 @@ mod tests {
     fn decode_pixels_raw_empty_buffer() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let err = encoder
@@ -2065,7 +2053,7 @@ mod tests {
     fn decode_pixels_file_variant_returns_error() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -2078,7 +2066,7 @@ mod tests {
     fn decode_pixels_base64_variant_returns_error() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -2094,7 +2082,7 @@ mod tests {
     fn decode_pixels_url_variant_returns_error() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -2109,7 +2097,7 @@ mod tests {
     fn siglip_encoder_config_accessor() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         assert_eq!(encoder.config().image_size, config.image_size);
@@ -2124,7 +2112,7 @@ mod tests {
     fn siglip_encoder_token_ids_accessor() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let retrieved = encoder.token_ids();
@@ -2150,7 +2138,7 @@ mod tests {
             weights.insert(spec.name.clone(), data, spec.shape.to_vec());
         }
 
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(config, Arc::new(weights), ids).unwrap_err();
         assert!(format!("{err}").contains("weight"));
         assert!(format!("{err}").contains("len"));
@@ -2162,7 +2150,7 @@ mod tests {
     fn encode_image_output_token_count_matches_num_patches() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let image_numel = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -2212,7 +2200,7 @@ mod tests {
     #[test]
     fn try_build_siglip_rejects_wrong_numel() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
 
         let result = try_build_siglip_from_tensors(&config, ids, |name| {
@@ -2232,7 +2220,7 @@ mod tests {
     #[test]
     fn try_build_siglip_rejects_wrong_shape() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
 
         let result = try_build_siglip_from_tensors(&config, ids, |name| {
@@ -2258,7 +2246,7 @@ mod tests {
             num_heads: 1,
             intermediate_size: 16,
         };
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = try_build_siglip_from_tensors(&bad_config, ids, |_| None).unwrap_err();
         assert!(format!("{err}").contains("image_size"));
     }
@@ -2295,7 +2283,7 @@ mod tests {
     fn siglip_encoder_rejects_base64_media() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -2572,7 +2560,7 @@ mod tests {
     fn siglip_encoder_debug_output_contains_config() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let debug = format!("{encoder:?}");
@@ -2585,7 +2573,7 @@ mod tests {
     fn siglip_encoder_rejects_base64_with_mime_type() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -2839,7 +2827,7 @@ mod tests {
     fn siglip_encoder_has_debug_trait() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let debug_output = format!("{encoder:?}");
         // Debug output must be non-empty and contain struct-identifiable content.
@@ -2860,7 +2848,7 @@ mod tests {
             intermediate_size: 16,
         };
         let weights = Arc::new(OwnedVisionWeights::new());
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(bad_config, weights, ids).unwrap_err();
         assert!(format!("{err}").contains("image_size"));
     }
@@ -2870,7 +2858,7 @@ mod tests {
     #[test]
     fn try_build_siglip_success_returns_accessible_config() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let populated = populate_weights(&config);
         let encoder = try_build_siglip_from_tensors(&config, ids, |name| {
             populated
@@ -3373,7 +3361,7 @@ mod tests {
     fn siglip_encoder_encode_audio_error_mentions_conformer() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let err = encoder.encode_audio(&EncoderMedia::Raw(vec![])).unwrap_err();
         let msg = format!("{err}");
@@ -3396,7 +3384,7 @@ mod tests {
     fn decode_pixels_roundtrip_negative_values() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -3422,7 +3410,7 @@ mod tests {
     fn decode_pixels_off_by_one_byte() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_bytes = VISION_IN_CHANNELS * config.image_size * config.image_size * 4;
@@ -3438,7 +3426,7 @@ mod tests {
     fn decode_pixels_one_byte_over() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_bytes = VISION_IN_CHANNELS * config.image_size * config.image_size * 4;
@@ -3501,7 +3489,7 @@ mod tests {
     #[test]
     fn try_build_siglip_calls_fetch_for_every_spec() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let populated = populate_weights(&config);
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
         let expected_calls = specs.len();
@@ -3584,13 +3572,13 @@ mod tests {
 
     #[test]
     fn token_ids_is_image_true_for_image_token() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(ids.is_image(258880));
     }
 
     #[test]
     fn token_ids_is_image_false_for_other_tokens() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_image(258881)); // audio token
         assert!(!ids.is_image(0));
         assert!(!ids.is_image(99999));
@@ -3598,25 +3586,15 @@ mod tests {
 
     #[test]
     fn token_ids_is_audio_true_for_audio_token() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(ids.is_audio(258881));
     }
 
     #[test]
     fn token_ids_is_audio_false_for_other_tokens() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_audio(258880)); // image token
         assert!(!ids.is_audio(0));
-    }
-
-    #[test]
-    fn token_ids_default_equals_gemma4_defaults() {
-        let via_default = MultimodalTokenIds::default();
-        let via_explicit = MultimodalTokenIds::gemma4_defaults();
-        assert_eq!(via_default.image_token_id, via_explicit.image_token_id);
-        assert_eq!(via_default.audio_token_id, via_explicit.audio_token_id);
-        assert_eq!(via_default.eoi_token_id, via_explicit.eoi_token_id);
-        assert_eq!(via_default.eoa_token_id, via_explicit.eoa_token_id);
     }
 
     // --- MultimodalEncoded: validate success and failure ---
@@ -3852,7 +3830,7 @@ mod tests {
     fn siglip_encoder_arc_clone_preserves_encoder() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), Arc::clone(&weights), ids).unwrap();
 
         // Encoder still functional through Arc clone.
@@ -4070,7 +4048,7 @@ mod tests {
     fn siglip_encoder_encode_image_rejects_empty_raw() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let err = encoder.encode_image(&EncoderMedia::Raw(vec![])).unwrap_err();
@@ -4439,7 +4417,7 @@ mod tests {
     fn route_multimodal_tokens_pure_text_passthrough() {
         use crate::compat::multimodal::route_multimodal_tokens;
         let ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![10u32, 20, 30];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 8).unwrap();
         assert_eq!(routed.token_ids, tokens);
@@ -4452,7 +4430,7 @@ mod tests {
     fn route_multimodal_tokens_empty_prompt() {
         use crate::compat::multimodal::route_multimodal_tokens;
         let ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let routed = route_multimodal_tokens(&[], &ctx, &ids, 8).unwrap();
         assert_eq!(routed.seq_len(), 0);
     }
@@ -4461,7 +4439,7 @@ mod tests {
     fn route_multimodal_tokens_image_count_mismatch() {
         use crate::compat::multimodal::route_multimodal_tokens;
         let mut ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Prompt has one image token but ctx has zero images.
         let tokens = vec![ids.image_token_id];
         let err = route_multimodal_tokens(&tokens, &ctx, &ids, 8).unwrap_err();
@@ -4473,7 +4451,7 @@ mod tests {
     fn route_multimodal_tokens_audio_count_mismatch() {
         use crate::compat::multimodal::route_multimodal_tokens;
         let mut ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Prompt has one audio token but ctx has zero audios.
         let tokens = vec![ids.audio_token_id];
         let err = route_multimodal_tokens(&tokens, &ctx, &ids, 8).unwrap_err();
@@ -4492,7 +4470,7 @@ mod tests {
             kind: MediaKind::Image,
         };
         ctx.push_image(img).unwrap();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![ids.image_token_id];
         let err = route_multimodal_tokens(&tokens, &ctx, &ids, 16).unwrap_err();
         let msg = format!("{err}");
@@ -4510,7 +4488,7 @@ mod tests {
             kind: MediaKind::Image,
         };
         ctx.push_image(img).unwrap();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![10u32, ids.image_token_id, 20];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 8).unwrap();
         // Text(10) + 3 virtual tokens + Text(20) = 5 tokens total.
@@ -4536,7 +4514,7 @@ mod tests {
             kind: MediaKind::Audio,
         };
         ctx.push_audio(aud).unwrap();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![ids.audio_token_id];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 4).unwrap();
         assert_eq!(routed.seq_len(), 2);
@@ -4550,7 +4528,7 @@ mod tests {
     fn build_fused_hidden_pure_text_gathers_embedding() {
         use crate::compat::multimodal::{build_fused_hidden, route_multimodal_tokens, RoutedSequence};
         let ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![0u32, 1];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 2).unwrap();
         // vocab_size=2, hidden=2: [[1.0, 2.0], [3.0, 4.0]]
@@ -4574,7 +4552,7 @@ mod tests {
             kind: MediaKind::Image,
         };
         ctx.push_image(img).unwrap();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![ids.image_token_id];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 2).unwrap();
         let embed_rows = vec![0.0f32; 4]; // vocab_size=2, hidden=2 (unused)
@@ -4682,14 +4660,14 @@ mod tests {
 
     #[test]
     fn token_ids_eoi_not_image_audio() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_image(ids.eoi_token_id));
         assert!(!ids.is_audio(ids.eoi_token_id));
     }
 
     #[test]
     fn token_ids_eoa_not_image_audio() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_image(ids.eoa_token_id));
         assert!(!ids.is_audio(ids.eoa_token_id));
     }
@@ -4845,7 +4823,7 @@ mod tests {
             weights.insert(spec.name.clone(), data, shape);
         }
 
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(config, Arc::new(weights), ids).unwrap_err();
         assert!(format!("{err}").contains("missing"));
         assert!(format!("{err}").contains("q_proj"));
@@ -4875,7 +4853,7 @@ mod tests {
             weights.insert(spec.name.clone(), data, shape);
         }
 
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(config, Arc::new(weights), ids).unwrap_err();
         assert!(format!("{err}").contains("missing"));
         assert!(format!("{err}").contains("fc1"));
@@ -5015,7 +4993,7 @@ mod tests {
 
     #[test]
     fn token_ids_copy_is_independent() {
-        let a = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
         let b = a;
         // Both should be identical after copy.
         assert_eq!(a.image_token_id, b.image_token_id);
@@ -5058,8 +5036,8 @@ mod tests {
     fn token_ids_hash_equal_ids_equal_hashes() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let a = MultimodalTokenIds::gemma4_defaults();
-        let b = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let b = MultimodalTokenIds::fallback_multimodal_token_ids();
         let mut ha = DefaultHasher::new();
         a.hash(&mut ha);
         let mut hb = DefaultHasher::new();
@@ -5069,14 +5047,14 @@ mod tests {
 
     #[test]
     fn token_ids_eq_identical() {
-        let a = MultimodalTokenIds::gemma4_defaults();
-        let b = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let b = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert_eq!(a, b);
     }
 
     #[test]
     fn token_ids_ne_different() {
-        let a = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
         let b = MultimodalTokenIds {
             image_token_id: 0,
             audio_token_id: 0,
@@ -5137,7 +5115,7 @@ mod tests {
     fn decode_pixels_roundtrip_arbitrary_values() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -5265,7 +5243,7 @@ mod tests {
             intermediate_size: 64,
         };
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
         let returned = encoder.config();
         assert_eq!(returned.image_size, 56);
@@ -5281,7 +5259,7 @@ mod tests {
     #[test]
     fn try_build_siglip_returns_none_on_first_missing_tensor() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let result = try_build_siglip_from_tensors(&config, ids, |_name| None);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -5292,7 +5270,7 @@ mod tests {
     #[test]
     fn try_build_siglip_partial_availability_returns_none() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let populated = populate_weights(&config);
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
 
@@ -5328,7 +5306,7 @@ mod tests {
         let mut compiler = InferenceCompiler::new();
         let mk_config = CompileConfig {
             max_seq_len: config.num_patches(),
-            business_config: BusinessConfig::default(),
+            debug_jit: false,
             hetero: None,
         };
         let compiled = compiler.compile_mega_kernel_from_graph(graph, &mk_config, None).expect("multi-head graph must compile").layer_code;
@@ -5798,7 +5776,7 @@ mod tests {
     fn decode_pixels_roundtrip_all_zeros() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -5818,7 +5796,7 @@ mod tests {
     fn decode_pixels_roundtrip_max_f32() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -5857,7 +5835,7 @@ mod tests {
     fn siglip_encoder_encode_image_deterministic() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let image_numel = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -6144,7 +6122,7 @@ mod tests {
     fn decode_pixels_roundtrip_subnormal_values() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -6174,7 +6152,7 @@ mod tests {
     fn siglip_encoder_encode_image_rejects_non_aligned_bytes() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         // 5 bytes: not a multiple of 4, so cannot be decoded into f32 slices.
@@ -6225,7 +6203,7 @@ mod tests {
     #[test]
     fn try_build_siglip_fetch_receives_exact_spec_name() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
         let first_spec_name = specs[0].name.clone();
 
@@ -6304,7 +6282,7 @@ mod tests {
     fn siglip_encoder_encode_image_returns_image_kind() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let image_numel = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -6483,7 +6461,7 @@ mod tests {
     fn decode_pixels_raw_one_f32_short() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -6499,7 +6477,7 @@ mod tests {
     fn decode_pixels_raw_not_aligned_to_f32() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_bytes = VISION_IN_CHANNELS * config.image_size * config.image_size * 4;
@@ -6520,7 +6498,7 @@ mod tests {
         // Insert wrong numel: config.hidden_size + 1.
         let wrong_data = vec![0.0f32; config.hidden_size + 1];
         weights.insert(&ln1_name, wrong_data, vec![config.hidden_size + 1]);
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(config, Arc::new(weights), ids).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains(&ln1_name), "error must reference the bad weight: {msg}");
@@ -6532,7 +6510,7 @@ mod tests {
     fn try_build_siglip_rejects_correct_numel_wrong_shape_vec() {
         let config = tiny_config();
         let populated = populate_weights(&config);
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
 
         let result = try_build_siglip_from_tensors(&config, ids, |name| {
@@ -6697,7 +6675,7 @@ mod tests {
         let bias_name = final_norm_bias_name();
         let wrong_data = vec![0.0f32; config.hidden_size + 5];
         weights.insert(bias_name, wrong_data, vec![config.hidden_size + 5]);
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(config, Arc::new(weights), ids).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("len") || msg.contains("weight"), "error must mention len/weight: {msg}");
@@ -6806,11 +6784,11 @@ mod tests {
         assert_eq!(all_names.len(), 15); // 5 layers * 3 suffixes
     }
 
-    /// Verify that MultimodalTokenIds::gemma4_defaults produces token IDs
+    /// Verify that MultimodalTokenIds::fallback_multimodal_token_ids produces token IDs
     /// that are all distinct from each other.
     #[test]
-    fn gemma4_defaults_all_token_ids_distinct() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+    fn fallback_multimodal_token_ids_all_token_ids_distinct() {
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let all_ids = [ids.image_token_id, ids.audio_token_id, ids.eoi_token_id, ids.eoa_token_id];
         for i in 0..all_ids.len() {
             for j in (i + 1)..all_ids.len() {
@@ -6853,7 +6831,7 @@ mod tests {
     fn decode_pixels_rejects_oversized_buffer() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_bytes = VISION_IN_CHANNELS * config.image_size * config.image_size * 4;
@@ -6915,7 +6893,7 @@ mod tests {
     fn decode_pixels_alternating_sign_byte_fidelity() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -7094,7 +7072,7 @@ mod tests {
     fn decode_pixels_roundtrip_constant_value() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -7147,7 +7125,7 @@ mod tests {
             assert_eq!(data.len(), expected_numel, "numel mismatch for {}", spec.name);
         }
 
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, Arc::new(populated), ids);
         assert!(encoder.is_ok(), "SigLipEncoder::new must succeed with exact numel");
     }
@@ -7193,7 +7171,7 @@ mod tests {
     #[test]
     fn try_build_siglip_stops_at_first_none() {
         let config = tiny_config();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let populated = populate_weights(&config);
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
 
@@ -7273,7 +7251,7 @@ mod tests {
     fn decode_pixels_roundtrip_min_f32() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_f32 = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -7322,7 +7300,7 @@ mod tests {
         let wrong_data = vec![0.0f32; 10];
         weights.insert(pos_name, wrong_data, vec![10]);
 
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(config, Arc::new(weights), ids).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("len") || msg.contains("weight"), "must mention len/weight: {msg}");
@@ -7460,7 +7438,7 @@ mod tests {
             intermediate_size: 32,
         };
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let image_numel = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -7694,7 +7672,7 @@ mod tests {
     fn siglip_encoder_encode_audio_error_mentions_encoder_name() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let err = encoder
             .encode_audio(&EncoderMedia::Raw(vec![]))
@@ -7776,7 +7754,7 @@ mod tests {
     fn try_build_siglip_rejects_correct_numel_wrong_shape() {
         let config = tiny_config();
         let populated = populate_weights(&config);
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let result = try_build_siglip_from_tensors(&config, ids, |name| {
             populated.get_vision_tensor(name).map(|slice| {
                 let correct_shape = populated.vision_tensor_shape(name).unwrap();
@@ -7875,7 +7853,7 @@ mod tests {
         let encoder = SigLipEncoder::new(
             config,
             Arc::new(weights.clone()),
-            MultimodalTokenIds::gemma4_defaults(),
+            MultimodalTokenIds::fallback_multimodal_token_ids(),
         )
         .unwrap();
         // The weights store should have the same number of tensors as specs.
@@ -7953,7 +7931,7 @@ mod tests {
         let (_, specs) = build_vision_encoder_graph(&config).unwrap();
         let populated = populate_weights(&config);
         let mut fetched_names: Vec<String> = Vec::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let _result = try_build_siglip_from_tensors(&config, ids, |name| {
             fetched_names.push(name.to_string());
             populated.get_vision_tensor(name).map(|slice| {
@@ -7978,7 +7956,7 @@ mod tests {
         let encoder = SigLipEncoder::new(
             config.clone(),
             Arc::new(weights),
-            MultimodalTokenIds::gemma4_defaults(),
+            MultimodalTokenIds::fallback_multimodal_token_ids(),
         )
         .unwrap();
         let num_patches = config.num_patches();
@@ -8113,7 +8091,7 @@ mod tests {
     fn siglip_encoder_encode_audio_error_is_audio_specific() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let err = encoder.encode_audio(&EncoderMedia::Raw(vec![])).unwrap_err();
         let msg = format!("{err}");
@@ -8215,7 +8193,7 @@ mod tests {
     fn siglip_encoder_encode_image_zero_pixels_produces_finite_output() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let image_numel = VISION_IN_CHANNELS * config.image_size * config.image_size;
@@ -8339,7 +8317,7 @@ mod tests {
             num_heads: 1,
             intermediate_size: 16,
         };
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let err = SigLipEncoder::new(bad_config, weights, ids).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("divisible"), "must mention divisibility: {msg}");
@@ -8406,7 +8384,7 @@ mod tests {
     fn siglip_encoder_decode_pixels_base64_error_mentions_raw() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let media = EncoderMedia::Base64 {
             data: "AAAA".into(),
@@ -8426,7 +8404,7 @@ mod tests {
     fn siglip_encoder_decode_pixels_url_error_mentions_no_network() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
         let media = EncoderMedia::Url("https://example.com/img.jpg".into());
         let err = encoder.decode_pixels(&media).unwrap_err();
@@ -8569,7 +8547,7 @@ mod tests {
     fn siglip_encoder_token_ids_returns_independent_copy() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let first = encoder.token_ids();
@@ -8778,7 +8756,7 @@ mod tests {
     /// Verify that MultimodalTokenIds::is_image returns false for the eoi token.
     #[test]
     fn multimodal_token_ids_is_image_false_for_eoi() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_image(ids.eoi_token_id), "eoi token must not be image");
     }
 
@@ -8806,7 +8784,7 @@ mod tests {
     fn siglip_encoder_encode_image_output_embeddings_are_f32_finite() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
         let pixel_count = VISION_IN_CHANNELS * config.image_size * config.image_size;
         let pixels = vec![0.5f32; pixel_count];
@@ -8921,7 +8899,7 @@ mod tests {
     fn decode_pixels_raw_exactly_four_bytes_short_error() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
         let expected_bytes = VISION_IN_CHANNELS * config.image_size * config.image_size * 4;
@@ -8962,14 +8940,14 @@ mod tests {
     /// 验证 MultimodalTokenIds::is_image 对 image_token_id 本身返回 true。
     #[test]
     fn token_ids_is_image_true_for_exact_image_token_id() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(ids.is_image(ids.image_token_id), "image_token_id must be recognized as image");
     }
 
     /// 验证 MultimodalTokenIds::is_audio 对 audio_token_id 本身返回 true。
     #[test]
     fn token_ids_is_audio_true_for_exact_audio_token_id() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(ids.is_audio(ids.audio_token_id), "audio_token_id must be recognized as audio");
     }
 
@@ -8991,7 +8969,7 @@ mod tests {
     fn siglip_encoder_encode_image_all_tokens_match_image_token_id() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let image_token = ids.image_token_id;
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
 
@@ -9105,7 +9083,7 @@ mod tests {
         };
         ctx.push_audio(audio_enc).unwrap();
 
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![ids.audio_token_id];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 4).unwrap();
         // 假 embedding 表：vocab 至少覆盖 token id 范围。
@@ -9165,7 +9143,7 @@ mod tests {
     fn route_multimodal_tokens_all_text_no_special_tokens() {
         use crate::compat::multimodal::route_multimodal_tokens;
         let ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // These are ordinary text token IDs, not special multimodal tokens.
         let tokens = vec![1u32, 2, 3, 4, 5];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 8).unwrap();
@@ -9183,7 +9161,7 @@ mod tests {
     fn build_fused_hidden_pure_text_no_media() {
         use crate::compat::multimodal::{build_fused_hidden, route_multimodal_tokens};
         let ctx = MultimodalContext::new();
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let tokens = vec![0u32, 1, 2];
         let routed = route_multimodal_tokens(&tokens, &ctx, &ids, 4).unwrap();
 
@@ -9211,7 +9189,7 @@ mod tests {
     /// Verify that MultimodalTokenIds::eoi_token_id is not classified as an image token.
     #[test]
     fn multimodal_token_ids_eoi_is_not_image() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_image(ids.eoi_token_id),
             "eoi_token_id must not be classified as image");
     }
@@ -9219,7 +9197,7 @@ mod tests {
     /// Verify that MultimodalTokenIds::eoa_token_id is not classified as an audio token.
     #[test]
     fn multimodal_token_ids_eoa_is_not_audio() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert!(!ids.is_audio(ids.eoa_token_id),
             "eoa_token_id must not be classified as audio");
     }
@@ -9230,7 +9208,7 @@ mod tests {
     fn encoder_media_base64_none_mime_type_rejected_gracefully() {
         let config = tiny_config();
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config, weights, ids).unwrap();
 
         let err = encoder
@@ -9303,7 +9281,7 @@ mod tests {
             intermediate_size: 8,
         };
         let weights = Arc::new(populate_weights(&config));
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = SigLipEncoder::new(config.clone(), weights, ids).unwrap();
         assert_eq!(encoder.config().num_patches(), 1);
         assert_eq!(encoder.config().head_dim(), 2);

@@ -681,6 +681,10 @@ fn gguf_arch_array_usize(reader: &GgufLoader, arch: &str, suffix: &str) -> Optio
     Some(out)
 }
 
+/// Fallback attention pattern derivation when metadata is absent.
+/// Primary source: config.json `layer_types` / GGUF `attention.pattern`.
+/// This function is used only when neither source provides the pattern.
+///
 /// Gemma 4 fallback: derive per-layer attention pattern when GGUF metadata is
 /// absent. SPEC §Gemma4: every 6th layer (1-indexed) is global, others are
 /// sliding-window. I.e. `(i + 1) % 6 == 0 → 1 (global)`, else `0 (sliding)`.

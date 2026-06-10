@@ -29,7 +29,7 @@ use crate::engine::executor::BackendError;
 /// `ModelConfig::multimodal_token_ids`) 读取，禁止在代码中硬编码。
 ///
 /// Gemma 4 的约定值为 (258880, 258881, 258882, 258883)，仅在 manifest /
-/// config 未显式提供时由 `MultimodalTokenIds::gemma4_defaults()` 注入。
+/// config 未显式提供时由 `MultimodalTokenIds::fallback_multimodal_token_ids()` 注入。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MultimodalTokenIds {
     /// 图像占位符 token ID
@@ -43,11 +43,12 @@ pub struct MultimodalTokenIds {
 }
 
 impl MultimodalTokenIds {
-    /// Gemma 4 默认值 (from `gemma4-implementation-plan.md §P3.3`)。
+    /// Fallback 多模态 token ID (Gemma 4 约定值: 258880–258883)。
     ///
-    /// 仅作为 `ModelConfig` 未显式声明多模态能力时的回退，由 loader 根据
-    /// `vision_config` 是否存在决定是否注入。
-    pub fn gemma4_defaults() -> Self {
+    /// **仅**在 GGUF metadata / model config 未提供多模态 token ID 时使用。
+    /// 正式路径应从 `ModelConfig::multimodal_token_ids` 或 tokenizer special_tokens_map 读取。
+    /// 此 fallback 存在的原因是部分 GGUF 文件缺少多模态 token 元数据。
+    pub fn fallback_multimodal_token_ids() -> Self {
         Self {
             image_token_id: 258880,
             audio_token_id: 258881,
@@ -67,12 +68,6 @@ impl MultimodalTokenIds {
     }
 }
 
-// 兼容历史类型别名 (loader / model_config 曾期望 Default impl)。
-impl Default for MultimodalTokenIds {
-    fn default() -> Self {
-        Self::gemma4_defaults()
-    }
-}
 
 // ============================================================================
 // EncoderMedia — 编码器输入 (对齐 generation::MediaInput)
@@ -524,7 +519,7 @@ mod tests {
     }
 
     fn default_ids() -> MultimodalTokenIds {
-        MultimodalTokenIds::gemma4_defaults()
+        MultimodalTokenIds::fallback_multimodal_token_ids()
     }
 
     #[test]
@@ -806,8 +801,8 @@ mod tests {
     // ── Additional tests ──
 
     #[test]
-    fn multimodal_token_ids_default_matches_gemma4() {
-        let ids = MultimodalTokenIds::default();
+    fn multimodal_token_ids_fallback_matches_gemma4() {
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         assert_eq!(ids.image_token_id, 258880);
         assert_eq!(ids.audio_token_id, 258881);
         assert_eq!(ids.eoi_token_id, 258882);
@@ -816,7 +811,7 @@ mod tests {
 
     #[test]
     fn multimodal_token_ids_copy_eq() {
-        let a = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
         let b = a;
         assert_eq!(a, b);
     }
@@ -1663,8 +1658,8 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let a = MultimodalTokenIds::gemma4_defaults();
-        let b = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let b = MultimodalTokenIds::fallback_multimodal_token_ids();
 
         let mut ha = DefaultHasher::new();
         a.hash(&mut ha);
@@ -1741,7 +1736,7 @@ mod tests {
     #[test]
     fn multimodal_token_ids_usable_as_hashmap_key() {
         use std::collections::HashMap;
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let mut map = HashMap::new();
         map.insert(ids, "gemma4");
         assert_eq!(map.get(&ids), Some(&"gemma4"));
@@ -3088,8 +3083,8 @@ mod tests {
     #[test]
     fn multimodal_token_ids_usable_in_hashset() {
         use std::collections::HashSet;
-        let a = MultimodalTokenIds::gemma4_defaults();
-        let b = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let b = MultimodalTokenIds::fallback_multimodal_token_ids();
         let c = MultimodalTokenIds {
             image_token_id: 0,
             audio_token_id: 0,
@@ -3929,8 +3924,8 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_token_ids_gemma4_defaults_all_unique() {
-        let ids = MultimodalTokenIds::gemma4_defaults();
+    fn multimodal_token_ids_fallback_multimodal_token_ids_all_unique() {
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let values = [
             ids.image_token_id,
             ids.audio_token_id,
@@ -3989,18 +3984,18 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_token_ids_gemma4_defaults_eoi_distinct_from_image() {
+    fn multimodal_token_ids_fallback_multimodal_token_ids_eoi_distinct_from_image() {
         // Arrange
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert
         assert_ne!(ids.eoi_token_id, ids.image_token_id);
         assert!(!ids.is_image(ids.eoi_token_id));
     }
 
     #[test]
-    fn multimodal_token_ids_gemma4_defaults_eoa_distinct_from_audio() {
+    fn multimodal_token_ids_fallback_multimodal_token_ids_eoa_distinct_from_audio() {
         // Arrange
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert
         assert_ne!(ids.eoa_token_id, ids.audio_token_id);
         assert!(!ids.is_audio(ids.eoa_token_id));
@@ -4493,16 +4488,14 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_token_ids_default_matches_all_four_gemma4_values() {
+    fn multimodal_token_ids_fallback_matches_all_four_gemma4_values() {
         // Arrange
-        let defaults = MultimodalTokenIds::gemma4_defaults();
-        let from_default = MultimodalTokenIds::default();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert — every field must match gemma4 values
-        assert_eq!(from_default.image_token_id, 258880);
-        assert_eq!(from_default.audio_token_id, 258881);
-        assert_eq!(from_default.eoi_token_id, 258882);
-        assert_eq!(from_default.eoa_token_id, 258883);
-        assert_eq!(from_default, defaults);
+        assert_eq!(ids.image_token_id, 258880);
+        assert_eq!(ids.audio_token_id, 258881);
+        assert_eq!(ids.eoi_token_id, 258882);
+        assert_eq!(ids.eoa_token_id, 258883);
     }
 
     #[test]
@@ -4935,9 +4928,9 @@ mod tests {
     // ── Batch 7: 15 additional edge-case and coverage tests ──
 
     #[test]
-    fn multimodal_token_ids_gemma4_defaults_all_above_258000() {
+    fn multimodal_token_ids_fallback_multimodal_token_ids_all_above_258000() {
         // Arrange
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert — gemma4 special tokens are in the high range
         assert!(ids.image_token_id > 258_000);
         assert!(ids.audio_token_id > 258_000);
@@ -5242,8 +5235,8 @@ mod tests {
     #[test]
     fn multimodal_token_ids_eq_symmetry() {
         // Arrange — verify Eq symmetry: a == b implies b == a
-        let a = MultimodalTokenIds::gemma4_defaults();
-        let b = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let b = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert
         assert_eq!(a, b);
         assert_eq!(b, a);
@@ -5256,9 +5249,9 @@ mod tests {
     #[test]
     fn multimodal_token_ids_eq_transitivity() {
         // Arrange — verify Eq transitivity: a == b && b == c implies a == c
-        let a = MultimodalTokenIds::gemma4_defaults();
-        let b = MultimodalTokenIds::default();
-        let c = MultimodalTokenIds::gemma4_defaults();
+        let a = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let b = MultimodalTokenIds::fallback_multimodal_token_ids();
+        let c = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert
         assert_eq!(a, b);
         assert_eq!(b, c);
@@ -5861,7 +5854,7 @@ mod tests {
     #[test]
     fn multimodal_token_ids_is_image_never_true_for_arbitrary_values() {
         // Arrange — verify is_image returns false for values not equal to image_token_id
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert — test a range of values that are NOT the image token id
         for v in [0u32, 1, 100, 1000, 258879, 258881, 258882, 258883, u32::MAX - 1] {
             assert!(!ids.is_image(v), "is_image should be false for {v}");
@@ -5871,7 +5864,7 @@ mod tests {
     #[test]
     fn multimodal_token_ids_is_audio_never_true_for_arbitrary_values() {
         // Arrange — verify is_audio returns false for values not equal to audio_token_id
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert
         for v in [0u32, 1, 100, 1000, 258880, 258879, 258882, 258883, u32::MAX] {
             assert!(!ids.is_audio(v), "is_audio should be false for {v}");
@@ -6093,7 +6086,7 @@ mod tests {
         // Arrange — text tokens just below image and above audio special IDs
         // Gemma4 defaults: image=258880, audio=258881, eoi=258882, eoa=258883
         // So values 258879 and 258884 are outside the special range
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let ctx = MultimodalContext::new();
         let boundary_tokens = vec![
             ids.image_token_id - 1, // 258879 — not image, not audio
@@ -6333,7 +6326,7 @@ mod tests {
     #[test]
     fn route_eoi_and_eoa_only_treated_as_regular_text() {
         // Arrange — prompt contains only eoi and eoa tokens, no image/audio special tokens
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let ctx = MultimodalContext::new();
         let prompt = vec![ids.eoi_token_id, ids.eoa_token_id];
         // Act
@@ -6349,7 +6342,7 @@ mod tests {
     #[test]
     fn mock_encoder_default_ids_token_values_match() {
         // Arrange — MockEncoder with default IDs produces tokens matching the image/audio IDs
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         let encoder = MockEncoder::new(3, 2, 4, ids);
         // Act
         let img = encoder.encode_image(&EncoderMedia::Raw(vec![])).unwrap();
@@ -8267,9 +8260,9 @@ mod tests {
     // @trace TEST-MULTIMODAL-076 [req:REQ-MEGA-003] [level:unit]
 
     #[test]
-    fn multimodal_token_ids_gemma4_defaults_eoi_distinct_from_eoa() {
+    fn multimodal_token_ids_fallback_multimodal_token_ids_eoi_distinct_from_eoa() {
         // Arrange — eoi_token_id and eoa_token_id must be distinct from each other
-        let ids = MultimodalTokenIds::gemma4_defaults();
+        let ids = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act & Assert
         assert_ne!(ids.eoi_token_id, ids.eoa_token_id);
         assert_eq!(ids.eoi_token_id, 258882);
@@ -8568,7 +8561,7 @@ mod tests {
     #[test]
     fn multimodal_token_ids_struct_update_syntax_single_field_override() {
         // Arrange — start from defaults, override only image_token_id
-        let base = MultimodalTokenIds::gemma4_defaults();
+        let base = MultimodalTokenIds::fallback_multimodal_token_ids();
         // Act
         let custom = MultimodalTokenIds { image_token_id: 999, ..base };
         // Assert — only image changed, rest inherited

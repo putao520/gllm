@@ -68,7 +68,7 @@ mod tests {
             ("model.layers.0.mlp.down_proj.weight", vec![64, 256]),
         ]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
         assert_eq!(features.family, Family::Decoder);
         assert_eq!(features.num_layers, 2);
         assert!(features.has_rope);
@@ -170,7 +170,7 @@ mod tests {
             ("roberta.encoder.layer.0.output.LayerNorm.bias", vec![32]),
         ]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
         assert_eq!(features.family, Family::Encoder);
         assert_eq!(features.num_layers, 2);
         assert!(!features.has_rope);
@@ -253,7 +253,7 @@ mod tests {
             ("model.layers.0.mlp.down_proj.weight", vec![64, 256]),
         ]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
         assert!(features.has_head_rms_norm, "Qwen3 should have head_rms_norm");
 
         // Canonical-keyed weight_shapes (single-template: only L0)
@@ -323,7 +323,7 @@ mod tests {
         ]);
         ws_ext.insert("model.layers.0.mlp.experts.0.gate_proj.weight".to_string(), vec![inter, 64]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
         assert_eq!(features.family, Family::Decoder);
         assert_eq!(features.num_layers, 1);
         assert!(features.is_moe);
@@ -418,24 +418,31 @@ mod tests {
             ("model.layers.0.mlp.down_proj.weight", vec![64, 256]),
         ]);
 
-        // Without arch name → no Gemma-4 features
-        let features_no_arch = analyze_architecture(&ri, &ws, None);
-        assert!(!features_no_arch.has_qk_norm, "no arch → no qk_norm");
-        assert!(!features_no_arch.has_value_norm, "no arch → no value_norm");
-        assert!(!features_no_arch.has_embedding_scale, "no arch → no embedding_scale");
+        // Without hints → no Gemma-4 features (hints drive config, not arch_name)
+        let features_no_hints = analyze_architecture(&ri, &ws, None, None);
+        assert!(!features_no_hints.has_qk_norm, "no hints → no qk_norm");
+        assert!(!features_no_hints.has_value_norm, "no hints → no value_norm");
+        assert!(!features_no_hints.has_embedding_scale, "no hints → no embedding_scale");
 
-        // With "gemma4" arch → Gemma-4 features enabled
-        let features = analyze_architecture(&ri, &ws, Some("gemma4"));
-        assert!(features.has_qk_norm, "gemma4 should have qk_norm");
-        assert!(features.has_value_norm, "gemma4 should have value_norm");
-        assert!(features.has_embedding_scale, "gemma4 should have embedding_scale");
+        // With ArchHints → Gemma-4 features enabled (REQ-MC-EXT-001..003)
+        let gemma4_hints = ArchHints {
+            qk_norm: Some(true),
+            value_norm: Some(true),
+            embedding_scale_factor: Some(8.0), // sqrt(hidden_size=64) = 8.0
+            hidden_act: Some(HiddenAct::GeluNew),
+            mla_use_unabsorbed: None,
+        };
+        let features = analyze_architecture(&ri, &ws, Some("gemma4"), Some(&gemma4_hints));
+        assert!(features.has_qk_norm, "gemma4 hints should enable qk_norm");
+        assert!(features.has_value_norm, "gemma4 hints should enable value_norm");
+        assert!(features.has_embedding_scale, "gemma4 hints should enable embedding_scale");
         assert!(!features.has_head_rms_norm, "gemma4 should NOT have head_rms_norm (no weight tensors)");
 
         // Qwen3 with q_norm weights → HeadRmsNorm, not QkNorm
         let mut ri_qwen3 = ri.clone();
         ri_qwen3.insert((TensorRole::AttentionQNorm, Some(0)), "model.layers.0.self_attn.q_norm.weight".to_string());
         ri_qwen3.insert((TensorRole::AttentionKNorm, Some(0)), "model.layers.0.self_attn.k_norm.weight".to_string());
-        let features_qwen3 = analyze_architecture(&ri_qwen3, &ws, Some("qwen3"));
+        let features_qwen3 = analyze_architecture(&ri_qwen3, &ws, Some("qwen3"), None);
         assert!(features_qwen3.has_head_rms_norm, "qwen3 should have head_rms_norm");
         assert!(!features_qwen3.has_qk_norm, "qwen3 should NOT have qk_norm");
         assert!(!features_qwen3.has_value_norm, "qwen3 should NOT have value_norm");
@@ -1106,7 +1113,7 @@ mod tests {
             ("model.layers.0.mlp.down_proj.weight", vec![64, 256]),
         ]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
 
         // Canonical-name shapes (for build_compiler_graph, as executor provides)
         let ws = make_weight_shapes(vec![
@@ -1267,11 +1274,6 @@ mod tests {
         };
 
         let mut business_config = BusinessConfig::default();
-        business_config.mtp_config = Some(gllm_kernels::compiler::MtpKernelConfig {
-            depth: mtp_depth,
-            hidden_size: 64,
-            vocab_size: 100,
-        });
         business_config.output_modes = vec![
             gllm_kernels::compiler::mega_kernel_abi::OutputMode::Generate {
                 max_new_tokens: 16,
@@ -1361,8 +1363,8 @@ mod tests {
             ("L0.down_proj", vec![64, 256]),
             ("final_norm", vec![64]),
             ("lm_head", vec![100, 64]),
-            // MTP weights exist in weight_shapes but no mtp_config
-            ("mtp_proj.0", vec![100, 64]),
+            // Note: MTP depth is now topology-driven from weight_shapes (SPEC/39).
+            // No mtp_proj weights → no MTP ops generated.
         ]);
 
         let features = ArchitectureFeatures {
@@ -1490,11 +1492,6 @@ mod tests {
         };
 
         let mut business_config = BusinessConfig::default();
-        business_config.mtp_config = Some(gllm_kernels::compiler::MtpKernelConfig {
-            depth: mtp_depth,
-            hidden_size: 64,
-            vocab_size: 100,
-        });
         business_config.output_modes = vec![
             gllm_kernels::compiler::mega_kernel_abi::OutputMode::Generate {
                 max_new_tokens: 16,
@@ -1563,7 +1560,7 @@ mod tests {
         ws_ext.insert("model.layers.0.self_attn.o_proj.weight".into(), vec![hidden, hidden]);
         ws_ext.insert("model.layers.0.mlp.gate.weight".into(), vec![hidden, num_experts]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
         assert_eq!(features.family, Family::Decoder);
         assert!(features.is_moe, "GPT-OSS should detect MoE");
         assert!(features.has_attention_bias, "GPT-OSS should detect attention bias");
@@ -1779,7 +1776,7 @@ mod tests {
     fn analyze_empty_role_index() {
         let ri: HashMap<(TensorRole, Option<usize>), String> = HashMap::new();
         let ws: HashMap<String, Vec<usize>> = HashMap::new();
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Encoder); // no OutputHead → Encoder
         assert_eq!(features.num_layers, 0);
         assert!(!features.has_rope);
@@ -1796,7 +1793,7 @@ mod tests {
         let ws = make_weight_shapes(vec![
             ("embed.weight", vec![100, 32]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Encoder);
         assert!(!features.has_rope);
         assert!(features.has_classifier);
@@ -1811,7 +1808,7 @@ mod tests {
             (TensorRole::PatchEmbed, None, "vision.patch_embed.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_vision);
     }
 
@@ -1823,7 +1820,7 @@ mod tests {
             (TensorRole::FinalNorm, None, "norm.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.tie_lm_head);
     }
 
@@ -1835,7 +1832,7 @@ mod tests {
             (TensorRole::FinalNorm, None, "norm.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(!features.tie_lm_head);
     }
 
@@ -1900,7 +1897,7 @@ mod tests {
             (TensorRole::AttentionKey, Some(0), "L0.k_proj"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Decoder, "FinalNorm alone → Decoder");
         assert!(features.has_rope, "Decoder with AttentionKey should have RoPE");
     }
@@ -1916,7 +1913,7 @@ mod tests {
             (TensorRole::DepthwiseConv, Some(0), "model.layers.0.dw_conv.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_audio, "DepthwiseConv role → audio detected");
         assert!(!features.is_vision, "DepthwiseConv should not trigger vision");
     }
@@ -1932,7 +1929,7 @@ mod tests {
             (TensorRole::AttentionSinks, Some(0), "model.layers.0.sinks.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.attention_sinks, "AttentionSinks role should be detected");
     }
 
@@ -1949,7 +1946,7 @@ mod tests {
             (TensorRole::InputNorm, Some(7), "L7.norm"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.num_layers, 8, "max layer_idx=7 → 8 layers");
     }
 
@@ -1967,7 +1964,7 @@ mod tests {
         let ws = make_weight_shapes(vec![
             ("model.layers.0.mlp.gate.weight", vec![64, 8]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_moe);
         assert!(features.has_shared_experts);
         assert_eq!(features.num_experts, 8);
@@ -1987,7 +1984,7 @@ mod tests {
         let ws = make_weight_shapes(vec![
             ("model.layers.0.mlp.gate.weight", vec![64, 4]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_moe);
         assert!(!features.has_shared_experts);
         assert_eq!(features.num_experts, 4);
@@ -2005,7 +2002,7 @@ mod tests {
             (TensorRole::MlaKeyAbsorb, Some(0), "model.layers.0.k_b_proj.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_mla, "MlaKvCompress + MlaKeyAbsorb → is_mla");
     }
 
@@ -2025,7 +2022,7 @@ mod tests {
             ("model.layers.0.self_attn.q_proj.bias", vec![64]),
             ("model.layers.0.self_attn.k_proj.bias", vec![32]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.has_attention_bias, "q_proj.bias/k_proj.bias → attention_bias");
     }
 
@@ -2039,7 +2036,7 @@ mod tests {
         let ws = make_weight_shapes(vec![
             ("model.layers.0.self_attn.q_proj.weight", vec![64, 64]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(!features.has_attention_bias, "no q/k/v bias → no attention_bias");
     }
 
@@ -2055,7 +2052,7 @@ mod tests {
             (TensorRole::FfnDown, Some(0), "model.layers.0.down.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.ffn_type, FfnType::Standard, "up+down without gate → Standard");
     }
 
@@ -2071,7 +2068,7 @@ mod tests {
             (TensorRole::FfnDown, Some(0), "model.layers.0.down_proj.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.ffn_type, FfnType::SwiGLU, "gate+down → SwiGLU (fused gate_up)");
     }
 
@@ -2088,7 +2085,7 @@ mod tests {
         let ws = make_weight_shapes(vec![
             ("model.layers.0.input_norm.weight", vec![64]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.norm_type, NormType::RmsNorm, "no .bias → RmsNorm");
     }
 
@@ -2104,7 +2101,7 @@ mod tests {
             ("model.layers.0.input_norm.weight", vec![64]),
             ("model.layers.0.input_norm.bias", vec![64]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.norm_type, NormType::LayerNorm, ".bias detected → LayerNorm");
     }
 
@@ -2118,7 +2115,7 @@ mod tests {
             (TensorRole::ClassifierDense, None, "classifier.dense.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Encoder);
         assert!(features.is_post_norm, "EmbedNorm → is_post_norm");
         assert_eq!(features.norm_type, NormType::LayerNorm, "post-norm default → LayerNorm");
@@ -2133,7 +2130,7 @@ mod tests {
             (TensorRole::ClassifierOutProj, None, "classifier.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(!features.tie_lm_head, "no OutputHead → tie_lm_head false");
     }
 
@@ -2147,7 +2144,7 @@ mod tests {
             (TensorRole::FinalNorm, None, "norm.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.moe_top_k, 0, "no MoE → top_k = 0");
     }
 
@@ -2614,7 +2611,7 @@ mod tests {
             ("L0.down", vec![64, 256]),
         ]);
 
-        let features = analyze_architecture(&ri, &ws_ext, None);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
 
         let ws = make_weight_shapes(vec![
             ("embed", vec![100, 64]),
@@ -2973,7 +2970,7 @@ mod tests {
             (TensorRole::FinalNorm, None, "norm.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.num_experts, 0);
         assert_eq!(features.moe_top_k, 0);
         assert!(!features.is_moe);
@@ -3119,7 +3116,7 @@ mod tests {
         let ws = make_weight_shapes(vec![
             ("L0.moe_gate", vec![64, 8]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_moe);
         assert!(features.is_vision);
         assert_eq!(features.num_experts, 8);
@@ -3204,7 +3201,7 @@ mod tests {
         ]);
         let ws = make_weight_shapes(vec![]);
         for arch in &["qwen3", "llama4", "deepseek", "phi4", "mistral3"] {
-            let features = analyze_architecture(&ri, &ws, Some(arch));
+            let features = analyze_architecture(&ri, &ws, Some(arch), None);
             assert!(!features.has_qk_norm, "{} should not have qk_norm", arch);
             assert!(!features.has_value_norm, "{} should not have value_norm", arch);
             assert!(!features.has_embedding_scale, "{} should not have embedding_scale", arch);
@@ -3225,7 +3222,7 @@ mod tests {
             let ws = make_weight_shapes(vec![
                 ("L0.moe_gate", vec![64, num_experts]),
             ]);
-            let features = analyze_architecture(&ri, &ws, None);
+            let features = analyze_architecture(&ri, &ws, None, None);
             assert_eq!(features.num_experts, num_experts);
             assert_eq!(features.moe_top_k, 2, "default top_k should be 2 for {} experts", num_experts);
         }
@@ -3325,7 +3322,7 @@ mod tests {
             ("model.layers.0.kv_b_proj.weight", vec![7168, 512]),
             ("model.layers.0.k_pe_proj.weight", vec![7168, 64]),
         ]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_mla);
         assert_eq!(features.mla_latent_dim, 512, "MLA latent dim from shape[1]");
         assert_eq!(features.mla_rope_dim, 64, "MLA rope dim from shape[1]");
@@ -3416,7 +3413,7 @@ mod tests {
             (TensorRole::FinalNorm, None, "norm.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Decoder, "OutputHead present → Decoder regardless of PositionEmbedding");
     }
 
@@ -3511,7 +3508,7 @@ mod tests {
             (TensorRole::InputNorm, Some(2), "L2.norm"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.num_layers, 6, "max layer_idx=5 → 6 layers (0-indexed)");
     }
 
@@ -3647,7 +3644,7 @@ mod tests {
             (TensorRole::InputNorm, Some(0), "L0.norm"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.num_layers, 1, "only layer 0 → num_layers = 1");
     }
 
@@ -3662,7 +3659,7 @@ mod tests {
             (TensorRole::MlaKvCompress, Some(0), "model.layers.0.kv_b_proj.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         // MlaKvCompress alone triggers is_mla because of the any() check
         assert!(features.is_mla, "MlaKvCompress alone triggers MLA detection");
         assert_eq!(features.mla_latent_dim, 0, "no weight shape → latent_dim = 0");
@@ -3677,7 +3674,7 @@ mod tests {
             (TensorRole::ClassifierOutProj, None, "classifier.out_proj.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Encoder, "no OutputHead/FinalNorm → Encoder");
         assert!(features.has_classifier, "ClassifierOutProj → has_classifier");
     }
@@ -3796,7 +3793,7 @@ mod tests {
         let ws = make_weight_shapes(vec![]);
 
         // Act
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
 
         // Assert: tied + OutputHead → Decoder + tie_lm_head
         assert_eq!(features.family, Family::Decoder, "OutputHead present → Decoder");
@@ -3816,19 +3813,29 @@ mod tests {
         ]);
         let ws = make_weight_shapes(vec![]);
 
-        // Act: uppercase arch name
-        let features_upper = analyze_architecture(&ri, &ws, Some("GEMMA4"));
-        // Act: mixed case
-        let features_mixed = analyze_architecture(&ri, &ws, Some("Gemma4"));
+        // Act: no hints → gemma4 features are all false regardless of arch_name
+        let features_upper = analyze_architecture(&ri, &ws, Some("GEMMA4"), None);
+        let features_mixed = analyze_architecture(&ri, &ws, Some("Gemma4"), None);
+        let features_exact = analyze_architecture(&ri, &ws, Some("gemma4"), None);
+        let features_no_arch = analyze_architecture(&ri, &ws, None, None);
 
-        // Assert: non-lowercase should NOT enable gemma4 features
-        assert!(!features_upper.has_qk_norm, "GEMMA4 (uppercase) should not enable qk_norm");
-        assert!(!features_upper.has_value_norm, "GEMMA4 (uppercase) should not enable value_norm");
-        assert!(!features_mixed.has_embedding_scale, "Gemma4 (mixed) should not enable embedding_scale");
+        // Assert: without ArchHints, all config-driven features default to false
+        assert!(!features_upper.has_qk_norm, "no hints → no qk_norm");
+        assert!(!features_mixed.has_value_norm, "no hints → no value_norm");
+        assert!(!features_exact.has_embedding_scale, "no hints → no embedding_scale");
+        assert!(!features_no_arch.has_qk_norm, "no hints → no qk_norm");
 
-        // Act: exact lowercase
-        let features_exact = analyze_architecture(&ri, &ws, Some("gemma4"));
-        assert!(features_exact.has_qk_norm, "gemma4 (exact) should enable qk_norm");
+        // Assert: with ArchHints, features are enabled regardless of arch_name case
+        let hints = ArchHints {
+            qk_norm: Some(true),
+            value_norm: Some(true),
+            embedding_scale_factor: Some(8.0),
+            ..Default::default()
+        };
+        let features_with_hints = analyze_architecture(&ri, &ws, Some("GEMMA4"), Some(&hints));
+        assert!(features_with_hints.has_qk_norm, "hints → qk_norm enabled");
+        assert!(features_with_hints.has_value_norm, "hints → value_norm enabled");
+        assert!(features_with_hints.has_embedding_scale, "hints → embedding_scale enabled");
     }
 
     // ── 3. Quant config handling: partial quantization (only q_proj + k_proj) ──
@@ -4019,7 +4026,7 @@ mod tests {
         let ws = make_weight_shapes(vec![]);
 
         // Act
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
 
         // Assert
         assert_eq!(features.family, Family::Encoder);
@@ -4049,7 +4056,7 @@ mod tests {
         let ws = make_weight_shapes(vec![]);
 
         // Act
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
 
         // Assert: gate+up+down → SwiGLU (default activation detection)
         assert_eq!(features.ffn_type, FfnType::SwiGLU, "gate+up+down → SwiGLU");
@@ -4152,7 +4159,7 @@ mod tests {
         let ws: HashMap<String, Vec<usize>> = HashMap::new();
 
         // Act
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
 
         // Assert: sensible defaults
         assert_eq!(features.family, Family::Decoder);
@@ -4180,7 +4187,7 @@ mod tests {
         let ws = make_weight_shapes(vec![]);
 
         // Act
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
 
         // Assert
         assert_eq!(features.num_layers, 1, "only layer 0 → 1 layer");
@@ -4302,7 +4309,7 @@ mod tests {
         ]);
 
         // Act
-        let features = analyze_architecture(&ri, &ws, None);
+        let features = analyze_architecture(&ri, &ws, None, None);
 
         // Assert: all features active simultaneously
         assert!(features.attention_sinks, "AttentionSinks at layer 0 → attention_sinks");

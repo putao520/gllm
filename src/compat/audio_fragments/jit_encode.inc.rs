@@ -457,13 +457,7 @@ pub fn audio_encode(
     let proj_graph = build_mel_projection_graph(num_frames, config);
     let proj_config = CompileConfig {
         max_seq_len: num_frames,
-        business_config: BusinessConfig {
-            output_modes: vec![OutputMode::EncodeToLayer {
-                anchor_layer: 0,
-                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-            }],
-            ..BusinessConfig::default()
-        },
+        debug_jit: false,
         hetero: None,
     };
     let proj_compiled = compiler
@@ -511,13 +505,7 @@ pub fn audio_encode(
     let block_graph = build_conformer_block_graph(num_frames, config);
     let block_config = CompileConfig {
         max_seq_len: num_frames,
-        business_config: BusinessConfig {
-            output_modes: vec![OutputMode::EncodeToLayer {
-                anchor_layer: 0,
-                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-            }],
-            ..BusinessConfig::default()
-        },
+        debug_jit: false,
         hetero: None,
     };
     let block_compiled = compiler
@@ -554,13 +542,7 @@ pub fn audio_encode(
     let final_graph = build_final_norm_graph(num_frames, config);
     let final_config = CompileConfig {
         max_seq_len: num_frames,
-        business_config: BusinessConfig {
-            output_modes: vec![OutputMode::EncodeToLayer {
-                anchor_layer: 0,
-                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
-            }],
-            ..BusinessConfig::default()
-        },
+        debug_jit: false,
         hetero: None,
     };
     let final_compiled = compiler

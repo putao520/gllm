@@ -2231,7 +2231,13 @@ pub fn build_compiler_graph(
         }
     }
 
-    // ── Pre-norm post-layer: final_norm + output modes ──
+    // ── Pre-norm post-layer: final_norm + lm_head + generate loop ──
+    // SPEC/39: Graph always builds the full model structure (lm_head →
+    // LogitSoftcap → Argmax → StoreToken → CheckStopCondition → MTP).
+    // OutputMode pruning happens at the BUILD strategy layer, not here.
+    // Post-norm models (BERT/XLM-R) are architecturally different — they
+    // naturally have MeanPool instead of lm_head (driven by weight-driven
+    // `features.is_post_norm`, not by OutputMode).
     if !features.is_post_norm {
         let final_norm_w = g.add_tensor_concrete("final_norm", &[hidden], tdt("final_norm"));
         let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
@@ -2242,96 +2248,101 @@ pub fn build_compiler_graph(
             g.add_op(OpKind::LayerNorm { eps }, vec![final_hidden, final_norm_w, bias_tid], vec![final_normed], "final_norm");
         }
 
-        use gllm_kernels::compiler::mega_kernel_abi::OutputMode;
-        let is_embed_or_rerank = business_config.output_modes.iter().any(|m| matches!(m, OutputMode::EncodeToLayer { .. }));
+        // ── lm_head → LogitSoftcap → Argmax → StoreToken → CheckStopCondition ──
+        // Always built; OutputMode pruning is a BUILD strategy concern.
+        let lm_head_w = g.add_tensor_concrete("lm_head", &[vocab_size, hidden], tdt("lm_head"));
+        let mut logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+        add_gemm_or_quant(&mut g, "lm_head", s.clone(), vocab_size, hidden,
+            vec![final_normed, lm_head_w],
+            vec![logits],
+            "lm_head",
+        );
 
-        if is_embed_or_rerank {
-            // Decoder used as embedding/reranker: MeanPool → output hidden state
-            let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
-            g.add_op(OpKind::MeanPool { seq_len: 0, hidden, cls_mode: false }, vec![final_normed], vec![pooled], "meanpool");
-            g.outputs = vec![pooled];
-        } else {
-            // Generator: lm_head → [LogitSoftcap] → Argmax → generate loop
-            let lm_head_w = g.add_tensor_concrete("lm_head", &[vocab_size, hidden], tdt("lm_head"));
-            let mut logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-            add_gemm_or_quant(&mut g, "lm_head", s.clone(), vocab_size, hidden,
-                vec![final_normed, lm_head_w],
-                vec![logits],
-                "lm_head",
+        // ── Logit softcapping (Gemma 4: cap=30.0, Grok: cap=24.0) ──
+        // cap * tanh(logits / cap) before argmax — prevents extreme logit values.
+        if let Some(cap) = config.final_logit_softcapping {
+            let softcapped = g.add_tensor("logits_softcapped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+            g.add_op(OpKind::LogitSoftcap { cap }, vec![logits], vec![softcapped], "logit_softcap");
+            logits = softcapped;
+        }
+
+        // ── MTP (Multi-Token Prediction) projection nodes (REQ-MTP-003) ──
+        // Each MTP depth projects the final hidden state through a per-depth
+        // weight matrix to produce candidate token logits:
+        //   mtp_logits_d = final_normed @ W_mtp[d]^T  → [seq_len, vocab_size]
+        //   candidate_d = argmax(mtp_logits_d)
+        //
+        // MTP weights are canonical-named "mtp_proj.{d}" (global) or
+        // "L{N}.mtp_proj.{d}" (per-layer), where d is the depth index.
+        // MTP depth is derived from weight_shapes presence (topology-driven),
+        // not from BusinessConfig (SPEC/39: mtp_config removed).
+        let mtp_global_prefix = "mtp_proj.";
+        let mtp_layered_prefix = format!("L{}.mtp_proj.", features.num_layers);
+
+        // Collect depth indices from weight_shapes
+        let mut mtp_depths: Vec<usize> = weight_shapes.keys()
+            .filter_map(|name| {
+                if let Some(suffix) = name.strip_prefix(mtp_global_prefix) {
+                    suffix.parse::<usize>().ok()
+                } else if let Some(suffix) = name.strip_prefix(&mtp_layered_prefix) {
+                    suffix.parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        mtp_depths.sort_unstable();
+        mtp_depths.dedup();
+
+        for d in mtp_depths {
+            let mtp_global = format!("mtp_proj.{}", d);
+            let mtp_layered = format!("L{}.mtp_proj.{}", features.num_layers, d);
+
+            // Resolve canonical name: prefer global variant, fall back to per-layer.
+            let actual_cn = if weight_shapes.contains_key(&mtp_global) {
+                mtp_global
+            } else if weight_shapes.contains_key(&mtp_layered) {
+                mtp_layered
+            } else {
+                // Weight not found for this depth — skip
+                continue;
+            };
+
+            let mtp_shape = weight_shapes.get(&actual_cn)
+                .expect("MTP weight shape must exist after contains_key check");
+            let mtp_n = if mtp_shape.len() >= 2 { mtp_shape[0] } else { vocab_size };
+            let mtp_k = if mtp_shape.len() >= 2 { mtp_shape[1] } else { hidden };
+
+            let mtp_w = g.add_tensor_concrete(&actual_cn, &[mtp_n, mtp_k], tdt(&actual_cn));
+            let mtp_logits = g.add_tensor(
+                &format!("mtp_logits_{}", d),
+                vec![s.clone(), SymDim::Concrete(mtp_n)],
+                dt,
+            );
+            add_gemm_or_quant(&mut g, &actual_cn, s.clone(), mtp_n, mtp_k,
+                vec![final_normed, mtp_w],
+                vec![mtp_logits],
+                &format!("mtp_proj_{}", d),
             );
 
-            // ── Logit softcapping (Gemma 4: cap=30.0, Grok: cap=24.0) ──
-            // cap * tanh(logits / cap) before argmax — prevents extreme logit values.
-            if let Some(cap) = config.final_logit_softcapping {
-                let softcapped = g.add_tensor("logits_softcapped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-                g.add_op(OpKind::LogitSoftcap { cap }, vec![logits], vec![softcapped], "logit_softcap");
-                logits = softcapped;
-            }
-
-            // ── MTP (Multi-Token Prediction) projection nodes (REQ-MTP-003) ──
-            // Each MTP depth projects the final hidden state through a per-depth
-            // weight matrix to produce candidate token logits:
-            //   mtp_logits_d = final_normed @ W_mtp[d]^T  → [seq_len, vocab_size]
-            //   candidate_d = argmax(mtp_logits_d)
-            //
-            // MTP weights are canonical-named "mtp_proj.{d}" (global) or
-            // "L{N}.mtp_proj.{d}" (per-layer), where d is the depth index.
-            // Only added when mtp_config is present and MTP weights exist in weight_shapes.
-            let mtp_depth = business_config.mtp_config.as_ref()
-                .map(|c| c.depth)
-                .unwrap_or(0);
-
-            for d in 0..mtp_depth {
-                let mtp_global = format!("mtp_proj.{}", d);
-                let mtp_layered = format!("L{}.mtp_proj.{}", features.num_layers, d);
-
-                // Resolve canonical name: prefer global variant, fall back to per-layer.
-                let actual_cn = if weight_shapes.contains_key(&mtp_global) {
-                    mtp_global
-                } else if weight_shapes.contains_key(&mtp_layered) {
-                    mtp_layered
-                } else {
-                    // Weight not found for this depth — skip
-                    continue;
-                };
-
-                let mtp_shape = weight_shapes.get(&actual_cn)
-                    .expect("MTP weight shape must exist after contains_key check");
-                let mtp_n = if mtp_shape.len() >= 2 { mtp_shape[0] } else { vocab_size };
-                let mtp_k = if mtp_shape.len() >= 2 { mtp_shape[1] } else { hidden };
-
-                let mtp_w = g.add_tensor_concrete(&actual_cn, &[mtp_n, mtp_k], tdt(&actual_cn));
-                let mtp_logits = g.add_tensor(
-                    &format!("mtp_logits_{}", d),
-                    vec![s.clone(), SymDim::Concrete(mtp_n)],
-                    dt,
-                );
-                add_gemm_or_quant(&mut g, &actual_cn, s.clone(), mtp_n, mtp_k,
-                    vec![final_normed, mtp_w],
-                    vec![mtp_logits],
-                    &format!("mtp_proj_{}", d),
-                );
-
-                let mtp_token = g.add_tensor(
-                    &format!("mtp_token_{}", d),
-                    vec![SymDim::Concrete(1)],
-                    dt,
-                );
-                g.add_op(OpKind::Argmax { vocab_size: mtp_n },
-                    vec![mtp_logits], vec![mtp_token], &format!("mtp_argmax_{}", d));
-                g.add_op(OpKind::StoreToken,
-                    vec![mtp_token], vec![], &format!("mtp_store_{}", d));
-            }
-
-            for mode in &business_config.output_modes {
-                if let OutputMode::Generate { .. } = mode {
-                    let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
-                    g.add_op(OpKind::Argmax { vocab_size }, vec![logits], vec![token_id], "argmax");
-                    g.add_op(OpKind::StoreToken, vec![token_id], vec![], "store_token");
-                    g.add_op(OpKind::CheckStopCondition, vec![token_id], vec![], "check_stop");
-                }
-            }
+            let mtp_token = g.add_tensor(
+                &format!("mtp_token_{}", d),
+                vec![SymDim::Concrete(1)],
+                dt,
+            );
+            g.add_op(OpKind::Argmax { vocab_size: mtp_n },
+                vec![mtp_logits], vec![mtp_token], &format!("mtp_argmax_{}", d));
+            g.add_op(OpKind::StoreToken,
+                vec![mtp_token], vec![], &format!("mtp_store_{}", d));
         }
+
+        // ── Argmax → StoreToken → CheckStopCondition (generate loop) ──
+        // Always present in non-post-norm graphs.  BUILD strategy prunes
+        // these when OutputMode is EncodeToLayer/ClassifyBinary.
+        let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
+        g.add_op(OpKind::Argmax { vocab_size }, vec![logits], vec![token_id], "argmax");
+        g.add_op(OpKind::StoreToken, vec![token_id], vec![], "store_token");
+        g.add_op(OpKind::CheckStopCondition, vec![token_id], vec![], "check_stop");
     }
 
     // Set graph inputs: all tensors without a producer (external inputs).

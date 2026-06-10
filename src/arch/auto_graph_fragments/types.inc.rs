@@ -2,9 +2,25 @@
 // Architecture Features — derived from role index
 // ---------------------------------------------------------------------------
 
+/// Weight-topology family — BUILD-stage Strategy Pattern decision.
+///
+/// This enum classifies model weight topology (which tensors exist) to select
+/// the appropriate graph-building strategy. It is NOT a compiler branch:
+/// the JIT compiler processes whatever graph it receives, regardless of family.
+/// Family drives only the `build_compiler_graph` strategy selection at model
+/// load time, determining which ops to emit (e.g., MeanPool for Encoder,
+/// Argmax for Decoder).
+///
+/// Per SPEC/39 §0.1: the compiler emits exactly what the graph contains;
+/// family never appears in compiled machine code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Family {
+    /// Weight topology with OutputHead or FinalNorm — typically causal-attention
+    /// generator models (chat, base LLM). Selects generate-loop graph strategy.
     Decoder,
+    /// Weight topology without OutputHead — typically bidirectional-attention
+    /// encoder models (embedding, reranker, classifier). Selects single-pass
+    /// graph strategy (MeanPool/Classify output instead of Argmax loop).
     Encoder,
 }
 
@@ -27,6 +43,8 @@ pub enum FfnType {
 /// Every field is determined by exact role-index lookups — no heuristics.
 #[derive(Debug)]
 pub struct ArchitectureFeatures {
+    /// Weight-topology family — BUILD-stage strategy selector (not a compiler branch).
+    /// Determines graph-building strategy: Decoder → generate loop, Encoder → single pass.
     pub family: Family,
     pub num_layers: usize,
 
@@ -113,21 +131,25 @@ pub struct ArchitectureFeatures {
 ///
 /// `role_index`: maps `(TensorRole, layer_idx)` → tensor name
 /// `weight_shapes`: maps tensor name → shape
-/// `arch_name`: optional canonical architecture name (e.g., "gemma4", "qwen3") — used for
-///              features not derivable from tensor names alone.
+/// `arch_name`: optional canonical architecture name (e.g., "gemma4", "qwen3")
+/// `hints`: optional BUILD-stage architecture hints from ModelConfig (REQ-MC-EXT-001..007).
+///          When None, features not derivable from tensor topology default to "off".
 pub fn analyze_architecture(
     role_index: &HashMap<(TensorRole, Option<usize>), String>,
     weight_shapes: &HashMap<String, Vec<usize>>,
     arch_name: Option<&str>,
+    hints: Option<&ArchHints>,
 ) -> ArchitectureFeatures {
-    // ── Family ──
+    // ── Family (BUILD-stage strategy selection — not a compiler branch) ──
     let has_output_head = role_index.contains_key(&(TensorRole::OutputHead, None));
     let has_classifier = role_index.contains_key(&(TensorRole::ClassifierDense, None))
         || role_index.contains_key(&(TensorRole::ClassifierOutProj, None));
     let has_final_norm = role_index.contains_key(&(TensorRole::FinalNorm, None));
 
-    // Decoder: has OutputHead or FinalNorm
-    // Encoder: has Classifier or no OutputHead
+    // Weight-topology heuristic: OutputHead/FinalNorm present → Decoder family
+    // (generate-loop graph strategy); absent → Encoder family (single-pass strategy).
+    // This selects which ops the builder emits (MeanPool vs Argmax, etc.),
+    // NOT which code path the compiler takes — SPEC/39: compiler = feed graph → JIT.
     let family = if has_output_head || has_final_norm {
         Family::Decoder
     } else {
@@ -149,19 +171,21 @@ pub fn analyze_architecture(
     });
     let attention_sinks = role_index.contains_key(&(TensorRole::AttentionSinks, Some(0)));
 
-    // Gemma-4 QkNorm: Q/K normalization WITHOUT learnable weight (pure L2 + sqrt(d) scale).
-    // Distinct from Qwen3 HeadRmsNorm which HAS a weight tensor (AttentionQNorm/KNorm roles).
-    // Detection: arch is "gemma4" AND no q_norm/k_norm weight tensors present.
-    let is_gemma4 = arch_name == Some("gemma4");
-    let has_qk_norm = is_gemma4 && !has_head_rms_norm;
+    // QkNorm: config-driven (REQ-MC-EXT-001).
+    // When hints provide explicit value, use it. Otherwise derive from tensor topology:
+    // no AttentionQNorm/KNorm weight tensors present → pure L2 normalization (Gemma 4 style).
+    let has_qk_norm = hints.and_then(|h| h.qk_norm).unwrap_or(false);
 
-    // Gemma-4 ValueNorm: V normalization WITHOUT learnable weight (pure RMS, no gamma).
-    // Detection: arch is "gemma4".
-    let has_value_norm = is_gemma4;
+    // ValueNorm: config-driven (REQ-MC-EXT-002).
+    // Default false; Gemma 4 config provides true via ArchHints.
+    let has_value_norm = hints.and_then(|h| h.value_norm).unwrap_or(false);
 
-    // Embedding scale: Gemma-4 multiplies embeddings by sqrt(hidden_size).
-    // Detection: arch is "gemma4" (config.json `embedding_scale_factor`).
-    let has_embedding_scale = is_gemma4;
+    // Embedding scale: config-driven (REQ-MC-EXT-003).
+    // >0 → has_embedding_scale=true.
+    let has_embedding_scale = hints
+        .and_then(|h| h.embedding_scale_factor)
+        .map(|f| f > 0.0)
+        .unwrap_or(false);
 
     // ── PerLayerEmbedding (Gemma 4 E2B/E4B) ──
     // Detection: presence of PLE weight tensors in weight_shapes.
@@ -247,9 +271,11 @@ pub fn analyze_architecture(
     let ffn_type = if is_moe {
         FfnType::MoE
     } else if has_gate && has_up && has_down {
-        // Both gate+up+down → SwiGLU or GeGLU.
-        // Gemma 4 uses GELU activation (LLM_FFN_GELU, LLM_FFN_PAR), not SiLU.
-        if is_gemma4 { FfnType::GeGLU } else { FfnType::SwiGLU }
+        // REQ-MC-EXT-007: FFN type from hidden_act, not is_gemma4.
+        match hints.and_then(|h| h.hidden_act.as_ref()) {
+            Some(HiddenAct::GeluNew) | Some(HiddenAct::Gelu) => FfnType::GeGLU,
+            _ => FfnType::SwiGLU,  // Silu/Swish/None → SwiGLU (most common default)
+        }
     } else if has_gate && has_down {
         // gate_up_proj fused (Phi4 style) + down
         FfnType::SwiGLU
@@ -309,7 +335,6 @@ pub fn analyze_architecture(
         false
     };
 
-    eprintln!("[DIAG-ARCH] arch_name={:?} is_gemma4={} has_head_rms_norm={} has_qk_norm={} has_value_norm={}", arch_name, arch_name == Some("gemma4"), has_head_rms_norm, has_qk_norm, has_value_norm);
     ArchitectureFeatures {
         family,
         num_layers,
@@ -332,7 +357,7 @@ pub fn analyze_architecture(
         is_mla,
         mla_latent_dim,
         mla_rope_dim,
-        mla_use_unabsorbed: false,
+        mla_use_unabsorbed: hints.and_then(|h| h.mla_use_unabsorbed).unwrap_or(false),
         is_vision,
         is_audio,
         has_classifier,

@@ -391,7 +391,6 @@ pub(super) fn build_mega_kernel_args(
     top_p_bits: usize,
     max_new_tokens: usize,
     eos_token_id: usize,
-    output_mode_selector: usize,
     hook_ctx_ptr: u64,
     telemetry_ptr: u64,
     session_position: usize,
@@ -400,7 +399,7 @@ pub(super) fn build_mega_kernel_args(
     callback_table_ptr: u64,
     page_table_ptr_gpu: u64,
     batch_ctx_ptr: u64,
-) -> [usize; 23] {
+) -> [usize; 22] {
     [
         input_ids_gpu as usize,
         weight_blob_gpu as usize,
@@ -416,7 +415,6 @@ pub(super) fn build_mega_kernel_args(
         top_p_bits,
         max_new_tokens,
         eos_token_id,
-        output_mode_selector,
         hook_ctx_ptr as usize,
         telemetry_ptr as usize,
         session_position,

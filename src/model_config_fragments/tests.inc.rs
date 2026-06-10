@@ -174,6 +174,11 @@ mod tests {
             use_double_wide_mlp: None,
             add_special_tokens: None,
             feed_forward_lengths: None,
+            qk_norm: None,
+            value_norm: None,
+            embedding_scale_factor: None,
+            rope_partial_ratio_global: None,
+            mla_use_unabsorbed: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -406,6 +411,11 @@ mod tests {
             use_double_wide_mlp: None,
             add_special_tokens: None,
             feed_forward_lengths: None,
+            qk_norm: None,
+            value_norm: None,
+            embedding_scale_factor: None,
+            rope_partial_ratio_global: None,
+            mla_use_unabsorbed: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }
@@ -535,6 +545,10 @@ mod tests {
             mla_d_c: 0,
             mla_d_rope: 0,
             mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
         }
     }
 
@@ -775,10 +789,10 @@ mod tests {
         let cfg = MlaConfig {
             d_c: 512,
             d_rope: 64,
-            unabsorbed_threshold: 256,
+            unabsorbed_threshold: Some(256),
         };
         assert_eq!(cfg.d_c, 512);
         assert_eq!(cfg.d_rope, 64);
-        assert_eq!(cfg.unabsorbed_threshold, 256);
+        assert_eq!(cfg.unabsorbed_threshold, Some(256));
     }
 }

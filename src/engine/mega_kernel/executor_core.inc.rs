@@ -59,9 +59,12 @@ impl MegaKernelExecutor {
             gllm_kernels::compiler::graph::OpKind::MtpDraft { depth, .. } => Some(*depth),
             _ => None,
         }).unwrap_or(0);
+        // SPEC/39: BusinessConfig no longer nested in CompileConfig.
+        // debug_jit promoted to CompileConfig top level — the only business
+        // parameter the compiler reads directly.
         let config = gllm_kernels::compiler::mega_kernel_abi::CompileConfig {
             max_seq_len,
-            business_config,
+            debug_jit: business_config.debug_jit,
             hetero: hetero_config.clone(),
         };
 
@@ -777,7 +780,6 @@ impl MegaKernelExecutor {
                 top_p.to_bits() as usize,
                 max_new_tokens,
                 self.eos_token_id as usize,
-                0,            // output_mode_selector: Generate
                 ctx.hook_ctx_ptr as *const u8,
                 ctx.telemetry_ptr,
                 session_position, // session_position (0=new, >0=resume)
@@ -1040,7 +1042,6 @@ impl MegaKernelExecutor {
                 0,                              // top_p (batch mode: read from sampling_params_ptr per-seq)
                 max_decode_steps,               // max_new_tokens — non-zero triggers decode step loop
                 0,                              // eos_token_id (batch mode: read from sampling_params_ptr per-seq)
-                0,                              // output_mode
                 std::ptr::null(),               // hook_ctx (from batch_ctx)
                 std::ptr::null_mut(),           // telemetry
                 0,                              // session_position (from batch_ctx)

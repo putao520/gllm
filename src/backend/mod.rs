@@ -999,7 +999,7 @@ impl<E: Element> BackendExecutor<E> {
             .model_config()
             .multimodal_token_ids
             .unwrap_or_else(|| {
-                crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults()
+                crate::compat::multimodal::MultimodalTokenIds::fallback_multimodal_token_ids()
             });
 
         match self {
@@ -1058,7 +1058,7 @@ impl<E: Element> BackendExecutor<E> {
         let token_ids = self
             .model_config()
             .multimodal_token_ids
-            .unwrap_or_else(crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults);
+            .unwrap_or_else(crate::compat::multimodal::MultimodalTokenIds::fallback_multimodal_token_ids);
 
         match self {
             BackendExecutor::Cpu(exec) => {
