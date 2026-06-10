@@ -587,7 +587,7 @@
       
     </section>
 
-    <section id="req-dtype-004" data-req="REQ-DTYPE-004" data-req-status="draft" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.5" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.5 GEMM 累加器 dtype 策略 — REQ-DTYPE-004
+    <section id="req-dtype-004" data-req="REQ-DTYPE-004" data-req-status="implemented" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.5" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.5 GEMM 累加器 dtype 策略 — REQ-DTYPE-004
       <strong>REQ-DTYPE-005: GEMM 累加器 dtype 选择</strong>
       <p>GEMM 累加器 dtype 由 <code>(输入 dtype × 硬件能力)</code> 联合决定:</p>
       <p>```</p>
@@ -632,7 +632,7 @@
       
     </section>
 
-    <section id="req-dtype-005" data-req="REQ-DTYPE-005" data-req-status="draft" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.6" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.6 Epilogue 窄化写回 — REQ-DTYPE-005
+    <section id="req-dtype-005" data-req="REQ-DTYPE-005" data-req-status="implemented" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.6" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.6 Epilogue 窄化写回 — REQ-DTYPE-005
       <strong>REQ-DTYPE-006: Epilogue 最后一步窄化</strong>
       <p>EpilogueInjection (§3.2.1 P0) 的写回阶段将累加器 dtype 窄化为存储 dtype:</p>
       <p>```</p>
@@ -673,7 +673,7 @@
       
     </section>
 
-    <section id="req-dtype-006" data-req="REQ-DTYPE-006" data-req-status="draft" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.7" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.7 dtype 感知的代数重关联 — REQ-DTYPE-006, REQ-DTYPE-008
+    <section id="req-dtype-006" data-req="REQ-DTYPE-006" data-req-status="implemented" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.7" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.7 dtype 感知的代数重关联 — REQ-DTYPE-006, REQ-DTYPE-008
       <strong>REQ-DTYPE-007: dtype 感知的代数重关联</strong>
       <p>融合组构建时（R1 PDT 融合），当融合组内存在 dtype 边界，若相邻算子满足</p>
       <p>交换律，重排顺序将同 dtype 算子聚集，消除中间 widen/narrow 变换:</p>

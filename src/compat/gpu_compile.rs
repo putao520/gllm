@@ -238,3 +238,193 @@ pub(crate) fn sample_logits_cpu(
     }
     Ok(result)
 }
+
+// ---------------------------------------------------------------------------
+// GPU Kernel Launch Configuration (REQ-KERNELS-GPU-001)
+// ---------------------------------------------------------------------------
+
+/// Unified configuration for GPU mega-kernel launch.
+///
+/// All GPU backends (CUDA/HIP/Metal) use the same parameter layout.
+/// This struct centralizes parameter construction and validation,
+/// eliminating per-backend duplication.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+#[derive(Debug, Clone)]
+pub(crate) struct GpuKernelLaunchConfig {
+    /// Device pointer to input token IDs.
+    pub input_ids_gpu: u64,
+    /// Device pointer to weight blob.
+    pub weight_blob_gpu: u64,
+    /// Device pointer to KV cache buffer (0 = no KV cache).
+    pub kv_cache_gpu: u64,
+    /// Device pointer to position IDs.
+    pub positions_gpu: u64,
+    /// Device pointer to auxiliary data (seq_lens, etc.).
+    pub aux_ptr: u64,
+    /// Batch size.
+    pub batch_size: usize,
+    /// Sequence length.
+    pub seq_len: usize,
+    /// Device pointer to scratchpad buffer.
+    pub scratchpad_gpu: u64,
+    /// Device pointer to output buffer.
+    pub output_buf_gpu: u64,
+    /// Temperature as IEEE 754 bits.
+    pub temperature_bits: usize,
+    /// Top-k sampling parameter.
+    pub top_k: usize,
+    /// Top-p as IEEE 754 bits.
+    pub top_p_bits: usize,
+    /// Maximum new tokens to generate.
+    pub max_new_tokens: usize,
+    /// End-of-sequence token ID.
+    pub eos_token_id: usize,
+    /// Device pointer to hook context.
+    pub hook_ctx_ptr: u64,
+    /// Device pointer to telemetry buffer.
+    pub telemetry_ptr: u64,
+    /// Session position offset.
+    pub session_position: usize,
+    /// Device pointer to fused hidden state (multimodal).
+    pub fused_hidden_ptr: u64,
+    /// Number of multimodal tokens.
+    pub num_mm_tokens: usize,
+    /// Device pointer to callback table.
+    pub callback_table_ptr: u64,
+    /// Device pointer to page table (0 = contiguous KV).
+    pub page_table_ptr: u64,
+    /// Device pointer to batch context.
+    pub batch_ctx_ptr: u64,
+}
+
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+impl GpuKernelLaunchConfig {
+    /// Validate the launch configuration before kernel invocation.
+    ///
+    /// Returns `Err` if any invariant is violated. This prevents
+    /// launching a GPU kernel with invalid parameters that would
+    /// cause undefined behavior on the device.
+    pub fn validate(&self) -> Result<(), BE> {
+        if self.input_ids_gpu == 0 {
+            return Err(BE::Other("GpuKernelLaunchConfig: input_ids_gpu is NULL".into()));
+        }
+        if self.weight_blob_gpu == 0 {
+            return Err(BE::Other("GpuKernelLaunchConfig: weight_blob_gpu is NULL".into()));
+        }
+        if self.scratchpad_gpu == 0 {
+            return Err(BE::Other("GpuKernelLaunchConfig: scratchpad_gpu is NULL".into()));
+        }
+        if self.batch_size == 0 {
+            return Err(BE::Other("GpuKernelLaunchConfig: batch_size is 0".into()));
+        }
+        if self.seq_len == 0 {
+            return Err(BE::Other("GpuKernelLaunchConfig: seq_len is 0".into()));
+        }
+        Ok(())
+    }
+
+    /// Build the 22-parameter ABI array for mega-kernel launch.
+    ///
+    /// The ABI order matches the CPU mega-kernel ABI (SPEC/40).
+    /// All pointer values must be valid device pointers.
+    pub fn to_mega_kernel_args(&self) -> [usize; 22] {
+        [
+            self.input_ids_gpu as usize,
+            self.weight_blob_gpu as usize,
+            self.kv_cache_gpu as usize,
+            self.positions_gpu as usize,
+            self.aux_ptr as usize,
+            self.batch_size,
+            self.seq_len,
+            self.scratchpad_gpu as usize,
+            self.output_buf_gpu as usize,
+            self.temperature_bits,
+            self.top_k,
+            self.top_p_bits,
+            self.max_new_tokens,
+            self.eos_token_id,
+            self.hook_ctx_ptr as usize,
+            self.telemetry_ptr as usize,
+            self.session_position,
+            self.fused_hidden_ptr as usize,
+            self.num_mm_tokens,
+            self.callback_table_ptr as usize,
+            self.page_table_ptr as usize,
+            self.batch_ctx_ptr as usize,
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU/CPU Numerical Alignment Verification (REQ-KERNELS-GPU-001)
+// ---------------------------------------------------------------------------
+
+/// Default tolerance threshold for GPU/CPU numerical alignment.
+/// GPU kernels use mixed-precision (BF16/TF16 tensor cores) while
+/// CPU uses F32, so some divergence is expected.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(crate) const GPU_CPU_ALIGN_TOLERANCE: f32 = 1e-3;
+
+/// Verify numerical alignment between GPU and CPU outputs.
+///
+/// Compares two f32 slices element-by-element, checking that the maximum
+/// relative error is within the specified tolerance. Returns the maximum
+/// relative error observed.
+///
+/// Returns `Err` if:
+/// - Slices have different lengths
+/// - Any element has relative error exceeding tolerance
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(crate) fn verify_gpu_cpu_alignment(
+    gpu_output: &[f32],
+    cpu_output: &[f32],
+    tolerance: f32,
+) -> Result<f32, BE> {
+    if gpu_output.len() != cpu_output.len() {
+        return Err(BE::Other(format!(
+            "GPU/CPU output length mismatch: GPU={} CPU={}",
+            gpu_output.len(),
+            cpu_output.len()
+        )));
+    }
+
+    let mut max_rel_error: f32 = 0.0;
+    let mut mismatch_count: usize = 0;
+    let mut first_mismatch_idx: Option<usize> = None;
+
+    for (i, (&gpu_val, &cpu_val)) in gpu_output.iter().zip(cpu_output.iter()).enumerate() {
+        if cpu_val == 0.0 && gpu_val == 0.0 {
+            continue;
+        }
+        if cpu_val == 0.0 {
+            let abs_err = (gpu_val - cpu_val).abs();
+            if abs_err > tolerance && first_mismatch_idx.is_none() {
+                first_mismatch_idx = Some(i);
+                mismatch_count += 1;
+            }
+            max_rel_error = max_rel_error.max(abs_err);
+            continue;
+        }
+        let rel_err = ((gpu_val - cpu_val) / cpu_val).abs();
+        max_rel_error = max_rel_error.max(rel_err);
+        if rel_err > tolerance && first_mismatch_idx.is_none() {
+            first_mismatch_idx = Some(i);
+            mismatch_count += 1;
+        }
+    }
+
+    if max_rel_error > tolerance {
+        if let Some(idx) = first_mismatch_idx {
+            return Err(BE::Other(format!(
+                "GPU/CPU numerical alignment failed: max_rel_error={:.6} > tolerance={:.6}, \
+                 first mismatch at index {} (GPU={:.6} CPU={:.6}), total mismatches={}",
+                max_rel_error, tolerance, idx,
+                gpu_output.get(idx).copied().unwrap_or(0.0),
+                cpu_output.get(idx).copied().unwrap_or(0.0),
+                mismatch_count
+            )));
+        }
+    }
+
+    Ok(max_rel_error)
+}

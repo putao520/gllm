@@ -375,7 +375,9 @@ pub(super) fn build_kernel_context(
 ///
 /// All pointer arguments must already be device pointers.
 /// R1 transitional: retained for GPU backends that still use the 22-param kernel launch.
+/// Internally delegates to GpuKernelLaunchConfig for unified parameter handling (REQ-KERNELS-GPU-001).
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_mega_kernel_args(
     input_ids_gpu: u64,
     weight_blob_gpu: u64,
@@ -400,30 +402,31 @@ pub(super) fn build_mega_kernel_args(
     page_table_ptr_gpu: u64,
     batch_ctx_ptr: u64,
 ) -> [usize; 22] {
-    [
-        input_ids_gpu as usize,
-        weight_blob_gpu as usize,
-        kv_cache_gpu as usize,
-        positions_gpu as usize,
-        seq_lens_ptr as usize,
+    let config = super::gpu_compile::GpuKernelLaunchConfig {
+        input_ids_gpu,
+        weight_blob_gpu,
+        kv_cache_gpu,
+        positions_gpu,
+        aux_ptr: seq_lens_ptr,
         batch_size,
         seq_len,
-        scratchpad_gpu as usize,
-        output_buf_gpu as usize,
+        scratchpad_gpu,
+        output_buf_gpu,
         temperature_bits,
         top_k,
         top_p_bits,
         max_new_tokens,
         eos_token_id,
-        hook_ctx_ptr as usize,
-        telemetry_ptr as usize,
+        hook_ctx_ptr,
+        telemetry_ptr,
         session_position,
-        fused_hidden_ptr as usize,
+        fused_hidden_ptr,
         num_mm_tokens,
-        callback_table_ptr as usize,
-        page_table_ptr_gpu as usize,
-        batch_ctx_ptr as usize,
-    ]
+        callback_table_ptr,
+        page_table_ptr: page_table_ptr_gpu,
+        batch_ctx_ptr,
+    };
+    config.to_mega_kernel_args()
 }
 
 /// Extract f32 array from raw bytes (for DtoH results).
