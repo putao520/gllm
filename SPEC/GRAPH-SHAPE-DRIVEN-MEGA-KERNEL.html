@@ -435,7 +435,7 @@
       <strong>缺陷 B — 重复 pack/transform</strong>: 每个 codegen 路径独立决定数据格式，缺少全局布局协商。
       <p>融合组内存在冗余的 widen→narrow→widen 链，本可通过算子重排消除。</p>
     </section>
-    <section id="req-dtype-001" data-req="REQ-DTYPE-001" data-req-status="draft" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.2" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.2 dtype 穿透设计 — REQ-DTYPE-001 ~ REQ-DTYPE-002
+    <section id="req-dtype-001" data-req="REQ-DTYPE-001" data-req-status="implemented" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.2" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.2 dtype 穿透设计 — REQ-DTYPE-001 ~ REQ-DTYPE-002
       <strong>REQ-DTYPE-001: LoweringContext.dtype 穿透</strong>
       <code>LoweringContext</code> 新增 dtype 字段，从 <code>op_input_dtype(op, graph)</code> 自动推断：
       <p>```</p>
@@ -491,7 +491,7 @@
       
     </section>
 
-    <section id="req-dtype-002" data-req="REQ-DTYPE-002" data-req-status="draft" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.3" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.3 融合组内 dtype 连续性 — REQ-DTYPE-002
+    <section id="req-dtype-002" data-req="REQ-DTYPE-002" data-req-status="implemented" data-req-domain="dtype" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="0.8.3" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">§0.8.3 融合组内 dtype 连续性 — REQ-DTYPE-002
       <strong>REQ-DTYPE-003: 融合组内 dtype 连续性约束</strong>
       <p>融合规则增加约束: 相邻算子 dtype 相同时，零变换直传。dtype 不同时按以下策略处理:</p>
       <p>```</p>
@@ -921,7 +921,7 @@
         </tr>
       </table>
     </section>
-    <section id="req-dtype-chain-001" data-req="REQ-DTYPE-CHAIN-001" data-req-status="draft" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="001" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-001: Loader 保留原始 dtype
+    <section id="req-dtype-chain-001" data-req="REQ-DTYPE-CHAIN-001" data-req-status="implemented" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="001" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-001: Loader 保留原始 dtype
       <p>SafeTensors / GGUF / ONNX loader 必须保留每个 tensor 的原始 dtype 和 raw bytes。</p>
       <strong>禁止加载时无条件转换到 F32。</strong>
       <li>量化 tensor（Q4_K / MXFP4 等）：保留 raw bytes + <code>GgmlDType</code> 元数据</li>
@@ -958,7 +958,7 @@
       
     </section>
 
-    <section id="req-dtype-chain-002" data-req="REQ-DTYPE-CHAIN-002" data-req-status="draft" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="002" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-002: Graph per-tensor dtype 源自 Loader
+    <section id="req-dtype-chain-002" data-req="REQ-DTYPE-CHAIN-002" data-req-status="implemented" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="002" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-002: Graph per-tensor dtype 源自 Loader
       <p>CompilerGraph 中每个 tensor 的 dtype 必须来自 Loader 的 <code>TensorMeta.dtype</code>。</p>
       <code>auto_graph::build_compiler_graph()</code> 不得用全局 <code>config.dtype</code> 覆盖 per-tensor dtype。
       <strong>约束</strong>:
@@ -992,7 +992,7 @@
       
     </section>
 
-    <section id="req-dtype-chain-003" data-req="REQ-DTYPE-CHAIN-003" data-req-status="draft" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="003" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-003: 权重布局 per-tensor dtype 感知
+    <section id="req-dtype-chain-003" data-req="REQ-DTYPE-CHAIN-003" data-req-status="implemented" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="003" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-003: 权重布局 per-tensor dtype 感知
       <p>实现权重 blob 的 per-tensor dtype 感知布局：MegaKernelWeightLayout 通过 graph.weight_layout() 获取每个 tensor 的精确偏移，内部按 per-tensor dtype.size_bytes() 计算偏移。确保权重 blob 中不同 dtype 的 tensor（如 Norm 权重通常 F32、GEMM 权重可能 BF16）按各自 size_bytes() 正确排列，GraphDerivedGeometry 不承担权重 dtype 责任。</p>
       <code>MegaKernelWeightLayout</code> 通过 <code>graph.weight_layout()</code> 获取每个 tensor 的精确偏移。
       <code>graph.weight_layout()</code> 内部按 per-tensor <code>dtype.size_bytes()</code> 计算偏移。
@@ -1028,7 +1028,7 @@
       
     </section>
 
-    <section id="req-dtype-chain-004" data-req="REQ-DTYPE-CHAIN-004" data-req-status="draft" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="004" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-004: Buffer 布局用计算 dtype
+    <section id="req-dtype-chain-004" data-req="REQ-DTYPE-CHAIN-004" data-req-status="implemented" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="004" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-004: Buffer 布局用计算 dtype
       <code>MegaKernelBufferLayout</code> 使用 <strong>compute_dtype</strong> 计算 activation / logits / sampling 大小。
       <p>compute_dtype 由 <code>(TensorMeta.dtype, DeviceProfile)</code> 推导，非硬编码。</p>
       <strong>compute_dtype 推导规则</strong> (当前硬件约束下的实际映射):
@@ -1068,7 +1068,7 @@
       
     </section>
 
-    <section id="req-dtype-chain-005" data-req="REQ-DTYPE-CHAIN-005" data-req-status="draft" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="005" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-005: GraphDerivedGeometry 演进
+    <section id="req-dtype-chain-005" data-req="REQ-DTYPE-CHAIN-005" data-req-status="implemented" data-req-domain="dtype-chain" data-req-category="business" data-req-entity="ENT-QUANT-PRECISION,ENT-COMPILER-GRAPH,ENT-TRACE-OP,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-api="API-DTYPE" data-section="005" data-entity-ref="ENT-QUANT-PRECISION ENT-COMPILER-GRAPH ENT-TRACE-OP ENT-VM-INSTR ENT-DEVICE-PROFILE" <h5="">REQ-DTYPE-CHAIN-005: GraphDerivedGeometry 演进
       <p>将 GraphDerivedGeometry.dtype 的语义演化为 compute_dtype：来自 graph 输入 tensor 的 dtype 但经过 DeviceProfile 提升，仅用于 buffer sizing 和 scratchpad 计算。权重偏移计算不依赖此字段，改用 graph.weight_layout() 直接派生，实现权重布局与 activation 布局的 dtype 职责分离。</p>
       <code>GraphDerivedGeometry.dtype</code> 语义演化为 <code>compute_dtype</code>：
       <li>来自 graph 输入 tensor 的 dtype，但经过 DeviceProfile 提升</li>

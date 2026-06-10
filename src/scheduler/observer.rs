@@ -112,6 +112,21 @@ impl BasicObserver {
         self.last_state.swap_io_rate = rate;
     }
 
+    /// REQ-SCHED-010: Update page hit rate [0.0, 1.0].
+    pub fn update_page_hit_rate(&mut self, rate: f32) {
+        self.last_state.page_hit_rate = rate;
+    }
+
+    /// REQ-SCHED-010: Update thrashing rate (eviction/recovery churn).
+    pub fn update_thrashing_rate(&mut self, rate: f32) {
+        self.last_state.thrashing_rate = rate;
+    }
+
+    /// REQ-SCHED-010: Update swap latency (μs per page).
+    pub fn update_swap_latency_us(&mut self, latency_us: f32) {
+        self.last_state.swap_latency_us = latency_us;
+    }
+
     pub fn update_logits_entropy(&mut self, entropy: f32) {
         self.last_state.logits_entropy = entropy;
     }

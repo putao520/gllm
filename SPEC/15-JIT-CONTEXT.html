@@ -1451,7 +1451,7 @@
         <section id="s11.2" data-section="11.2">
       <h4>11.2 集成 REQ</h4>
 
-    <section id="req-jctx-010" data-req="REQ-JCTX-010" data-req-status="draft" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.2" data-entity-ref="ENT-JIT-CONTEXT" <h5="">X86Lower 接入 JitContext (REQ-JCTX-010)
+    <section id="req-jctx-010" data-req="REQ-JCTX-010" data-req-status="implemented" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.2" data-entity-ref="ENT-JIT-CONTEXT" <h5="">X86Lower 接入 JitContext (REQ-JCTX-010)
       <p>将 X86Lower 中的 AMX Tile 分配（amx_tile_dtype: Option<dtype>）迁移到 JitContext.allocate(ResourceKind::Tile) 追踪，所有 AMX 相关资源操作通过 JitContext API 管理，替代分散的 bool/Option 追踪。</dtype></p>
       
         <h5>验收标准</h5>
@@ -1523,7 +1523,7 @@
     </section>
 
 
-    <section id="req-jctx-013" data-req="REQ-JCTX-013" data-req-status="draft" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.2" data-entity-ref="ENT-JIT-CONTEXT ENT-REG-ALLOCATOR" <h5="">RegAllocator 消费 JitContext.budget (REQ-JCTX-013)
+    <section id="req-jctx-013" data-req="REQ-JCTX-013" data-req-status="implemented" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.2" data-entity-ref="ENT-JIT-CONTEXT ENT-REG-ALLOCATOR" <h5="">RegAllocator 消费 JitContext.budget (REQ-JCTX-013)
       <p>将 RegAllocator 的分配约束从独立计算改为从 JitContext.budget 读取，确保寄存器分配上限与 JitContext 追踪的物理资源上限一致，消除预算来源分裂。</p>
       
         <h5>验收标准</h5>
@@ -1548,7 +1548,7 @@
     </section>
 
 
-    <section id="req-jctx-014" data-req="REQ-JCTX-014" data-req-status="draft" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.2" data-entity-ref="ENT-JIT-CONTEXT" <h5="">融合决策使用 JitContext 查询 (REQ-JCTX-014)
+    <section id="req-jctx-014" data-req="REQ-JCTX-014" data-req-status="implemented" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.2" data-entity-ref="ENT-JIT-CONTEXT" <h5="">融合决策使用 JitContext 查询 (REQ-JCTX-014)
       <p>在 Phase 2 融合 pass 和 Phase 2.5 StrategySelector 中使用 JitContext 查询资源余量（SMEM 可用量、Tile 可用数），使融合决策从静态规则匹配进化为动态资源查询。</p>
       
         <h5>验收标准</h5>
@@ -1647,7 +1647,7 @@
     </section>
 
 
-    <section id="req-jctx-023" data-req="REQ-JCTX-023" data-req-status="draft" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.3" data-entity-ref="ENT-JIT-CONTEXT" <h5="">所有硬件 Profile 测试 (REQ-JCTX-023)
+    <section id="req-jctx-023" data-req="REQ-JCTX-023" data-req-status="implemented" data-req-domain="jctx" data-req-category="business" data-req-entity="ENT-JIT-CONTEXT" data-req-api="API-JIT-CONTEXT" data-section="11.3" data-entity-ref="ENT-JIT-CONTEXT" <h5="">所有硬件 Profile 测试 (REQ-JCTX-023)
       <p>实现 12 种 HardwareProfile × 9 种 ResourceKind = 108 组预算测试，验证所有硬件配置的 ResourceBudget 值与 SPEC 定义一致，确保 JitContext 在全平台正确初始化。</p>
       
         <h5>验收标准</h5>

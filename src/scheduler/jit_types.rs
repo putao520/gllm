@@ -10,6 +10,14 @@ pub struct SystemState {
     /// Swap I/O rate (pages/sec).
     pub swap_io_rate: f32,
 
+    // REQ-SCHED-010: Scheduling decision metrics
+    /// Page hit rate in L1 cache [0.0, 1.0].
+    pub page_hit_rate: f32,
+    /// Thrashing rate (eviction/recovery churn ratio).
+    pub thrashing_rate: f32,
+    /// Swap latency (microseconds per page).
+    pub swap_latency_us: f32,
+
     // Load Metrics
     pub waiting_queue_len: usize,
     pub current_batch_size: usize,
@@ -364,8 +372,8 @@ mod tests {
     #[test]
     fn system_state_size_is_small() {
         // Must be zero-cost to copy — verify struct is reasonably small.
-        // 7 f32 fields = 28 bytes, 11 usize fields = 88 bytes → 116 bytes on 64-bit.
-        assert!(std::mem::size_of::<SystemState>() <= 128);
+        // 10 f32 fields = 40 bytes, 11 usize fields = 88 bytes → 128 bytes on 64-bit.
+        assert!(std::mem::size_of::<SystemState>() <= 144);
     }
 
     #[test]

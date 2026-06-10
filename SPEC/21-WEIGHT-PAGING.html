@@ -906,7 +906,7 @@
       
     </h3=""></section>
 
-    <section id="req-wp-005" data-req="REQ-WP-005" data-req-status="draft" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="005" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-005: Executor step 接入 ExpertWeightPrefetcher
+    <section id="req-wp-005" data-req="REQ-WP-005" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="005" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-005: Executor step 接入 ExpertWeightPrefetcher
       <strong>描述</strong>: 在 <code>step()</code> 的 MoE dispatch plan 生成后，调用 <code>prefetcher.update_location()</code> + <code>schedule_prefetch()</code> 生成预取请求。
       <strong>验收标准</strong>:
       <p>1. <code>schedule_prefetch()</code> 在每个 step 中被调用（当 MoE 模型时）</p>
@@ -942,7 +942,7 @@
       
     </h3=""></section>
 
-    <section id="req-wp-006" data-req="REQ-WP-006" data-req-status="draft" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="006" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-006: 权重页 Tier 迁移执行
+    <section id="req-wp-006" data-req="REQ-WP-006" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="006" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-006: 权重页 Tier 迁移执行
       <strong>描述</strong>: 将 <code>ExpertWeightPrefetcher</code> 的预取请求转化为 <code>GlobalMemoryManager::migrate_page()</code> 调用，执行实际的权重页 Tier 迁移。
       <strong>验收标准</strong>:
       <p>1. 预取请求触发 <code>GMM.migrate_page(Tier::L2 → Tier::L1)</code> 或 <code>L3 → L2</code></p>
@@ -1051,7 +1051,7 @@
       
     </h3=""></section>
 
-    <section id="req-wp-009" data-req="REQ-WP-009" data-req-status="draft" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="009" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-009: 权重页缺页恢复
+    <section id="req-wp-009" data-req="REQ-WP-009" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="009" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-009: 权重页缺页恢复
       <strong>描述</strong>: 当推理需要已被驱逐到 L2/L3 的权重页时，通过 <code>ExpertFaultHandler</code> 路径恢复。
       <strong>验收标准</strong>:
       <p>1. 访问 L2/L3 权重页触发 fault handler</p>
@@ -1088,7 +1088,7 @@
       
     </h3=""></section>
 
-    <section id="req-wp-010" data-req="REQ-WP-010" data-req-status="draft" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="010" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-010: 权重页遥测
+    <section id="req-wp-010" data-req="REQ-WP-010" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="010" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-010: 权重页遥测
       <strong>描述</strong>: Observer 新增权重页遥测指标：权重页总数、各 Tier 分布、驱逐/恢复次数、平均恢复延迟。
       <strong>验收标准</strong>:
       <p>1. <code>update_weight_metrics()</code> 记录权重页 L1/L2/L3 分布</p>

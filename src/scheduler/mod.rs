@@ -28,6 +28,7 @@ pub mod nvme_swap;
 pub mod eviction_worker;
 pub mod swap_in_worker;
 pub mod three_tier_swap;
+pub mod weight_paging;
 
 pub use allocator::BlockAllocator;
 pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};
@@ -61,4 +62,9 @@ pub use telemetry::{SequenceTelemetry};
 pub use three_tier_swap::{
     ThreeTierSwapConfig, ThreeTierSwapCoordinator, ThreeTierSwapStats, TierMigration,
     TierMigrationPlan, TierMigrationReason,
+};
+pub use weight_paging::{
+    DefragPlan, MultiGpuMigrationRequest, MultiGpuPageMigrator, PcieDmaStatus, PcieDmaTransfer,
+    PrefetchTrigger, QuantPageParams, QuantWeightPage, QuantWeightPrefetchQueue,
+    WeightPageDefragmenter, WeightPageDistribution, WeightPageDtypeHandler,
 };

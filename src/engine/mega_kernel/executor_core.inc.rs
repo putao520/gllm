@@ -50,7 +50,7 @@ impl MegaKernelExecutor {
     ) -> Result<Self, MegaKernelError> {
         // Derive all geometry from graph — CompilerGraph is the SSOT.
         let geometry =
-            gllm_kernels::compiler::graph_geometry::GraphDerivedGeometry::from_graph(&graph)
+            gllm_kernels::compiler::graph_geometry::GraphDerivedGeometry::from_graph(&graph, &gllm_kernels::dispatch::device_profile::DeviceProfile::detect())
                 .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
 
         // Build slim config with only non-derivable fields.

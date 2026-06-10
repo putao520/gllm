@@ -65,12 +65,14 @@ pub struct ExpertWeightLayout {
     pub location: ExpertWeightLocation,
 }
 
-/// 单个专家的预取请求
+/// 单个专家的预取请求 (REQ-WP-005)
 #[derive(Debug, Clone)]
 pub struct ExpertPrefetchRequest {
     /// 专家索引
     pub expert_idx: usize,
-    /// 权重存储位置
+    /// 层索引 (REQ-WP-005: 标识专家权重所在层)
+    pub layer_idx: usize,
+    /// 权重存储位置 (REQ-WP-005: weight_location)
     pub source: ExpertWeightLocation,
     /// 预取目标位置
     pub destination: ExpertWeightLocation,
@@ -196,6 +198,7 @@ impl ExpertWeightPrefetcher {
 
             requests.push(ExpertPrefetchRequest {
                 expert_idx,
+                layer_idx: 0,
                 source,
                 destination,
                 bytes: layout.compressed_bytes,
@@ -273,6 +276,7 @@ impl ExpertWeightPrefetcher {
 
             requests.push(ExpertPrefetchRequest {
                 expert_idx,
+                layer_idx: 0,
                 source,
                 destination,
                 bytes: layout.compressed_bytes,
@@ -1057,6 +1061,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_manual_construction() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 3,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -1075,6 +1080,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_clone_is_equal() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 5,
             source: ExpertWeightLocation::RemoteNode,
             destination: ExpertWeightLocation::GpuVram,
@@ -1094,6 +1100,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_debug_format() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -1323,6 +1330,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_zero_bytes() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -1339,6 +1347,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_max_priority() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 255,
             source: ExpertWeightLocation::RemoteNode,
             destination: ExpertWeightLocation::GpuVram,
@@ -1354,6 +1363,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_source_equals_destination() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::GpuVram,
             destination: ExpertWeightLocation::GpuVram,
@@ -1568,6 +1578,7 @@ mod tests {
         let prefetcher = ExpertWeightPrefetcher::new(2, 1024);
 
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::GpuL2,
             destination: ExpertWeightLocation::GpuVram,
@@ -1999,6 +2010,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_zero_latency() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::GpuL2,
             destination: ExpertWeightLocation::GpuVram,
@@ -2014,6 +2026,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_negative_latency() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -2240,6 +2253,7 @@ mod tests {
             .with_layer_compute_time(10.0);
 
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -2261,6 +2275,7 @@ mod tests {
             .with_layer_compute_time(10.0);
 
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -2315,6 +2330,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_clone_distinct() {
         let mut req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -2401,6 +2417,7 @@ mod tests {
 
         let reqs = vec![
             ExpertPrefetchRequest {
+                layer_idx: 0,
                 expert_idx: 0,
                 source: ExpertWeightLocation::CpuRam,
                 destination: ExpertWeightLocation::GpuVram,
@@ -2409,6 +2426,7 @@ mod tests {
                 priority: 0,
             },
             ExpertPrefetchRequest {
+                layer_idx: 0,
                 expert_idx: 1,
                 source: ExpertWeightLocation::CpuRam,
                 destination: ExpertWeightLocation::GpuVram,
@@ -2553,6 +2571,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_nan_latency() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
@@ -2568,6 +2587,7 @@ mod tests {
     #[test]
     fn test_expert_prefetch_request_inf_latency() {
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::Evicted,
             destination: ExpertWeightLocation::GpuVram,
@@ -2586,6 +2606,7 @@ mod tests {
         let pf = ExpertWeightPrefetcher::new(2, 1024)
             .with_layer_compute_time(10000.0);
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::Evicted,
             destination: ExpertWeightLocation::GpuVram,
@@ -2698,6 +2719,7 @@ mod tests {
         // u32 cannot be negative, but a computed priority from u32 arithmetic can overflow
         // Verify the struct accepts any u32 value
         let req = ExpertPrefetchRequest {
+                layer_idx: 0,
             expert_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,

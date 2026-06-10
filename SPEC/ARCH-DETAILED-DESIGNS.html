@@ -1160,7 +1160,7 @@
         </tr>
       </table>
     </section>
-    <section id="req-fusion-deep-001" data-req="REQ-FUSION-DEEP-001" data-req-status="draft" data-req-domain="fusion-deep" data-req-category="business" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN" data-req-api="POST /internal/fusion/deep" data-section="6" data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN" <h3="">功能 6: 深度算子融合 (REQ-FUSION-DEEP-001~006)
+    <section id="req-fusion-deep-001" data-req="REQ-FUSION-DEEP-001" data-req-status="implemented" data-req-domain="fusion-deep" data-req-category="business" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN" data-req-api="POST /internal/fusion/deep" data-section="6" data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN" <h3="">功能 6: 深度算子融合 (REQ-FUSION-DEEP-001~006)
     
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1583,7 +1583,7 @@
       <p>3. 融合算法全覆盖，无 fallback</p>
       <p>&gt; <strong>审计结果</strong>: 全部通过。详见审计 commit: <code>f5b885a2</code>, <code>6dd2f3e</code>, <code>8621a1a7</code>。</p>
     </section>
-    <section id="req-jit-graph-1" data-req="REQ-JIT-GRAPH-1" data-req-status="draft" data-req-domain="jit-graph" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-api="POST /internal/jit/graph_compile" data-section="8" data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" <h3="">功能 8：JIT 图通用化执行器 (REQ-JIT-GRAPH-1~003)
+    <section id="req-jit-graph-1" data-req="REQ-JIT-GRAPH-1" data-req-status="implemented" data-req-domain="jit-graph" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-api="POST /internal/jit/graph_compile" data-section="8" data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" <h3="">功能 8：JIT 图通用化执行器 (REQ-JIT-GRAPH-1~003)
       <p>&gt; <strong>SSOT</strong>: REQ-JIT-GRAPH-001 (SymDim Symbolic Shape) 和 REQ-JIT-GRAPH-003 (auto_graph → Mega-Kernel 端到端) 均已完成 🟢。</p>
       <p>&gt; SymDim 动态绑定机制的完整定义见 <a data-xref-type="section" data-xref-id="" href="./DOCS/scheduling/jit-cache-protocol.html" SPEC="" DOCS="" scheduling="" jit-cache-protocol.md<="" a=""> §3。</a></p>
     
@@ -1689,7 +1689,7 @@
         </tr>
       </table>
     </section>
-    <section id="req-jit-quant-001" data-req="REQ-JIT-QUANT-001" data-req-status="draft" data-req-domain="jit-quant" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-api="POST /internal/jit/quant_compile" data-section="10" data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" <h3="">功能 10：量化算子符号化与 JIT 融合 (REQ-JIT-QUANT-001)
+    <section id="req-jit-quant-001" data-req="REQ-JIT-QUANT-001" data-req-status="implemented" data-req-domain="jit-quant" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-api="POST /internal/jit/quant_compile" data-section="10" data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" <h3="">功能 10：量化算子符号化与 JIT 融合 (REQ-JIT-QUANT-001)
       <p>&gt; <strong>关联 REQ</strong>: REQ-JIT-QUANT-001 (Symbolic Quantization IR)</p>
       <p>&gt; <strong>状态</strong>: 规划中 (📝 Planned)</p>
       <p>当前 <code>gllm-kernels</code> 中针对 28 种复杂量化格式（如 <code>IQ2_XXS</code>, <code>AWQ4</code>, <code>IQ1_S</code>），JIT 中的 <code>SemanticDAG</code> 无法在内部原生表示量化解包逻辑。这导致每个后端的汇编发射器（PTX, x86_64, AMX, Metal）都必须在特征层分别手写 <code>dequantize_*</code>。这种实现引发了 O(M×N) 的巨量维护成本，并导致 GPU trait 层产生了大量的 <code>unimplemented!</code> fallback。</p>
