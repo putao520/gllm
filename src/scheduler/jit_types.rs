@@ -612,8 +612,8 @@ mod tests {
             weight_pages_l3: 32,
             weight_eviction_count: 45,
             weight_recovery_count: 42,
+            ..Default::default()
         };
-        // Act & Assert: verify all fields are stored correctly
         assert!((s.memory_pressure - 0.72).abs() < 1e-6);
         assert!((s.kv_fragmentation - 0.35).abs() < 1e-6);
         assert!((s.swap_io_rate - 1200.0).abs() < 1e-6);
@@ -1071,17 +1071,7 @@ mod tests {
             attention_sparsity: 0.5,
             moe_fault_rate: 0.6,
             moe_avg_recovery_us: 0.7,
-            waiting_queue_len: 0,
-            current_batch_size: 0,
-            current_running_len: 0,
-            mean_context_len: 0,
-            moe_working_set_size: 0,
-            weight_page_total: 0,
-            weight_pages_l1: 0,
-            weight_pages_l2: 0,
-            weight_pages_l3: 0,
-            weight_eviction_count: 0,
-            weight_recovery_count: 0,
+            ..Default::default()
         };
         // Act & Assert: each single-field mutation makes it different
         let mut s = base;
@@ -1574,8 +1564,8 @@ mod tests {
             weight_pages_l3: 17,
             weight_eviction_count: 18,
             weight_recovery_count: 19,
+            ..Default::default()
         };
-        // Act
         let debug = format!("{s:?}");
         // Assert: all 18 fields appear in debug output
         for field_name in [
@@ -1816,6 +1806,7 @@ mod tests {
             weight_pages_l3: 10,
             weight_eviction_count: 5,
             weight_recovery_count: 3,
+            ..Default::default()
         };
         // Act & Assert: reflexivity (a == a) holds for non-NaN floats
         assert_eq!(s, s);
@@ -2495,6 +2486,7 @@ mod tests {
             weight_pages_l3: 50,
             weight_eviction_count: 30,
             weight_recovery_count: 28,
+            ..Default::default()
         };
         // Act: override only one field
         let derived = SystemState {

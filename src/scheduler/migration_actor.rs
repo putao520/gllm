@@ -5531,7 +5531,9 @@ mod tests {
                 storage_tier: StorageTier::GpuHbm,
                 checksum: 0,
                 compressed_size: 0,
-                _pad: [0; 8],
+                sequence_id: 0,
+                logical_index: 0,
+                last_access_seq: 0,
             };
             assert_eq!(hdr.codec, codec, "codec must round-trip through KvPageHeader");
         }
@@ -5565,7 +5567,9 @@ mod tests {
                 storage_tier: tier,
                 checksum: 0,
                 compressed_size: 0,
-                _pad: [0; 8],
+                sequence_id: 0,
+                logical_index: 0,
+                last_access_seq: 0,
             };
             assert_eq!(hdr.storage_tier, tier, "tier must round-trip through KvPageHeader");
         }
@@ -18877,7 +18881,9 @@ mod tests {
             storage_tier: StorageTier::GpuHbm,
             checksum: 0,
             compressed_size: 0,
-            _pad: [0u8; 8],
+            sequence_id: 0,
+            logical_index: 0,
+            last_access_seq: 0,
         };
 
         // Act: clone and format

@@ -114,8 +114,8 @@ impl MultiGpuPageMigrator {
         &mut self,
         prefetch_requests: &[ExpertPrefetchRequest],
         current_device: u32,
-        gmm: &mut GlobalMemoryManager,
-        weight_table: &mut WeightPageTable,
+        _gmm: &mut GlobalMemoryManager,
+        _weight_table: &mut WeightPageTable,
     ) -> Vec<PcieDmaTransfer> {
         let mut new_transfers = Vec::new();
 

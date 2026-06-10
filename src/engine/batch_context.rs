@@ -505,8 +505,8 @@ mod tests {
     #[test]
     fn test_batch_context_v2_extension_layout() {
         let ctx = BatchContext::with_v2_extension(8, 2);
-        // header (96) + 8 × 64 + 96 = 96 + 512 + 96 = 704
-        assert_eq!(ctx.byte_size(), 704);
+        // header (96) + 8 × 64 + 128 = 96 + 512 + 128 = 736
+        assert_eq!(ctx.byte_size(), 736);
         assert!(ctx.has_v2_extension);
         assert_eq!(ctx.max_batch_size, 8);
         assert_eq!(ctx.num_seqs, 2);
@@ -2081,8 +2081,8 @@ mod tests {
     }
 
     #[test]
-    fn constants_extension_size_is_96() {
-        assert_eq!(mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE, 96);
+    fn constants_extension_size_is_128() {
+        assert_eq!(mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE, 128);
     }
 
     #[test]

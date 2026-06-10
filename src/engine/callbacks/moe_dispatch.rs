@@ -1651,6 +1651,7 @@ mod tests {
     fn test_expert_prefetch_request_construction_and_field_access() {
         let req = ExpertPrefetchRequest {
             expert_idx: 5,
+            layer_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 2048,
@@ -1669,6 +1670,7 @@ mod tests {
     fn test_expert_prefetch_request_clone_preserves_fields() {
         let req = ExpertPrefetchRequest {
             expert_idx: 10,
+            layer_idx: 0,
             source: ExpertWeightLocation::RemoteNode,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 65536,
@@ -2478,6 +2480,7 @@ mod tests {
     fn test_expert_prefetch_request_max_priority() {
         let req = ExpertPrefetchRequest {
             expert_idx: 0,
+            layer_idx: 0,
             source: ExpertWeightLocation::RemoteNode,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 0,
@@ -2493,6 +2496,7 @@ mod tests {
     fn test_expert_prefetch_request_debug_format() {
         let req = ExpertPrefetchRequest {
             expert_idx: 3,
+            layer_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuL2,
             bytes: 1024,
@@ -3098,6 +3102,7 @@ mod tests {
     fn test_expert_prefetch_request_zero_fields() {
         let req = ExpertPrefetchRequest {
             expert_idx: 0,
+            layer_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 0,
@@ -3116,6 +3121,7 @@ mod tests {
     fn test_expert_prefetch_request_same_source_destination() {
         let req = ExpertPrefetchRequest {
             expert_idx: 5,
+            layer_idx: 0,
             source: ExpertWeightLocation::GpuVram,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 4096,
@@ -3895,6 +3901,7 @@ mod tests {
             .with_layer_compute_time(50.0);
         let requests = vec![ExpertPrefetchRequest {
             expert_idx: 0,
+            layer_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 4096,
@@ -3913,6 +3920,7 @@ mod tests {
         let requests = vec![
             ExpertPrefetchRequest {
                 expert_idx: 0,
+                layer_idx: 0,
                 source: ExpertWeightLocation::CpuRam,
                 destination: ExpertWeightLocation::GpuVram,
                 bytes: 8192,
@@ -3921,6 +3929,7 @@ mod tests {
             },
             ExpertPrefetchRequest {
                 expert_idx: 1,
+                layer_idx: 0,
                 source: ExpertWeightLocation::RemoteNode,
                 destination: ExpertWeightLocation::GpuVram,
                 bytes: 4096,
@@ -3929,6 +3938,7 @@ mod tests {
             },
             ExpertPrefetchRequest {
                 expert_idx: 2,
+                layer_idx: 0,
                 source: ExpertWeightLocation::CpuRam,
                 destination: ExpertWeightLocation::GpuL2,
                 bytes: 2048,
@@ -3947,6 +3957,7 @@ mod tests {
             .with_layer_compute_time(10.0);
         let requests = vec![ExpertPrefetchRequest {
             expert_idx: 0,
+            layer_idx: 0,
             source: ExpertWeightLocation::CpuRam,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 8192,
@@ -4188,6 +4199,7 @@ mod tests {
     fn test_prefetch_request_with_evicted_source() {
         let req = ExpertPrefetchRequest {
             expert_idx: 2,
+            layer_idx: 0,
             source: ExpertWeightLocation::Evicted,
             destination: ExpertWeightLocation::GpuVram,
             bytes: 4096,
@@ -4825,6 +4837,7 @@ mod tests {
     fn test_prefetch_request_with_max_expert_idx() {
         let req = ExpertPrefetchRequest {
             expert_idx: usize::MAX,
+            layer_idx: 0,
             source: ExpertWeightLocation::RemoteNode,
             destination: ExpertWeightLocation::GpuVram,
             bytes: usize::MAX,

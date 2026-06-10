@@ -137,7 +137,7 @@ pub struct ArchitectureFeatures {
 pub fn analyze_architecture(
     role_index: &HashMap<(TensorRole, Option<usize>), String>,
     weight_shapes: &HashMap<String, Vec<usize>>,
-    arch_name: Option<&str>,
+    _arch_name: Option<&str>,
     hints: Option<&ArchHints>,
 ) -> ArchitectureFeatures {
     // ── Family (BUILD-stage strategy selection — not a compiler branch) ──

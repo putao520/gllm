@@ -42,7 +42,7 @@ pub fn build_compiler_graph(
     weight_shapes: &HashMap<String, Vec<usize>>,
     weight_dtypes: &HashMap<String, DType>,
     weight_quant_types: &HashMap<String, gllm_kernels::quant::QuantType>,
-    business_config: &BusinessConfig,
+    _business_config: &BusinessConfig,
     max_seq_len: usize,
 ) -> Result<CompilerGraph, GraphBuildError> {
     let mut g = CompilerGraph::new();

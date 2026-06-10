@@ -606,6 +606,9 @@ fn pack_weights_from_graph(
             packed_count += 1;
         }
     }
+    log::debug!(
+        "pack_weights_from_graph: packed={packed_count}, missing={missing_count}, total_bytes={total_bytes}"
+    );
     blob
 }
 
