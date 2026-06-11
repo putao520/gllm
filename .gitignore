@@ -64,3 +64,7 @@ tests/e2e_alignment/data/
 # Sub-repo copies (these are separate repos)
 gllm-nccl/
 gllm-kernels/
+
+# SPEC and project docs — tracked locally, excluded from remote push
+SPEC/
+CLAUDE.md
