@@ -88,7 +88,7 @@ impl TaskType {
 }
 
 /// Single turn classification result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
     /// Raw task logits (3 values).
     pub task_logits: Vec<f32>,
@@ -123,7 +123,7 @@ impl Classification {
 ///
 /// Loads a custom 3.65M classifier model and performs inference on
 /// pre-encoded embedding sequences.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IntentTracker {
     config: IntentTrackerConfig,
     weights: HashMap<String, Vec<f32>>,

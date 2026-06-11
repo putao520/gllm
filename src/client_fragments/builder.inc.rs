@@ -31,6 +31,8 @@ pub struct ClientBuilder {
     debug_jit: bool,
     /// Enable weight page JIT injection (SPEC/21 §8).
     weight_paging_enabled: bool,
+    /// Intent Tracker for signal-aware intent classification (SPEC/INTENT-TRACKER.md).
+    intent_tracker: Option<crate::intent_tracker::IntentTracker>,
 }
 
 fn make_dummy_manifest(model_id: &str, arch: impl Into<String>, kind: ModelKind) -> ModelManifest {
@@ -68,6 +70,7 @@ impl ClientBuilder {
             gguf_file_filter: None,
             debug_jit: false,
             weight_paging_enabled: false,
+            intent_tracker: None,
         }
     }
 
@@ -149,6 +152,17 @@ impl ClientBuilder {
     /// code. Default: `false`.
     pub fn weight_paging_enabled(mut self, enabled: bool) -> Self {
         self.weight_paging_enabled = enabled;
+        self
+    }
+
+    /// Attach an Intent Tracker for signal-aware intent classification
+    /// (SPEC/INTENT-TRACKER.md, REQ-SIT-001~009).
+    ///
+    /// When set, `Client::generate()` will classify the input prompt's intent
+    /// before generation and include the classification result in the response.
+    /// When unset (default), generation proceeds without intent tracking.
+    pub fn with_intent_tracker(mut self, tracker: crate::intent_tracker::IntentTracker) -> Self {
+        self.intent_tracker = Some(tracker);
         self
     }
 
@@ -240,6 +254,7 @@ impl ClientBuilder {
             guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             sg_callback: Arc::new(std::sync::Mutex::new(None)),
+            intent_tracker: Arc::new(std::sync::Mutex::new(self.intent_tracker)),
         })
     }
 

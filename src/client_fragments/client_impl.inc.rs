@@ -140,6 +140,11 @@ pub struct Client {
     guardrail_next_id: Arc<std::sync::atomic::AtomicU64>,
     /// Registered Semantic Gatekeeper callback (SPEC/SEMANTIC-GATEKEEPER.md).
     sg_callback: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<crate::semantic_gatekeeper::SemanticGatekeeperCallback>>>>>,
+    /// Intent Tracker for signal-aware intent classification (SPEC/INTENT-TRACKER.md).
+    ///
+    /// When set, `generate()` classifies the prompt's intent before generation
+    /// and includes the result in the response. When unset, no intent tracking.
+    intent_tracker: Arc<std::sync::Mutex<Option<crate::intent_tracker::IntentTracker>>>,
 }
 
 /// Internal storage for a registered Guardrail (kept inside the Client).
@@ -186,6 +191,7 @@ impl Client {
             guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             sg_callback: Arc::new(std::sync::Mutex::new(None)),
+            intent_tracker: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -197,6 +203,7 @@ impl Client {
             guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             sg_callback: Arc::new(std::sync::Mutex::new(None)),
+            intent_tracker: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -586,6 +593,61 @@ impl Client {
     }
 
     // -----------------------------------------------------------------
+    // Intent Tracker SDK (SPEC/INTENT-TRACKER.md, REQ-SIT-001~009)
+    // -----------------------------------------------------------------
+
+    /// Set the Intent Tracker for signal-aware intent classification
+    /// (SPEC/INTENT-TRACKER.md, REQ-SIT-007).
+    ///
+    /// When set, `generate()` will classify the prompt's intent before
+    /// generation and include the classification result in the response.
+    /// Overwrites any previously registered tracker.
+    pub fn set_intent_tracker(
+        &self,
+        tracker: crate::intent_tracker::IntentTracker,
+    ) {
+        let mut guard = self
+            .intent_tracker
+            .lock()
+            .expect("intent_tracker mutex poisoned");
+        *guard = Some(tracker);
+    }
+
+    /// Returns true if an Intent Tracker has been registered.
+    pub fn has_intent_tracker(&self) -> bool {
+        self.intent_tracker
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Classify the intent of a prompt using the registered Intent Tracker
+    /// (SPEC/INTENT-TRACKER.md, REQ-SIT-007).
+    ///
+    /// Uses `classify_conversation_turn` to embed the text then classify.
+    /// Returns the `Classification` result, or `Ok(None)` if no tracker
+    /// is registered.
+    pub fn classify_intent(
+        &self,
+        turn_texts: &[&str],
+        roles: &[u8],
+        signals: &[f32; 11],
+    ) -> Result<Option<crate::intent_tracker::Classification>, ClientError> {
+        let tracker_arc = {
+            let guard = self.intent_tracker.lock().map_err(|_| {
+                ClientError::RuntimeError("intent_tracker mutex poisoned".into())
+            })?;
+            guard.as_ref().cloned()
+        };
+        let Some(tracker) = tracker_arc else {
+            return Ok(None);
+        };
+        crate::intent_tracker::classify_conversation_turn(self, &tracker, turn_texts, roles, signals)
+            .map(Some)
+            .map_err(|e| ClientError::RuntimeError(format!("intent classification failed: {e}")))
+    }
+
+    // -----------------------------------------------------------------
     // Guardrail SDK (SPEC/GUARDRAIL.md, SPEC/04-API-DESIGN §3.9)
     // -----------------------------------------------------------------
 
@@ -749,6 +811,22 @@ impl Client {
         session_id: Option<u64>,
         thinking_budget: Option<usize>,
     ) -> Result<GenerationResponse, ClientError> {
+        // Intent classification (SPEC/INTENT-TRACKER.md, REQ-SIT-007).
+        // When an IntentTracker is registered, classify the prompt before
+        // generation. The result is attached to GenerationResponse for
+        // observability. Classification failure does not block generation.
+        let intent_classification = {
+            let tracker_opt = self.intent_tracker.lock().ok().and_then(|g| g.as_ref().cloned());
+            if let Some(tracker) = tracker_opt {
+                let signals = [0.0f32; 11];
+                crate::intent_tracker::classify_conversation_turn(
+                    self, &tracker, &[&prompt], &[0u8], &signals,
+                ).ok()
+            } else {
+                None
+            }
+        };
+
         let state = self.require_state()?;
         let plan = state.execution_plan.clone();
         gllm_kernels::compiler::planner::with_execution_plan(plan, || {
@@ -764,6 +842,7 @@ impl Client {
                 text,
                 thinking_content,
                 request_id: None,
+                intent_classification,
             })
         })
     }
@@ -915,6 +994,7 @@ impl Client {
             text,
             thinking_content,
             request_id: None,
+            intent_classification: None,
         })
     }
 
@@ -1048,6 +1128,7 @@ impl Client {
             text,
             thinking_content,
             request_id: None,
+            intent_classification: None,
         })
     }
 

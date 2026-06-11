@@ -364,6 +364,9 @@ pub struct GenerationResponse {
     pub thinking_content: Option<String>,
     /// Request ID (for tracking).
     pub request_id: Option<u64>,
+    /// Intent classification result, when an IntentTracker is configured
+    /// (SPEC/INTENT-TRACKER.md, REQ-SIT-007). `None` when no tracker.
+    pub intent_classification: Option<crate::intent_tracker::Classification>,
 }
 
 /// Builder for text generation (per SPEC 04-API-DESIGN §3.1).
@@ -1043,6 +1046,7 @@ mod tests {
             text: "hi".to_string(),
             thinking_content: None,
             request_id: None,
+            intent_classification: None,
         }));
         assert!(!out.is_stream());
     }
@@ -1053,7 +1057,8 @@ mod tests {
             text: "test".to_string(),
             thinking_content: Some("inner".to_string()),
             request_id: Some(42),
-        }));
+        intent_classification: None,
+}));
         let resp = out.response().unwrap();
         assert_eq!(resp.text, "test");
         assert_eq!(resp.thinking_content.as_deref(), Some("inner"));
@@ -1300,7 +1305,8 @@ mod tests {
             text: "hello".to_string(),
             thinking_content: Some("thought".to_string()),
             request_id: Some(42),
-        };
+        intent_classification: None,
+};
         let cloned = resp.clone();
         assert_eq!(cloned.text, "hello");
         assert_eq!(cloned.thinking_content, Some("thought".to_string()));
@@ -1314,7 +1320,8 @@ mod tests {
             text: "answer".to_string(),
             thinking_content: None,
             request_id: None,
-        };
+        intent_classification: None,
+};
         assert!(resp.thinking_content.is_none());
         assert!(resp.request_id.is_none());
     }
@@ -1374,6 +1381,7 @@ mod tests {
             text: String::new(),
             thinking_content: None,
             request_id: None,
+            intent_classification: None,
         }));
         let _ = out.stream();
     }
@@ -1746,7 +1754,8 @@ mod tests {
             text: String::new(),
             thinking_content: None,
             request_id: None,
-        };
+        intent_classification: None,
+};
         assert!(resp.text.is_empty());
         assert!(resp.thinking_content.is_none());
         assert!(resp.request_id.is_none());
@@ -1904,19 +1913,22 @@ mod tests {
             text: "hello".to_string(),
             thinking_content: Some("thought".to_string()),
             request_id: Some(1),
-        };
+        intent_classification: None,
+};
         let b = GenerationResponse {
             text: "hello".to_string(),
             thinking_content: Some("thought".to_string()),
             request_id: Some(1),
-        };
+        intent_classification: None,
+};
         assert_eq!(a, b);
 
         let c = GenerationResponse {
             text: "world".to_string(),
             thinking_content: None,
             request_id: None,
-        };
+        intent_classification: None,
+};
         assert_ne!(a, c);
     }
 
@@ -1926,12 +1938,14 @@ mod tests {
             text: "x".to_string(),
             thinking_content: None,
             request_id: None,
-        };
+        intent_classification: None,
+};
         let b = GenerationResponse {
             text: "x".to_string(),
             thinking_content: None,
             request_id: None,
-        };
+        intent_classification: None,
+};
         assert_eq!(a, b);
     }
 
@@ -2339,7 +2353,8 @@ mod tests {
             text: "\u{4f60}\u{597d}\u{4e16}\u{754c}".to_string(), // 你好世界
             thinking_content: Some("\u{601d}\u{8003}".to_string()), // 思考
             request_id: Some(999),
-        };
+        intent_classification: None,
+};
         assert_eq!(resp.text, "\u{4f60}\u{597d}\u{4e16}\u{754c}");
         assert_eq!(resp.thinking_content.as_deref(), Some("\u{601d}\u{8003}"));
         assert_eq!(resp.request_id, Some(999));
@@ -2684,6 +2699,7 @@ mod tests {
             text: "x".to_string(),
             thinking_content: None,
             request_id: None,
+            intent_classification: None,
         }));
         assert!(!out.is_stream());
     }
@@ -2795,7 +2811,8 @@ mod tests {
             text: "full response".to_string(),
             thinking_content: Some("I thought".to_string()),
             request_id: Some(12345),
-        };
+        intent_classification: None,
+};
         assert_eq!(resp.text, "full response");
         assert_eq!(resp.thinking_content.as_deref(), Some("I thought"));
         assert_eq!(resp.request_id, Some(12345));
@@ -2807,7 +2824,8 @@ mod tests {
             text: "original".to_string(),
             thinking_content: Some("thought".to_string()),
             request_id: Some(1),
-        };
+        intent_classification: None,
+};
         let mut cloned = original.clone();
         cloned.text.push_str(" modified");
         // Original should be unaffected
@@ -3004,7 +3022,8 @@ mod tests {
             text: "answer".to_string(),
             thinking_content: Some(String::new()),
             request_id: None,
-        };
+        intent_classification: None,
+};
         // Some("") is distinct from None
         assert!(resp.thinking_content.is_some());
         assert!(resp.thinking_content.as_ref().unwrap().is_empty());
@@ -3192,12 +3211,14 @@ mod tests {
             text: "hello".to_string(),
             thinking_content: None,
             request_id: Some(1),
-        };
+        intent_classification: None,
+};
         let b = GenerationResponse {
             text: "hello".to_string(),
             thinking_content: None,
             request_id: Some(2),
-        };
+        intent_classification: None,
+};
         assert_ne!(a, b);
     }
 
@@ -3209,12 +3230,14 @@ mod tests {
             text: "hello".to_string(),
             thinking_content: Some("thought".to_string()),
             request_id: Some(42),
-        };
+        intent_classification: None,
+};
         let b = GenerationResponse {
             text: "hello".to_string(),
             thinking_content: Some("thought".to_string()),
             request_id: Some(42),
-        };
+        intent_classification: None,
+};
         assert_eq!(a, b);
     }
 
@@ -3226,7 +3249,8 @@ mod tests {
             text: "full text".to_string(),
             thinking_content: Some("reasoning".to_string()),
             request_id: Some(999),
-        }));
+        intent_classification: None,
+}));
         let resp = out.response().expect("should be Ok");
         assert_eq!(resp.text, "full text");
         assert_eq!(resp.thinking_content.as_deref(), Some("reasoning"));

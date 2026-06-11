@@ -60,6 +60,7 @@ use std::time::Instant;
 use crate::kv_cache::{CompressionCodec, StorageTier};
 use crate::scheduler::dma_helpers::DmaBackend;
 use crate::scheduler::eviction_worker::{EvictionWorker, EvictionWorkerConfig, EvictionCandidate};
+use crate::scheduler::fault_recovery::WeightPageTable;
 use crate::scheduler::memory_manager::GlobalMemoryManager;
 use crate::scheduler::migration_actor::{
     MigrationActorConfig, PageAddrEntry, PageAddrTable, PageMigrationActor,
@@ -68,6 +69,10 @@ use crate::scheduler::nvme_swap::NvmeSwapFile;
 use crate::scheduler::observer::BasicObserver;
 use crate::scheduler::swap_in_worker::{PrefetchRequest, SwapInWorker, SwapInWorkerConfig};
 use crate::scheduler::types::{PageId, PageMetadata, PagePayloadKind, PageState};
+use crate::scheduler::weight_paging::{
+    MultiGpuPageMigrator, WeightPageDefragmenter, WeightPageDistribution,
+    WeightPageDtypeHandler,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Three-tier swap statistics
@@ -247,6 +252,12 @@ pub struct ThreeTierSwapCoordinator {
     stats: Arc<Mutex<ThreeTierSwapStats>>,
     /// Configuration snapshot.
     config: ThreeTierSwapConfig,
+    /// Multi-GPU page migration coordinator (REQ-WP-005).
+    gpu_migrator: Mutex<MultiGpuPageMigrator>,
+    /// Weight page defragmenter (REQ-WP-010).
+    defragmenter: WeightPageDefragmenter,
+    /// DType-aware weight page fault handler (REQ-WP-009).
+    dtype_handler: Mutex<WeightPageDtypeHandler>,
 }
 
 impl ThreeTierSwapCoordinator {
@@ -337,6 +348,9 @@ impl ThreeTierSwapCoordinator {
             observer,
             stats,
             config,
+            gpu_migrator: Mutex::new(MultiGpuPageMigrator::new()),
+            defragmenter: WeightPageDefragmenter::new(),
+            dtype_handler: Mutex::new(WeightPageDtypeHandler::new()),
         }
     }
 
@@ -370,6 +384,98 @@ impl ThreeTierSwapCoordinator {
     /// Reference to the eviction worker.
     pub fn eviction_worker(&self) -> Option<&EvictionWorker> {
         self.eviction_worker.as_ref()
+    }
+
+    // ── Weight Paging Integration (REQ-WP-005 / REQ-WP-010) ──────────────────
+
+    /// Process MoE prefetch requests through the multi-GPU migrator (REQ-WP-005).
+    ///
+    /// Called by the inference coordinator when a MoE model's expert weights
+    /// reside on a different GPU than the compute device. Creates PCIe DMA
+    /// migration entries for weights that are not already on GPU.
+    pub fn migrate_expert_pages(
+        &self,
+        prefetch_requests: &[crate::moe::prefetch::ExpertPrefetchRequest],
+        current_device: u32,
+        weight_table: &mut WeightPageTable,
+    ) -> Vec<crate::scheduler::weight_paging::PcieDmaTransfer> {
+        let mut gmm = match self.memory_manager.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut migrator = match self.gpu_migrator.lock() {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
+        migrator.step(prefetch_requests, current_device, &mut gmm, weight_table)
+    }
+
+    /// Run weight page defragmentation cycle (REQ-WP-010).
+    ///
+    /// Analyzes the current tier distribution and, if fragmentation exceeds
+    /// the threshold, merges small pages into contiguous blocks.
+    /// Returns the number of bytes freed by defragmentation.
+    pub fn run_defrag_cycle(&self) -> usize {
+        let mm = match self.memory_manager.lock() {
+            Ok(g) => g,
+            Err(_) => return 0,
+        };
+        let l1 = mm.tier_usage(crate::scheduler::memory_manager::Tier::L1);
+        let l2 = mm.tier_usage(crate::scheduler::memory_manager::Tier::L2);
+        let l3 = mm.tier_usage(crate::scheduler::memory_manager::Tier::L3);
+
+        let l1_used = l1.used;
+        let l2_used = l2.used;
+        let l3_used = l3.used;
+
+        // Estimate fragmentation from free space fragmentation.
+        let l1_frag = if l1.capacity > 0 { 1.0 - (l1.available() as f32 / l1.capacity as f32) } else { 0.0 };
+        let l2_frag = if l2.capacity > 0 { 1.0 - (l2.available() as f32 / l2.capacity as f32) } else { 0.0 };
+
+        let dist = WeightPageDistribution {
+            l1_count: l1_used as usize / 4096,
+            l2_count: l2_used as usize / 4096,
+            l3_count: l3_used as usize / 4096,
+            l1_fragmentation: l1_frag,
+            l2_fragmentation: l2_frag,
+        };
+
+        match self.defragmenter.analyze(&dist) {
+            Some(plan) => {
+                if let Ok(mut obs) = self.observer.lock() {
+                    self.defragmenter.execute(&plan, &mut obs)
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        }
+    }
+
+    /// Handle a weight page fault using DType-aware handler (REQ-WP-009).
+    ///
+    /// When a weight page faults on L2 or L3, this method coordinates
+    /// with the fault recovery handler to determine the action, mapping
+    /// WeightTier to the swap-in tier.
+    pub fn handle_weight_page_fault(
+        &self,
+        page_id: crate::scheduler::types::PageId,
+        current_weight_tier: crate::scheduler::types::WeightTier,
+        weight_table: &WeightPageTable,
+    ) -> crate::scheduler::fault_recovery::FaultAction {
+        let gmm = match self.memory_manager.lock() {
+            Ok(g) => g,
+            Err(_) => return crate::scheduler::fault_recovery::FaultAction::Abort {
+                reason: "memory manager lock poisoned".to_string(),
+            },
+        };
+        let mut handler = match self.dtype_handler.lock() {
+            Ok(h) => h,
+            Err(_) => return crate::scheduler::fault_recovery::FaultAction::Abort {
+                reason: "dtype handler lock poisoned".to_string(),
+            },
+        };
+        handler.handle_weight_fault(page_id, current_weight_tier, &gmm, weight_table)
     }
 
     // ── build_batch (SPEC §7.1 / §7.2) ─────────────────────────────────────
@@ -700,6 +806,8 @@ impl ThreeTierSwapCoordinator {
         bytes: u64,
         latency_us: u64,
     ) {
+        let total_evictions;
+        let total_swap_ins;
         if let Ok(mut s) = self.stats.lock() {
             match (from_tier, to_tier) {
                 (StorageTier::GpuHbm, StorageTier::CpuDram) => {
@@ -712,8 +820,18 @@ impl ThreeTierSwapCoordinator {
             }
             s.total_bytes_evicted += bytes;
             s.total_eviction_latency_us += latency_us;
+            total_evictions = s.evictions_gpu_to_dram + s.evictions_dram_to_nvme;
+            total_swap_ins = s.swap_ins_dram_to_gpu + s.swap_ins_nvme_to_dram;
+        } else {
+            return;
         }
-        let _ = page_id; // used above
+        // REQ-SCHED-010: update thrashing_rate when eviction churn is detected.
+        if total_swap_ins > 0 {
+            if let Ok(mut obs) = self.observer.lock() {
+                obs.update_thrashing_rate(total_evictions as f32 / total_swap_ins as f32);
+            }
+        }
+        let _ = page_id;
     }
 
     /// Record a successful swap-in completion.
@@ -725,6 +843,8 @@ impl ThreeTierSwapCoordinator {
         bytes: u64,
         latency_us: u64,
     ) {
+        let total_swap_ins;
+        let total_evictions;
         if let Ok(mut s) = self.stats.lock() {
             match (from_tier, to_tier) {
                 (StorageTier::CpuDram, StorageTier::GpuHbm) => {
@@ -737,6 +857,18 @@ impl ThreeTierSwapCoordinator {
             }
             s.total_bytes_swapped_in += bytes;
             s.total_swap_in_latency_us += latency_us;
+            total_swap_ins = s.swap_ins_dram_to_gpu + s.swap_ins_nvme_to_dram;
+            total_evictions = s.evictions_gpu_to_dram + s.evictions_dram_to_nvme;
+        } else {
+            return;
+        }
+        // REQ-SCHED-010: update page_hit_rate and swap_latency_us.
+        if let Ok(mut obs) = self.observer.lock() {
+            let total_ops = total_swap_ins + total_evictions;
+            if total_ops > 0 {
+                obs.update_page_hit_rate(total_swap_ins as f32 / total_ops as f32);
+            }
+            obs.update_swap_latency_us(latency_us as f32);
         }
         let _ = page_id;
     }

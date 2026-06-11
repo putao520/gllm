@@ -46,6 +46,8 @@ pub struct MoeDispatchCallback {
     fault_handler: ExpertFaultHandler,
     /// Last dispatch signal (consumed by the engine after each pre_node).
     last_signal: MoeDispatchSignal,
+    /// Quantized weight page prefetch queue (REQ-WP-006).
+    quant_prefetch_queue: crate::scheduler::weight_paging::QuantWeightPrefetchQueue,
 }
 
 impl MoeDispatchCallback {
@@ -74,6 +76,7 @@ impl MoeDispatchCallback {
             enabled,
             fault_handler: ExpertFaultHandler::new(num_experts),
             last_signal: MoeDispatchSignal::Continue,
+            quant_prefetch_queue: crate::scheduler::weight_paging::QuantWeightPrefetchQueue::new(),
         }
     }
 
@@ -86,6 +89,7 @@ impl MoeDispatchCallback {
             enabled: false,
             fault_handler: ExpertFaultHandler::new(0),
             last_signal: MoeDispatchSignal::Continue,
+            quant_prefetch_queue: crate::scheduler::weight_paging::QuantWeightPrefetchQueue::new(),
         }
     }
 
@@ -107,6 +111,30 @@ impl MoeDispatchCallback {
     /// Get a mutable reference to the fault handler.
     pub fn fault_handler_mut(&mut self) -> &mut ExpertFaultHandler {
         &mut self.fault_handler
+    }
+
+    /// Enqueue a quantized weight page for async prefetch (REQ-WP-006).
+    ///
+    /// Called during MoE dispatch when a quantized expert's weight page
+    /// needs to be prefetched before the FFN computation begins.
+    pub fn enqueue_quant_prefetch(
+        &mut self,
+        page: crate::scheduler::weight_paging::QuantWeightPage,
+    ) {
+        self.quant_prefetch_queue.enqueue(page);
+    }
+
+    /// Drain all pending quantized weight prefetch requests (REQ-WP-006).
+    ///
+    /// Called by the inference coordinator after gate_topk computation
+    /// to submit prefetch DMA transfers.
+    pub fn drain_quant_prefetch(&mut self) -> Vec<crate::scheduler::weight_paging::QuantWeightPage> {
+        self.quant_prefetch_queue.drain_pending()
+    }
+
+    /// Advance to next layer boundary and collect ready prefetch pages (REQ-WP-006).
+    pub fn advance_quant_prefetch_layer(&mut self) -> Vec<crate::scheduler::weight_paging::QuantWeightPage> {
+        self.quant_prefetch_queue.advance_layer()
     }
 
     /// Consume the last dispatch signal (used by the engine after pre_node).

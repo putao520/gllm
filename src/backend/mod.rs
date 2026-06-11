@@ -4353,11 +4353,13 @@ mod tests {
             text: "hello".to_string(),
             thinking_content: None,
             request_id: Some(1),
+            intent_classification: None,
         };
         let b = GenerationResponse {
             text: "hello".to_string(),
             thinking_content: None,
             request_id: Some(1),
+            intent_classification: None,
         };
         assert_eq!(a, b);
     }
@@ -4369,11 +4371,13 @@ mod tests {
             text: "hello".to_string(),
             thinking_content: None,
             request_id: None,
+            intent_classification: None,
         };
         let b = GenerationResponse {
             text: "world".to_string(),
             thinking_content: None,
             request_id: None,
+            intent_classification: None,
         };
         assert_ne!(a, b);
     }
@@ -4385,6 +4389,7 @@ mod tests {
             text: "test".to_string(),
             thinking_content: Some("thinking...".to_string()),
             request_id: Some(42),
+            intent_classification: None,
         };
         let cloned = original.clone();
         assert_eq!(original, cloned);
@@ -4397,6 +4402,7 @@ mod tests {
             text: "hi".to_string(),
             thinking_content: None,
             request_id: None,
+            intent_classification: None,
         };
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("GenerationResponse"));
