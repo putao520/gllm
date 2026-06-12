@@ -11,7 +11,7 @@
 use crate::graph::layer_callback::{CallbackAction, LayerCallback, LayerContext};
 use crate::moe::fault_handler::{ExpertFault, ExpertFaultHandler, FaultResolution};
 use crate::moe::prefetch::ExpertWeightLocation;
-use crate::moe::thermal::{ExpertHeatLevel, ExpertThermalManager};
+use crate::moe::thermal::{ExpertHeatLevel, ExpertResidency, ExpertThermalManager};
 use std::time::Instant;
 
 /// Control flow signal returned after fault detection.
@@ -159,7 +159,7 @@ impl MoeDispatchCallback {
             Some(s) => s,
             None => return MoeDispatchSignal::Continue,
         };
-        if !state.is_evicted {
+        if state.residency == ExpertResidency::Resident {
             return MoeDispatchSignal::Continue;
         }
 
@@ -1470,7 +1470,7 @@ mod tests {
         assert_eq!(state.route_count, 0);
         assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
         assert_eq!(state.consecutive_zero_streak, 0);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.reactivation_count, 0);
     }
 
@@ -2161,7 +2161,7 @@ mod tests {
         assert!(thermal.reactivate_expert(1));
         let state = thermal.state(1).unwrap();
         assert_eq!(state.heat_level, ExpertHeatLevel::Cold);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.consecutive_zero_streak, 0);
     }
 
@@ -2215,7 +2215,7 @@ mod tests {
             DeoptHandlingResult::SpuriousDeopt { .. } => panic!("expected ReactivateAndRerun"),
         }
         // Expert should now be reactivated
-        assert!(!thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -3408,10 +3408,10 @@ mod tests {
             heat_level: ExpertHeatLevel::Evicted,
             consecutive_zero_streak: 100,
             last_hit_step: 50,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 0,
         };
-        assert!(state.is_evicted);
+        assert!(state.residency == ExpertResidency::Evicted);
         assert_eq!(state.heat_level, ExpertHeatLevel::Evicted);
         assert_eq!(state.consecutive_zero_streak, 100);
         assert_eq!(state.last_hit_step, 50);
@@ -3429,11 +3429,11 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 20,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let debug = format!("{:?}", state);
-        assert!(debug.contains("is_evicted: false"));
+        assert!(debug.contains("residency: Resident"));
         assert!(debug.contains("hit_rate: 0.5"));
     }
 
@@ -4059,7 +4059,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 3,
             last_hit_step: 15,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 1,
         };
         let b = a.clone();
@@ -4076,11 +4076,11 @@ mod tests {
             heat_level: ExpertHeatLevel::Evicted,
             consecutive_zero_streak: 10,
             last_hit_step: 0,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 0,
         };
         let mut b = a.clone();
-        b.is_evicted = false;
+        b.residency = ExpertResidency::Resident;
         assert_ne!(a, b);
     }
 
@@ -4094,7 +4094,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 40,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 2,
         };
         let cloned = state.clone();
@@ -4113,7 +4113,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Cold,
             consecutive_zero_streak: 50,
             last_hit_step: 25,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let cloned = state.clone();
@@ -4301,7 +4301,7 @@ mod tests {
         thermal.step(&[0, 100]);
 
         let state = thermal.state(1).unwrap();
-        assert!(state.is_evicted, "evicted expert should remain evicted until explicit reactivate");
+        assert!(state.residency == ExpertResidency::Evicted, "evicted expert should remain evicted until explicit reactivate");
     }
 
     // ── ExpertWeightPrefetcher: update_location to Evicted ───────────────
@@ -4700,7 +4700,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 7,
             last_hit_step: 93,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 3,
         };
         assert_eq!(state.expert_idx, 42);
@@ -4710,7 +4710,7 @@ mod tests {
         assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
         assert_eq!(state.consecutive_zero_streak, 7);
         assert_eq!(state.last_hit_step, 93);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.reactivation_count, 3);
     }
 
@@ -5048,10 +5048,10 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 1000,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 2,
         };
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.heat_level, ExpertHeatLevel::Hot);
         assert_eq!(state.reactivation_count, 2);
         assert_eq!(state.last_hit_step, 1000);
@@ -5071,7 +5071,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Evicted,
             consecutive_zero_streak: u64::MAX,
             last_hit_step: 0,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 0,
         };
         assert_eq!(state.expert_idx, usize::MAX);

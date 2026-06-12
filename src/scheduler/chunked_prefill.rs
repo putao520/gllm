@@ -3344,7 +3344,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compose_batch_prefill_slot_type_is_prefill() {
+    fn test_compose_batch_prefill_slot_type_prefill_phase() {
         let scheduler = ChunkedPrefillScheduler::new(ChunkedPrefillConfig {
             max_batch_tokens: 100,
             chunk_size: 10,

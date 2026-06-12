@@ -1201,7 +1201,6 @@ mod tests {
             prompt_tokens: vec![],
             output_tokens: vec![],
             sampling_config: super::super::executor::SamplingConfig::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 0,
             finished: false,
@@ -2706,7 +2705,6 @@ mod tests {
                 top_k: 50,
                 top_p: 0.95,
             },
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 100,
             finished: false,
@@ -2719,7 +2717,7 @@ mod tests {
         assert_eq!(rd.output_tokens, vec![10, 20]);
         assert_eq!(rd.sampling_config.temperature, 0.7);
         assert_eq!(rd.sampling_config.top_k, 50);
-        assert!(!rd.is_prefill);
+        assert_eq!(rd.phase, RequestPhase::Decode);
         assert_eq!(rd.max_new_tokens, 100);
         assert!(!rd.finished);
         assert_eq!(rd.session_id, Some(42u64));

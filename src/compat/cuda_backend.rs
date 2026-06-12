@@ -2432,7 +2432,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3, 4, 5],
             output_tokens: vec![10, 20],
             sampling_config: SamplingConfig { temperature: 0.7, top_k: 50, top_p: 0.95 },
-            is_prefill: true,
             phase: crate::scheduler::request_state::RequestPhase::Prefill,
             max_new_tokens: 256,
             finished: false,
@@ -2444,7 +2443,7 @@ mod tests {
         assert_eq!(data.prompt_tokens.len(), 5);
         assert_eq!(data.output_tokens, vec![10, 20]);
         assert_eq!(data.sampling_config.temperature, 0.7);
-        assert!(data.is_prefill);
+        assert_eq!(data.phase, crate::scheduler::request_state::RequestPhase::Prefill);
         assert_eq!(data.max_new_tokens, 256);
         assert!(!data.finished);
         assert!(data.session_id.is_none());
@@ -2460,7 +2459,6 @@ mod tests {
             prompt_tokens: vec![100, 200],
             output_tokens: vec![10],
             sampling_config: SamplingConfig::default(),
-            is_prefill: false,
             phase: crate::scheduler::request_state::RequestPhase::Decode,
             max_new_tokens: 128,
             finished: false,
@@ -2471,7 +2469,7 @@ mod tests {
         // Assert: all fields are accessible with correct values
         assert_eq!(data.prompt_tokens, vec![100, 200]);
         assert_eq!(data.output_tokens, vec![10]);
-        assert!(!data.is_prefill);
+        assert_eq!(data.phase, crate::scheduler::request_state::RequestPhase::Decode);
         assert_eq!(data.max_new_tokens, 128);
         assert_eq!(data.session_id, Some(42u64));
         assert_eq!(data.thinking_budget, Some(1024));
@@ -3336,7 +3334,6 @@ mod tests {
             prompt_tokens: vec![],
             output_tokens: vec![],
             sampling_config: SamplingConfig::default(),
-            is_prefill: true,
             phase: crate::scheduler::request_state::RequestPhase::Prefill,
             max_new_tokens: 0,
             finished: false,
@@ -3359,7 +3356,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![4, 5, 6, 7, 8],
             sampling_config: SamplingConfig { temperature: 0.0, top_k: 1, top_p: 1.0 },
-            is_prefill: false,
             phase: crate::scheduler::request_state::RequestPhase::Decode,
             max_new_tokens: 100,
             finished: true,

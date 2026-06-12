@@ -83,7 +83,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 100,
             finished: false,
@@ -98,7 +97,7 @@ mod tests {
         // Assert: lookup succeeds
         assert!(coord.requests.contains_key(&42));
         assert_eq!(coord.requests.get(&42).unwrap().prompt_tokens, vec![1, 2, 3]);
-        assert!(coord.requests.get(&42).unwrap().is_prefill);
+        assert_eq!(coord.requests.get(&42).unwrap().phase, RequestPhase::Prefill);
         assert_eq!(coord.requests.get(&42).unwrap().max_new_tokens, 100);
     }
 
@@ -110,7 +109,6 @@ mod tests {
             prompt_tokens: vec![10, 20],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 50,
             finished: false,
@@ -138,7 +136,6 @@ mod tests {
                 prompt_tokens: vec![i],
                 output_tokens: vec![],
                 sampling_config: Default::default(),
-                is_prefill: true,
                 phase: RequestPhase::Prefill,
                 max_new_tokens: i as usize * 10,
                 finished: false,
@@ -165,7 +162,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 10,
             finished: false,
@@ -190,7 +186,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3, 4],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 20,
             finished: false,
@@ -203,11 +198,10 @@ mod tests {
         // Act: transition to decode
         let req = coord.requests.get_mut(&100).unwrap();
         req.phase = RequestPhase::Decode;
-        req.is_prefill = false;
 
         // Assert
         assert_eq!(coord.requests[&100].phase, RequestPhase::Decode);
-        assert!(!coord.requests[&100].is_prefill);
+        assert_eq!(coord.requests[&100].phase, RequestPhase::Decode);
     }
 
     // ── Field access patterns ─────────────────────────────────────────────
@@ -288,7 +282,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 50,
             finished: false,
@@ -312,7 +305,6 @@ mod tests {
             prompt_tokens: vec![1, 2],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 30,
             finished: false,
@@ -425,7 +417,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::ChunkedPrefill,
             max_new_tokens: 40,
             finished: false,
@@ -437,7 +428,6 @@ mod tests {
 
         // Act & Assert: ChunkedPrefill phase is stored and readable
         assert_eq!(coord.requests[&200].phase, RequestPhase::ChunkedPrefill);
-        assert!(coord.requests[&200].is_prefill);
     }
 
     #[test]
@@ -457,7 +447,6 @@ mod tests {
                 prompt_tokens: vec![idx as u32],
                 output_tokens: vec![],
                 sampling_config: Default::default(),
-                is_prefill: phase != RequestPhase::Decode,
                 phase,
                 max_new_tokens: 10,
                 finished: false,
@@ -490,7 +479,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: custom_sampling,
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 20,
             finished: false,
@@ -515,7 +503,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 20,
             finished: false,
@@ -542,7 +529,6 @@ mod tests {
             prompt_tokens: vec![1, 2],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 10,
             finished: false,
@@ -571,7 +557,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![10, 20],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 3,
             finished: false,
@@ -604,7 +589,6 @@ mod tests {
             prompt_tokens: vec![1, 2],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 10,
             finished: false,
@@ -629,7 +613,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 10,
             finished: false,
@@ -643,7 +626,6 @@ mod tests {
         let req = coord.requests.get_mut(&501).unwrap();
         req.fused_prefill_hidden = None;
         req.phase = RequestPhase::Decode;
-        req.is_prefill = false;
 
         // Assert: hidden data cleared, phase transitioned
         assert!(coord.requests[&501].fused_prefill_hidden.is_none());
@@ -674,7 +656,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 100,
             finished: false,
@@ -699,7 +680,6 @@ mod tests {
                 prompt_tokens: vec![i as u32],
                 output_tokens: vec![],
                 sampling_config: Default::default(),
-                is_prefill: true,
                 phase: RequestPhase::Prefill,
                 max_new_tokens: 10,
                 finished: i % 2 == 0, // requests 0, 2 are finished
@@ -739,7 +719,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 50,
             finished: false,
@@ -753,7 +732,6 @@ mod tests {
             prompt_tokens: vec![10, 20, 30, 40],
             output_tokens: vec![100],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 200,
             finished: true,
@@ -770,7 +748,7 @@ mod tests {
         let r = &coord.requests[&99];
         assert_eq!(r.prompt_tokens, vec![10, 20, 30, 40]);
         assert_eq!(r.output_tokens, vec![100]);
-        assert!(!r.is_prefill);
+        assert_eq!(r.phase, RequestPhase::Decode);
         assert_eq!(r.phase, RequestPhase::Decode);
         assert_eq!(r.max_new_tokens, 200);
         assert!(r.finished);
@@ -989,7 +967,6 @@ mod tests {
             prompt_tokens: vec![5, 10, 15],
             output_tokens: vec![],
             sampling_config: sampling,
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 50,
             finished: false,
@@ -1014,7 +991,6 @@ mod tests {
             prompt_tokens: vec![],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 0,
             finished: false,
@@ -1038,7 +1014,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 1000,
             finished: false,
@@ -1370,7 +1345,6 @@ mod tests {
                 top_k: 40,
                 top_p: 0.95,
             },
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 5,
             finished: false,
@@ -1383,7 +1357,7 @@ mod tests {
         // Assert: Phase 1 - Prefill
         let r = &coord.requests[&1001];
         assert_eq!(r.phase, RequestPhase::Prefill);
-        assert!(r.is_prefill);
+        assert_eq!(r.phase, RequestPhase::Prefill);
         assert!(r.fused_prefill_hidden.is_some());
         assert_eq!(r.fused_prefill_hidden.as_ref().unwrap().len(), 2560);
         assert_eq!(r.thinking_budget, Some(128));
@@ -1393,18 +1367,14 @@ mod tests {
         // Act: Phase 2 - transition to ChunkedPrefill
         let req = coord.requests.get_mut(&1001).unwrap();
         req.phase = RequestPhase::ChunkedPrefill;
-        req.is_prefill = true;
         assert_eq!(coord.requests[&1001].phase, RequestPhase::ChunkedPrefill);
-        assert!(coord.requests[&1001].is_prefill);
 
         // Act: Phase 3 - consume fused hidden, transition to Decode
         let req = coord.requests.get_mut(&1001).unwrap();
         req.fused_prefill_hidden = None;
         req.phase = RequestPhase::Decode;
-        req.is_prefill = false;
         assert!(coord.requests[&1001].fused_prefill_hidden.is_none());
         assert_eq!(coord.requests[&1001].phase, RequestPhase::Decode);
-        assert!(!coord.requests[&1001].is_prefill);
 
         // Act: Phase 4 - generate tokens and finish
         let req = coord.requests.get_mut(&1001).unwrap();
@@ -3143,7 +3113,6 @@ mod tests {
                 prompt_tokens: vec![k as u32],
                 output_tokens: vec![],
                 sampling_config: Default::default(),
-                is_prefill: true,
                 phase: RequestPhase::Prefill,
                 max_new_tokens: 10,
                 finished: false,
@@ -3171,7 +3140,6 @@ mod tests {
                 prompt_tokens: vec![i as u32],
                 output_tokens: vec![],
                 sampling_config: Default::default(),
-                is_prefill: false,
                 phase: RequestPhase::Decode,
                 max_new_tokens: 10,
                 finished: i < 2, // first two are finished
@@ -3201,7 +3169,6 @@ mod tests {
             prompt_tokens: vec![1, 2],
             output_tokens: vec![10, 20, 30],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 100,
             finished: false,
@@ -3228,7 +3195,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![10, 20, 30, 40, 50],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 100,
             finished: false,
@@ -4245,7 +4211,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: usize::MAX,
             finished: false,
@@ -4277,7 +4242,6 @@ mod tests {
                 prompt_tokens: vec![1],
                 output_tokens: vec![],
                 sampling_config: Default::default(),
-                is_prefill: true,
                 phase: RequestPhase::Prefill,
                 max_new_tokens: 10,
                 finished: false,
@@ -4997,7 +4961,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: Default::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 10,
             finished: false,
@@ -5265,7 +5228,6 @@ mod tests {
             prompt_tokens: vec![100, 200, 300],
             output_tokens: vec![400, 500],
             sampling_config: sampling,
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 999,
             finished: false,
@@ -5284,7 +5246,7 @@ mod tests {
         assert_eq!(r.sampling_config.temperature, 0.33);
         assert_eq!(r.sampling_config.top_k, 77);
         assert_eq!(r.sampling_config.top_p, 0.88);
-        assert!(!r.is_prefill);
+        assert_eq!(r.phase, RequestPhase::Decode);
         assert_eq!(r.phase, RequestPhase::Decode);
         assert_eq!(r.max_new_tokens, 999);
         assert!(!r.finished);

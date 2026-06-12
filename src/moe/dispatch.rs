@@ -2808,7 +2808,7 @@ mod tests {
         topk_with_weights, topk_indices, softmax,
     };
     use super::super::thermal::{
-        ExpertHeatLevel, EvictionDecision, DeoptRequest,
+        ExpertHeatLevel, ExpertResidency, EvictionDecision, DeoptRequest,
         ExpertThermalManager, DeoptHandlingResult, ThermalSummary,
     };
 
@@ -3077,7 +3077,7 @@ mod tests {
         assert_eq!(state.route_count, 0);
         assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
         assert_eq!(state.consecutive_zero_streak, 0);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.reactivation_count, 0);
     }
 
@@ -3188,7 +3188,7 @@ mod tests {
         let mgr = ExpertThermalManager::new(4);
         for state in mgr.states() {
             assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
-            assert!(!state.is_evicted);
+            assert!(state.residency == ExpertResidency::Resident);
         }
     }
 
@@ -3316,7 +3316,7 @@ mod tests {
     fn thermal_manager_evict_expert_success() {
         let mut mgr = ExpertThermalManager::new(4);
         assert!(mgr.evict_expert(1));
-        assert!(mgr.state(1).unwrap().is_evicted);
+        assert!(mgr.state(1).unwrap().residency == ExpertResidency::Evicted);
         assert_eq!(mgr.state(1).unwrap().heat_level, ExpertHeatLevel::Evicted);
     }
 
@@ -3338,7 +3338,7 @@ mod tests {
         let mut mgr = ExpertThermalManager::new(4);
         mgr.evict_expert(2);
         assert!(mgr.reactivate_expert(2));
-        assert!(!mgr.state(2).unwrap().is_evicted);
+        assert!(mgr.state(2).unwrap().residency == ExpertResidency::Resident);
         assert_eq!(mgr.state(2).unwrap().heat_level, ExpertHeatLevel::Cold);
         assert_eq!(mgr.state(2).unwrap().reactivation_count, 1);
     }
@@ -3388,7 +3388,7 @@ mod tests {
         mgr.handle_deopt_request(req);
         // After handling, expert 1 has reactivation_count > 0
         // But it was reactivated by handle_deopt_request, so decision is Keep
-        assert!(!mgr.state(1).unwrap().is_evicted);
+        assert!(mgr.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ── ExpertThermalManager: experts_to_evict / experts_to_reactivate ──
@@ -5034,7 +5034,7 @@ mod tests {
         mgr.evict_expert(0);
         mgr.reactivate_expert(0);
         assert_eq!(mgr.state(0).unwrap().reactivation_count, 1);
-        assert!(!mgr.state(0).unwrap().is_evicted);
+        assert!(mgr.state(0).unwrap().residency == ExpertResidency::Resident);
         // Cycle 2: evict resets reactivation_count to 0, then reactivate increments to 1
         mgr.evict_expert(0);
         assert_eq!(mgr.state(0).unwrap().reactivation_count, 0,
@@ -5042,7 +5042,7 @@ mod tests {
         mgr.reactivate_expert(0);
         assert_eq!(mgr.state(0).unwrap().reactivation_count, 1,
             "reactivate increments from 0 after evict reset");
-        assert!(!mgr.state(0).unwrap().is_evicted);
+        assert!(mgr.state(0).unwrap().residency == ExpertResidency::Resident);
         // total_reactivations should be 2 (one per cycle)
         let summary = mgr.summary();
         assert_eq!(summary.total_reactivations, 2);
@@ -5451,8 +5451,8 @@ mod tests {
         assert!(matches!(result0, DeoptHandlingResult::ReactivateAndRerun { expert_idx: 0, .. }));
         assert!(matches!(result1, DeoptHandlingResult::ReactivateAndRerun { expert_idx: 1, .. }));
         // Both should no longer be evicted
-        assert!(!mgr.state(0).unwrap().is_evicted);
-        assert!(!mgr.state(1).unwrap().is_evicted);
+        assert!(mgr.state(0).unwrap().residency == ExpertResidency::Resident);
+        assert!(mgr.state(1).unwrap().residency == ExpertResidency::Resident);
         // total_reactivations should be 2
         let summary = mgr.summary();
         assert_eq!(summary.total_reactivations, 2);

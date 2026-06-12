@@ -30,5 +30,5 @@ pub use routing::{
 };
 pub use thermal::{
     DeoptHandlingResult, DeoptRequest, EvictionDecision, ExpertHeatLevel, ExpertHeatState,
-    ExpertThermalManager, ThermalSummary, WorkingSetTracker,
+    ExpertResidency, ExpertThermalManager, ThermalSummary, WorkingSetTracker,
 };

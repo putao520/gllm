@@ -2304,8 +2304,7 @@ mod tests {
             prompt_tokens: vec![1, 2, 3, 4],
             output_tokens: vec![100],
             sampling_config: sampling.clone(),
-            is_prefill: true,
-            phase: RequestPhase::Prefill,
+            phase: crate::scheduler::request_state::RequestPhase::Prefill,
             max_new_tokens: 256,
             finished: false,
             session_id: Some(42u64),
@@ -2317,7 +2316,7 @@ mod tests {
         assert_eq!(data.prompt_tokens, vec![1, 2, 3, 4]);
         assert_eq!(data.output_tokens, vec![100]);
         assert_eq!(data.sampling_config.temperature, 0.7);
-        assert!(data.is_prefill);
+        assert_eq!(data.phase, crate::scheduler::request_state::RequestPhase::Prefill);
         assert_eq!(data.phase, RequestPhase::Prefill);
         assert_eq!(data.max_new_tokens, 256);
         assert!(!data.finished);
@@ -2570,8 +2569,7 @@ mod tests {
                 top_k: 10,
                 top_p: 0.95,
             },
-            is_prefill: false,
-            phase: RequestPhase::Decode,
+            phase: crate::scheduler::request_state::RequestPhase::Decode,
             max_new_tokens: 512,
             finished: false,
             session_id: Some(7u64),
@@ -2582,7 +2580,7 @@ mod tests {
         assert_eq!(data.prompt_tokens, vec![1, 2, 3]);
         assert_eq!(data.output_tokens, vec![100, 101]);
         assert_eq!(data.sampling_config.temperature, 0.5);
-        assert!(!data.is_prefill);
+        assert_eq!(data.phase, crate::scheduler::request_state::RequestPhase::Decode);
         assert_eq!(data.phase, RequestPhase::Decode);
         assert_eq!(data.max_new_tokens, 512);
         assert!(!data.finished);

@@ -532,7 +532,6 @@ pub struct RequestData {
     pub prompt_tokens: Vec<u32>,
     pub output_tokens: Vec<u32>,
     pub sampling_config: SamplingConfig,
-    pub is_prefill: bool,
     pub phase: crate::scheduler::request_state::RequestPhase,
     // kv_cache: KvCacheHandle, // Moved to Scheduler/BlockTable management
     pub max_new_tokens: usize,

@@ -514,7 +514,7 @@ mod tests {
     ///
     /// This test exercises the full path without requiring a real model load:
     /// 1. Create a minimal Executor with synthetic state
-    /// 2. Enqueue a decode request (is_prefill=false) with a page table
+    /// 2. Enqueue a decode request (phase=Decode) with a page table
     /// 3. Call optimize_kv_cache
     /// 4. Verify it completes without error
     #[test]
@@ -986,14 +986,14 @@ mod tests {
         let hidden = vec![0.5; 64];
         let rd = RequestData {
             prompt_tokens: vec![1, 2, 3], output_tokens: vec![], sampling_config: SamplingConfig::default(),
-            is_prefill: true, phase: RequestPhase::Prefill, max_new_tokens: 128,
+            phase: RequestPhase::Prefill, max_new_tokens: 128,
             finished: false, session_id: None, thinking_budget: None, fused_prefill_hidden: Some(hidden),
         };
         assert_eq!(rd.fused_prefill_hidden.unwrap().len(), 64);
 
         let rd2 = RequestData {
             prompt_tokens: vec![1], output_tokens: vec![], sampling_config: SamplingConfig::default(),
-            is_prefill: false, phase: RequestPhase::Decode, max_new_tokens: 50,
+            phase: RequestPhase::Decode, max_new_tokens: 50,
             finished: false, session_id: None, thinking_budget: None, fused_prefill_hidden: None,
         };
         assert!(format!("{rd2:?}").contains("RequestData"));
@@ -2321,8 +2321,7 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![4, 5, 6, 7],
             sampling_config: SamplingConfig::default(),
-            is_prefill: false,
-            phase: RequestPhase::Decode,
+            phase: crate::scheduler::request_state::RequestPhase::Decode,
             max_new_tokens: 100,
             finished: false,
             session_id: None,
@@ -2340,8 +2339,7 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: custom_sampling,
-            is_prefill: true,
-            phase: RequestPhase::Prefill,
+            phase: crate::scheduler::request_state::RequestPhase::Prefill,
             max_new_tokens: 50,
             finished: false,
             session_id: None,
@@ -2771,8 +2769,7 @@ mod tests {
             prompt_tokens: vec![],
             output_tokens: vec![],
             sampling_config: SamplingConfig::default(),
-            is_prefill: true,
-            phase: RequestPhase::Prefill,
+            phase: crate::scheduler::request_state::RequestPhase::Prefill,
             max_new_tokens: 100,
             finished: false,
             session_id: None,
@@ -3015,8 +3012,7 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![],
             sampling_config: SamplingConfig::default(),
-            is_prefill: true,
-            phase: RequestPhase::Prefill,
+            phase: crate::scheduler::request_state::RequestPhase::Prefill,
             max_new_tokens: 100,
             finished: false,
             session_id: None,
@@ -3038,8 +3034,7 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![],
             sampling_config: SamplingConfig::default(),
-            is_prefill: false,
-            phase: RequestPhase::Decode,
+            phase: crate::scheduler::request_state::RequestPhase::Decode,
             max_new_tokens: 50,
             finished: false,
             session_id: Some(sid),

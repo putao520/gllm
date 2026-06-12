@@ -669,6 +669,18 @@ fn pack_weights_from_graph(
     blob
 }
 
+/// Attention sink status for a position in the sequence.
+///
+/// ARCH-JIT-DATA-YIELDS: replaces `is_attention_sink: bool` with a semantic enum.
+/// Sink tokens receive special treatment in KV cache eviction and quantization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionSinkStatus {
+    /// Normal token — eligible for standard eviction/quantization.
+    Normal,
+    /// Sink token — protected from eviction, preserved in quantization.
+    SinkToken,
+}
+
 // ============================================================================
 
 /// Structured observation extracted from Mega-Kernel epilogue telemetry buffer.
@@ -679,7 +691,7 @@ pub struct MegaKernelObservation {
     pub residual_delta: f32,
     pub cosine_similarity: f32,
     pub dead_neuron_count: u32,
-    pub is_attention_sink: bool,
+    pub sink_status: AttentionSinkStatus,
     pub per_channel_scale: f32,
     pub row_l1_norm: f32,
     pub row_max: f32,
@@ -720,7 +732,7 @@ impl MegaKernelObservation {
             residual_delta: read_f32(telemetry_offsets::RESIDUAL_DELTA_OFFSET),
             cosine_similarity: read_f32(telemetry_offsets::COSINE_SIMILARITY_OFFSET),
             dead_neuron_count: read_u32(telemetry_offsets::SILU_DEAD_NEURON_MASK_OFFSET),
-            is_attention_sink: read_u32(telemetry_offsets::IS_ATTENTION_SINK_OFFSET) != 0,
+            sink_status: if read_u32(telemetry_offsets::IS_ATTENTION_SINK_OFFSET) != 0 { AttentionSinkStatus::SinkToken } else { AttentionSinkStatus::Normal },
             per_channel_scale: read_f32(telemetry_offsets::CHANNEL_SCALE_PTR_OFFSET),
             row_l1_norm: read_f32(telemetry_offsets::GEMM_ROW_NORM_L1_OFFSET),
             row_max: read_f32(telemetry_offsets::GEMM_ROW_MAX_OFFSET),

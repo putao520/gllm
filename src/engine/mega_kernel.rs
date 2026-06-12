@@ -433,7 +433,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 100,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -450,7 +450,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 768,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -467,7 +467,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 256,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -484,7 +484,7 @@ mod tests {
             residual_delta: 0.001,  // < 0.01 threshold
             cosine_similarity: 0.99, // > 0.95 threshold
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 1.0,
             row_l1_norm: 10.0,
             row_max: 5.0,
@@ -500,7 +500,7 @@ mod tests {
             residual_delta: 0.5, // >= 0.01 threshold
             cosine_similarity: 0.99,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -516,7 +516,7 @@ mod tests {
             residual_delta: 0.001,
             cosine_similarity: 0.5, // <= 0.95 threshold
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -532,7 +532,7 @@ mod tests {
             residual_delta: 0.2,
             cosine_similarity: 0.8,
             dead_neuron_count: 42,
-            is_attention_sink: true,
+            sink_status: AttentionSinkStatus::SinkToken,
             per_channel_scale: 2.0,
             row_l1_norm: 15.0,
             row_max: 7.5,
@@ -540,7 +540,7 @@ mod tests {
         let copy = obs; // Copy trait
         assert_eq!(copy.layer_idx, 3);
         assert_eq!(copy.dead_neuron_count, 42);
-        assert!(copy.is_attention_sink);
+        assert_eq!(copy.sink_status, AttentionSinkStatus::SinkToken);
         let debug_str = format!("{obs:?}");
         assert!(debug_str.contains("MegaKernelObservation"));
     }
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(obs.layer_idx, 0);
         assert_eq!(obs.entropy, 0.0);
         assert_eq!(obs.dead_neuron_count, 0);
-        assert!(!obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::Normal);
     }
 
     #[test]
@@ -723,7 +723,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 1.0,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: f32::NAN,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -745,7 +745,7 @@ mod tests {
             residual_delta: f32::NEG_INFINITY,
             cosine_similarity: f32::INFINITY,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: f32::INFINITY,
             row_max: f32::NEG_INFINITY,
@@ -765,7 +765,7 @@ mod tests {
             residual_delta: 0.01,
             cosine_similarity: 0.99,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -782,7 +782,7 @@ mod tests {
             residual_delta: 0.001,
             cosine_similarity: 0.95,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -799,7 +799,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 2000,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -993,7 +993,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -1014,7 +1014,7 @@ mod tests {
             residual_delta: 0.009,  // < 0.01
             cosine_similarity: 0.951, // > 0.95
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 1.0,
             row_l1_norm: 5.0,
             row_max: 3.0,
@@ -1032,7 +1032,7 @@ mod tests {
         assert_eq!(obs.layer_idx, 42);
         // All other fields should be zero since buffer is all zeros
         assert_eq!(obs.dead_neuron_count, 0);
-        assert!(!obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::Normal);
     }
 
     // ── DiagnosticScratchpad: read_f32_at with count=0 ──
@@ -1250,7 +1250,7 @@ mod tests {
             residual_delta: -0.001,
             cosine_similarity: 0.5,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -1263,7 +1263,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.5,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -1283,7 +1283,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: -1.0,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -1462,7 +1462,7 @@ mod tests {
             residual_delta: 0.3,
             cosine_similarity: 0.85,
             dead_neuron_count: 42,
-            is_attention_sink: true,
+            sink_status: AttentionSinkStatus::SinkToken,
             per_channel_scale: 2.5,
             row_l1_norm: 12.3,
             row_max: 6.7,
@@ -1473,7 +1473,7 @@ mod tests {
         assert!((copy.residual_delta - 0.3).abs() < f32::EPSILON);
         assert!((copy.cosine_similarity - 0.85).abs() < f32::EPSILON);
         assert_eq!(copy.dead_neuron_count, 42);
-        assert!(copy.is_attention_sink);
+        assert_eq!(copy.sink_status, AttentionSinkStatus::SinkToken);
         assert!((copy.per_channel_scale - 2.5).abs() < f32::EPSILON);
         assert!((copy.row_l1_norm - 12.3).abs() < 0.01);
         assert!((copy.row_max - 6.7).abs() < 0.01);
@@ -1587,7 +1587,7 @@ mod tests {
         assert_eq!(ctx.decompress_inject_flags, 1);
     }
 
-    // ── MegaKernelObservation: from_buffer reads is_attention_sink correctly ──
+    // ── MegaKernelObservation: from_buffer reads sink_status correctly ──
     // @trace TEST-MKO-087 [req:REQ-OBS] [level:unit]
 
     #[test]
@@ -1599,7 +1599,7 @@ mod tests {
         let val: u32 = 1;
         buf[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
         let obs = MegaKernelObservation::from_buffer(0, &buf);
-        assert!(obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::SinkToken);
     }
 
     // ── MegaKernelObservation: from_buffer reads per_channel_scale ──
@@ -1716,7 +1716,7 @@ mod tests {
             residual_delta: 0.0, // 0.0 < tiny (subnormal) => true
             cosine_similarity: 1.0,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -1742,7 +1742,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: u32::MAX,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -1892,7 +1892,7 @@ mod tests {
         assert!((obs.residual_delta - 2.22).abs() < 0.01);
         assert!((obs.cosine_similarity - 3.33).abs() < 0.01);
         assert_eq!(obs.dead_neuron_count, 777);
-        assert!(obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::SinkToken);
         assert!((obs.per_channel_scale - 4.44).abs() < 0.01);
         assert!((obs.row_l1_norm - 5.55).abs() < 0.01);
         assert!((obs.row_max - 6.66).abs() < 0.01);
@@ -2082,7 +2082,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 1,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -2107,7 +2107,7 @@ mod tests {
             residual_delta: -1.0,
             cosine_similarity: 0.96,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -2442,7 +2442,7 @@ mod tests {
             residual_delta: 1.0e30,
             cosine_similarity: 0.001,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -2466,12 +2466,12 @@ mod tests {
         let zero_val: u32 = 0;
         buf[offset..offset + 4].copy_from_slice(&zero_val.to_le_bytes());
         let obs = MegaKernelObservation::from_buffer(0, &buf);
-        assert!(!obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::Normal);
         // Write 2 (non-zero) — should be true
         let nonzero: u32 = 2;
         buf[offset..offset + 4].copy_from_slice(&nonzero.to_le_bytes());
         let obs2 = MegaKernelObservation::from_buffer(0, &buf);
-        assert!(obs2.is_attention_sink);
+        assert_eq!(obs2.sink_status, AttentionSinkStatus::SinkToken);
     }
 
     // ── DiagnosticScratchpad: read_f32_at returns correct values at middle of buffer ──
@@ -2544,7 +2544,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 1,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -2584,7 +2584,7 @@ mod tests {
         assert_eq!(obs.residual_delta, 0.0);
         assert_eq!(obs.cosine_similarity, 0.0);
         assert_eq!(obs.dead_neuron_count, 0);
-        assert!(!obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::Normal);
         assert_eq!(obs.per_channel_scale, 0.0);
         assert_eq!(obs.row_l1_norm, 0.0);
         assert_eq!(obs.row_max, 0.0);
@@ -2615,7 +2615,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 1,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -2765,7 +2765,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: f32::MAX,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -2806,7 +2806,7 @@ mod tests {
         assert_eq!(obs.residual_delta, 0.0);
         assert_eq!(obs.cosine_similarity, 0.0);
         assert_eq!(obs.dead_neuron_count, 0);
-        assert!(!obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::Normal);
         assert_eq!(obs.per_channel_scale, 0.0);
         assert_eq!(obs.row_l1_norm, 0.0);
         assert_eq!(obs.row_max, 0.0);
@@ -3000,7 +3000,7 @@ mod tests {
         buf[telemetry_offsets::SILU_DEAD_NEURON_MASK_OFFSET
             ..telemetry_offsets::SILU_DEAD_NEURON_MASK_OFFSET + 4]
             .copy_from_slice(&dead.to_le_bytes());
-        // is_attention_sink = true (non-zero u32)
+        // sink_status = SinkToken (non-zero u32)
         let sink: u32 = 1;
         buf[telemetry_offsets::IS_ATTENTION_SINK_OFFSET
             ..telemetry_offsets::IS_ATTENTION_SINK_OFFSET + 4]
@@ -3009,7 +3009,7 @@ mod tests {
         let obs = MegaKernelObservation::from_buffer(10, &buf);
         assert_eq!(obs.layer_idx, 10);
         assert_eq!(obs.dead_neuron_count, 500);
-        assert!(obs.is_attention_sink);
+        assert_eq!(obs.sink_status, AttentionSinkStatus::SinkToken);
         // Ratio: 500 / 768 ≈ 0.651
         let ratio = obs.dead_neuron_ratio(768);
         assert!((ratio - (500.0f32 / 768.0)).abs() < 0.01);
@@ -3027,7 +3027,7 @@ mod tests {
             residual_delta: -2.0,  // < -1.0 => true
             cosine_similarity: 0.0, // > -1.0 => true
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -3327,7 +3327,7 @@ mod tests {
         assert!((first_two[1] - 2.0).abs() < f32::EPSILON);
     }
 
-    // ── Test 165: MegaKernelObservation from_buffer with is_attention_sink=u32::MAX ──
+    // ── Test 165: MegaKernelObservation from_buffer with sink_status=u32::MAX ──
 
     #[test]
     fn observation_from_buffer_attention_sink_u32_max() {
@@ -3337,8 +3337,8 @@ mod tests {
         let max_val: u32 = u32::MAX;
         buf[offset..offset + 4].copy_from_slice(&max_val.to_le_bytes());
         let obs = MegaKernelObservation::from_buffer(0, &buf);
-        // Any non-zero u32 should set is_attention_sink to true
-        assert!(obs.is_attention_sink);
+        // Any non-zero u32 should set sink_status to SinkToken
+        assert_eq!(obs.sink_status, AttentionSinkStatus::SinkToken);
     }
 
     // ── Test 166: TelemetryFlagsBitmask wrapping_add and wrapping_sub ──
@@ -3387,7 +3387,7 @@ mod tests {
             residual_delta: f32::NAN,
             cosine_similarity: 1.0,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -3409,7 +3409,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: f32::NAN,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -3669,7 +3669,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 2048,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -3858,7 +3858,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 256,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -4238,7 +4238,7 @@ mod tests {
             residual_delta: -999.0,
             cosine_similarity: 999.0,
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -4586,7 +4586,7 @@ mod tests {
             residual_delta: -1.0, // < 0.0 threshold
             cosine_similarity: 0.0, // NOT > 0.0 threshold
             dead_neuron_count: 0,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,
@@ -4607,7 +4607,7 @@ mod tests {
             residual_delta: 0.0,
             cosine_similarity: 0.0,
             dead_neuron_count: 1024,
-            is_attention_sink: false,
+            sink_status: AttentionSinkStatus::Normal,
             per_channel_scale: 0.0,
             row_l1_norm: 0.0,
             row_max: 0.0,

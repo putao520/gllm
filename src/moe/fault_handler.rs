@@ -271,7 +271,7 @@ impl ExpertFaultHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::moe::thermal::ExpertHeatLevel;
+    use crate::moe::thermal::{ExpertHeatLevel, ExpertResidency};
 
     #[test]
     fn test_handle_fault_and_complete() {
@@ -312,7 +312,7 @@ mod tests {
         let resumed = handler.complete_restoration(2, 0, &mut thermal, &mut patch);
         assert_eq!(resumed.len(), 1);
         assert_eq!(resumed[0].0, 42);
-        assert!(!thermal.state(2).unwrap().is_evicted);
+        assert!(thermal.state(2).unwrap().residency == ExpertResidency::Resident);
         assert!(!patch.is_expert_patched(2, 0));
     }
 
@@ -702,7 +702,7 @@ mod tests {
         // Complete
         let resumed = handler.complete_restoration(3, 1, &mut thermal, &mut patch);
         assert_eq!(resumed.len(), 1);
-        assert!(!thermal.state(3).unwrap().is_evicted);
+        assert!(thermal.state(3).unwrap().residency == ExpertResidency::Resident);
         assert!(!patch.is_expert_patched(3, 1));
     }
 
@@ -2093,7 +2093,7 @@ mod tests {
             thermal.step(&[10, 0, 5, 5]);
         }
         thermal.evict_expert(1);
-        assert!(thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
 
         // Fault and complete restoration
         let fault = ExpertFault {
@@ -2107,7 +2107,7 @@ mod tests {
 
         // Assert: expert is no longer evicted
         assert_eq!(resumed.len(), 1);
-        assert!(!thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ── complete_restoration: per_expert_recovery_us accumulates ─────────
@@ -4688,7 +4688,7 @@ mod tests {
 
         // Assert: should succeed
         assert!(evicted);
-        assert!(thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -4702,10 +4702,10 @@ mod tests {
         thermal.evict_expert(1);
 
         // Assert: only expert 1 is evicted
-        assert!(!thermal.state(0).unwrap().is_evicted);
-        assert!(thermal.state(1).unwrap().is_evicted);
-        assert!(!thermal.state(2).unwrap().is_evicted);
-        assert!(!thermal.state(3).unwrap().is_evicted);
+        assert!(thermal.state(0).unwrap().residency == ExpertResidency::Resident);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
+        assert!(thermal.state(2).unwrap().residency == ExpertResidency::Resident);
+        assert!(thermal.state(3).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ── Thermal reactivation clears eviction flag ─────────────────────────
@@ -4718,14 +4718,14 @@ mod tests {
             thermal.step(&[10, 0, 5, 3]);
         }
         thermal.evict_expert(1);
-        assert!(thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
 
         // Act: reactivate
         let reactivated = thermal.reactivate_expert(1);
 
         // Assert
         assert!(reactivated);
-        assert!(!thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ── Thermal reactivation of non-evicted expert returns false ──────────
@@ -4787,7 +4787,7 @@ mod tests {
         let thermal = ExpertThermalManager::new(8);
         for i in 0..8 {
             let state = thermal.state(i).unwrap();
-            assert!(!state.is_evicted, "expert {} should not be evicted initially", i);
+            assert!(state.residency == ExpertResidency::Resident, "expert {} should not be evicted initially", i);
         }
     }
 
@@ -4851,7 +4851,7 @@ mod tests {
                 thermal.step(&[5, 5, 0, 5]);
             }
             thermal.evict_expert(2);
-            assert!(thermal.state(2).unwrap().is_evicted);
+            assert!(thermal.state(2).unwrap().residency == ExpertResidency::Evicted);
 
             // Fault and restore
             let fault = ExpertFault {
@@ -4864,7 +4864,7 @@ mod tests {
             let resumed =
                 handler.complete_restoration(2, 0, &mut thermal, &mut patch);
             assert_eq!(resumed.len(), 1);
-            assert!(!thermal.state(2).unwrap().is_evicted);
+            assert!(thermal.state(2).unwrap().residency == ExpertResidency::Resident);
         }
 
         // Assert: 3 cycles completed
@@ -5281,7 +5281,7 @@ mod tests {
         assert!((state.hit_rate - 0.0).abs() < 1e-9);
         assert_eq!(state.consecutive_zero_streak, 0);
         assert_eq!(state.last_hit_step, 0);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.reactivation_count, 0);
     }
 
@@ -5466,7 +5466,7 @@ mod tests {
             thermal.step(&[10, 5, 5, 0]);
         }
         thermal.evict_expert(3);
-        assert!(thermal.state(3).unwrap().is_evicted);
+        assert!(thermal.state(3).unwrap().residency == ExpertResidency::Evicted);
 
         let req = DeoptRequest {
             request_id: 42,
@@ -5485,7 +5485,7 @@ mod tests {
         }
 
         // Expert should no longer be evicted
-        assert!(!thermal.state(3).unwrap().is_evicted);
+        assert!(thermal.state(3).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -6601,10 +6601,10 @@ mod tests {
                 thermal.step(&[10, 0, 5, 5]);
             }
             assert!(thermal.evict_expert(1));
-            assert!(thermal.state(1).unwrap().is_evicted);
+            assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
 
             assert!(thermal.reactivate_expert(1));
-            assert!(!thermal.state(1).unwrap().is_evicted);
+            assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
         }
 
         let summary = thermal.summary();
@@ -7919,11 +7919,11 @@ mod tests {
         thermal.step(&[0, 10]);
         assert!(thermal.evict_expert(0));
         assert!(thermal.reactivate_expert(0));
-        assert!(!thermal.state(0).unwrap().is_evicted);
+        assert!(thermal.state(0).unwrap().residency == ExpertResidency::Resident);
         thermal.step(&[0, 10]);
         thermal.step(&[0, 10]);
         assert!(thermal.evict_expert(0));
-        assert!(thermal.state(0).unwrap().is_evicted);
+        assert!(thermal.state(0).unwrap().residency == ExpertResidency::Evicted);
     }
 
     // ── Thermal: summary after mixed operations ─────────────────────────────
@@ -8245,7 +8245,7 @@ mod tests {
         handler.handle_fault(fault, 0.0, ExpertWeightLocation::CpuRam);
         let resumed = handler.complete_restoration(2, 0, &mut thermal, &mut patch);
         assert_eq!(resumed.len(), 1);
-        assert!(!thermal.state(2).unwrap().is_evicted);
+        assert!(thermal.state(2).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ── FaultStats: PartialEq comprehensive checks ──────────────────────────
@@ -8714,7 +8714,7 @@ mod tests {
 
         thermal.step(&[10, 5, 3]);
         let state = thermal.state(2).unwrap();
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert!(state.route_count > 0);
     }
 
@@ -14008,7 +14008,7 @@ mod tests {
         assert!(!handler.is_restoration_pending(2, 1));
         // Expert 2 should be reactivated (state != Evicted)
         let state = thermal.state(2).expect("expert 2 should have a heat state");
-        assert!(!state.is_evicted,
+        assert!(state.residency == ExpertResidency::Resident,
             "expert 2 should be reactivated after restoration");
     }
 
@@ -15435,7 +15435,7 @@ mod tests {
                 thermal.step(&[10, 10, 0, 10]);
             }
             thermal.evict_expert(2);
-            assert!(thermal.state(2).unwrap().is_evicted);
+            assert!(thermal.state(2).unwrap().residency == ExpertResidency::Evicted);
 
             // Fault
             let fault = ExpertFault {
@@ -15451,7 +15451,7 @@ mod tests {
                 handler.complete_restoration(2, 0, &mut thermal, &mut patch);
             assert_eq!(resumed.len(), 1);
             assert_eq!(resumed[0].0, cycle);
-            assert!(!thermal.state(2).unwrap().is_evicted);
+            assert!(thermal.state(2).unwrap().residency == ExpertResidency::Resident);
         }
 
         // Assert: all 3 cycles tracked
@@ -15556,10 +15556,10 @@ mod tests {
         thermal.evict_expert(1);
         thermal.evict_expert(3);
 
-        assert!(thermal.state(1).unwrap().is_evicted);
-        assert!(thermal.state(3).unwrap().is_evicted);
-        assert!(!thermal.state(0).unwrap().is_evicted);
-        assert!(!thermal.state(2).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
+        assert!(thermal.state(3).unwrap().residency == ExpertResidency::Evicted);
+        assert!(thermal.state(0).unwrap().residency == ExpertResidency::Resident);
+        assert!(thermal.state(2).unwrap().residency == ExpertResidency::Resident);
 
         // Fault both
         let f1 = ExpertFault {
@@ -15584,7 +15584,7 @@ mod tests {
         // Assert: all 4 experts now non-evicted
         for i in 0..4 {
             assert!(
-                !thermal.state(i).unwrap().is_evicted,
+                thermal.state(i).unwrap().residency == ExpertResidency::Resident,
                 "expert {} should not be evicted after restoration",
                 i
             );

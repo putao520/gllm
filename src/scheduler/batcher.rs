@@ -526,7 +526,7 @@ impl ContinuousBatcher {
         let mut prefill_slots = Vec::new();
 
         for (idx, &req_id) in batch.requests.iter().enumerate() {
-            let is_prefill = self.running.get(&req_id)
+            let needs_prefill = self.running.get(&req_id)
                 .map(|seq| seq.needs_prefill())
                 .unwrap_or(false);
 
@@ -543,7 +543,7 @@ impl ContinuousBatcher {
                 draft_steps: batch.draft_steps.get(idx).copied().unwrap_or(0),
             };
 
-            if is_prefill {
+            if needs_prefill {
                 prefill_slots.push(slot);
             } else {
                 decode_slots.push(slot);

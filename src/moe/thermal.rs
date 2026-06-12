@@ -40,6 +40,18 @@ impl ExpertHeatLevel {
     }
 }
 
+/// Residency state of a MoE expert in GPU memory.
+///
+/// ARCH-JIT-DATA-YIELDS: replaces `is_evicted: bool` with a semantic enum.
+/// Expert residency drives memory management and dispatch decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertResidency {
+    /// Expert weights are resident in GPU memory.
+    Resident,
+    /// Expert weights have been evicted to host memory.
+    Evicted,
+}
+
 /// 单个专家的热度状态
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpertHeatState {
@@ -57,8 +69,8 @@ pub struct ExpertHeatState {
     pub consecutive_zero_streak: u64,
     /// 最近一次命中时间 (单调递增计数器)
     pub last_hit_step: u64,
-    /// 是否已被封杀 (Deopt 跳转已写入)
-    pub is_evicted: bool,
+    /// 专家驻留状态 (Resident=权重在GPU, Evicted=权重已封杀)
+    pub residency: ExpertResidency,
     /// 封杀后又被触发的次数 (用于复活统计)
     pub reactivation_count: u64,
 }
@@ -73,7 +85,7 @@ impl ExpertHeatState {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 0,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         }
     }
@@ -317,7 +329,7 @@ impl ExpertThermalManager {
                 self.cold_threshold,
             );
             // 已封杀的专家保持 Evicted
-            if state.is_evicted {
+            if state.residency == ExpertResidency::Evicted {
                 state.heat_level = ExpertHeatLevel::Evicted;
             }
         }
@@ -331,7 +343,7 @@ impl ExpertThermalManager {
 
         let state = &self.states[expert_idx];
 
-        if state.is_evicted {
+        if state.residency == ExpertResidency::Evicted {
             // 已封杀: 检查是否需要恢复
             // 如果该专家在封杀后被触发过 Deopt，说明需要恢复
             if state.reactivation_count > 0 {
@@ -359,11 +371,11 @@ impl ExpertThermalManager {
         }
 
         let state = &mut self.states[expert_idx];
-        if state.is_evicted {
+        if state.residency == ExpertResidency::Evicted {
             return false; // 已经封杀
         }
 
-        state.is_evicted = true;
+        state.residency = ExpertResidency::Evicted;
         state.heat_level = ExpertHeatLevel::Evicted;
         state.reactivation_count = 0;
         self.total_evictions += 1;
@@ -392,11 +404,11 @@ impl ExpertThermalManager {
         }
 
         let state = &mut self.states[expert_idx];
-        if !state.is_evicted {
+        if state.residency == ExpertResidency::Resident {
             return false; // 未被封杀
         }
 
-        state.is_evicted = false;
+        state.residency = ExpertResidency::Resident;
         state.heat_level = ExpertHeatLevel::Cold;
         state.reactivation_count += 1;
         state.consecutive_zero_streak = 0;
@@ -423,7 +435,7 @@ impl ExpertThermalManager {
         let state = &mut self.states[expert_idx];
 
         // 标记需要恢复
-        if state.is_evicted {
+        if state.residency == ExpertResidency::Evicted {
             state.reactivation_count += 1;
 
             // 执行恢复
@@ -447,7 +459,7 @@ impl ExpertThermalManager {
         let threshold = self.effective_eviction_threshold();
         let mut to_evict = Vec::new();
         for state in &self.states {
-            if !state.is_evicted && state.consecutive_zero_streak >= threshold {
+            if state.residency == ExpertResidency::Resident && state.consecutive_zero_streak >= threshold {
                 to_evict.push(state.expert_idx);
             }
         }
@@ -458,7 +470,7 @@ impl ExpertThermalManager {
     pub fn experts_to_reactivate(&self) -> Vec<usize> {
         let mut to_reactivate = Vec::new();
         for state in &self.states {
-            if state.is_evicted && state.reactivation_count > 0 {
+            if state.residency == ExpertResidency::Evicted && state.reactivation_count > 0 {
                 to_reactivate.push(state.expert_idx);
             }
         }
@@ -598,7 +610,7 @@ mod tests {
 
         // 执行封杀
         assert!(manager.evict_expert(1));
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
         assert_eq!(manager.state(1).unwrap().heat_level, ExpertHeatLevel::Evicted);
     }
 
@@ -633,7 +645,7 @@ mod tests {
         }
 
         // Expert 2 应该已恢复
-        assert!(!manager.state(2).unwrap().is_evicted);
+        assert!(manager.state(2).unwrap().residency == ExpertResidency::Resident);
         assert_eq!(manager.state(2).unwrap().heat_level, ExpertHeatLevel::Cold);
     }
 
@@ -830,7 +842,7 @@ mod tests {
         assert!(matches!(result, DeoptHandlingResult::ReactivateAndRerun { expert_idx: 1, .. }));
 
         // After reactivation, expert is no longer evicted => Keep
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
         assert_eq!(manager.eviction_decision(1), EvictionDecision::Keep);
     }
 
@@ -870,7 +882,7 @@ mod tests {
             assert_eq!(state.route_count, 0);
             assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
             assert_eq!(state.consecutive_zero_streak, 0);
-            assert!(!state.is_evicted);
+            assert!(state.residency == ExpertResidency::Resident);
             assert_eq!(state.reactivation_count, 0);
         }
 
@@ -1066,13 +1078,13 @@ mod tests {
 
         // First reactivation succeeds
         assert!(manager.reactivate_expert(1));
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
         assert_eq!(manager.state(1).unwrap().heat_level, ExpertHeatLevel::Cold);
         assert_eq!(manager.state(1).unwrap().reactivation_count, 1);
 
         // Re-evict (resets reactivation_count to 0 per evict_expert)
         manager.evict_expert(1);
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
         assert_eq!(manager.state(1).unwrap().reactivation_count, 0);
 
         // Second reactivation also succeeds, count is 1 again
@@ -1133,7 +1145,7 @@ mod tests {
         assert!(to_reactivate.is_empty());
 
         // Expert 2 is still evicted with no reactivation_count
-        assert!(manager.state(2).unwrap().is_evicted);
+        assert!(manager.state(2).unwrap().residency == ExpertResidency::Evicted);
         assert_eq!(manager.state(2).unwrap().reactivation_count, 0);
     }
 
@@ -1392,7 +1404,7 @@ mod tests {
         assert_eq!(state.hit_count, 1);
         assert_eq!(state.route_count, 1);
         assert_eq!(state.hit_rate, 1.0);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
     }
 
     // ────────────────────────────────────────────────────────
@@ -1432,7 +1444,7 @@ mod tests {
         assert!(matches!(result, DeoptHandlingResult::ReactivateAndRerun { expert_idx: 2, .. }));
 
         // Phase 5: Expert 2 reactivated
-        assert!(!manager.state(2).unwrap().is_evicted);
+        assert!(manager.state(2).unwrap().residency == ExpertResidency::Resident);
         assert_eq!(manager.state(2).unwrap().heat_level, ExpertHeatLevel::Cold);
         assert_eq!(manager.summary().total_reactivations, 1);
 
@@ -1545,7 +1557,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 400,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let debug = format!("{:?}", state);
@@ -1554,7 +1566,7 @@ mod tests {
         assert!(debug.contains("hit_count: 300"));
         assert!(debug.contains("route_count: 400"));
         assert!(debug.contains("Hot"));
-        assert!(debug.contains("is_evicted: false"));
+        assert!(debug.contains("residency: Resident"));
     }
 
     #[test]
@@ -1717,7 +1729,7 @@ mod tests {
         // Expert 1's heat_level must remain Evicted despite hit_rate increasing
         let state = manager.state(1).unwrap();
         assert_eq!(state.heat_level, ExpertHeatLevel::Evicted);
-        assert!(state.is_evicted);
+        assert!(state.residency == ExpertResidency::Evicted);
         // But the underlying hit_rate and counts are still updated
         assert!(state.hit_count > 0);
         assert!(state.route_count > 0);
@@ -1848,7 +1860,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 7,
             last_hit_step: 93,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 3,
         };
         assert_eq!(state.expert_idx, 10);
@@ -1858,7 +1870,7 @@ mod tests {
         assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
         assert_eq!(state.consecutive_zero_streak, 7);
         assert_eq!(state.last_hit_step, 93);
-        assert!(state.is_evicted);
+        assert!(state.residency == ExpertResidency::Evicted);
         assert_eq!(state.reactivation_count, 3);
     }
 
@@ -1985,7 +1997,7 @@ mod tests {
 
         // Reactivate
         manager.reactivate_expert(1);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
 
         // Expert 1 streak was reset to 0, so not yet flagged for eviction
         assert!(manager.experts_to_evict().is_empty());
@@ -2126,7 +2138,7 @@ mod tests {
 
         manager.reactivate_expert(1);
         assert_eq!(manager.state(1).unwrap().heat_level, ExpertHeatLevel::Cold);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -2445,7 +2457,7 @@ mod tests {
 
         // Assert
         assert!(matches!(result, DeoptHandlingResult::ReactivateAndRerun { expert_idx: 0, .. }));
-        assert!(!manager.state(0).unwrap().is_evicted);
+        assert!(manager.state(0).unwrap().residency == ExpertResidency::Resident);
         // handle_deopt_request increments reactivation_count internally (line 427)
         // then reactivate_expert increments it again (line 401), so count = 2
         assert_eq!(manager.state(0).unwrap().reactivation_count, 2);
@@ -2618,7 +2630,7 @@ mod tests {
 
         // After full reactivation, the expert is no longer evicted => Keep
         assert_eq!(manager.eviction_decision(1), EvictionDecision::Keep);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -2668,8 +2680,8 @@ mod tests {
         // Assert: both experts are fully reactivated by handle_deopt_request
         // so experts_to_reactivate should be empty (is_evicted=false)
         assert!(manager.experts_to_reactivate().is_empty());
-        assert!(!manager.state(1).unwrap().is_evicted);
-        assert!(!manager.state(2).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ────────────────────────────────────────────────────────
@@ -2712,7 +2724,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 100,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let s2 = ExpertHeatState {
@@ -2723,7 +2735,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 100,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         assert_eq!(s1, s2);
@@ -2739,13 +2751,13 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 50,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
 
         let diff_idx = ExpertHeatState { expert_idx: 2, ..base.clone() };
         let diff_rate = ExpertHeatState { hit_rate: 0.25, ..base.clone() };
-        let diff_evicted = ExpertHeatState { is_evicted: true, ..base.clone() };
+        let diff_evicted = ExpertHeatState { residency: ExpertResidency::Evicted, ..base.clone() };
         let diff_level = ExpertHeatState { heat_level: ExpertHeatLevel::Cold, ..base.clone() };
         let diff_streak = ExpertHeatState { consecutive_zero_streak: 10, ..base.clone() };
         let diff_reactivation = ExpertHeatState { reactivation_count: 5, ..base.clone() };
@@ -3183,7 +3195,7 @@ mod tests {
         assert_eq!(state.heat_level, ExpertHeatLevel::Warm);
         assert_eq!(state.consecutive_zero_streak, 0);
         assert_eq!(state.last_hit_step, 0);
-        assert!(!state.is_evicted);
+        assert!(state.residency == ExpertResidency::Resident);
         assert_eq!(state.reactivation_count, 0);
     }
 
@@ -3436,7 +3448,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 0,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let s2 = ExpertHeatState {
@@ -3447,7 +3459,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 0,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         assert_eq!(s, s2);
@@ -3458,7 +3470,7 @@ mod tests {
         let s1 = ExpertHeatState {
             expert_idx: 0, hit_rate: 0.5, hit_count: 5, route_count: 10,
             heat_level: ExpertHeatLevel::Warm, consecutive_zero_streak: 0,
-            last_hit_step: 10, is_evicted: false, reactivation_count: 0,
+            last_hit_step: 10, residency: ExpertResidency::Resident, reactivation_count: 0,
         };
         let s2 = ExpertHeatState { hit_count: 6, ..s1.clone() };
         assert_ne!(s1, s2);
@@ -3469,7 +3481,7 @@ mod tests {
         let s1 = ExpertHeatState {
             expert_idx: 0, hit_rate: 0.5, hit_count: 5, route_count: 10,
             heat_level: ExpertHeatLevel::Warm, consecutive_zero_streak: 0,
-            last_hit_step: 10, is_evicted: false, reactivation_count: 0,
+            last_hit_step: 10, residency: ExpertResidency::Resident, reactivation_count: 0,
         };
         let s2 = ExpertHeatState { route_count: 11, ..s1.clone() };
         assert_ne!(s1, s2);
@@ -3480,7 +3492,7 @@ mod tests {
         let s1 = ExpertHeatState {
             expert_idx: 0, hit_rate: 0.5, hit_count: 5, route_count: 10,
             heat_level: ExpertHeatLevel::Warm, consecutive_zero_streak: 0,
-            last_hit_step: 10, is_evicted: false, reactivation_count: 0,
+            last_hit_step: 10, residency: ExpertResidency::Resident, reactivation_count: 0,
         };
         let s2 = ExpertHeatState { last_hit_step: 20, ..s1.clone() };
         assert_ne!(s1, s2);
@@ -3566,7 +3578,7 @@ mod tests {
 
         // Assert: evicted expert without reactivation => Keep
         assert_eq!(decision, EvictionDecision::Keep);
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -3621,15 +3633,15 @@ mod tests {
     }
 
     #[test]
-    fn test_reactivate_expert_clears_is_evicted() {
+    fn test_reactivate_expert_sets_residency_to_resident() {
         let mut manager = ExpertThermalManager::new(2).with_eviction_threshold(3);
         for _ in 0..4 {
             manager.step(&[10, 0]);
         }
         manager.evict_expert(1);
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
         manager.reactivate_expert(1);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -3958,10 +3970,10 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 0,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 0,
         };
-        assert!(state.is_evicted);
+        assert!(state.residency == ExpertResidency::Evicted);
         assert_eq!(state.heat_level, ExpertHeatLevel::Hot);
     }
 
@@ -3975,14 +3987,14 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 5,
             last_hit_step: 42,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 1,
         };
         assert_eq!(state, state);
     }
 
     #[test]
-    fn test_expert_heat_state_differs_by_is_evicted() {
+    fn test_expert_heat_state_differs_by_residency() {
         let base = ExpertHeatState {
             expert_idx: 0,
             hit_rate: 0.5,
@@ -3991,11 +4003,11 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 10,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let mut evicted = base.clone();
-        evicted.is_evicted = true;
+        evicted.residency = ExpertResidency::Evicted;
         assert_ne!(base, evicted);
     }
 
@@ -4009,7 +4021,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 5,
             last_hit_step: 0,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let b = a.clone();
@@ -4027,7 +4039,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 10,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
         let b = a.clone();
@@ -4045,7 +4057,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Warm,
             consecutive_zero_streak: 0,
             last_hit_step: 0,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 0,
         };
         let b = a.clone();
@@ -4352,7 +4364,7 @@ mod tests {
         // Step again with expert 1 active — should stay evicted
         manager.step(&[5, 10]);
         let state = manager.state(1).unwrap();
-        assert!(state.is_evicted);
+        assert!(state.residency == ExpertResidency::Evicted);
         assert_eq!(state.heat_level, ExpertHeatLevel::Evicted);
     }
 
@@ -4446,8 +4458,8 @@ mod tests {
         assert!(manager.evict_expert(3));
 
         // Experts 0 and 1 should not be evicted
-        assert!(!manager.state(0).unwrap().is_evicted);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(0).unwrap().residency == ExpertResidency::Resident);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -4462,9 +4474,9 @@ mod tests {
 
         manager.reactivate_expert(1);
 
-        assert!(manager.state(0).unwrap().is_evicted);
-        assert!(!manager.state(1).unwrap().is_evicted);
-        assert!(manager.state(2).unwrap().is_evicted);
+        assert!(manager.state(0).unwrap().residency == ExpertResidency::Evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
+        assert!(manager.state(2).unwrap().residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -4669,15 +4681,15 @@ mod tests {
     }
 
     #[test]
-    fn test_manager_reactivate_clears_is_evicted() {
+    fn test_manager_reactivate_sets_residency_to_resident() {
         let mut manager = ExpertThermalManager::new(2).with_eviction_threshold(3);
         for _ in 0..4 {
             manager.step(&[5, 0]);
         }
         manager.evict_expert(1);
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
         manager.reactivate_expert(1);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     #[test]
@@ -4784,7 +4796,7 @@ mod tests {
         // Reactivate
         manager.reactivate_expert(1);
         assert_eq!(manager.summary().total_reactivations, 1);
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
 
         // Expert 1 goes cold again
         for _ in 0..4 {
@@ -4795,7 +4807,7 @@ mod tests {
         // Re-evict
         assert!(manager.evict_expert(1));
         assert_eq!(manager.summary().total_evictions, 2);
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -4826,7 +4838,7 @@ mod tests {
         });
         assert!(matches!(result, DeoptHandlingResult::SpuriousDeopt { .. }));
         // Expert 0 should remain non-evicted
-        assert!(!manager.state(0).unwrap().is_evicted);
+        assert!(manager.state(0).unwrap().residency == ExpertResidency::Resident);
     }
 
     // ────────────────────────────────────────────────────────
@@ -5389,7 +5401,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 20,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
 
@@ -5805,7 +5817,7 @@ mod tests {
             heat_level: ExpertHeatLevel::Evicted,
             consecutive_zero_streak: 50,
             last_hit_step: 0,
-            is_evicted: true,
+            residency: ExpertResidency::Evicted,
             reactivation_count: 0,
         };
 
@@ -5814,7 +5826,7 @@ mod tests {
 
         // Assert
         assert!(debug.contains("Evicted"));
-        assert!(debug.contains("is_evicted: true"));
+        assert!(debug.contains("residency: Evicted"));
         assert!(debug.contains("consecutive_zero_streak: 50"));
         assert!(debug.contains("route_count: 50"));
     }
@@ -5914,14 +5926,14 @@ mod tests {
         manager.handle_deopt_request(DeoptRequest {
             request_id: 1, expert_idx: 1, layer_idx: 0, step: 4,
         });
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
 
         // Build streak again and re-evict
         for _ in 0..4 { manager.step(&[10, 0]); }
         assert!(manager.evict_expert(1));
 
         // Assert
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
         assert_eq!(manager.summary().total_evictions, 2);
     }
 
@@ -5939,7 +5951,7 @@ mod tests {
 
         // Assert
         assert_eq!(decision, EvictionDecision::Keep);
-        assert!(manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -5960,7 +5972,7 @@ mod tests {
         // Assert: 2 evictions, 1 reactivation
         assert_eq!(manager.summary().total_evictions, 2);
         assert_eq!(manager.summary().total_reactivations, 1);
-        assert!(manager.state(0).unwrap().is_evicted);
+        assert!(manager.state(0).unwrap().residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -6075,10 +6087,10 @@ mod tests {
         assert!(manager.evict_expert(0));
 
         // Assert: only expert 0 is evicted, others remain hot
-        assert!(manager.state(0).unwrap().is_evicted);
+        assert!(manager.state(0).unwrap().residency == ExpertResidency::Evicted);
         assert_eq!(manager.state(0).unwrap().heat_level, ExpertHeatLevel::Evicted);
         for idx in 1..4 {
-            assert!(!manager.state(idx).unwrap().is_evicted);
+            assert!(manager.state(idx).unwrap().residency == ExpertResidency::Resident);
             assert_eq!(manager.state(idx).unwrap().heat_level, ExpertHeatLevel::Hot);
         }
     }
@@ -6299,7 +6311,7 @@ mod tests {
     // ────────────────────────────────────────────────────────
 
     #[test]
-    fn test_heat_level_from_hit_rate_positive_negative_rate_is_evicted() {
+    fn test_heat_level_from_hit_rate_positive_negative_rate_residency() {
         // Arrange: a small negative rate should fall through to Evicted
         let rate = -1e-300;
 
@@ -6322,20 +6334,20 @@ mod tests {
             heat_level: ExpertHeatLevel::Hot,
             consecutive_zero_streak: 0,
             last_hit_step: 100,
-            is_evicted: false,
+            residency: ExpertResidency::Resident,
             reactivation_count: 0,
         };
 
         // Act: clone and modify the clone
         let mut modified = original.clone();
         modified.hit_count = 999;
-        modified.is_evicted = true;
+        modified.residency = ExpertResidency::Evicted;
 
         // Assert: original unchanged
         assert_eq!(original.hit_count, 75);
-        assert!(!original.is_evicted);
+        assert!(original.residency == ExpertResidency::Resident);
         assert_eq!(modified.hit_count, 999);
-        assert!(modified.is_evicted);
+        assert!(modified.residency == ExpertResidency::Evicted);
     }
 
     #[test]
@@ -6932,7 +6944,7 @@ mod tests {
 
         // Assert
         assert!(matches!(result, DeoptHandlingResult::SpuriousDeopt { expert_idx: 1, .. }));
-        assert!(!manager.state(1).unwrap().is_evicted);
+        assert!(manager.state(1).unwrap().residency == ExpertResidency::Resident);
         // Request is still recorded
         assert_eq!(manager.pending_deopt_requests().len(), 1);
     }

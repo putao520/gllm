@@ -372,7 +372,7 @@ impl<'a> BatchExecutor<'a> {
     /// from BatchContext pointers. This is the unified single-pointer ABI path.
     ///
     /// After prefill completes, the JIT sets `current_pos = prompt_len` and
-    /// `is_prefill = 0` for each sequence in per-seq metadata.
+    /// `phase = Decode` for each sequence in per-seq metadata.
     pub fn prefill_batch<F, E>(&mut self, mega_fn: F) -> Result<(), E>
     where
         F: FnOnce(&BatchContext) -> Result<usize, E>,
@@ -384,7 +384,7 @@ impl<'a> BatchExecutor<'a> {
     /// Decode one step: M=num_active, one CALL via single-pointer ABI (REQ-BCI-008).
     ///
     /// Collects active (non-terminated) sequences from `batch_ctx` per-seq metadata.
-    /// Updates `is_prefill=0` and `current_pos` in `BatchContext`, then calls `mega_fn`
+    /// Updates `phase=Decode` and `current_pos` in `BatchContext`, then calls `mega_fn`
     /// with single `&BatchContext` pointer.
     ///
     /// Returns the number of active sequences that decoded (0 = all terminated).

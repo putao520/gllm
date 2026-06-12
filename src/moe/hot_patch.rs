@@ -378,7 +378,7 @@ pub struct HotPatchSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::moe::thermal::{DeoptHandlingResult, DeoptRequest, EvictionDecision, ExpertHeatLevel};
+    use crate::moe::thermal::{DeoptHandlingResult, DeoptRequest, EvictionDecision, ExpertHeatLevel, ExpertResidency};
 
     #[test]
     fn test_expert_patch_safety_evicted() {
@@ -4217,7 +4217,7 @@ mod tests {
             _ => panic!("Expected ReactivateAndRerun, got {:?}", result),
         }
         // After deopt, expert is reactivated
-        assert!(!thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
     }
 
     // 6. ThermalSummary fields reflect actual thermal state after eviction.
@@ -4313,12 +4313,12 @@ mod tests {
         thermal.evict_expert(1);
 
         let state_before = thermal.state(1).unwrap();
-        assert!(state_before.is_evicted);
+        assert!(state_before.residency == ExpertResidency::Evicted);
         assert!(state_before.consecutive_zero_streak >= 3);
 
         thermal.reactivate_expert(1);
         let state_after = thermal.state(1).unwrap();
-        assert!(!state_after.is_evicted);
+        assert!(state_after.residency == ExpertResidency::Resident);
         assert_eq!(state_after.heat_level, ExpertHeatLevel::Cold);
         assert_eq!(state_after.consecutive_zero_streak, 0);
         assert_eq!(state_after.reactivation_count, 1);
@@ -4344,7 +4344,7 @@ mod tests {
             thermal.step(&[10, 0, 5]);
         }
         thermal.evict_expert(1);
-        assert!(thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
 
         // Trigger deopt → reactivates expert 1.
         // handle_deopt_request calls reactivate_expert which increments reactivation_count twice
@@ -4352,7 +4352,7 @@ mod tests {
         thermal.handle_deopt_request(DeoptRequest {
             request_id: 1, expert_idx: 1, layer_idx: 0, step: 5,
         });
-        assert!(!thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
         assert_eq!(thermal.state(1).unwrap().reactivation_count, 2);
 
         // Drive expert 1 back to zero hits and evict again
@@ -4362,14 +4362,14 @@ mod tests {
         thermal.evict_expert(1);
         // evict_expert resets reactivation_count to 0
         assert_eq!(thermal.state(1).unwrap().reactivation_count, 0);
-        assert!(thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Evicted);
 
         // Now trigger another deopt → reactivation_count goes to 2 again
         thermal.handle_deopt_request(DeoptRequest {
             request_id: 2, expert_idx: 1, layer_idx: 0, step: 10,
         });
         assert_eq!(thermal.state(1).unwrap().reactivation_count, 2);
-        assert!(!thermal.state(1).unwrap().is_evicted);
+        assert!(thermal.state(1).unwrap().residency == ExpertResidency::Resident);
 
         // Verify the total_reactivations counter accumulates across cycles
         assert_eq!(thermal.summary().total_reactivations, 2);

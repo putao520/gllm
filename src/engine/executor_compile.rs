@@ -4920,7 +4920,6 @@ mod tests {
             prompt_tokens: vec![1, 50256, 314],
             output_tokens: vec![99],
             sampling_config: sampling.clone(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 512,
             finished: false,
@@ -4934,7 +4933,7 @@ mod tests {
         assert_eq!(data.output_tokens, vec![99]);
         assert!((data.sampling_config.temperature - 0.8).abs() < 1e-6);
         assert_eq!(data.sampling_config.top_k, 40);
-        assert!(!data.is_prefill);
+        assert_eq!(data.phase, RequestPhase::Decode);
         assert_eq!(data.max_new_tokens, 512);
         assert!(!data.finished);
         assert_eq!(data.session_id, Some(42));
@@ -5587,7 +5586,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3, 4, 5],
             output_tokens: vec![],
             sampling_config: sampling,
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 256,
             finished: false,
@@ -5599,7 +5597,7 @@ mod tests {
         // Assert
         assert_eq!(data.prompt_tokens.len(), 5);
         assert!(data.output_tokens.is_empty());
-        assert!(data.is_prefill);
+        assert_eq!(data.phase, RequestPhase::Prefill);
         assert!(!data.finished);
         assert!(data.session_id.is_none());
         assert!(data.thinking_budget.is_none());
@@ -5620,7 +5618,6 @@ mod tests {
             prompt_tokens: vec![1],
             output_tokens: vec![2],
             sampling_config: SamplingConfig::default(),
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 100,
             finished: false,
@@ -5655,7 +5652,6 @@ mod tests {
             prompt_tokens: vec![10, 20, 30, 40, 50],
             output_tokens: vec![],
             sampling_config: SamplingConfig::default(),
-            is_prefill: true,
             phase: RequestPhase::Prefill,
             max_new_tokens: 512,
             finished: false,
@@ -5685,7 +5681,6 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             output_tokens: vec![4, 5, 6, 7],
             sampling_config: SamplingConfig { temperature: 0.5, top_k: 10, top_p: 0.95 },
-            is_prefill: false,
             phase: RequestPhase::Decode,
             max_new_tokens: 100,
             finished: true,

@@ -181,7 +181,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Collect page IDs for decode (non-prefill) requests that have page tables.
         let mut decode_page_ids: Vec<u32> = Vec::new();
         for (&req_id, req) in &self.dispatch.requests {
-            if req.is_prefill {
+            if req.phase == crate::scheduler::request_state::RequestPhase::Prefill {
                 continue;
             }
             if let Some(page_table) = self.dispatch.scheduler.get_page_table(req_id) {
@@ -698,7 +698,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     continue;
                 }
 
-                let tokens = if req.is_prefill {
+                let tokens = if req.phase == crate::scheduler::request_state::RequestPhase::Prefill || req.phase == crate::scheduler::request_state::RequestPhase::ChunkedPrefill {
                     let all_tokens = req.prompt_tokens.clone();
                     if self.dispatch.chunked_prefill_scheduler.should_chunk(all_tokens.len()) {
                         let chunk_size = self.dispatch.chunked_prefill_scheduler
@@ -709,8 +709,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                             req_id, all_tokens.len(), end,
                         );
                         req.prompt_tokens = all_tokens[end..].to_vec();
-                        req.is_prefill = !req.prompt_tokens.is_empty();
-                        req.phase = crate::scheduler::request_state::RequestPhase::ChunkedPrefill;
+                        req.phase = if req.prompt_tokens.is_empty() {
+                            crate::scheduler::request_state::RequestPhase::Decode
+                        } else {
+                            crate::scheduler::request_state::RequestPhase::ChunkedPrefill
+                        };
                         all_tokens[..end].to_vec()
                     } else {
                         all_tokens
@@ -719,13 +722,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     req.output_tokens.last().map(|t| vec![*t]).unwrap_or_default()
                 };
 
-                let position = if req.is_prefill {
+                let position = if req.phase == crate::scheduler::request_state::RequestPhase::Prefill || req.phase == crate::scheduler::request_state::RequestPhase::ChunkedPrefill {
                     0
                 } else {
                     req.prompt_tokens.len() + req.output_tokens.len().saturating_sub(1)
                 };
 
-                let fused = if req.is_prefill {
+                let fused = if req.phase == crate::scheduler::request_state::RequestPhase::Prefill || req.phase == crate::scheduler::request_state::RequestPhase::ChunkedPrefill {
                     req.fused_prefill_hidden.take()
                 } else {
                     None
@@ -784,7 +787,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             for sb in &plan.sub_batches {
                 for &rid in &sb.request_ids {
                     if let Some(r) = self.dispatch.requests.get(&rid) {
-                        if r.is_prefill {
+                        if r.phase == crate::scheduler::request_state::RequestPhase::Prefill || r.phase == crate::scheduler::request_state::RequestPhase::ChunkedPrefill {
                             prefill_queue.push((rid, r.prompt_tokens.len(), 0));
                         } else {
                             decode_ready.push((rid, r.output_tokens.len()));
@@ -898,7 +901,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let seq_len = self
                 .dispatch.requests
                 .get(req_id)
-                .map(|r| if r.is_prefill { r.prompt_tokens.len() } else { 1 })
+                .map(|r| if r.phase == crate::scheduler::request_state::RequestPhase::Prefill || r.phase == crate::scheduler::request_state::RequestPhase::ChunkedPrefill { r.prompt_tokens.len() } else { 1 })
                 .unwrap_or(1);
             let golden_seq = self.compute.collapse_seq_len(seq_len);
             if golden_seq != seq_len {
@@ -917,7 +920,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mut prefill_queue = Vec::new();
         for &rid in request_ids {
             if let Some(r) = self.dispatch.requests.get(&rid) {
-                if r.is_prefill {
+                if r.phase == crate::scheduler::request_state::RequestPhase::Prefill {
                     prefill_queue.push((rid, r.prompt_tokens.len(), 0));
                 } else {
                     decode_ready.push((rid, r.output_tokens.len()));
@@ -968,13 +971,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         let concurrent = request_ids.len();
         for &req_id in request_ids {
-            let (is_prefill, prompt_len, session_id) = {
+            let (needs_prefill, prompt_len, session_id) = {
                 let Some(req) = self.dispatch.requests.get(&req_id) else {
                     continue;
                 };
-                (req.is_prefill, req.prompt_tokens.len(), req.session_id)
+                (matches!(req.phase, crate::scheduler::request_state::RequestPhase::Prefill | crate::scheduler::request_state::RequestPhase::ChunkedPrefill), req.prompt_tokens.len(), req.session_id)
             };
-            if !is_prefill {
+            if !needs_prefill {
                 continue;
             }
             let chunk_size = adaptive.compute(l1_ratio, concurrent, prompt_len);
@@ -1122,7 +1125,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .get_mut(&req_id)
                 .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
             req.output_tokens.push(next_token);
-            req.is_prefill = false;
             req.phase = crate::scheduler::request_state::RequestPhase::Decode;
 
             let eos_token = self.model_ctx.model_config.eos_token_id;
