@@ -676,6 +676,18 @@ pub fn build_compiler_graph(
                 k_for_attn = rope_k;
             }
 
+            // KvCacheWrite: write K/V projections to KV cache (generate graphs only).
+            // In encode/embedding/rerank graphs, MHA uses K/V directly without persistence.
+            // kv_cache_ptr is resolved at lowering time from ABI, not as a graph tensor.
+            if !features.is_post_norm {
+                g.add_op(
+                    OpKind::KvCacheWrite { num_kv_heads, head_dim: this_head_dim, seq_len: s.clone() },
+                    vec![k_for_attn, v_out],
+                    vec![],
+                    &ptname("kv_write"),
+                );
+            }
+
             // Attention
             let causal = features.causal;
             let attn = g.add_tensor(&ptname("attn"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
@@ -1564,6 +1576,18 @@ pub fn build_compiler_graph(
                         vec![k_for_attn], vec![rope_k], "layer.rope_k", kv_guard);
                 }
                 k_for_attn = rope_k;
+            }
+
+            // KvCacheWrite: write K/V projections to KV cache (generate graphs only).
+            // In encode/embedding/rerank graphs, MHA uses K/V directly without persistence.
+            // kv_cache_ptr is resolved at lowering time from ABI, not as a graph tensor.
+            if !features.is_post_norm {
+                g.add_op(
+                    OpKind::KvCacheWrite { num_kv_heads, head_dim, seq_len: s.clone() },
+                    vec![k_for_attn, v_out],
+                    vec![],
+                    "layer.kv_write",
+                );
             }
 
             // ── Attention ──

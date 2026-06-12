@@ -893,7 +893,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         request_ids: &[RequestId],
     ) -> Option<crate::jit::sub_batch::DispatchPlan> {
         let mut shape_map = std::collections::HashMap::new();
-        let is_moe = self.model_ctx.forward_config.moe_config.is_some();
+        let has_moe_ops = self.model_ctx.forward_config.moe_config.is_some();
         for req_id in request_ids {
             let seq_len = self
                 .dispatch.requests
@@ -904,7 +904,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             if golden_seq != seq_len {
                 log::trace!("executor: §12.4 Golden Bucket: seq_len {} → {}", seq_len, golden_seq);
             }
-            let shape = self.compute.classify_request_shape(is_moe, 0.0);
+            let shape = self.compute.classify_request_shape(has_moe_ops, 0.0);
             shape_map.insert(*req_id, shape);
         }
 

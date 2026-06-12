@@ -5,6 +5,7 @@ pub mod quant;
 pub mod dual_track;
 pub mod turboquant;
 
+use crate::compat::KvLayoutStrategy;
 use crate::engine::executor::{KvCacheHandle, KvCacheConfig};
 use kv_optimizer::{KvOptimization, KvOptimizationConfig, KvOptimizationStatus};
 use thiserror::Error;
@@ -755,7 +756,7 @@ pub struct KvCache {
     pub kv_dtype: String,
     pub page_size: usize,
     pub num_kv_shared_layers: usize,
-    pub is_mla: bool,
+    pub kv_layout: KvLayoutStrategy,
 }
 
 
@@ -770,7 +771,7 @@ impl Default for KvCache {
             kv_dtype: String::new(),
             page_size: 0,
             num_kv_shared_layers: 0,
-            is_mla: false,
+            kv_layout: KvLayoutStrategy::Standard,
         }
     }
 }
@@ -792,6 +793,7 @@ impl KvCache {
         kv_config: &KvCacheConfig,
         hardware: kv_optimizer::HardwareProfile,
     ) -> Self {
+        let kv_layout = if kv_config.is_mla() { KvLayoutStrategy::MlaCompressed } else { KvLayoutStrategy::Standard };
         Self {
             optimization: KvOptimization::from_config(config, kv_config.num_layers(), hardware),
             num_layers: kv_config.num_layers(),
@@ -801,7 +803,7 @@ impl KvCache {
             kv_dtype: format!("{:?}", kv_config.kv_dtype),
             page_size: kv_config.page_size,
             num_kv_shared_layers: kv_config.num_kv_shared_layers(),
-            is_mla: kv_config.is_mla(),
+            kv_layout,
         }
     }
 
@@ -821,7 +823,7 @@ impl KvCache {
             kv_dtype: String::new(),
             page_size: 0,
             num_kv_shared_layers: 0,
-            is_mla: false,
+            kv_layout: KvLayoutStrategy::Standard,
         }
     }
 
@@ -839,7 +841,7 @@ impl KvCache {
             kv_dtype: String::new(),
             page_size: 0,
             num_kv_shared_layers: 0,
-            is_mla: false,
+            kv_layout: KvLayoutStrategy::Standard,
         }
     }
 
@@ -859,7 +861,7 @@ impl KvCache {
             kv_dtype: String::new(),
             page_size: 0,
             num_kv_shared_layers: 0,
-            is_mla: false,
+            kv_layout: KvLayoutStrategy::Standard,
         }
     }
 

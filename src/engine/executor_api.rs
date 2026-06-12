@@ -109,12 +109,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
 
         // §19 KV-OPT-009: Variant selection
-        let is_moe = self.model_ctx.geometry.is_moe();
+        let moe_brief = self.model_ctx.forward_config.moe_config.as_ref()
+            .map(crate::jit::variant_registry::MoeConfigBrief::from_manifest_moe);
         let has_guardrail = self.model_ctx.hooks.read().map(|h| !h.is_empty()).unwrap_or(false);
         let kv_tier_ref = self.kv.majority_kv_tier.as_deref();
         let mega = self.compute.mega_kernel.as_ref().unwrap();
         let variant = mega.select_variant_for_batch(
-            kv_tier_ref, is_moe, has_guardrail,
+            kv_tier_ref, moe_brief, has_guardrail,
             self.inference.rag_system.is_some(), None,
         );
         let variant_skip_guardrail = variant.as_ref().is_some_and(|v| {

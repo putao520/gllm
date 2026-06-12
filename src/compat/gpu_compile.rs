@@ -15,6 +15,8 @@ use crate::engine::executor::{BackendError as BE, GeneratorForwardConfig, KvCach
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use crate::scheduler::types::StorageKey;
 
+use super::KvLayoutStrategy;
+
 /// Metadata for a GPU-resident KV cache buffer, needed for swap operations.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 #[derive(Debug, Clone)]
@@ -37,22 +39,23 @@ pub(super) struct GpuKvCacheMeta {
     pub page_size: usize,
     /// Current sequence length (tokens written so far).
     pub seq_len: usize,
-    /// Whether this is an MLA model (affects layout: no K/V split, no per-head dimension).
-    pub is_mla: bool,
+    /// KV cache layout strategy (topology-derived, not bool).
+    pub layout: KvLayoutStrategy,
 }
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 impl GpuKvCacheMeta {
     pub fn dtype_size(&self) -> usize { self.kv_dtype.size_bytes() }
 
     pub fn from_config(config: &KvCacheConfig, device_ptr: u64) -> Self {
-        let kv_dtype = DType::F32;
-        let is_mla = config.is_mla();
+        let kv_dtype = config.kv_dtype;
+        let layout = if config.is_mla() { KvLayoutStrategy::MlaCompressed } else { KvLayoutStrategy::Standard };
         let kv_dim = config.kv_dim();
-        let total_bytes = if is_mla {
-            config.num_layers() * config.max_seq_len() * kv_dim * config.dtype_size()
-        } else {
-            config.num_layers() * 2 * config.num_heads() * config.max_seq_len()
-                * config.head_dim() * config.dtype_size()
+        let total_bytes = match layout {
+            KvLayoutStrategy::MlaCompressed =>
+                config.num_layers() * config.max_seq_len() * kv_dim * config.dtype_size(),
+            KvLayoutStrategy::Standard =>
+                config.num_layers() * 2 * config.num_heads() * config.max_seq_len()
+                    * config.head_dim() * config.dtype_size(),
         };
         Self {
             device_ptr,
@@ -60,11 +63,14 @@ impl GpuKvCacheMeta {
             num_layers: config.num_layers(),
             num_kv_heads: config.num_heads(),
             max_seq_len: config.max_seq_len(),
-            head_dim: if is_mla { kv_dim } else { config.head_dim() },
+            head_dim: match layout {
+                KvLayoutStrategy::MlaCompressed => kv_dim,
+                KvLayoutStrategy::Standard => config.head_dim(),
+            },
             kv_dtype,
             page_size: config.page_size,
             seq_len: 0,
-            is_mla,
+            layout,
         }
     }
 
@@ -72,10 +78,11 @@ impl GpuKvCacheMeta {
     /// Standard: layers × 2 (K+V) × kv_heads × page_size × head_dim × dtype.
     /// MLA: layers × page_size × (d_c + d_rope) × dtype (single compressed vector).
     pub fn page_bytes(&self) -> usize {
-        if self.is_mla {
-            self.num_layers * self.page_size * self.head_dim * self.dtype_size()
-        } else {
-            self.num_layers * 2 * self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size()
+        match self.layout {
+            KvLayoutStrategy::MlaCompressed =>
+                self.num_layers * self.page_size * self.head_dim * self.dtype_size(),
+            KvLayoutStrategy::Standard =>
+                self.num_layers * 2 * self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size(),
         }
     }
 
@@ -127,8 +134,8 @@ pub(super) struct GpuPagedKvMeta {
     /// Standard: layers * 2 * kv_heads * page_size * head_dim * dtype.
     /// MLA: layers * page_size * kv_dim * dtype.
     pub page_stride: usize,
-    /// Whether this is an MLA model.
-    pub is_mla: bool,
+    /// KV cache layout strategy (topology-derived, not bool).
+    pub layout: KvLayoutStrategy,
 }
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 impl GpuPagedKvMeta {
@@ -143,13 +150,12 @@ impl GpuPagedKvMeta {
         head_dim: usize,
         kv_dim: usize,
         kv_dtype: DType,
-        is_mla: bool,
+        layout: KvLayoutStrategy,
     ) -> Self {
         let dtype_size = kv_dtype.size_bytes();
-        let page_stride = if is_mla {
-            num_layers * page_size * kv_dim * dtype_size
-        } else {
-            num_layers * 2 * num_kv_heads * page_size * head_dim * dtype_size
+        let page_stride = match layout {
+            KvLayoutStrategy::MlaCompressed => num_layers * page_size * kv_dim * dtype_size,
+            KvLayoutStrategy::Standard => num_layers * 2 * num_kv_heads * page_size * head_dim * dtype_size,
         };
         let pool_bytes = num_physical_pages * page_stride;
         Self {
@@ -163,7 +169,7 @@ impl GpuPagedKvMeta {
             kv_dim,
             kv_dtype,
             page_stride,
-            is_mla,
+            layout,
         }
     }
 
@@ -175,15 +181,18 @@ impl GpuPagedKvMeta {
     /// MLA layout within page: `[layer][token][kv_dim]`
     /// - kv_half and head are ignored
     pub fn offset_in_page(&self, layer: usize, kv_half: usize, head: usize, token: usize) -> usize {
-        if self.is_mla {
-            let layer_stride = self.page_size * self.kv_dim * self.dtype_size();
-            layer * layer_stride + token * self.kv_dim * self.dtype_size()
-        } else {
-            let layer_stride = 2 * self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size();
-            let half_stride = self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size();
-            let head_stride = self.page_size * self.head_dim * self.dtype_size();
-            let token_stride = self.head_dim * self.dtype_size();
-            layer * layer_stride + kv_half * half_stride + head * head_stride + token * token_stride
+        match self.layout {
+            KvLayoutStrategy::MlaCompressed => {
+                let layer_stride = self.page_size * self.kv_dim * self.dtype_size();
+                layer * layer_stride + token * self.kv_dim * self.dtype_size()
+            }
+            KvLayoutStrategy::Standard => {
+                let layer_stride = 2 * self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size();
+                let half_stride = self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size();
+                let head_stride = self.page_size * self.head_dim * self.dtype_size();
+                let token_stride = self.head_dim * self.dtype_size();
+                layer * layer_stride + kv_half * half_stride + head * head_stride + token * token_stride
+            }
         }
     }
 

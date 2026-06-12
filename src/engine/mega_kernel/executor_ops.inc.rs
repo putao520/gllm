@@ -1,4 +1,5 @@
 impl MegaKernelExecutor {
+
     /// Diagnostic: run prefill only (max_new_tokens=0) and return logits from scratchpad.
     ///
     /// Returns logits for the last prompt token: shape [vocab_size].
@@ -51,7 +52,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no persistent KV
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -142,7 +143,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no persistent KV
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -230,7 +231,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache: null
+                std::ptr::null_mut(), // kv_cache_ptr: null — encode graph has no persistent KV
                 positions.as_ptr(),
                 std::ptr::null(), // seq_lens: null
                 1,                // batch_size
@@ -325,7 +326,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // kv_cache_ptr: null — rerank graph has no generate loop
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -428,7 +429,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -518,7 +519,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -780,14 +781,14 @@ impl MegaKernelExecutor {
     pub fn select_variant_for_batch(
         &self,
         kv_tier: Option<&str>,
-        has_moe: bool,
+        moe_config: Option<crate::jit::variant_registry::MoeConfigBrief>,
         guardrail_active: bool,
         rag_active: bool,
         batch_golden_size: Option<usize>,
     ) -> Option<&crate::jit::variant_registry::CompiledVariant> {
         let key = crate::jit::variant_registry::VariantRegistry::derive_key(
             "default",
-            has_moe,
+            moe_config,
             guardrail_active,
             None,
             rag_active,
@@ -868,7 +869,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // kv_cache_ptr: null — forward-only graph has no persistent KV
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,

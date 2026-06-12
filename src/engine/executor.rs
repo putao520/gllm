@@ -53,7 +53,9 @@ pub(crate) struct LoaderContext<B: Backend<E> + 'static, E: Element> {
     pub(super) sg_ring_buffer: std::sync::Arc<crate::semantic_gatekeeper::GatekeeperRingBuffer>,
     pub(super) qtap_cfg: gllm_kernels::compiler::graph::QTapGraphConfig,
     pub(super) sg_shared_memory: std::sync::Mutex<crate::semantic_gatekeeper::SgSharedMemory>,
-    pub(super) is_moe: bool,
+    /// MoE configuration (None = dense FFN, Some = MoE with routing).
+    /// ARCH-JIT-DATA-YIELDS: replaces is_moe bool with topology-derived config.
+    pub(super) moe_config: Option<gllm_kernels::compiler::MoeConfig>,
 }
 
 pub(super) struct WeightMaps {

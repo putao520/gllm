@@ -20,7 +20,7 @@ use super::executor::{
 impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub(super) fn init_moe_subsystem(
         geometry: &crate::model_config::ModelGeometry,
-        is_moe: bool,
+        moe_config: Option<&gllm_kernels::compiler::MoeConfig>,
     ) -> (
         Option<crate::moe::thermal::ExpertThermalManager>,
         Option<crate::moe::fault_handler::ExpertFaultHandler>,
@@ -29,26 +29,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Option<crate::jit::director::JitDirector>,
         Option<crate::moe::hot_patch::HotPatchManager>,
     ) {
-        if !is_moe {
-            return (None, None, None, None, None, None);
-        }
+        let moe = match moe_config {
+            None => return (None, None, None, None, None, None),
+            Some(cfg) => cfg,
+        };
         let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
         let bias = &exec_plan.strategy_bias;
-        let thermal = crate::moe::thermal::ExpertThermalManager::new(geometry.num_experts)
+        let thermal = crate::moe::thermal::ExpertThermalManager::new(moe.num_experts)
             .with_eviction_aggressiveness(bias.expert_eviction_aggressiveness());
-        let fault_handler = crate::moe::fault_handler::ExpertFaultHandler::new(geometry.num_experts);
+        let fault_handler = crate::moe::fault_handler::ExpertFaultHandler::new(moe.num_experts);
         let route_config = crate::moe::routing::ExpertRouteConfig::new(
-            geometry.num_experts,
-            geometry.moe_top_k,
+            moe.num_experts,
+            moe.top_k,
         );
         let dispatcher = crate::moe::dispatch::MoeHardwareDispatcher::new(route_config.clone());
         let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
-            geometry.num_experts,
+            moe.num_experts,
             geometry.expert_weight_bytes(),
         )
         .with_prefetch_priority(bias.expert_prefetch_priority());
         let director_config = crate::jit::director::DirectorConfig {
-            num_experts: geometry.num_experts,
+            num_experts: moe.num_experts,
             ..Default::default()
         };
         let director = crate::jit::director::JitDirector::spawn(director_config);
@@ -387,8 +388,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             geometry.num_kv_heads, full_num_kv_heads,
             small_intermediate, large_intermediate, large_ffn_start_segment,
         );
-        eprintln!("[DIAG-HETERO-CFG] head_dim={} sliding_q={} full_q={} sliding_kv={} full_kv={}",
-            head_dim, sliding_num_q_heads, full_num_q_heads, geometry.num_kv_heads, full_num_kv_heads);
 
         Some(gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig {
             num_segments,
@@ -438,6 +437,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             })
     }
 
+    // ARCH-BUILD-COMPILE-BOUNDARY: BUILD-stage strategy selection by manifest.kind.
+    // The compiler (COMPILE stage) never branches on ModelKind; it compiles whatever
+    // graph topology it receives (SPEC/39 §0.1).
     /// Build BusinessConfig from model geometry and manifest.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn build_business_config(
@@ -799,7 +801,7 @@ mod tests {
     #[test]
     fn init_moe_subsystem_non_moe_returns_all_none() {
         let geo = make_geometry();
-        let result = TestExec::init_moe_subsystem(&geo, false);
+        let result = TestExec::init_moe_subsystem(&geo, None);
         assert!(result.0.is_none());
         assert!(result.1.is_none());
         assert!(result.2.is_none());

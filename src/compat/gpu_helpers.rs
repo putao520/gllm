@@ -185,7 +185,7 @@ pub(super) fn gpu_swap_out_pages(
         let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
         let total_page_bytes = meta.page_bytes();
 
-        if meta.is_mla {
+        if meta.layout == super::KvLayoutStrategy::MlaCompressed {
             // MLA: [layers, seq, d_c+d_rope] — single contiguous copy per layer
             let layer_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size();
             let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size();
@@ -257,7 +257,7 @@ pub(super) fn gpu_swap_in_pages(
 
         let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
 
-        if meta.is_mla {
+        if meta.layout == super::KvLayoutStrategy::MlaCompressed {
             // MLA: [layers, seq, d_c+d_rope]
             let layer_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size();
             let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size();
@@ -475,8 +475,8 @@ pub struct GpuPagedKvPool {
     kv_dim: usize,
     /// Bytes per element (4 for F32, 2 for F16/BF16).
     elem_bytes: usize,
-    /// Whether this is an MLA model.
-    is_mla: bool,
+    /// KV cache layout strategy (topology-derived, not bool).
+    layout: super::KvLayoutStrategy,
     /// Free page bitmap: true = free, false = allocated.
     free_pages: Vec<bool>,
 }
@@ -493,12 +493,13 @@ impl GpuPagedKvPool {
         head_dim: usize,
         kv_dim: usize,
         elem_bytes: usize,
-        is_mla: bool,
+        layout: super::KvLayoutStrategy,
     ) -> Result<Self, BE> {
-        let page_stride = if is_mla {
-            num_layers * page_size * kv_dim * elem_bytes
-        } else {
-            num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes
+        let page_stride = match layout {
+            super::KvLayoutStrategy::MlaCompressed =>
+                num_layers * page_size * kv_dim * elem_bytes,
+            super::KvLayoutStrategy::Standard =>
+                num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes,
         };
         let total_bytes = num_pages * page_stride;
         let device_ptr = backend.raw_alloc(total_bytes).map_err(|e| {
@@ -514,7 +515,7 @@ impl GpuPagedKvPool {
             head_dim,
             kv_dim,
             elem_bytes,
-            is_mla,
+            layout,
             free_pages: vec![true; num_pages],
         })
     }
@@ -576,7 +577,7 @@ impl GpuPagedKvPool {
         kv_head: usize,
         token_in_page: usize,
     ) -> usize {
-        if self.is_mla {
+        if self.layout == super::KvLayoutStrategy::MlaCompressed {
             let layer_stride = self.page_size * self.kv_dim * self.elem_bytes;
             page_id as usize * self.page_stride
                 + layer * layer_stride
@@ -606,7 +607,7 @@ impl std::fmt::Debug for GpuPagedKvPool {
             .field("page_size", &self.page_size)
             .field("num_layers", &self.num_layers)
             .field("kv_dim", &self.kv_dim)
-            .field("is_mla", &self.is_mla)
+            .field("layout", &self.layout)
             .field("num_free", &self.num_free())
             .finish()
     }

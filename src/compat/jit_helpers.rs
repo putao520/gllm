@@ -13,6 +13,9 @@ fn bytes_as_f32(s: &[u8]) -> &[f32] {
 
 /// Convert typed bytes (F16/BF16/F32) to Vec<f32>.
 /// F32: zero-copy reinterpret. F16/BF16: element-wise conversion.
+// ARCH-JIT-DATA-YIELDS: BUILD-stage dtype conversion — weight preprocessing
+// at model load time. Different source dtypes require different conversion logic.
+// This is NOT a JIT compile-time branch.
 pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
     if data.is_empty() {
         return Vec::new();

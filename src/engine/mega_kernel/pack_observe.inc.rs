@@ -112,6 +112,9 @@ fn pack_weights_from_graph(
         }
     }
     if false && !raw_floats.is_empty() {
+        // ARCH-JIT-DATA-YIELDS: BUILD-stage dtype dispatch — weight packing requires
+        // per-dtype copy logic at model load time. This is NOT a JIT compile-time branch;
+        // different weight dtypes genuinely require different deserialization paths.
         for (cn, offset) in named_offsets {
             if cn.contains("qkv_proj") || cn.contains("gate_proj") {
                 let ext = name_map.resolve_external_to_string(cn);
@@ -553,6 +556,19 @@ fn pack_weights_from_graph(
                     continue;
                 }
 
+                // DIAG: verify Q4_1 weight data at packing for q_proj L0
+                if layer_idx == 0 && canonical_name.contains("q_proj") && copy_size >= 20 {
+                    let src_first = unsafe { std::slice::from_raw_parts(ptr, 20) };
+                    let d_bits = u16::from_le_bytes([src_first[0], src_first[1]]);
+                    let m_bits = u16::from_le_bytes([src_first[2], src_first[3]]);
+                    let d_val = half::f16::from_bits(d_bits).to_f32();
+                    let m_val = half::f16::from_bits(m_bits).to_f32();
+                    let nib0 = src_first[4] & 0x0F;
+                    let nib1 = (src_first[4] >> 4) & 0x0F;
+                    eprintln!("[PACK-Q41-CHECK] {} off={} size={} block0: d={:.6}(0x{:04x}) m={:.6}(0x{:04x}) nib[0]={} nib[16]={}",
+                        canonical_name, abs_off, copy_size, d_val, d_bits, m_val, m_bits, nib0, nib1);
+                }
+
                 if layer_idx == 0 {
                     let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
                     blob[abs_off..abs_off + copy_size].copy_from_slice(src);
@@ -562,10 +578,51 @@ fn pack_weights_from_graph(
                         if !layer_ptr.is_null() {
                             let layer_size = *weight_sizes.get(&layer_cn).unwrap_or(&size);
                             let layer_copy = layer_size.min(copy_size);
+                            if layer_size != copy_size && layer_size > 0 && copy_size > 0 {
+                                // Mixed quantization: layer uses a different format than the template.
+                                // Detect Q4_0 → Q4_1 conversion: template is 20 bytes/block, layer is 18 bytes/block.
+                                let template_bb = copy_size / (layer_size / 18);
+                                if template_bb == 20 && layer_size % 18 == 0 && copy_size % 20 == 0 {
+                                    // Re-quantize Q4_0 → Q4_1:
+                                    // Q4_0 block: [scale_f16(2B)][nibbles(16B)] = 18B, value = (nibble-8)*scale
+                                    // Q4_1 block: [d_f16(2B)][m_f16(2B)][nibbles(16B)] = 20B, value = nibble*d + m
+                                    // Conversion: d = scale, m = -8 * scale (f16), nibbles = same
+                                    let num_blocks = layer_size / 18;
+                                    let src = unsafe { std::slice::from_raw_parts(layer_ptr, layer_size) };
+                                    let dst = &mut blob[abs_off..abs_off + num_blocks * 20];
+                                    for bi in 0..num_blocks {
+                                        let s_off = bi * 18;
+                                        let d_off = bi * 20;
+                                        let scale_f16_bits = u16::from_le_bytes([src[s_off], src[s_off + 1]]);
+                                        let scale_f32 = half::f16::from_bits(scale_f16_bits).to_f32();
+                                        // d = scale
+                                        dst[d_off] = src[s_off];
+                                        dst[d_off + 1] = src[s_off + 1];
+                                        // m = -8 * scale (as f16)
+                                        let m_f16 = half::f16::from_f32(-8.0 * scale_f32);
+                                        let m_bits = m_f16.to_bits();
+                                        dst[d_off + 2] = m_bits as u8;
+                                        dst[d_off + 3] = (m_bits >> 8) as u8;
+                                        // nibbles = same
+                                        dst[d_off + 4..d_off + 20].copy_from_slice(&src[s_off + 2..s_off + 18]);
+                                    }
+                                    if canonical_name.contains("down_proj") && layer_idx <= 4 {
+                                        eprintln!("[PACK-REQUANT] {} L{} Q4_0→Q4_1: {} blocks at off={}",
+                                            canonical_name, layer_idx, num_blocks, abs_off);
+                                    }
+                                    continue; // skip the raw copy below
+                                }
+                                eprintln!("[PACK-WARN] {} L{} size mismatch: layer_size={} copy_size={} — no requant handler",
+                                    canonical_name, layer_idx, layer_size, copy_size);
+                            }
                             let src = unsafe { std::slice::from_raw_parts(layer_ptr, layer_copy) };
                             blob[abs_off..abs_off + layer_copy].copy_from_slice(src);
                         }
                     } else {
+                        if canonical_name.contains("down_proj") && layer_idx <= 4 {
+                            eprintln!("[PACK-DIAG] {} L{} NOT found in weight_ptrs, reusing L0 data copy_size={}",
+                                canonical_name, layer_idx, copy_size);
+                        }
                         let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
                         blob[abs_off..abs_off + copy_size].copy_from_slice(src);
                     }

@@ -95,11 +95,11 @@ mod tests {
         let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &BusinessConfig::default(), 2048)
             .expect("graph build should succeed");
 
-        // Single-template: 1 × 15 layer ops + 6 global ops = 21
-        // layer: input_norm + q + k + v + rope_q + rope_k + mha + o + resid + post_norm
-        //        + gate + up + swiglu + down + ffn_resid = 15
+        // Single-template: 1 × 15 layer ops + 1 kv_write + 6 global ops = 22
+        // layer: input_norm + q + k + v + rope_q + rope_k + kv_write + mha + o + resid + post_norm
+        //        + gate + up + swiglu + down + ffn_resid = 15 + kv_write = 16
         // global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
-        assert_eq!(graph.ops.len(), 21, "expected 21 ops, got {}: {:?}",
+        assert_eq!(graph.ops.len(), 22, "expected 22 ops, got {}: {:?}",
             graph.ops.len(), graph.ops.iter().map(|o| o.label.clone()).collect::<Vec<_>>());
 
         // Verify canonical tensor names are used
@@ -277,11 +277,11 @@ mod tests {
         let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &BusinessConfig::default(), 2048)
             .expect("graph build should succeed");
 
-        // Single-template: 1 × 17 layer ops + 6 global ops = 23
-        // layer: input_norm + q + k + v + q_norm + k_norm + rope_q + rope_k + mha + o + resid + post_norm
-        //        + gate + up + swiglu + down + ffn_resid = 17
+        // Single-template: 1 × 17 layer ops + 1 kv_write + 6 global ops = 24
+        // layer: input_norm + q + k + v + q_norm + k_norm + rope_q + rope_k + kv_write + mha + o + resid + post_norm
+        //        + gate + up + swiglu + down + ffn_resid = 17 + kv_write = 18
         // global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
-        let expected = 17 + 6;
+        let expected = 18 + 6;
         assert_eq!(graph.ops.len(), expected, "expected {} ops, got {}: {:?}",
             expected, graph.ops.len(), graph.ops.iter().map(|o| o.label.clone()).collect::<Vec<_>>());
 
@@ -359,9 +359,10 @@ mod tests {
         //   MoE: moe_gate + topk = 2
         //   Per expert (4): gate_gemm + gate_mask + up_gemm + swiglu + down_gemm + cond_add = 6×4 = 24
         //   moe_resid = 1
-        //   Total per-layer = 10 + 2 + 24 + 1 = 37
+        //   kv_write = 1
+        //   Total per-layer = 10 + 2 + 24 + 1 + 1 = 38
         // Global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
-        let expected = 37 + 6;
+        let expected = 38 + 6;
         assert_eq!(graph.ops.len(), expected, "expected {} ops, got {}: {:?}",
             expected, graph.ops.len(),
             graph.ops.iter().map(|o| o.label.clone()).collect::<Vec<_>>());

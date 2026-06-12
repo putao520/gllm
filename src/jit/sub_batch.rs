@@ -357,11 +357,11 @@ impl SubBatchDispatcher {
         &self,
         attention_sparsity: f32,  // 0.0 = 全有效, 1.0 = 全跳过
         dead_neuron_ratio: f32,    // 0.0 = 全活, 1.0 = 全死
-        is_moe: bool,
+        has_moe_ops: bool,
         moe_active_experts: f32,   // 活跃专家比例 (0.0-1.0)
     ) -> GraphShape {
         // §12.1 分类规则
-        if is_moe && moe_active_experts < 0.5 {
+        if has_moe_ops && moe_active_experts < 0.5 {
             GraphShape::MoeSparse
         } else if dead_neuron_ratio > 0.6 {
             GraphShape::NarrowQuant

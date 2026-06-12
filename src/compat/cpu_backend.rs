@@ -49,8 +49,8 @@ pub(crate) struct KvCacheBuffer {
     /// Effective KV dimension per token per layer.
     /// Standard: num_kv_heads * head_dim. MLA: d_c + d_rope.
     pub kv_dim: usize,
-    /// Whether this is an MLA model (affects layout: no K/V split, no per-head dimension).
-    pub is_mla: bool,
+    /// KV cache layout strategy (topology-derived, not bool).
+    pub layout: crate::compat::KvLayoutStrategy,
     /// Page size (tokens per page)
     pub page_size: usize,
     /// Current sequence length written (tokens stored so far)
@@ -85,7 +85,7 @@ impl KvCacheBuffer {
             _ => gllm_kernels::types::DType::F32,
         };
         let num_layers = config.num_layers();
-        let is_mla = config.is_mla();
+        let layout = if config.is_mla() { crate::compat::KvLayoutStrategy::MlaCompressed } else { crate::compat::KvLayoutStrategy::Standard };
         let kv_dim = config.kv_dim();
 
         // SharedKvRef: 计算 donor 映射
@@ -95,14 +95,17 @@ impl KvCacheBuffer {
             config.attention_pattern(),
         );
 
-        let (k_bytes, v_bytes) = if is_mla {
-            // MLA: single compressed vector [num_layers, max_seq_len, d_c + d_rope]
-            let total = effective_layers * config.max_seq_len() * kv_dim * elem_bytes;
-            (total, 0usize)
-        } else {
-            // Standard: K and V each [num_layers, num_kv_heads, max_seq_len, head_dim]
-            let total = effective_layers * config.num_heads() * config.max_seq_len() * config.head_dim() * elem_bytes;
-            (total, total)
+        let (k_bytes, v_bytes) = match layout {
+            crate::compat::KvLayoutStrategy::MlaCompressed => {
+                // MLA: single compressed vector [num_layers, max_seq_len, d_c + d_rope]
+                let total = effective_layers * config.max_seq_len() * kv_dim * elem_bytes;
+                (total, 0usize)
+            }
+            crate::compat::KvLayoutStrategy::Standard => {
+                // Standard: K and V each [num_layers, num_kv_heads, max_seq_len, head_dim]
+                let total = effective_layers * config.num_heads() * config.max_seq_len() * config.head_dim() * elem_bytes;
+                (total, total)
+            }
         };
         Self {
             k: vec![0u8; k_bytes],
@@ -112,7 +115,7 @@ impl KvCacheBuffer {
             max_seq_len: config.max_seq_len(),
             head_dim: config.head_dim(),
             kv_dim,
-            is_mla,
+            layout,
             page_size: config.page_size,
             seq_len: 0,
             elem_bytes,
@@ -168,7 +171,7 @@ impl KvCacheBuffer {
             Some(donor) => donor,
             None => layer_i,
         };
-        if self.is_mla {
+        if self.layout == crate::compat::KvLayoutStrategy::MlaCompressed {
             // MLA: [layers, max_seq_len, kv_dim]
             effective_layer * self.max_seq_len * self.kv_dim * self.elem_bytes
         } else {
@@ -285,8 +288,8 @@ pub struct PagedKvPool {
     kv_dim: usize,
     /// Bytes per element (4 for F32, 2 for F16/BF16).
     elem_bytes: usize,
-    /// Whether this is an MLA model.
-    is_mla: bool,
+    /// KV cache layout strategy (topology-derived, not bool).
+    layout: crate::compat::KvLayoutStrategy,
 }
 
 impl PagedKvPool {
@@ -300,7 +303,7 @@ impl PagedKvPool {
     /// * `head_dim` - Dimension per attention head (unused for sizing in MLA)
     /// * `kv_dim` - Effective KV dimension per token per layer
     /// * `elem_bytes` - Bytes per element (4 for F32)
-    /// * `is_mla` - Whether this is an MLA model
+    /// * `layout` - KV cache layout strategy (topology-derived)
     pub fn new(
         num_pages: usize,
         page_size: usize,
@@ -309,12 +312,11 @@ impl PagedKvPool {
         head_dim: usize,
         kv_dim: usize,
         elem_bytes: usize,
-        is_mla: bool,
+        layout: crate::compat::KvLayoutStrategy,
     ) -> Self {
-        let page_stride = if is_mla {
-            num_layers * page_size * kv_dim * elem_bytes
-        } else {
-            num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes
+        let page_stride = match layout {
+            crate::compat::KvLayoutStrategy::MlaCompressed => num_layers * page_size * kv_dim * elem_bytes,
+            crate::compat::KvLayoutStrategy::Standard => num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes,
         };
         let total_bytes = num_pages * page_stride;
         Self {
@@ -327,7 +329,7 @@ impl PagedKvPool {
             head_dim,
             kv_dim,
             elem_bytes,
-            is_mla,
+            layout,
         }
     }
 
@@ -378,7 +380,7 @@ impl PagedKvPool {
         kv_head: usize,
         token_in_page: usize,
     ) -> usize {
-        if self.is_mla {
+        if self.layout == crate::compat::KvLayoutStrategy::MlaCompressed {
             let layer_stride = self.page_size * self.kv_dim * self.elem_bytes;
             page_id as usize * self.page_stride
                 + layer * layer_stride
@@ -428,16 +430,19 @@ impl PagedKvPool {
         elem_bytes: usize,
         page_size: usize,
         num_pages: usize,
-        is_mla: bool,
+        layout: crate::compat::KvLayoutStrategy,
     ) -> (usize, usize) {
-        let (contiguous, page_stride) = if is_mla {
-            let c = num_layers * max_seq_len * kv_dim * elem_bytes;
-            let p = num_layers * page_size * kv_dim * elem_bytes;
-            (c, p)
-        } else {
-            let c = num_layers * 2 * num_kv_heads * max_seq_len * head_dim * elem_bytes;
-            let p = num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes;
-            (c, p)
+        let (contiguous, page_stride) = match layout {
+            crate::compat::KvLayoutStrategy::MlaCompressed => {
+                let c = num_layers * max_seq_len * kv_dim * elem_bytes;
+                let p = num_layers * page_size * kv_dim * elem_bytes;
+                (c, p)
+            }
+            crate::compat::KvLayoutStrategy::Standard => {
+                let c = num_layers * 2 * num_kv_heads * max_seq_len * head_dim * elem_bytes;
+                let p = num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes;
+                (c, p)
+            }
         };
         let paged = num_pages * page_stride;
         (contiguous, paged)
@@ -735,7 +740,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let head_dim = buffer.head_dim;
         let max_seq_len = buffer.max_seq_len;
         let kv_dim = buffer.kv_dim;
-        let is_mla = buffer.is_mla;
+        let layout = buffer.layout;
 
         let elem_bytes = buffer.elem_bytes;
 
@@ -748,7 +753,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                 )));
             }
 
-            if is_mla {
+            if layout == crate::compat::KvLayoutStrategy::MlaCompressed {
                 // MLA: [layers, max_seq_len, kv_dim] — single contiguous copy per layer
                 let layer_stride = max_seq_len * kv_dim * elem_bytes;
                 let actual_tokens = page_size.min(max_seq_len - token_start);
@@ -814,7 +819,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let head_dim = buffer.head_dim;
         let max_seq_len = buffer.max_seq_len;
         let kv_dim = buffer.kv_dim;
-        let is_mla = buffer.is_mla;
+        let layout = buffer.layout;
 
         for &(page_id, storage_key) in mappings {
             let page_data = swap.remove(&storage_key).ok_or_else(|| {
@@ -833,7 +838,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
 
             let elem_bytes = buffer.elem_bytes;
 
-            if is_mla {
+            if layout == crate::compat::KvLayoutStrategy::MlaCompressed {
                 // MLA: [layers, max_seq_len, kv_dim]
                 let layer_stride = max_seq_len * kv_dim * elem_bytes;
                 let actual_tokens = page_size.min(max_seq_len - token_start);
@@ -1095,7 +1100,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_standard_layout() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.num_pages(), 4);
         assert_eq!(pool.page_size(), 16);
         // page_stride = 2 layers * 2 * 4 heads * 16 tokens * 64 dim * 4 bytes = 65536
@@ -1105,7 +1110,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_mla_layout() {
-        let pool = PagedKvPool::new(8, 32, 3, 0, 0, 512, 2, true);
+        let pool = PagedKvPool::new(8, 32, 3, 0, 0, 512, 2, crate::compat::KvLayoutStrategy::MlaCompressed);
         assert_eq!(pool.num_pages(), 8);
         assert_eq!(pool.page_size(), 32);
         // page_stride = 3 layers * 32 tokens * 512 dim * 2 bytes = 98304
@@ -1114,7 +1119,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_of_standard_key() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         let base = 0usize;
         let offset = pool.offset_of(0, 0, false, 0, 0);
         assert_eq!(offset, base);
@@ -1122,7 +1127,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_of_standard_value() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         let key_head_stride = 16 * 64 * 4;
         let kv_half = 4 * key_head_stride;
         let val_offset = pool.offset_of(0, 0, true, 0, 0);
@@ -1131,7 +1136,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_of_layer1() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         let layer_stride = 2 * 4 * 16 * 64 * 4;
         let offset = pool.offset_of(0, 1, false, 0, 0);
         assert_eq!(offset, layer_stride);
@@ -1139,7 +1144,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_of_mla() {
-        let pool = PagedKvPool::new(4, 16, 2, 0, 0, 128, 4, true);
+        let pool = PagedKvPool::new(4, 16, 2, 0, 0, 128, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         let layer_stride = 16 * 128 * 4;
         let offset_l1_t5 = pool.offset_of(0, 1, false, 0, 5);
         assert_eq!(offset_l1_t5, layer_stride + 5 * 128 * 4);
@@ -1147,7 +1152,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_read_write_roundtrip() {
-        let mut pool = PagedKvPool::new(2, 4, 1, 2, 32, 64, 4, false);
+        let mut pool = PagedKvPool::new(2, 4, 1, 2, 32, 64, 4, crate::compat::KvLayoutStrategy::Standard);
         let data = &[0xAB, 0xCD, 0xEF, 0x01];
         assert!(pool.write_at(0, data));
         let read = pool.read_at(0, 4).unwrap();
@@ -1156,7 +1161,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_write_out_of_bounds() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         let data = &[0u8; 4];
         assert!(!pool.write_at(total - 2, data));
@@ -1164,7 +1169,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_read_out_of_bounds() {
-        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         assert!(pool.read_at(total - 2, 4).is_none());
     }
@@ -1172,7 +1177,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_memory_comparison_standard() {
         let (contiguous, paged) = PagedKvPool::memory_comparison(
-            32, 8, 4096, 128, 1024, 4, 16, 256, false,
+            32, 8, 4096, 128, 1024, 4, 16, 256, crate::compat::KvLayoutStrategy::Standard,
         );
         // contiguous = 32 * 2 * 8 * 4096 * 128 * 4 = 1,073,741,824
         assert_eq!(contiguous, 32 * 2 * 8 * 4096 * 128 * 4);
@@ -1185,7 +1190,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_memory_comparison_mla() {
         let (contiguous, paged) = PagedKvPool::memory_comparison(
-            32, 0, 4096, 0, 512, 2, 16, 256, true,
+            32, 0, 4096, 0, 512, 2, 16, 256, crate::compat::KvLayoutStrategy::MlaCompressed,
         );
         // contiguous = 32 * 4096 * 512 * 2
         assert_eq!(contiguous, 32 * 4096 * 512 * 2);
@@ -1195,7 +1200,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_debug_format() {
-        let pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let debug = format!("{pool:?}");
         assert!(debug.contains("PagedKvPool"));
         assert!(debug.contains("num_pages"));
@@ -1214,7 +1219,7 @@ mod tests {
             max_seq_len: 32,
             head_dim: 64,
             kv_dim: 128,
-            is_mla: false,
+            layout: crate::compat::KvLayoutStrategy::Standard,
             page_size: 16,
             seq_len: 0,
             elem_bytes: 4,
@@ -1238,7 +1243,7 @@ mod tests {
             max_seq_len: 8,
             head_dim: 32,
             kv_dim: 128,
-            is_mla: false,
+            layout: crate::compat::KvLayoutStrategy::Standard,
             page_size: 4,
             seq_len: 0,
             elem_bytes: 4,
@@ -1263,7 +1268,7 @@ mod tests {
             max_seq_len: 16,
             head_dim: 0,
             kv_dim: 64,
-            is_mla: true,
+            layout: crate::compat::KvLayoutStrategy::MlaCompressed,
             page_size: 8,
             seq_len: 0,
             elem_bytes: 2,
@@ -1288,7 +1293,7 @@ mod tests {
             max_seq_len: 8,
             head_dim: 32,
             kv_dim: 64,
-            is_mla: false,
+            layout: crate::compat::KvLayoutStrategy::Standard,
             page_size: 4,
             seq_len: 0,
             elem_bytes: 4,
@@ -1317,7 +1322,7 @@ mod tests {
             max_seq_len: 32,
             head_dim: 16,
             kv_dim: 16,
-            is_mla: false,
+            layout: crate::compat::KvLayoutStrategy::Standard,
             page_size: 8,
             seq_len: 10,
             elem_bytes: 4,
@@ -1350,7 +1355,7 @@ mod tests {
             max_seq_len: 32,
             head_dim: 16,
             kv_dim: 16,
-            is_mla: false,
+            layout: crate::compat::KvLayoutStrategy::Standard,
             page_size: 8,
             seq_len: 5,
             elem_bytes: 4,
@@ -1374,7 +1379,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1386,7 +1391,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 32,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 32,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1398,7 +1403,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 17,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 17,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1410,7 +1415,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 0], v: vec![0u8; 0],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 0, head_dim: 0,
-            kv_dim: 0, is_mla: false, page_size: 0, seq_len: 10,
+            kv_dim: 0, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 0, seq_len: 10,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1422,7 +1427,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1434,7 +1439,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 60, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1446,7 +1451,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 0], v: vec![0u8; 0],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 0, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 0, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1516,7 +1521,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 10,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 10,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 5, in_thinking: true,
         };
@@ -1530,7 +1535,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 10,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 10,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 10, in_thinking: false,
         };
@@ -1544,7 +1549,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1578,7 +1583,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 2, num_kv_heads: 2, max_seq_len: 8, head_dim: 32,
-            kv_dim: 64, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 64, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1590,7 +1595,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 2, num_kv_heads: 2, max_seq_len: 8, head_dim: 32,
-            kv_dim: 64, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 64, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1601,19 +1606,19 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_as_ptr_not_null() {
-        let pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(!pool.as_ptr().is_null());
     }
 
     #[test]
     fn paged_kv_pool_as_mut_ptr_not_null() {
-        let mut pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(!pool.as_mut_ptr().is_null());
     }
 
     #[test]
     fn paged_kv_pool_ptrs_same_address() {
-        let mut pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.as_ptr() as *mut u8, pool.as_mut_ptr());
     }
 
@@ -1621,13 +1626,13 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_page1() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.offset_of(1, 0, false, 0, 0), pool.page_stride());
     }
 
     #[test]
     fn paged_kv_pool_offset_page2_layer1() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         let s = pool.page_stride();
         let ls = 2 * 4 * 16 * 64 * 4;
         assert_eq!(pool.offset_of(2, 1, false, 0, 0), 2 * s + ls);
@@ -1635,7 +1640,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_head_and_token() {
-        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, crate::compat::KvLayoutStrategy::Standard);
         let hs = 8 * 32 * 4;
         let ts = 32 * 4;
         assert_eq!(pool.offset_of(0, 0, false, 2, 3), 2 * hs + 3 * ts);
@@ -1643,7 +1648,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_mla_page1_layer1() {
-        let pool = PagedKvPool::new(4, 16, 3, 0, 0, 128, 4, true);
+        let pool = PagedKvPool::new(4, 16, 3, 0, 0, 128, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         let s = pool.page_stride();
         let ls = 16 * 128 * 4;
         assert_eq!(pool.offset_of(1, 1, false, 0, 0), s + ls);
@@ -1651,7 +1656,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_mla_ignores_value_and_head() {
-        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, true);
+        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         assert_eq!(
             pool.offset_of(0, 0, false, 0, 4),
             pool.offset_of(0, 0, true, 99, 4),
@@ -1662,7 +1667,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_read_exact_boundary() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let t = pool.total_bytes();
         assert!(pool.write_at(t - 4, &[0xAA; 4]));
         assert_eq!(pool.read_at(t - 4, 4).unwrap(), &[0xAA; 4]);
@@ -1670,19 +1675,19 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_read_zero_len() {
-        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(pool.read_at(0, 0).is_some());
     }
 
     #[test]
     fn paged_kv_pool_write_zero_len() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(pool.write_at(0, &[]));
     }
 
     #[test]
     fn paged_kv_pool_write_read_multiple() {
-        let mut pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(2, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let ob = pool.page_stride();
         assert!(pool.write_at(0, &[0x11, 0x22]));
         assert!(pool.write_at(ob, &[0x33, 0x44]));
@@ -1694,21 +1699,21 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_mem_cmp_zero_pages() {
-        let (c, p) = PagedKvPool::memory_comparison(2, 4, 512, 64, 256, 4, 16, 0, false);
+        let (c, p) = PagedKvPool::memory_comparison(2, 4, 512, 64, 256, 4, 16, 0, crate::compat::KvLayoutStrategy::Standard);
         assert!(c > 0);
         assert_eq!(p, 0);
     }
 
     #[test]
     fn paged_kv_pool_mem_cmp_single_page() {
-        let (c, p) = PagedKvPool::memory_comparison(1, 1, 16, 32, 32, 4, 16, 1, false);
+        let (c, p) = PagedKvPool::memory_comparison(1, 1, 16, 32, 32, 4, 16, 1, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(c, 1 * 2 * 1 * 16 * 32 * 4);
         assert_eq!(p, c);
     }
 
     #[test]
     fn paged_kv_pool_mem_cmp_mla_zero_pages() {
-        let (c, p) = PagedKvPool::memory_comparison(2, 0, 512, 0, 128, 4, 16, 0, true);
+        let (c, p) = PagedKvPool::memory_comparison(2, 0, 512, 0, 128, 4, 16, 0, crate::compat::KvLayoutStrategy::MlaCompressed);
         assert!(c > 0);
         assert_eq!(p, 0);
     }
@@ -1717,21 +1722,21 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_zero_pages() {
-        let pool = PagedKvPool::new(0, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(0, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.num_pages(), 0);
         assert_eq!(pool.total_bytes(), 0);
     }
 
     #[test]
     fn paged_kv_pool_zero_pages_mla() {
-        let pool = PagedKvPool::new(0, 4, 1, 0, 0, 128, 2, true);
+        let pool = PagedKvPool::new(0, 4, 1, 0, 0, 128, 2, crate::compat::KvLayoutStrategy::MlaCompressed);
         assert_eq!(pool.num_pages(), 0);
         assert_eq!(pool.total_bytes(), 0);
     }
 
     #[test]
     fn paged_kv_pool_debug_shows_fields() {
-        let pool = PagedKvPool::new(3, 8, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(3, 8, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         let d = format!("{pool:?}");
         assert!(d.contains("PagedKvPool"));
         assert!(d.contains("num_pages: 3"));
@@ -1907,7 +1912,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1924,7 +1929,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1949,7 +1954,7 @@ mod tests {
         }}
         let buf = KvCacheBuffer {
             k, v, num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -1981,7 +1986,7 @@ mod tests {
         for t in 0..4 { let base = t * kd * eb; for i in 0..(kd * eb) { k[base + i] = 0xCC; }}
         let buf = KvCacheBuffer {
             k, v: vec![], num_layers: nl, num_kv_heads: 0, max_seq_len: ms, head_dim: 0,
-            kv_dim: kd, is_mla: true, page_size: ps, seq_len: 4,
+            kv_dim: kd, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2013,7 +2018,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 16,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 16,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2029,7 +2034,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 6,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 6,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2048,7 +2053,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2081,7 +2086,7 @@ mod tests {
         b.kv_store().lock().unwrap().insert(1234, KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         });
@@ -2099,7 +2104,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2114,7 +2119,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![],
             num_layers: 4, num_kv_heads: 0, max_seq_len: 16, head_dim: 0,
-            kv_dim: 32, is_mla: true, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 4, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             // Layer 2 shares donor 0, layer 3 shares donor 1
             kv_donor_map: vec![None, None, Some(0), Some(1)],
@@ -2162,7 +2167,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 1,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 1,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2177,7 +2182,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 20,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 20,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 7, in_thinking: true,
         };
@@ -2241,7 +2246,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 12,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 12,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 12, in_thinking: false,
         };
@@ -2257,7 +2262,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 16], v: vec![0u8; 16],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 1, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 1, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 1, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2273,7 +2278,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2293,7 +2298,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_mem_cmp_zero_layers() {
-        let (c, p) = PagedKvPool::memory_comparison(0, 4, 512, 64, 256, 4, 16, 8, false);
+        let (c, p) = PagedKvPool::memory_comparison(0, 4, 512, 64, 256, 4, 16, 8, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(c, 0);
         assert_eq!(p, 0);
     }
@@ -2302,7 +2307,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_mla_last_token() {
-        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, true);
+        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         let page_size = 8;
         let kv_dim = 64;
         let elem_bytes = 4;
@@ -2322,7 +2327,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![], v: vec![],
             num_layers: 0, num_kv_heads: 0, max_seq_len: 0, head_dim: 0,
-            kv_dim: 0, is_mla: false, page_size: 0, seq_len: 0,
+            kv_dim: 0, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 0, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![],
             persistent_seq_len: 0, in_thinking: false,
@@ -2422,7 +2427,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_write_overwrites() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(pool.write_at(0, &[0x11, 0x22, 0x33, 0x44]));
         assert_eq!(pool.read_at(0, 4).unwrap(), &[0x11, 0x22, 0x33, 0x44]);
         assert!(pool.write_at(0, &[0xAA, 0xBB]));
@@ -2433,7 +2438,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_standard_value_head2() {
-        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, crate::compat::KvLayoutStrategy::Standard);
         let hs = 8 * 32 * 4; // head stride = page_size * head_dim * elem_bytes
         let kv_half = 4 * hs; // value half offset
         let expected = kv_half + 2 * hs + 3 * 32 * 4; // head 2, token 3
@@ -2447,7 +2452,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 15,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 15,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 5, in_thinking: true,
         };
@@ -2463,7 +2468,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 30,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 30,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 8, in_thinking: true,
         };
@@ -2479,7 +2484,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 20,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 20,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2491,7 +2496,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_zero_pages_valid_pointers() {
-        let pool = PagedKvPool::new(0, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(0, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.num_pages(), 0);
         assert_eq!(pool.total_bytes(), 0);
     }
@@ -2755,13 +2760,13 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_page_zero_all_zeros() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.offset_of(0, 0, false, 0, 0), 0);
     }
 
     #[test]
     fn paged_kv_pool_offset_mla_page_zero_all_zeros() {
-        let pool = PagedKvPool::new(4, 16, 2, 0, 0, 128, 4, true);
+        let pool = PagedKvPool::new(4, 16, 2, 0, 0, 128, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         assert_eq!(pool.offset_of(0, 0, false, 0, 0), 0);
     }
 
@@ -2769,7 +2774,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_f16_standard_stride() {
-        let pool = PagedKvPool::new(4, 8, 2, 4, 32, 128, 2, false);
+        let pool = PagedKvPool::new(4, 8, 2, 4, 32, 128, 2, crate::compat::KvLayoutStrategy::Standard);
         // page_stride = 2 * 2 * 4 * 8 * 32 * 2 = 8192
         assert_eq!(pool.page_stride(), 2 * 2 * 4 * 8 * 32 * 2);
         assert_eq!(pool.total_bytes(), 4 * pool.page_stride());
@@ -2777,7 +2782,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_f16_mla_stride() {
-        let pool = PagedKvPool::new(2, 16, 3, 0, 0, 256, 2, true);
+        let pool = PagedKvPool::new(2, 16, 3, 0, 0, 256, 2, crate::compat::KvLayoutStrategy::MlaCompressed);
         // page_stride = 3 * 16 * 256 * 2 = 24576
         assert_eq!(pool.page_stride(), 3 * 16 * 256 * 2);
     }
@@ -2786,20 +2791,20 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_read_at_start_zero_len() {
-        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let slice = pool.read_at(0, 0).unwrap();
         assert!(slice.is_empty());
     }
 
     #[test]
     fn paged_kv_pool_write_at_start_zero_len() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(pool.write_at(0, &[]));
     }
 
     #[test]
     fn paged_kv_pool_read_at_offset_one() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         assert!(pool.write_at(1, &[0xFF]));
         let read = pool.read_at(1, 1).unwrap();
         assert_eq!(read, &[0xFF]);
@@ -2807,7 +2812,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_write_full_page() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let stride = pool.page_stride();
         let data = vec![0xAB; stride];
         assert!(pool.write_at(0, &data));
@@ -2822,7 +2827,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 16,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 16,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2834,7 +2839,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 15,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 15,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2846,7 +2851,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2860,7 +2865,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2879,7 +2884,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 2, max_seq_len: 16, head_dim: 8,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -2940,7 +2945,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_mem_cmp_large_dimensions() {
         let (c, p) = PagedKvPool::memory_comparison(
-            64, 32, 32768, 128, 4096, 2, 64, 512, false,
+            64, 32, 32768, 128, 4096, 2, 64, 512, crate::compat::KvLayoutStrategy::Standard,
         );
         // contiguous = 64 * 2 * 32 * 32768 * 128 * 2 = large
         // paged = 512 * (64 * 2 * 32 * 64 * 128 * 2)
@@ -2982,7 +2987,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_debug_includes_total_bytes() {
-        let pool = PagedKvPool::new(3, 8, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(3, 8, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         let debug = format!("{pool:?}");
         assert!(debug.contains("total_bytes"));
     }
@@ -2994,7 +2999,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 3, num_kv_heads: 1, max_seq_len: 8, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None, None],
             persistent_seq_len: 0, in_thinking: false,
@@ -3012,7 +3017,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3045,7 +3050,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 8192], v: vec![0u8; 8192],
             num_layers: 2, num_kv_heads: 2, max_seq_len: 8, head_dim: 32,
-            kv_dim: 64, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 64, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3060,7 +3065,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3072,7 +3077,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_last_head() {
-        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, crate::compat::KvLayoutStrategy::Standard);
         let last_head = 3;
         let hs = 8 * 32 * 4;
         let expected = last_head * hs;
@@ -3083,7 +3088,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_last_token_in_page() {
-        let pool = PagedKvPool::new(2, 8, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let last_token = 7;
         let expected = last_token * 32 * 4;
         assert_eq!(pool.offset_of(0, 0, false, 0, last_token), expected);
@@ -3099,7 +3104,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0xAA; tb], v: vec![0xBB; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3131,14 +3136,14 @@ mod tests {
         let buf1 = KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 2,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 2,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
         let buf2 = KvCacheBuffer {
             k: vec![0u8; 128], v: vec![0u8; 128],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 8, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 4,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 4,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3158,7 +3163,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 2, num_kv_heads: 2, max_seq_len: 8, head_dim: 8,
-            kv_dim: 16, is_mla: false, page_size: 1, seq_len: 1,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 1, seq_len: 1,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3171,7 +3176,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_mem_cmp_page_equals_max_seq() {
         let (c, p) = PagedKvPool::memory_comparison(
-            2, 4, 64, 32, 128, 4, 64, 4, false,
+            2, 4, 64, 32, 128, 4, 64, 4, crate::compat::KvLayoutStrategy::Standard,
         );
         // page_stride = 2 * 2 * 4 * 64 * 32 * 4 = same as contiguous layer
         let page_stride = 2 * 2 * 4 * 64 * 32 * 4;
@@ -3188,7 +3193,7 @@ mod tests {
         c.kv_store().lock().unwrap().insert(7777, KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         });
@@ -3201,7 +3206,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_mla_elem_bytes_one() {
-        let pool = PagedKvPool::new(2, 8, 3, 0, 0, 64, 1, true);
+        let pool = PagedKvPool::new(2, 8, 3, 0, 0, 64, 1, crate::compat::KvLayoutStrategy::MlaCompressed);
         // page_stride = 3 layers * 8 tokens * 64 dim * 1 byte = 1536
         assert_eq!(pool.page_stride(), 3 * 8 * 64 * 1);
         assert_eq!(pool.total_bytes(), 2 * 3 * 8 * 64 * 1);
@@ -3209,35 +3214,35 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_offset_last_page_id() {
-        let pool = PagedKvPool::new(8, 4, 1, 2, 16, 32, 4, false);
+        let pool = PagedKvPool::new(8, 4, 1, 2, 16, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let s = pool.page_stride();
         assert_eq!(pool.offset_of(7, 0, false, 0, 0), 7 * s);
     }
 
     #[test]
     fn paged_kv_pool_read_at_total_bytes_returns_none() {
-        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         assert!(pool.read_at(total, 1).is_none());
     }
 
     #[test]
     fn paged_kv_pool_read_at_total_bytes_zero_len() {
-        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         assert!(pool.read_at(total, 0).is_some());
     }
 
     #[test]
     fn paged_kv_pool_write_at_total_bytes_returns_false() {
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         assert!(!pool.write_at(total, &[0x00]));
     }
 
     #[test]
     fn paged_kv_pool_offset_standard_value_head3_token5() {
-        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, crate::compat::KvLayoutStrategy::Standard);
         let hs = 8 * 32 * 4;
         let kv_half = 4 * hs;
         let expected = kv_half + 3 * hs + 5 * 32 * 4;
@@ -3249,7 +3254,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3263,7 +3268,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 48,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 48,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3275,7 +3280,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 1, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3287,7 +3292,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 3, num_kv_heads: 2, max_seq_len: 8, head_dim: 16,
-            kv_dim: 32, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3314,7 +3319,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 5,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 5,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3368,7 +3373,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_mem_cmp_mla_one_page() {
         let (c, p) = PagedKvPool::memory_comparison(
-            2, 0, 64, 0, 32, 4, 16, 1, true,
+            2, 0, 64, 0, 32, 4, 16, 1, crate::compat::KvLayoutStrategy::MlaCompressed,
         );
         assert_eq!(c, 2 * 64 * 32 * 4);
         let page_stride = 2 * 16 * 32 * 4;
@@ -3386,7 +3391,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_new_1024_pages() {
-        let pool = PagedKvPool::new(1024, 4, 1, 1, 16, 16, 4, false);
+        let pool = PagedKvPool::new(1024, 4, 1, 1, 16, 16, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.num_pages(), 1024);
         let stride = 1 * 2 * 1 * 4 * 16 * 4;
         assert_eq!(pool.page_stride(), stride);
@@ -3398,7 +3403,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 2, num_kv_heads: 4, max_seq_len: 16, head_dim: 32,
-            kv_dim: 128, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 128, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3410,7 +3415,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 128, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 64, seq_len: 3,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 64, seq_len: 3,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3428,13 +3433,13 @@ mod tests {
             k: vec![0u8; 256],
             v: vec![],
             num_layers: 2, num_kv_heads: 0, max_seq_len: 16, head_dim: 0,
-            kv_dim: 32, is_mla: true, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 4, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
         assert!(buf.v.is_empty());
         assert!(!buf.k.is_empty());
-        assert!(buf.is_mla);
+        assert!(matches!(buf.layout, crate::compat::KvLayoutStrategy::MlaCompressed));
     }
 
     #[test]
@@ -3443,12 +3448,12 @@ mod tests {
             k: vec![0u8; 512],
             v: vec![0u8; 512],
             num_layers: 2, num_kv_heads: 1, max_seq_len: 8, head_dim: 8,
-            kv_dim: 8, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 8, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
         assert_eq!(buf.k.len(), buf.v.len());
-        assert!(!buf.is_mla);
+        assert!(matches!(buf.layout, crate::compat::KvLayoutStrategy::Standard));
     }
 
     #[test]
@@ -3456,7 +3461,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3469,7 +3474,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 64], v: vec![],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: true, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 2, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3482,7 +3487,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 8, max_seq_len: 4, head_dim: 32,
-            kv_dim: 256, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 256, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3494,13 +3499,13 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![],
             num_layers: 1, num_kv_heads: 0, max_seq_len: 8, head_dim: 0,
-            kv_dim: 512, is_mla: true, page_size: 4, seq_len: 0,
+            kv_dim: 512, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 4, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
         // MLA: kv_dim = d_c + d_rope, independent of num_kv_heads/head_dim
         assert_eq!(buf.kv_dim, 512);
-        assert!(buf.is_mla);
+        assert!(matches!(buf.layout, crate::compat::KvLayoutStrategy::MlaCompressed));
     }
 
     #[test]
@@ -3513,7 +3518,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_standard_elem_bytes_one_stride() {
-        let pool = PagedKvPool::new(4, 16, 2, 4, 32, 128, 1, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 32, 128, 1, crate::compat::KvLayoutStrategy::Standard);
         // page_stride = 2 * 2 * 4 * 16 * 32 * 1 = 8192
         assert_eq!(pool.page_stride(), 2 * 2 * 4 * 16 * 32 * 1);
         assert_eq!(pool.total_bytes(), 4 * 2 * 2 * 4 * 16 * 32 * 1);
@@ -3521,7 +3526,7 @@ mod tests {
 
     #[test]
     fn paged_kv_pool_zero_layers_standard_stride() {
-        let pool = PagedKvPool::new(4, 16, 0, 4, 32, 128, 4, false);
+        let pool = PagedKvPool::new(4, 16, 0, 4, 32, 128, 4, crate::compat::KvLayoutStrategy::Standard);
         assert_eq!(pool.page_stride(), 0);
         assert_eq!(pool.total_bytes(), 0);
     }
@@ -3547,7 +3552,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 32,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 32,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3565,7 +3570,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_cross_page_boundary() {
         // Arrange: 4 pages, 8 tokens per page, 2 layers, 2 heads, head_dim=32
-        let pool = PagedKvPool::new(4, 8, 2, 2, 32, 64, 4, false);
+        let pool = PagedKvPool::new(4, 8, 2, 2, 32, 64, 4, crate::compat::KvLayoutStrategy::Standard);
         // Act: get offset for page 3, layer 1, key, head 1, token 7 (last token)
         let offset = pool.offset_of(3, 1, false, 1, 7);
         // Assert: page_stride * 3 + layer_stride + head_stride + token_offset
@@ -3582,7 +3587,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_write_read_across_pages() {
         // Arrange
-        let mut pool = PagedKvPool::new(4, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(4, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let stride = pool.page_stride();
         let data_a = vec![0xCA; 8];
         let data_b = vec![0xFE; 8];
@@ -3606,7 +3611,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![],
             num_layers: 1, num_kv_heads: 0, max_seq_len: 8, head_dim: 0,
-            kv_dim: 16, is_mla: true, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3645,7 +3650,7 @@ mod tests {
         }
         let buf = KvCacheBuffer {
             k, v, num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; nl], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3691,7 +3696,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![],
             num_layers: 1, num_kv_heads: 0, max_seq_len: 8, head_dim: 0,
-            kv_dim: 16, is_mla: true, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3716,7 +3721,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3765,7 +3770,7 @@ mod tests {
     fn paged_kv_pool_mem_cmp_elem_bytes_one_standard() {
         // Arrange & Act
         let (c, p) = PagedKvPool::memory_comparison(
-            4, 2, 128, 32, 64, 1, 16, 8, false,
+            4, 2, 128, 32, 64, 1, 16, 8, crate::compat::KvLayoutStrategy::Standard,
         );
         // Assert: contiguous = 4 * 2 * 2 * 128 * 32 * 1
         let expected_contiguous = 4 * 2 * 2 * 128 * 32 * 1;
@@ -3783,7 +3788,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 1, seq_len: 5,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 1, seq_len: 5,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3813,7 +3818,7 @@ mod tests {
         }
         let buf = KvCacheBuffer {
             k, v: vec![], num_layers: nl, num_kv_heads: 0, max_seq_len: ms, head_dim: 0,
-            kv_dim: kd, is_mla: true, page_size: ps, seq_len: 4,
+            kv_dim: kd, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; nl], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3848,7 +3853,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_value_last_head_last_token() {
         // Arrange: page with 4 kv_heads, page_size=8, head_dim=32
-        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 4, 32, 128, 4, crate::compat::KvLayoutStrategy::Standard);
         let head_stride = 8 * 32 * 4;
         let kv_half = 4 * head_stride;
         let last_head = 3;
@@ -3870,7 +3875,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 13,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 13,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -3935,7 +3940,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_mla_page2_layer3() {
         // Arrange: 4 pages, page_size=16, 4 layers, kv_dim=64, elem_bytes=2
-        let pool = PagedKvPool::new(4, 16, 4, 0, 0, 64, 2, true);
+        let pool = PagedKvPool::new(4, 16, 4, 0, 0, 64, 2, crate::compat::KvLayoutStrategy::MlaCompressed);
         let layer_stride = 16 * 64 * 2;
         let token_offset = 10 * 64 * 2;
         let expected = 2 * pool.page_stride() + 3 * layer_stride + token_offset;
@@ -3958,7 +3963,7 @@ mod tests {
         let original = KvCacheBuffer {
             k: vec![0xAA; 64], v: vec![0xBB; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 8,
-            kv_dim: 8, is_mla: false, page_size: 2, seq_len: 3,
+            kv_dim: 8, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 3,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 2, in_thinking: false,
         };
@@ -3980,7 +3985,7 @@ mod tests {
         let mut original = KvCacheBuffer {
             k: vec![0x11; 32], v: vec![0x22; 32],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4015,7 +4020,7 @@ mod tests {
         }
         let buf = KvCacheBuffer {
             k, v, num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 8,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 8,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4046,7 +4051,7 @@ mod tests {
         for t in 4..8 { let base = t * hd * eb; for i in 0..(hd * eb) { k[base + i] = 0x33; v[base + i] = 0x44; } }
         let buf = KvCacheBuffer {
             k, v, num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 8,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 8,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4080,7 +4085,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 8, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 8,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 8,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4102,7 +4107,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 8, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4124,14 +4129,14 @@ mod tests {
         let buf_a = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
         let buf_b = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 16,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 16,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4156,7 +4161,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 15360], v: vec![],
             num_layers: 5, num_kv_heads: 0, max_seq_len: 32, head_dim: 0,
-            kv_dim: 48, is_mla: true, page_size: 8, seq_len: 0,
+            kv_dim: 48, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 8, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None; 5], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4177,7 +4182,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 128, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4216,7 +4221,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_page_size_accessor() {
         // Arrange
-        let pool = PagedKvPool::new(8, 32, 4, 6, 64, 384, 4, false);
+        let pool = PagedKvPool::new(8, 32, 4, 6, 64, 384, 4, crate::compat::KvLayoutStrategy::Standard);
         // Assert
         assert_eq!(pool.page_size(), 32);
         assert_eq!(pool.num_pages(), 8);
@@ -4234,7 +4239,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0x55; tb], v: vec![0x66; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4261,7 +4266,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; tb], v: vec![0u8; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 0,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 0,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4283,7 +4288,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_write_at_exact_end_boundary() {
         // Arrange
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         // Act & Assert: writing 1 byte at exactly total_bytes is out of bounds
         assert!(!pool.write_at(total, &[0x00]));
@@ -4320,7 +4325,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_standard_page_size_one() {
         // Arrange: page_size=1, 2 layers, 3 heads, head_dim=16, elem_bytes=4
-        let pool = PagedKvPool::new(8, 1, 2, 3, 16, 48, 4, false);
+        let pool = PagedKvPool::new(8, 1, 2, 3, 16, 48, 4, crate::compat::KvLayoutStrategy::Standard);
         // Assert: page_stride = 2 * 2 * 3 * 1 * 16 * 4 = 768
         let expected_stride = 2 * 2 * 3 * 1 * 16 * 4;
         assert_eq!(pool.page_stride(), expected_stride);
@@ -4337,7 +4342,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 768], v: vec![0u8; 768],
             num_layers: 3, num_kv_heads: 2, max_seq_len: 16, head_dim: 8,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 1, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; 3], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4371,7 +4376,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 512], v: vec![0u8; 512],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 8, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4390,7 +4395,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_write_read_full_pool_contents() {
         // Arrange
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 8, 8, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 8, 8, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         let data: Vec<u8> = (0..total).map(|i| (i % 256) as u8).collect();
         // Act
@@ -4409,7 +4414,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 10, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 32, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 32, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4441,7 +4446,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_mla_zero_layers() {
         // Arrange
-        let pool = PagedKvPool::new(4, 8, 0, 0, 0, 64, 4, true);
+        let pool = PagedKvPool::new(4, 8, 0, 0, 0, 64, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         // Assert: 0 layers → stride = 0 * 8 * 64 * 4 = 0
         assert_eq!(pool.page_stride(), 0);
         assert_eq!(pool.total_bytes(), 0);
@@ -4456,7 +4461,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 16, seq_len: 32,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 16, seq_len: 32,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4471,7 +4476,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_standard_zero_heads() {
         // Arrange: standard layout with 0 kv_heads → stride=0, total=0
-        let pool = PagedKvPool::new(4, 8, 2, 0, 32, 0, 4, false);
+        let pool = PagedKvPool::new(4, 8, 2, 0, 32, 0, 4, crate::compat::KvLayoutStrategy::Standard);
         // Assert: stride = layers * 2 * 0 * ... = 0
         assert_eq!(pool.page_stride(), 0);
         assert_eq!(pool.total_bytes(), 0);
@@ -4486,7 +4491,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 8192], v: vec![0u8; 8192],
             num_layers: 6, num_kv_heads: 2, max_seq_len: 8, head_dim: 16,
-            kv_dim: 32, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None, None, None, Some(2), Some(3)],
             persistent_seq_len: 0, in_thinking: false,
@@ -4514,7 +4519,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0x77; tb], v: vec![],
             num_layers: nl, num_kv_heads: 0, max_seq_len: ms, head_dim: 0,
-            kv_dim: kd, is_mla: true, page_size: ps, seq_len: 4,
+            kv_dim: kd, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4535,7 +4540,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_standard_zero_head_dim() {
         // Arrange: standard with head_dim=0 → all offsets collapse to 0
-        let pool = PagedKvPool::new(2, 4, 1, 2, 0, 0, 4, false);
+        let pool = PagedKvPool::new(2, 4, 1, 2, 0, 0, 4, crate::compat::KvLayoutStrategy::Standard);
         // Assert: any offset computation yields 0 since head_dim=0
         assert_eq!(pool.offset_of(0, 0, false, 0, 0), 0);
         assert_eq!(pool.offset_of(1, 0, false, 0, 0), 0);
@@ -4555,7 +4560,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0xFF; tb], v: vec![0xEE; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4577,7 +4582,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 512], v: vec![0u8; 512],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 25,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 25,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 10, in_thinking: true,
         };
@@ -4599,7 +4604,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_mla_value_flag_ignored() {
         // Arrange: MLA pool, compare is_value=false vs true at same position
-        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, true);
+        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         // Act
         let key_off = pool.offset_of(0, 0, false, 0, 3);
         let val_off = pool.offset_of(0, 0, true, 0, 3);
@@ -4614,7 +4619,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_mla_head_param_ignored() {
         // Arrange: MLA pool, head parameter should be ignored
-        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, true);
+        let pool = PagedKvPool::new(2, 8, 2, 0, 0, 64, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         // Act: same position but different kv_head values
         let head0 = pool.offset_of(0, 1, false, 0, 5);
         let head99 = pool.offset_of(0, 1, false, 99, 5);
@@ -4649,7 +4654,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 128, head_dim: 8,
-            kv_dim: 8, is_mla: false, page_size: 1, seq_len: 10,
+            kv_dim: 8, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 1, seq_len: 10,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4667,7 +4672,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 512], v: vec![0u8; 512],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4707,7 +4712,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_standard_full_params() {
         // Arrange: 2 pages, page_size=4, 2 layers, 2 heads, head_dim=8, elem_bytes=4
-        let pool = PagedKvPool::new(2, 4, 2, 2, 8, 16, 4, false);
+        let pool = PagedKvPool::new(2, 4, 2, 2, 8, 16, 4, crate::compat::KvLayoutStrategy::Standard);
         let page_stride = pool.page_stride();
         // Act: page=1, layer=1, value, head=1, token=2
         let offset = pool.offset_of(1, 1, true, 1, 2);
@@ -4797,7 +4802,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 8192], v: vec![0u8; 8192],
             num_layers: 5, num_kv_heads: 1, max_seq_len: 16, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None, None, Some(1), Some(2)],
             persistent_seq_len: 0, in_thinking: false,
@@ -4819,7 +4824,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_mla_value_and_head_both_ignored() {
         // Arrange: MLA pool
-        let pool = PagedKvPool::new(4, 16, 3, 0, 0, 64, 4, true);
+        let pool = PagedKvPool::new(4, 16, 3, 0, 0, 64, 4, crate::compat::KvLayoutStrategy::MlaCompressed);
         // Act: same layer/token with different is_value and kv_head
         let baseline = pool.offset_of(0, 1, false, 0, 5);
         let with_value = pool.offset_of(0, 1, true, 0, 5);
@@ -4843,7 +4848,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0xDD; tb], v: vec![0xEE; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 8,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 8,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4870,7 +4875,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 6144], v: vec![],
             num_layers: 6, num_kv_heads: 0, max_seq_len: 16, head_dim: 0,
-            kv_dim: 32, is_mla: true, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 4, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None, None, None, None, Some(0), Some(1)],
             persistent_seq_len: 0, in_thinking: false,
@@ -4899,7 +4904,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_read_last_single_byte() {
         // Arrange: 1 page, write a pattern into the pool
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         // Act: write at the very last byte
         assert!(pool.write_at(total - 1, &[0xFE]));
@@ -4914,7 +4919,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_read_full_pool_from_zero() {
         // Arrange
-        let mut pool = PagedKvPool::new(2, 4, 1, 1, 8, 8, 4, false);
+        let mut pool = PagedKvPool::new(2, 4, 1, 1, 8, 8, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         let pattern: Vec<u8> = (0..total).map(|i| (i.wrapping_mul(3) % 256) as u8).collect();
         assert!(pool.write_at(0, &pattern));
@@ -4934,7 +4939,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 32,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 32,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4952,7 +4957,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 12,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 12,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -4998,7 +5003,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0xAA; tb], v: vec![0xBB; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 8,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 8,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5054,7 +5059,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_high_page_id() {
         // Arrange: 8 pages, compute offset for page 7 layer 0
-        let pool = PagedKvPool::new(8, 4, 1, 2, 16, 32, 4, false);
+        let pool = PagedKvPool::new(8, 4, 1, 2, 16, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let stride = pool.page_stride();
         // Act
         let offset = pool.offset_of(7, 0, false, 0, 0);
@@ -5068,7 +5073,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_write_beyond_pool_fails() {
         // Arrange
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 8, 8, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 8, 8, 4, crate::compat::KvLayoutStrategy::Standard);
         let total = pool.total_bytes();
         // Act & Assert: writing at offset total+1 with any data fails
         assert!(!pool.write_at(total + 1, &[0x00]));
@@ -5084,14 +5089,14 @@ mod tests {
         let buf_a = KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
         let buf_b = KvCacheBuffer {
             k: vec![0u8; 128], v: vec![0u8; 128],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 8, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5134,7 +5139,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 7,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 7,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 7, in_thinking: false,
         };
@@ -5159,7 +5164,7 @@ mod tests {
     fn paged_kv_pool_mem_cmp_mla_page_equals_max_seq() {
         // Arrange & Act: MLA where page_size == max_seq_len
         let (contiguous, paged) = PagedKvPool::memory_comparison(
-            4, 0, 32, 0, 64, 2, 32, 8, true,
+            4, 0, 32, 0, 64, 2, 32, 8, crate::compat::KvLayoutStrategy::MlaCompressed,
         );
         // Assert: contiguous = 4 * 32 * 64 * 2 = 16384
         let expected_contiguous = 4 * 32 * 64 * 2;
@@ -5177,7 +5182,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 32768], v: vec![0u8; 32768],
             num_layers: 4, num_kv_heads: 1, max_seq_len: 32, head_dim: 64,
-            kv_dim: 64, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 64, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; 4], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5249,7 +5254,7 @@ mod tests {
         store_ref.lock().unwrap().insert(42, KvCacheBuffer {
             k: vec![0u8; 64], v: vec![0u8; 64],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 4, head_dim: 4,
-            kv_dim: 4, is_mla: false, page_size: 2, seq_len: 0,
+            kv_dim: 4, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 2, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         });
@@ -5267,7 +5272,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 512], v: vec![0u8; 512],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 5,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 5,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 10, in_thinking: false,
         };
@@ -5287,7 +5292,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 512], v: vec![0u8; 512],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 64, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 5,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 5,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 5, in_thinking: true,
         };
@@ -5313,7 +5318,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 128, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 256, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 256, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5328,7 +5333,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_large_page_id_computes_correctly() {
         // Arrange: small pool, compute offset formula for a high page_id
-        let pool = PagedKvPool::new(4, 8, 1, 2, 32, 64, 4, false);
+        let pool = PagedKvPool::new(4, 8, 1, 2, 32, 64, 4, crate::compat::KvLayoutStrategy::Standard);
         let stride = pool.page_stride();
         // Act: page_id=100 (beyond actual pool, but offset formula still computes)
         let offset = pool.offset_of(100, 0, false, 0, 0);
@@ -5354,7 +5359,7 @@ mod tests {
         }
         let buf = KvCacheBuffer {
             k, v: vec![], num_layers: nl, num_kv_heads: 0, max_seq_len: ms, head_dim: 0,
-            kv_dim: kd, is_mla: true, page_size: ps, seq_len: 6,
+            kv_dim: kd, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: ps, seq_len: 6,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5382,7 +5387,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 8192], v: vec![0u8; 8192],
             num_layers: 8, num_kv_heads: 1, max_seq_len: 8, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, Some(0), Some(0), None, None, Some(3), Some(3), None],
             persistent_seq_len: 0, in_thinking: false,
@@ -5414,7 +5419,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 256], v: vec![0u8; 256],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5451,7 +5456,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_standard_value_head0_last_token() {
         // Arrange: 2 pages, page_size=8, 1 layer, 4 heads, head_dim=16
-        let pool = PagedKvPool::new(2, 8, 1, 4, 16, 64, 4, false);
+        let pool = PagedKvPool::new(2, 8, 1, 4, 16, 64, 4, crate::compat::KvLayoutStrategy::Standard);
         let head_stride = 8 * 16 * 4;
         let kv_half = 4 * head_stride;
         let last_token = 7;
@@ -5490,7 +5495,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 4096], v: vec![0u8; 4096],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 8, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5519,7 +5524,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0u8; 1536], v: vec![],
             num_layers: 3, num_kv_heads: 0, max_seq_len: 32, head_dim: 0,
-            kv_dim: 16, is_mla: true, page_size: 8, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: 8, seq_len: 0,
             elem_bytes: 1, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; 3], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5539,7 +5544,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_construction_and_field_access() {
         // Arrange: 8 pages, page_size=16, 3 layers, 4 kv_heads, head_dim=64, kv_dim=256, elem=4
-        let pool = PagedKvPool::new(8, 16, 3, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(8, 16, 3, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         // Assert: all accessors return construction values
         assert_eq!(pool.num_pages(), 8);
         assert_eq!(pool.page_size(), 16);
@@ -5557,7 +5562,7 @@ mod tests {
             k: vec![0u8; 256],
             v: vec![0u8; 256],
             num_layers: 2, num_kv_heads: 1, max_seq_len: 8, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5675,7 +5680,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_single_page() {
         // Arrange: single page pool
-        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, false);
+        let mut pool = PagedKvPool::new(1, 4, 1, 1, 32, 32, 4, crate::compat::KvLayoutStrategy::Standard);
         let stride = pool.page_stride();
         // Assert: total_bytes == page_stride (only one page)
         assert_eq!(pool.total_bytes(), stride);
@@ -5697,7 +5702,7 @@ mod tests {
         let buf_f32 = KvCacheBuffer {
             k: vec![0u8; 1024], v: vec![0u8; 1024],
             num_layers: 2, num_kv_heads: 2, max_seq_len: 8, head_dim: 16,
-            kv_dim: 32, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5709,7 +5714,7 @@ mod tests {
         let buf_f16 = KvCacheBuffer {
             k: vec![0u8; 512], v: vec![0u8; 512],
             num_layers: 2, num_kv_heads: 2, max_seq_len: 8, head_dim: 16,
-            kv_dim: 32, is_mla: false, page_size: 4, seq_len: 0,
+            kv_dim: 32, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 0,
             elem_bytes: 2, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None, None], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5741,7 +5746,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_memory_alignment() {
         // Arrange: pool with typical alignment-friendly sizes
-        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, false);
+        let pool = PagedKvPool::new(4, 16, 2, 4, 64, 256, 4, crate::compat::KvLayoutStrategy::Standard);
         // Act: verify pointer alignment
         let ptr = pool.as_ptr() as usize;
         // Assert: Vec<u8> aligns to at least 1 byte (always true),
@@ -5863,7 +5868,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0xAA; tb], v: vec![0xBB; tb],
             num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; nl], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5893,7 +5898,7 @@ mod tests {
         let buf = KvCacheBuffer {
             k: vec![0xCC; tb], v: vec![],
             num_layers: nl, num_kv_heads: 0, max_seq_len: ms, head_dim: 0,
-            kv_dim: kd, is_mla: true, page_size: ps, seq_len: 4,
+            kv_dim: kd, layout: crate::compat::KvLayoutStrategy::MlaCompressed, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None; nl], persistent_seq_len: 0, in_thinking: false,
         };
@@ -5936,7 +5941,7 @@ mod tests {
         }
         let buf = KvCacheBuffer {
             k, v, num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None, None, Some(0), Some(1)],
             persistent_seq_len: 0, in_thinking: false,
@@ -5964,7 +5969,7 @@ mod tests {
         let mut buf = KvCacheBuffer {
             k: vec![0u8; 2048], v: vec![0u8; 2048],
             num_layers: 1, num_kv_heads: 1, max_seq_len: 32, head_dim: 16,
-            kv_dim: 16, is_mla: false, page_size: 4, seq_len: 8,
+            kv_dim: 16, layout: crate::compat::KvLayoutStrategy::Standard, page_size: 4, seq_len: 8,
             elem_bytes: 4, cache_dtype: gllm_kernels::types::DType::F32,
             kv_donor_map: vec![None], persistent_seq_len: 8, in_thinking: false,
         };
@@ -6014,7 +6019,7 @@ mod tests {
     #[test]
     fn paged_kv_pool_offset_consistency_with_stride() {
         // Arrange: pool with known dimensions
-        let pool = PagedKvPool::new(4, 8, 3, 2, 32, 64, 4, false);
+        let pool = PagedKvPool::new(4, 8, 3, 2, 32, 64, 4, crate::compat::KvLayoutStrategy::Standard);
         let stride = pool.page_stride();
         // Act: compute offset for page 2, layer 1, value, head 1, token 5
         let offset = pool.offset_of(2, 1, true, 1, 5);
@@ -6056,7 +6061,7 @@ mod tests {
         }
         let buf = KvCacheBuffer {
             k, v, num_layers: nl, num_kv_heads: nh, max_seq_len: ms, head_dim: hd,
-            kv_dim: nh * hd, is_mla: false, page_size: ps, seq_len: 4,
+            kv_dim: nh * hd, layout: crate::compat::KvLayoutStrategy::Standard, page_size: ps, seq_len: 4,
             elem_bytes: eb, cache_dtype: gllm_kernels::types::DType::F16,
             kv_donor_map: vec![None], persistent_seq_len: 0, in_thinking: false,
         };

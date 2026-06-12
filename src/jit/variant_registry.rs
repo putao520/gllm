@@ -66,6 +66,23 @@ pub enum SpecPhase {
     Verify,
 }
 
+/// MoE 配置摘要 — 替代 `moe_enabled: bool`
+///
+/// ARCH-JIT-DATA-YIELDS: MoE 存在性从配置推导，不是 bool flag。
+/// `Some` = 图含 MoE ops，`None` = 无 MoE ops。
+/// num_experts/top_k 影响变体选择（不同专家数可能需要不同代码路径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MoeConfigBrief {
+    pub num_experts: u32,
+    pub top_k: u32,
+}
+
+impl MoeConfigBrief {
+    pub fn from_manifest_moe(cfg: &crate::manifest::MoEConfig) -> Self {
+        Self { num_experts: cfg.num_experts as u32, top_k: cfg.num_experts_per_tok as u32 }
+    }
+}
+
 /// 变体签名 — 决定需要哪些机制的代码 (§18.4 VariantKey)
 ///
 /// 每个不同的 VariantKey 对应一份独立的 JIT 编译产物。
@@ -75,8 +92,8 @@ pub enum SpecPhase {
 pub struct VariantKey {
     /// 模型架构 (决定基础图结构)
     pub arch: String,
-    /// 是否含 MoE 层 (决定专家分发代码)
-    pub moe_enabled: bool,
+    /// MoE 配置 (决定专家分发代码), None = 无 MoE ops
+    pub moe_config: Option<MoeConfigBrief>,
     /// Guardrail 是否激活 (决定 probe 代码)
     pub guardrail_enabled: bool,
     /// 推测解码阶段 (None=标准, Some(Draft/Verify))
@@ -101,7 +118,7 @@ impl std::fmt::Display for VariantKey {
             f,
             "{}_{}{}_{}_{}_{}",
             self.arch,
-            if self.moe_enabled { "moe_" } else { "" },
+            if self.moe_config.is_some() { "moe_" } else { "" },
             match self.spec_phase {
                 Some(SpecPhase::Draft) => "draft_",
                 Some(SpecPhase::Verify) => "verify_",
@@ -233,32 +250,32 @@ impl VariantRegistry {
     /// 4. 放松 rag_enabled (false) + 全部放松
     pub fn find_closest(&self, key: &VariantKey) -> Option<&CompiledVariant> {
         // 原始约束
-        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_config, key.guardrail_enabled,
             key.spec_phase, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size, key.batch_golden_size) {
             return Some(v);
         }
         // 放松 spec_phase=None
-        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_config, key.guardrail_enabled,
             None, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size, key.batch_golden_size) {
             return Some(v);
         }
         // 放松 guardrail=false, spec_phase=original
-        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_config, false,
             key.spec_phase, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size, key.batch_golden_size) {
             return Some(v);
         }
         // 放松 guardrail=false, spec_phase=None
-        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_config, false,
             None, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size, key.batch_golden_size) {
             return Some(v);
         }
         // 放松 rag=false, guardrail=original, spec=original
-        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_config, key.guardrail_enabled,
             key.spec_phase, false, &key.quant_type, &key.kv_tier, key.golden_size, key.batch_golden_size) {
             return Some(v);
         }
         // 全部放松
-        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_config, false,
             None, false, &key.quant_type, &key.kv_tier, key.golden_size, key.batch_golden_size) {
             return Some(v);
         }
@@ -266,11 +283,11 @@ impl VariantRegistry {
     }
 
     /// 尝试精确匹配 + golden_size 放松 + batch_golden_size 放松
-    fn try_relaxed(&self, arch: &str, moe: bool, guard: bool,
+    fn try_relaxed(&self, arch: &str, moe: Option<MoeConfigBrief>, guard: bool,
                    spec: Option<SpecPhase>, rag: bool, qt: &Option<String>,
                    kv_tier: &Option<String>, max_gs: usize, batch_gs: Option<usize>) -> Option<&CompiledVariant> {
         let exact = VariantKey {
-            arch: arch.to_string(), moe_enabled: moe, guardrail_enabled: guard,
+            arch: arch.to_string(), moe_config: moe, guardrail_enabled: guard,
             spec_phase: spec, rag_enabled: rag, golden_size: max_gs,
             quant_type: qt.clone(), kv_tier: kv_tier.clone(),
             batch_golden_size: batch_gs,
@@ -281,7 +298,7 @@ impl VariantRegistry {
         // 放松 golden_size: 找 ≤ max_gs 的最大值
         let best = self.entries.keys()
             .filter(|k| {
-                k.arch == arch && k.moe_enabled == moe
+                k.arch == arch && k.moe_config == moe
                     && k.guardrail_enabled == guard && k.spec_phase == spec
                     && k.rag_enabled == rag && k.quant_type == *qt
                     && k.kv_tier == *kv_tier
@@ -292,7 +309,7 @@ impl VariantRegistry {
             .max();
         if let Some(best_gs) = best {
             let relaxed = VariantKey {
-                arch: arch.to_string(), moe_enabled: moe, guardrail_enabled: guard,
+                arch: arch.to_string(), moe_config: moe, guardrail_enabled: guard,
                 spec_phase: spec, rag_enabled: rag, golden_size: best_gs,
                 quant_type: qt.clone(), kv_tier: kv_tier.clone(),
                 batch_golden_size: batch_gs,
@@ -333,7 +350,7 @@ impl VariantRegistry {
     /// 在 build_batch() 阶段调用，收集 batch 中所有请求属性后生成 key
     pub fn derive_key(
         arch: impl Into<String>,
-        has_moe_layers: bool,
+        moe_config: Option<MoeConfigBrief>,
         guardrail_active: bool,
         spec_phase: Option<SpecPhase>,
         rag_active: bool,
@@ -344,7 +361,7 @@ impl VariantRegistry {
     ) -> VariantKey {
         VariantKey {
             arch: arch.into(),
-            moe_enabled: has_moe_layers,
+            moe_config,
             guardrail_enabled: guardrail_active,
             spec_phase,
             rag_enabled: rag_active,
@@ -380,10 +397,12 @@ impl Default for VariantRegistry {
 mod tests {
     use super::*;
 
+    const TEST_MOE: MoeConfigBrief = MoeConfigBrief { num_experts: 8, top_k: 2 };
+
     fn test_key(arch: &str, golden_size: usize) -> VariantKey {
         VariantKey {
             arch: arch.to_string(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -466,7 +485,7 @@ mod tests {
     fn test_derive_key() {
         let key = VariantRegistry::derive_key(
             "qwen3",
-            true,
+            Some(TEST_MOE),
             false,
             Some(SpecPhase::Draft),
             false,
@@ -476,8 +495,7 @@ mod tests {
             None,
         );
         assert_eq!(key.arch, "qwen3");
-        assert!(key.moe_enabled);
-        assert_eq!(key.spec_phase, Some(SpecPhase::Draft));
+        assert!(key.moe_config.is_some());        assert_eq!(key.spec_phase, Some(SpecPhase::Draft));
         assert_eq!(key.golden_size, 64);
         assert_eq!(key.batch_golden_size, None);
     }
@@ -486,7 +504,7 @@ mod tests {
     fn test_display_key() {
         let key = VariantKey {
             arch: "qwen3moe".to_string(),
-            moe_enabled: true,
+            moe_config: Some(MoeConfigBrief { num_experts: 8, top_k: 2 }),
             guardrail_enabled: false,
             spec_phase: Some(SpecPhase::Draft),
             rag_enabled: true,
@@ -575,7 +593,7 @@ mod tests {
         assert_eq!(k1, k2);
 
         let mut k3 = test_key("qwen3", 64);
-        k3.moe_enabled = true;
+        k3.moe_config = Some(MoeConfigBrief { num_experts: 8, top_k: 2 });
         assert_ne!(k1, k3);
 
         let mut set = HashSet::new();
@@ -588,7 +606,7 @@ mod tests {
     fn variant_key_display_with_quant_and_kv() {
         let key = VariantKey {
             arch: "llama".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: true,
             spec_phase: None,
             rag_enabled: false,
@@ -753,7 +771,7 @@ mod tests {
     fn derive_key_full_fields() {
         let key = VariantRegistry::derive_key(
             "deepseek",
-            true,
+            Some(TEST_MOE),
             true,
             Some(SpecPhase::Verify),
             true,
@@ -763,8 +781,7 @@ mod tests {
             Some(8),
         );
         assert_eq!(key.arch, "deepseek");
-        assert!(key.moe_enabled);
-        assert!(key.guardrail_enabled);
+        assert!(key.moe_config.is_some());        assert!(key.guardrail_enabled);
         assert_eq!(key.spec_phase, Some(SpecPhase::Verify));
         assert!(key.rag_enabled);
         assert_eq!(key.golden_size, 128);
@@ -891,7 +908,7 @@ mod tests {
     fn variant_key_display_verify_phase() {
         let key = VariantKey {
             arch: "llama".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: Some(SpecPhase::Verify),
             rag_enabled: false,
@@ -909,7 +926,7 @@ mod tests {
         // Both enabled: format is "{arch}_{}{}_g_r_{golden_size}"
         let key_enabled = VariantKey {
             arch: "test".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: true,
             spec_phase: None,
             rag_enabled: true,
@@ -925,7 +942,7 @@ mod tests {
         // Both disabled: format has "n_n_" for guardrail and rag
         let key_disabled = VariantKey {
             arch: "test".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -942,7 +959,7 @@ mod tests {
     fn variant_key_display_kv_tier_only() {
         let key = VariantKey {
             arch: "model".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -960,7 +977,7 @@ mod tests {
     fn variant_key_display_batch_only() {
         let key = VariantKey {
             arch: "model".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -1308,8 +1325,8 @@ mod tests {
         // Arrange
         let mut k1 = test_key("qwen3", 64);
         let mut k2 = test_key("qwen3", 64);
-        k1.moe_enabled = true;
-        k2.moe_enabled = false;
+        k1.moe_config = Some(MoeConfigBrief { num_experts: 8, top_k: 2 });
+        k2.moe_config = None;
         // Act & Assert
         assert_ne!(k1, k2);
     }
@@ -1392,7 +1409,7 @@ mod tests {
 
         // Act: query for MoE variant
         let mut query = test_key("qwen3", 64);
-        query.moe_enabled = true;
+        query.moe_config = Some(MoeConfigBrief { num_experts: 8, top_k: 2 });
         // Assert
         assert!(registry.find_closest(&query).is_none());
     }
@@ -1445,7 +1462,7 @@ mod tests {
         // Arrange & Act
         let key = VariantRegistry::derive_key(
             "test_arch",
-            false,
+            None,
             false,
             None,
             false,
@@ -1456,8 +1473,7 @@ mod tests {
         );
         // Assert
         assert_eq!(key.arch, "test_arch");
-        assert!(!key.moe_enabled);
-        assert!(!key.guardrail_enabled);
+        assert!(key.moe_config.is_none());        assert!(!key.guardrail_enabled);
         assert!(key.spec_phase.is_none());
         assert!(!key.rag_enabled);
         assert_eq!(key.golden_size, 32);
@@ -1472,7 +1488,7 @@ mod tests {
     fn variant_key_display_moe_only() {
         let key = VariantKey {
             arch: "deepseek".into(),
-            moe_enabled: true,
+            moe_config: Some(MoeConfigBrief { num_experts: 8, top_k: 2 }),
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -1491,7 +1507,7 @@ mod tests {
     fn variant_key_display_empty_arch() {
         let key = VariantKey {
             arch: String::new(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -1509,7 +1525,7 @@ mod tests {
     fn variant_key_display_golden_size_zero() {
         let key = VariantKey {
             arch: "m".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -1526,7 +1542,7 @@ mod tests {
     fn variant_key_display_batch_golden_size_zero() {
         let key = VariantKey {
             arch: "m".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -1543,7 +1559,7 @@ mod tests {
     fn variant_key_display_all_features_enabled() {
         let key = VariantKey {
             arch: "full".into(),
-            moe_enabled: true,
+            moe_config: Some(MoeConfigBrief { num_experts: 8, top_k: 2 }),
             guardrail_enabled: true,
             spec_phase: Some(SpecPhase::Draft),
             rag_enabled: true,
@@ -1657,13 +1673,13 @@ mod tests {
     fn registry_get_by_full_key_match() {
         let mut registry = VariantRegistry::new();
         let mut key = test_key("qwen3", 64);
-        key.moe_enabled = true;
+        key.moe_config = Some(TEST_MOE);
         key.guardrail_enabled = true;
         key.quant_type = Some("awq4".into());
         registry.register(test_variant(key.clone(), 1024)).unwrap();
 
         let found = registry.get(&key).unwrap();
-        assert!(found.key.moe_enabled);
+        assert!(found.key.moe_config.is_some());
         assert!(found.key.guardrail_enabled);
         assert_eq!(found.key.quant_type.as_deref(), Some("awq4"));
     }
@@ -1855,7 +1871,7 @@ mod tests {
         let found = registry.get(&key).unwrap();
         assert_eq!(found.key.arch, "qwen3");
         assert_eq!(found.key.golden_size, 64);
-        assert_eq!(found.key.moe_enabled, false);
+        assert!(found.key.moe_config.is_none());
     }
 
     #[test]
@@ -1920,7 +1936,7 @@ mod tests {
         let arch = String::from("qwen3");
         let key = VariantRegistry::derive_key(
             arch,
-            false,
+            None,
             false,
             None,
             false,
@@ -1936,7 +1952,7 @@ mod tests {
     fn derive_key_accepts_str_ref() {
         let key = VariantRegistry::derive_key(
             "qwen3",
-            false,
+            None,
             false,
             None,
             false,
@@ -1951,7 +1967,7 @@ mod tests {
     #[test]
     fn derive_key_guardrail_active_field() {
         let key = VariantRegistry::derive_key(
-            "test", false, true, None, false, 32, None, None, None,
+            "test", None, true, None, false, 32, None, None, None,
         );
         assert!(key.guardrail_enabled);
     }
@@ -1959,7 +1975,7 @@ mod tests {
     #[test]
     fn derive_key_rag_active_field() {
         let key = VariantRegistry::derive_key(
-            "test", false, false, None, true, 32, None, None, None,
+            "test", None, false, None, true, 32, None, None, None,
         );
         assert!(key.rag_enabled);
     }
@@ -1967,15 +1983,14 @@ mod tests {
     #[test]
     fn derive_key_moe_field() {
         let key = VariantRegistry::derive_key(
-            "test", true, false, None, false, 32, None, None, None,
+            "test", Some(TEST_MOE), false, None, false, 32, None, None, None,
         );
-        assert!(key.moe_enabled);
-    }
+        assert!(key.moe_config.is_some());    }
 
     #[test]
     fn derive_key_spec_phase_verify() {
         let key = VariantRegistry::derive_key(
-            "test", false, false, Some(SpecPhase::Verify), false, 32, None, None, None,
+            "test", None, false, Some(SpecPhase::Verify), false, 32, None, None, None,
         );
         assert_eq!(key.spec_phase, Some(SpecPhase::Verify));
     }
@@ -2053,11 +2068,11 @@ mod tests {
         // find_closest does not relax moe_enabled — it's always strict
         let mut registry = VariantRegistry::new();
         let mut key = test_key("qwen3", 64);
-        key.moe_enabled = false;
+        key.moe_config = None;
         registry.register(test_variant(key, 512)).unwrap();
 
         let mut query = test_key("qwen3", 64);
-        query.moe_enabled = true;
+        query.moe_config = Some(MoeConfigBrief { num_experts: 8, top_k: 2 });
         // moe_enabled mismatch cannot be relaxed by find_closest
         assert!(registry.find_closest(&query).is_none());
     }
@@ -2109,7 +2124,7 @@ mod tests {
         // Arrange: quant_type = Some("") should still append the underscore+value
         let key_some_empty = VariantKey {
             arch: "m".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -2134,7 +2149,7 @@ mod tests {
         // Arrange: kv_tier = Some("") should still produce the "kv" prefix
         let key = VariantKey {
             arch: "m".into(),
-            moe_enabled: false,
+            moe_config: None,
             guardrail_enabled: false,
             spec_phase: None,
             rag_enabled: false,
@@ -2203,12 +2218,12 @@ mod tests {
         // Arrange: register a variant that cannot match through any relaxation
         let mut registry = VariantRegistry::new();
         let mut key = test_key("qwen3", 64);
-        key.moe_enabled = true; // find_closest never relaxes moe_enabled
+        key.moe_config = Some(MoeConfigBrief { num_experts: 8, top_k: 2 }); // find_closest never relaxes moe_config
         registry.register(test_variant(key, 512)).unwrap();
 
         // Act: query non-MoE — moe_enabled mismatch is not relaxable
         let mut query = test_key("qwen3", 64);
-        query.moe_enabled = false;
+        query.moe_config = None;
         query.guardrail_enabled = true;
         query.rag_enabled = true;
         query.spec_phase = Some(SpecPhase::Verify);
@@ -2221,7 +2236,7 @@ mod tests {
     fn derive_key_golden_size_zero_boundary() {
         // Arrange & Act: golden_size = 0 is a valid boundary value
         let key = VariantRegistry::derive_key(
-            "boundary_test", false, false, None, false, 0, None, None, None,
+            "boundary_test", None, false, None, false, 0, None, None, None,
         );
         // Assert
         assert_eq!(key.golden_size, 0);

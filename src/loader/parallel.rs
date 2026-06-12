@@ -38,16 +38,16 @@ impl ParallelLoader {
     }
 }
 
-pub fn enforce_parallel(is_moe: bool, requested: bool) -> bool {
-    if is_moe {
+pub fn enforce_parallel(has_moe_ops: bool, requested: bool) -> bool {
+    if has_moe_ops {
         true
     } else {
         requested
     }
 }
 
-pub fn decide_parallel(is_moe: bool, requested: bool, shards: usize) -> bool {
-    if is_moe {
+pub fn decide_parallel(has_moe_ops: bool, requested: bool, shards: usize) -> bool {
+    if has_moe_ops {
         true
     } else {
         requested && shards > 1

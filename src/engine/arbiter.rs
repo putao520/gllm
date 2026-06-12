@@ -23,6 +23,15 @@ pub enum InferenceMode {
 }
 
 
+// ── Device family ──────────────────────────────────────────────────────────
+
+/// Minimal device classification consumed by the arbiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceFamily {
+    Cpu,
+    Gpu,
+}
+
 // ── Hardware view for the arbiter ───────────────────────────────────────────
 
 /// Minimal hardware view consumed by the arbiter.
@@ -32,7 +41,7 @@ pub enum InferenceMode {
 /// properties the arbiter actually reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArbiterHwView {
-    pub is_gpu: bool,
+    pub device: DeviceFamily,
     pub num_simd_regs: usize,
     /// (L1, L2, L3) in bytes. For GPUs, L1 maps to shared memory.
     pub cache_sizes: (usize, usize, usize),
@@ -41,7 +50,7 @@ pub struct ArbiterHwView {
 impl From<&DeviceProfile> for ArbiterHwView {
     fn from(p: &DeviceProfile) -> Self {
         Self {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: p.num_simd_regs(),
             cache_sizes: p.cache_sizes(),
         }
@@ -52,7 +61,7 @@ impl ArbiterHwView {
     /// Construct a GPU hardware view with the given shared-memory size.
     pub fn gpu(shared_mem_bytes: usize) -> Self {
         Self {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (shared_mem_bytes, 0, 0),
         }
@@ -163,10 +172,13 @@ impl StrategyArbiter {
 
     fn apply_hardware_adjustment(bias: &mut StrategyBias, hw: &ArbiterHwView) {
         // GPU: abundant registers → relax register tension
-        if hw.is_gpu {
-            bias.epilogue_depth_preference *= 1.2;
-            bias.k_depth_preference *= 1.2;
-            bias.pipeline_cost_scale *= 1.2;
+        match hw.device {
+            DeviceFamily::Gpu => {
+                bias.epilogue_depth_preference *= 1.2;
+                bias.k_depth_preference *= 1.2;
+                bias.pipeline_cost_scale *= 1.2;
+            }
+            DeviceFamily::Cpu => {}
         }
 
         // CPU register scarcity
@@ -215,7 +227,7 @@ mod tests {
 
     fn cpu_avx2() -> ArbiterHwView {
         ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         }
@@ -223,7 +235,7 @@ mod tests {
 
     fn cpu_avx512() -> ArbiterHwView {
         ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 1048576, 33554432),
         }
@@ -231,7 +243,7 @@ mod tests {
 
     fn gpu_a100() -> ArbiterHwView {
         ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         }
@@ -349,7 +361,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_constructor() {
         let view = ArbiterHwView::gpu(48 * 1024);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.num_simd_regs, 255);
         assert_eq!(view.cache_sizes.0, 48 * 1024);
     }
@@ -358,7 +370,7 @@ mod tests {
     fn arbiter_hw_view_from_device_profile() {
         let dp = DeviceProfile::detect();
         let view = ArbiterHwView::from(&dp);
-        assert!(!view.is_gpu);
+        assert!(view.device == DeviceFamily::Cpu);
         assert_eq!(view.num_simd_regs, dp.num_simd_regs());
     }
 
@@ -388,7 +400,7 @@ mod tests {
     fn arbiter_hw_view_debug() {
         let view = cpu_avx2();
         let s = format!("{:?}", view);
-        assert!(s.contains("is_gpu"));
+        assert!(s.contains("device"));
         assert!(s.contains("num_simd_regs"));
     }
 
@@ -396,7 +408,7 @@ mod tests {
     fn arbiter_hw_view_clone() {
         let view = gpu_a100();
         let cloned = view.clone();
-        assert_eq!(cloned.is_gpu, view.is_gpu);
+        assert_eq!(cloned.device, view.device);
         assert_eq!(cloned.num_simd_regs, view.num_simd_regs);
     }
 
@@ -404,14 +416,14 @@ mod tests {
     fn arbiter_hw_view_copy() {
         let view = cpu_avx512();
         let copied = view;
-        assert_eq!(view.is_gpu, copied.is_gpu);
+        assert_eq!(view.device, copied.device);
         assert_eq!(view.cache_sizes, copied.cache_sizes);
     }
 
     #[test]
     fn arbiter_hw_view_gpu_zero_shared_mem() {
         let view = ArbiterHwView::gpu(0);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.cache_sizes.0, 0);
     }
 
@@ -500,12 +512,12 @@ mod tests {
     #[test]
     fn low_registers_increase_epilogue_preference() {
         let low_reg = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (32768, 262144, 8388608),
         };
         let high_reg = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -527,12 +539,12 @@ mod tests {
     #[test]
     fn large_l1_reduces_fusion_cost() {
         let small_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (16384, 262144, 8388608),
         };
         let large_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 262144, 8388608),
         };
@@ -562,7 +574,7 @@ mod tests {
         };
         // Neutral hw: 32 regs, 64K L1 — no hw adjustments
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -583,7 +595,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -610,7 +622,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -632,7 +644,7 @@ mod tests {
             pipeline_valuable: 0.1,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -652,7 +664,7 @@ mod tests {
             pipeline_valuable: 0.9,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -897,7 +909,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -912,12 +924,12 @@ mod tests {
     #[test]
     fn cpu_exactly_16_registers_triggers_scarcity() {
         let hw_16 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -942,12 +954,12 @@ mod tests {
         // With 17 registers the branch is skipped, so epilogue_depth_preference
         // should equal the 32-register baseline (no scarcity adjustment).
         let hw_17 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 17,
             cache_sizes: (65536, 0, 0),
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -986,7 +998,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1015,7 +1027,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1060,7 +1072,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_cache_sizes_all_nonzero() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -1099,7 +1111,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1118,7 +1130,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_max_shared_mem() {
         let view = ArbiterHwView::gpu(usize::MAX);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.num_simd_regs, 255);
         assert_eq!(view.cache_sizes.0, usize::MAX);
         assert_eq!(view.cache_sizes.1, 0);
@@ -1130,7 +1142,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_zero_l1_no_panic() {
         let zero_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (0, 0, 0),
         };
@@ -1151,14 +1163,14 @@ mod tests {
     #[test]
     fn arbiter_hw_view_field_mutation() {
         let mut view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
-        view.is_gpu = true;
+        view.device = DeviceFamily::Gpu;
         view.num_simd_regs = 64;
         view.cache_sizes.0 = 98304;
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.num_simd_regs, 64);
         assert_eq!(view.cache_sizes.0, 98304);
         // Unchanged fields
@@ -1187,7 +1199,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1283,7 +1295,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1404,7 +1416,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1429,7 +1441,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1454,12 +1466,12 @@ mod tests {
     #[test]
     fn cpu_single_register_extreme_scarcity() {
         let hw_1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (65536, 0, 0),
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1484,7 +1496,7 @@ mod tests {
     #[test]
     fn l1_exactly_64kb_no_fusion_adjustment() {
         let hw_64k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1505,12 +1517,12 @@ mod tests {
     #[test]
     fn l1_128kb_capped_richness_reduces_fusion_cost() {
         let hw_128k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0),
         };
         let hw_64k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1539,12 +1551,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_eq_identical() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1552,14 +1564,14 @@ mod tests {
     }
 
     #[test]
-    fn arbiter_hw_view_neq_is_gpu_differs() {
+    fn arbiter_hw_view_neq_device_differs() {
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1569,12 +1581,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_neq_num_simd_regs_differs() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1584,12 +1596,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_neq_cache_sizes_differs() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1602,7 +1614,7 @@ mod tests {
     fn arbiter_hw_view_hash_consistency() {
         use std::collections::HashMap;
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1618,7 +1630,7 @@ mod tests {
     fn arbiter_hw_view_hash_distinct_keys() {
         use std::collections::HashMap;
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1634,7 +1646,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_eq_reflexive() {
         let view = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -1652,17 +1664,17 @@ mod tests {
     #[test]
     fn arbiter_hw_view_eq_transitive() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
         let c = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -1676,7 +1688,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_small_shared_mem() {
         let view = ArbiterHwView::gpu(1);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.cache_sizes.0, 1);
         assert_eq!(view.cache_sizes.1, 0);
         assert_eq!(view.cache_sizes.2, 0);
@@ -1694,12 +1706,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_debug_all_fields() {
         let view = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 128,
             cache_sizes: (65536, 524288, 16777216),
         };
         let s = format!("{:?}", view);
-        assert!(s.contains("is_gpu: true"), "Debug output should show is_gpu field");
+        assert!(s.contains("device: Gpu"), "Debug output should show device field");
         assert!(s.contains("128"), "Debug output should show num_simd_regs value");
         assert!(s.contains("cache_sizes"), "Debug output should show cache_sizes field");
     }
@@ -1802,7 +1814,7 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1834,7 +1846,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -1859,7 +1871,7 @@ mod tests {
     #[test]
     fn cpu_zero_registers_extreme_scarcity_no_panic() {
         let hw_0 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
@@ -1884,7 +1896,7 @@ mod tests {
         // epilogue boost = 1 + 0.5 * 0.3 = 1.15
         // k_depth reduction = 1 - 0.5 * 0.2 = 0.9
         let hw_16 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
@@ -1909,12 +1921,12 @@ mod tests {
         // 256KB L1: richness = 262144/65536 = 4.0, capped to 2.0 by .min(2.0)
         // Should produce same fusion_cost_scale as 128KB (also capped to 2.0).
         let hw_256k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (262144, 0, 0),
         };
         let hw_128k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0),
         };
@@ -1940,12 +1952,12 @@ mod tests {
     #[test]
     fn l1_96kb_richness_between_1_and_2() {
         let hw_96k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (98304, 0, 0), // 96KB
         };
         let hw_64k = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0), // 64KB
         };
@@ -1977,7 +1989,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2001,7 +2013,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2025,7 +2037,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2050,7 +2062,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2072,7 +2084,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2107,12 +2119,12 @@ mod tests {
     #[test]
     fn cpu_high_registers_no_scarcity_adjustment() {
         let hw_64 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 64,
             cache_sizes: (65536, 0, 0),
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2323,12 +2335,12 @@ mod tests {
         let modes = [InferenceMode::Latency, InferenceMode::Throughput];
         let hws = [
             ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: 16,
                 cache_sizes: (32768, 0, 0),
             },
             ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: 32,
                 cache_sizes: (65536, 0, 0),
             },
@@ -2418,12 +2430,12 @@ mod tests {
     fn gpu_with_low_registers_gpu_branch_takes_priority() {
         // GPU flag=true, num_simd_regs=8 (low). Both GPU and scarcity branches fire.
         let gpu_low_reg = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
         let cpu_low_reg = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -2457,7 +2469,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2494,9 +2506,9 @@ mod tests {
 
     #[test]
     fn arbiter_hw_view_gpu_always_true() {
-        assert!(ArbiterHwView::gpu(0).is_gpu);
-        assert!(ArbiterHwView::gpu(1).is_gpu);
-        assert!(ArbiterHwView::gpu(usize::MAX).is_gpu);
+        assert!(ArbiterHwView::gpu(0).device == DeviceFamily::Gpu);
+        assert!(ArbiterHwView::gpu(1).device == DeviceFamily::Gpu);
+        assert!(ArbiterHwView::gpu(usize::MAX).device == DeviceFamily::Gpu);
     }
 
     // ── ArbiterHwView::gpu num_simd_regs always 255 ──
@@ -2535,7 +2547,7 @@ mod tests {
             pipeline_valuable: -0.4,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2556,7 +2568,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2579,7 +2591,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2603,7 +2615,7 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2627,7 +2639,7 @@ mod tests {
             pipeline_valuable: 0.8,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2655,7 +2667,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2686,7 +2698,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2705,12 +2717,12 @@ mod tests {
     #[test]
     fn cpu_15_registers_scarcity_fires() {
         let hw_15 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 15,
             cache_sizes: (65536, 0, 0),
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -2737,7 +2749,7 @@ mod tests {
         // epilogue = 1.0 + 0.75*0.3 = 1.225
         // k_depth = 1.0 - 0.75*0.2 = 0.85
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -2800,7 +2812,7 @@ mod tests {
         // l1_richness = 32768/65536 = 0.5, sqrt(0.5) = 0.7071
         // fusion *= 1/0.7071 = 1.4142
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -2821,7 +2833,7 @@ mod tests {
     fn l1_16kb_richness_precise() {
         // l1_richness = 0.25, sqrt = 0.5, fusion *= 1/0.5 = 2.0
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (16384, 0, 0),
         };
@@ -3010,7 +3022,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3035,7 +3047,7 @@ mod tests {
     #[test]
     fn cpu_zero_registers_scarcity_saturates() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
@@ -3104,12 +3116,12 @@ mod tests {
     #[test]
     fn only_l1_matters_for_fusion() {
         let small_l1_big_rest = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (16384, 1048576, 33554432),
         };
         let small_l1_zero_rest = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (16384, 0, 0),
         };
@@ -3137,7 +3149,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3169,7 +3181,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3242,7 +3254,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3263,7 +3275,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3283,7 +3295,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3303,7 +3315,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3360,7 +3372,7 @@ mod tests {
             pipeline_valuable: 0.42,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3374,7 +3386,7 @@ mod tests {
     #[test]
     fn cpu_max_registers_no_scarcity() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: usize::MAX,
             cache_sizes: (65536, 0, 0),
         };
@@ -3563,7 +3575,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3584,7 +3596,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3605,7 +3617,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3623,12 +3635,12 @@ mod tests {
     #[test]
     fn cpu_4_registers_k_depth_reduced() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3655,7 +3667,7 @@ mod tests {
         // epilogue = 1.0 + 0.875*0.3 = 1.2625
         // k_depth = 1.0 - 0.875*0.2 = 0.825
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
@@ -3681,7 +3693,7 @@ mod tests {
         // epilogue = 1.0 + 0.625*0.3 = 1.1875
         // k_depth = 1.0 - 0.625*0.2 = 0.875
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 12,
             cache_sizes: (65536, 0, 0),
         };
@@ -3712,7 +3724,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3738,7 +3750,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3761,7 +3773,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3781,7 +3793,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3801,7 +3813,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3821,7 +3833,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3834,7 +3846,7 @@ mod tests {
     #[test]
     fn l1_64kb_throughput_mode_no_fusion_adjustment() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3866,7 +3878,7 @@ mod tests {
         let mut prev_cost = f64::MAX;
         for &l1 in &l1_sizes {
             let hw = ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: 32,
                 cache_sizes: (l1, 0, 0),
             };
@@ -3888,7 +3900,7 @@ mod tests {
         // epilogue = 1.0 + 0.6875*0.3 = 1.20625
         // k_depth = 1.0 - 0.6875*0.2 = 0.8625
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 10,
             cache_sizes: (65536, 0, 0),
         };
@@ -3950,7 +3962,7 @@ mod tests {
             pipeline_valuable: 0.1,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -3967,7 +3979,7 @@ mod tests {
     #[test]
     fn cpu_throughput_scarcity_high_memory_valid() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (32768, 0, 0),
         };
@@ -3998,7 +4010,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4020,7 +4032,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4042,7 +4054,7 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4065,7 +4077,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4091,7 +4103,7 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4121,7 +4133,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4148,7 +4160,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4164,7 +4176,7 @@ mod tests {
         // fusion *= 1/0.7071 = 1.4142
         // Throughput baseline=1.0, * 1.4142 = 1.4142
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -4187,7 +4199,7 @@ mod tests {
         // fusion *= 1/0.866 = 1.1547
         // Latency baseline=0.5, * 1.1547 = 0.5774
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 0, 0),
         };
@@ -4210,7 +4222,7 @@ mod tests {
         // GPU also has regs=255 > 16, so scarcity branch skipped
         // But we test with is_gpu=true, num_simd_regs=8 (low regs)
         let gpu_low = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -4237,7 +4249,7 @@ mod tests {
         // epilogue = 1.0 + 0.9375*0.3 = 1.28125
         // k_depth = 1.0 - 0.9375*0.2 = 0.8125
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 2,
             cache_sizes: (65536, 0, 0),
         };
@@ -4294,7 +4306,7 @@ mod tests {
     fn arbiter_hw_view_from_always_cpu() {
         let dp = DeviceProfile::detect();
         let view = ArbiterHwView::from(&dp);
-        assert!(!view.is_gpu, "From<&DeviceProfile> should always produce is_gpu=false");
+        assert!(view.device == DeviceFamily::Cpu, "From<&DeviceProfile> should always produce CPU view");
     }
 
     // ── 89. KV cache modulation: zero memory -> no adjustment ──
@@ -4309,7 +4321,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4329,7 +4341,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4375,7 +4387,7 @@ mod tests {
         let mut prev_epilogue = f64::MAX;
         for &regs in &reg_counts {
             let hw = ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: regs,
                 cache_sizes: (65536, 0, 0),
             };
@@ -4406,7 +4418,7 @@ mod tests {
         let mut prev_k_depth = f64::MIN;
         for &regs in &reg_counts {
             let hw = ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: regs,
                 cache_sizes: (65536, 0, 0),
             };
@@ -4490,7 +4502,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4522,7 +4534,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4581,7 +4593,7 @@ mod tests {
             pipeline_valuable: 0.4,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4612,7 +4624,7 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -4642,11 +4654,11 @@ mod tests {
     #[test]
     fn arbiter_hw_view_manual_construction_all_distinct() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 24,
             cache_sizes: (49152, 524288, 16777216),
         };
-        assert!(!view.is_gpu);
+        assert!(view.device == DeviceFamily::Cpu);
         assert_eq!(view.num_simd_regs, 24);
         assert_eq!(view.cache_sizes.0, 49152);
         assert_eq!(view.cache_sizes.1, 524288);
@@ -4658,12 +4670,12 @@ mod tests {
     #[test]
     fn l1_at_2x_cap_boundary() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0), // exactly 2x 64KB
         };
         let hw_above = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131073, 0, 0), // just above 2x
         };
@@ -4705,12 +4717,12 @@ mod tests {
     #[test]
     fn l2_l3_cache_sizes_no_effect_on_output() {
         let hw_zero_l2l3 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
         let hw_big_l2l3 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 1048576, 33554432),
         };
@@ -4791,7 +4803,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_cpu_gpu_same_cache_not_equal() {
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -4806,7 +4818,7 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -4824,12 +4836,12 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -4886,7 +4898,7 @@ mod tests {
             pipeline_valuable: -0.001,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5056,12 +5068,12 @@ mod tests {
     #[test]
     fn register_scarcity_does_not_affect_fusion_cost() {
         let hw_low = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
         let hw_high = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5082,7 +5094,7 @@ mod tests {
     #[test]
     fn gpu_boost_does_not_affect_fusion_cost() {
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5104,7 +5116,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_a100_shared_mem() {
         let view = ArbiterHwView::gpu(49152); // 48KB = typical A100 shared mem
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.cache_sizes.0, 49152);
         assert_eq!(view.cache_sizes.1, 0);
         assert_eq!(view.cache_sizes.2, 0);
@@ -5115,7 +5127,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_h100_shared_mem() {
         let view = ArbiterHwView::gpu(65536); // 64KB = H100 shared mem
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.cache_sizes.0, 65536);
     }
 
@@ -5124,7 +5136,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_cache_tuple_destructuring() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 524288, 16777216),
         };
@@ -5139,11 +5151,11 @@ mod tests {
     #[test]
     fn arbiter_hw_view_all_zero_fields() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (0, 0, 0),
         };
-        assert!(!view.is_gpu);
+        assert!(view.device == DeviceFamily::Cpu);
         assert_eq!(view.num_simd_regs, 0);
         assert_eq!(view.cache_sizes, (0, 0, 0));
     }
@@ -5153,11 +5165,11 @@ mod tests {
     #[test]
     fn arbiter_hw_view_max_fields() {
         let view = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: usize::MAX,
             cache_sizes: (usize::MAX, usize::MAX, usize::MAX),
         };
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.num_simd_regs, usize::MAX);
         assert_eq!(view.cache_sizes.0, usize::MAX);
     }
@@ -5216,7 +5228,7 @@ mod tests {
             pipeline_valuable: -100.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (0, 0, 0),
         };
@@ -5251,7 +5263,7 @@ mod tests {
         // scarcity = 1.0 - (16/32) = 0.5
         // k_depth multiplier = 1.0 - 0.5*0.2 = 0.9
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
@@ -5279,7 +5291,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5304,7 +5316,7 @@ mod tests {
             pipeline_valuable: 0.05,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5326,7 +5338,7 @@ mod tests {
             pipeline_valuable: 0.95,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5349,7 +5361,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5371,7 +5383,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5393,7 +5405,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5409,7 +5421,7 @@ mod tests {
         // fusion *= 1/0.7906 = 1.2649
         // Latency baseline=0.5, * 1.2649 = 0.6325
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (40960, 0, 0),
         };
@@ -5432,7 +5444,7 @@ mod tests {
         // epilogue = 1.0 + 0.8125*0.3 = 1.24375
         // k_depth = 1.0 - 0.8125*0.2 = 0.8375
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 6,
             cache_sizes: (65536, 0, 0),
         };
@@ -5472,12 +5484,12 @@ mod tests {
     #[test]
     fn cpu_32_regs_same_as_64_regs() {
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let hw_64 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 64,
             cache_sizes: (65536, 0, 0),
         };
@@ -5502,8 +5514,8 @@ mod tests {
         let dp = DeviceProfile::detect();
         let view1 = ArbiterHwView::from(&dp);
         let view2 = ArbiterHwView::from(&dp);
-        assert!(!view1.is_gpu);
-        assert!(!view2.is_gpu);
+        assert!(view1.device == DeviceFamily::Cpu);
+        assert!(view2.device == DeviceFamily::Cpu);
         assert_eq!(view1, view2);
     }
 
@@ -5521,7 +5533,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5543,7 +5555,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5565,7 +5577,7 @@ mod tests {
             pipeline_valuable: 0.9,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5655,7 +5667,7 @@ mod tests {
         // epilogue = 1.0 + 0.5625*0.3 = 1.16875
         // k_depth = 1.0 - 0.5625*0.2 = 0.8875
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 14,
             cache_sizes: (65536, 0, 0),
         };
@@ -5678,12 +5690,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_neq_different_regs() {
         let a = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 128,
             cache_sizes: (49152, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -5786,7 +5798,7 @@ mod tests {
     #[test]
     fn l1_8kb_very_small_l1_increases_fusion_cost() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (8192, 0, 0),
         };
@@ -5837,7 +5849,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_debug_specific_values() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -5858,7 +5870,7 @@ mod tests {
             pipeline_valuable: 0.50,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5880,7 +5892,7 @@ mod tests {
             pipeline_valuable: 0.51,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -5985,7 +5997,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6010,7 +6022,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (16384, 0, 0),
         };
@@ -6043,7 +6055,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6068,7 +6080,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
@@ -6094,7 +6106,7 @@ mod tests {
             pipeline_valuable: 0.4,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (32768, 0, 0),
         };
@@ -6129,7 +6141,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6149,7 +6161,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6169,7 +6181,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6189,7 +6201,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6209,7 +6221,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6222,12 +6234,12 @@ mod tests {
     #[test]
     fn gpu_scarcity_combined_throughput_mode() {
         let gpu_low = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
         let cpu_low = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -6266,7 +6278,7 @@ mod tests {
         let mut prev = f64::MAX;
         for &regs in &reg_counts {
             let hw = ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: regs,
                 cache_sizes: (65536, 0, 0),
             };
@@ -6292,7 +6304,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6324,7 +6336,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let neutral = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6353,7 +6365,7 @@ mod tests {
         // epilogue = 1.0 + 0.90625*0.3 = 1.271875
         // k_depth = 1.0 - 0.90625*0.2 = 0.81875
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 3,
             cache_sizes: (65536, 0, 0),
         };
@@ -6379,7 +6391,7 @@ mod tests {
         // epilogue = 1.0 + 0.84375*0.3 = 1.253125
         // k_depth = 1.0 - 0.84375*0.2 = 0.83125
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 5,
             cache_sizes: (65536, 0, 0),
         };
@@ -6405,7 +6417,7 @@ mod tests {
         // fusion *= 1/1.1180 = 0.8944
         // Latency baseline=0.5, * 0.8944 = 0.4472
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (81920, 0, 0),
         };
@@ -6428,7 +6440,7 @@ mod tests {
         // fusion *= 1/0.25 = 4.0
         // Latency baseline=0.5, * 4.0 = 2.0
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (4096, 0, 0),
         };
@@ -6449,7 +6461,7 @@ mod tests {
     fn l1_4kb_throughput_fusion_precise() {
         // fusion *= 4.0, Throughput baseline=1.0, * 4.0 = 4.0 → validate clamps to 3.0
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (4096, 0, 0),
         };
@@ -6476,7 +6488,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6499,7 +6511,7 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6521,7 +6533,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6543,7 +6555,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6565,7 +6577,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6587,7 +6599,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6603,7 +6615,7 @@ mod tests {
         // epilogue = 1.0 + 0.78125*0.3 = 1.234375
         // k_depth = 1.0 - 0.78125*0.2 = 0.84375
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 7,
             cache_sizes: (65536, 0, 0),
         };
@@ -6629,7 +6641,7 @@ mod tests {
         // epilogue = 1.0 + 0.71875*0.3 = 1.215625
         // k_depth = 1.0 - 0.71875*0.2 = 0.85625
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 9,
             cache_sizes: (65536, 0, 0),
         };
@@ -6655,7 +6667,7 @@ mod tests {
         // epilogue = 1.0 + 0.65625*0.3 = 1.196875
         // k_depth = 1.0 - 0.65625*0.2 = 0.86875
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 11,
             cache_sizes: (65536, 0, 0),
         };
@@ -6681,7 +6693,7 @@ mod tests {
         // epilogue = 1.0 + 0.59375*0.3 = 1.178125
         // k_depth = 1.0 - 0.59375*0.2 = 0.88125
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 13,
             cache_sizes: (65536, 0, 0),
         };
@@ -6707,7 +6719,7 @@ mod tests {
         // epilogue = 1.0 + 0.53125*0.3 = 1.159375
         // k_depth = 1.0 - 0.53125*0.2 = 0.89375
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 15,
             cache_sizes: (65536, 0, 0),
         };
@@ -6774,7 +6786,7 @@ mod tests {
             pipeline_valuable: 0.42,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6797,7 +6809,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6819,7 +6831,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6841,7 +6853,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6863,7 +6875,7 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6886,7 +6898,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6912,7 +6924,7 @@ mod tests {
             pipeline_valuable: 0.8,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6936,7 +6948,7 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -6972,7 +6984,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_min_nonzero_fields() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (1, 1, 1),
         };
@@ -7003,12 +7015,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw_32kb = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
         let hw_64kb = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7038,7 +7050,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -7056,7 +7068,7 @@ mod tests {
         // Throughput baseline epilogue=0.8, * 1.290625 = 1.0325
         // Throughput baseline k_depth=0.8, * 0.80625 = 0.645
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (65536, 0, 0),
         };
@@ -7136,7 +7148,7 @@ mod tests {
         // Throughput baseline epilogue=0.8, * 1.225 = 0.98
         // Throughput baseline k_depth=0.8, * 0.85 = 0.68
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -7179,9 +7191,9 @@ mod tests {
             GraphArchetype { compute_intensive: -1.0, memory_intensive: 2.0, parallelism_exploitable: 0.8, fusion_profitable: 1.5, pipeline_valuable: -0.5 },
         ];
         let hws = [
-            ArbiterHwView { is_gpu: false, num_simd_regs: 4, cache_sizes: (4096, 0, 0) },
-            ArbiterHwView { is_gpu: false, num_simd_regs: 16, cache_sizes: (32768, 0, 0) },
-            ArbiterHwView { is_gpu: false, num_simd_regs: 32, cache_sizes: (65536, 0, 0) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 4, cache_sizes: (4096, 0, 0) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 16, cache_sizes: (32768, 0, 0) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 32, cache_sizes: (65536, 0, 0) },
             ArbiterHwView::gpu(65536),
             ArbiterHwView::gpu(0),
         ];
@@ -7235,7 +7247,7 @@ mod tests {
         let sizes: Vec<usize> = vec![0, 1024, 16384, 32768, 49152, 65536, 98304, 131072, 262144];
         for sz in sizes {
             let view = ArbiterHwView::gpu(sz);
-            assert!(view.is_gpu, "gpu({}) should be is_gpu=true", sz);
+            assert!(view.device == DeviceFamily::Gpu, "gpu({}) should have device=Gpu", sz);
             assert_eq!(view.num_simd_regs, 255, "gpu() should set 255 regs");
             assert_eq!(view.cache_sizes.0, sz, "gpu({}) L1 mismatch", sz);
             assert_eq!(view.cache_sizes.1, 0, "gpu() L2 should be 0");
@@ -7248,11 +7260,11 @@ mod tests {
     #[test]
     fn arbiter_hw_view_cpu_max_registers() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: usize::MAX,
             cache_sizes: (65536, 0, 0),
         };
-        assert!(!view.is_gpu);
+        assert!(view.device == DeviceFamily::Cpu);
         assert_eq!(view.num_simd_regs, usize::MAX);
     }
 
@@ -7261,7 +7273,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_eq_cpu_gpu_never_equal() {
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -7373,7 +7385,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7389,12 +7401,12 @@ mod tests {
     #[test]
     fn gpu_with_one_register_still_uses_gpu_branch() {
         let gpu_low_reg = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 1,
             cache_sizes: (65536, 0, 0),
         };
         let cpu_32_reg = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7429,12 +7441,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let small_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (4096, 0, 0),
         };
         let large_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0),
         };
@@ -7455,7 +7467,7 @@ mod tests {
             pipeline_valuable: -0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7484,7 +7496,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7505,7 +7517,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (4096, 0, 0),
         };
@@ -7529,7 +7541,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7551,7 +7563,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7573,7 +7585,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7595,7 +7607,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7617,7 +7629,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7635,8 +7647,8 @@ mod tests {
             GraphArchetype { compute_intensive: 0.33, memory_intensive: 0.67, parallelism_exploitable: 0.11, fusion_profitable: 0.89, pipeline_valuable: 0.42 },
         ];
         let hws = [
-            ArbiterHwView { is_gpu: false, num_simd_regs: 0, cache_sizes: (0, 0, 0) },
-            ArbiterHwView { is_gpu: false, num_simd_regs: 32, cache_sizes: (262144, 0, 0) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 0, cache_sizes: (0, 0, 0) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 32, cache_sizes: (262144, 0, 0) },
             ArbiterHwView::gpu(131072),
         ];
         for arch in &archetypes {
@@ -7682,7 +7694,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_zero_l1_skip_fusion_adjustment() {
         let zero_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (0, 0, 0),
         };
@@ -7703,7 +7715,7 @@ mod tests {
     #[test]
     fn cpu_1_register_extreme_scarcity_confirm() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (65536, 0, 0),
         };
@@ -7737,7 +7749,7 @@ mod tests {
         let mut prev_fusion = f64::MAX;
         for l1 in l1_sizes {
             let hw = ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: 32,
                 cache_sizes: (l1, 0, 0),
             };
@@ -7778,7 +7790,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7820,12 +7832,12 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let v1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
         let v2 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
@@ -7848,7 +7860,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7878,7 +7890,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7903,7 +7915,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7921,7 +7933,7 @@ mod tests {
     #[test]
     fn expert_prefetch_monotonic_with_memory() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -7979,7 +7991,7 @@ mod tests {
             pipeline_valuable: -0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8001,7 +8013,7 @@ mod tests {
             pipeline_valuable: f64::MAX,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8023,17 +8035,17 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let base = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let with_l2 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 1048576, 0),
         };
         let with_l2_l3 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 1048576, 33554432),
         };
@@ -8057,7 +8069,7 @@ mod tests {
             pipeline_valuable: 0.8,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
@@ -8096,7 +8108,7 @@ mod tests {
     #[test]
     fn cpu_32_registers_neutral_no_adjustment() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8125,8 +8137,8 @@ mod tests {
             GraphArchetype { compute_intensive: f64::MAX, memory_intensive: f64::MAX, parallelism_exploitable: f64::MAX, fusion_profitable: f64::MAX, pipeline_valuable: f64::MAX },
         ];
         let extreme_hws = [
-            ArbiterHwView { is_gpu: false, num_simd_regs: 0, cache_sizes: (0, 0, 0) },
-            ArbiterHwView { is_gpu: false, num_simd_regs: usize::MAX, cache_sizes: (usize::MAX, usize::MAX, usize::MAX) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 0, cache_sizes: (0, 0, 0) },
+            ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: usize::MAX, cache_sizes: (usize::MAX, usize::MAX, usize::MAX) },
             ArbiterHwView::gpu(0),
             ArbiterHwView::gpu(usize::MAX),
         ];
@@ -8192,7 +8204,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8217,7 +8229,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8255,12 +8267,12 @@ mod tests {
     #[test]
     fn register_scarcity_not_affect_batch_or_decode() {
         let hw_scarce = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
         let hw_rich = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8283,12 +8295,12 @@ mod tests {
     #[test]
     fn gpu_boost_applies_even_with_low_registers() {
         let gpu_4_reg = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
         let cpu_4_reg = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
@@ -8314,7 +8326,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_debug_shows_cache_tuple() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -8340,7 +8352,7 @@ mod tests {
     #[test]
     fn quantization_monotonic_with_memory() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8377,7 +8389,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8409,7 +8421,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_copy_semantics_verified() {
         let original = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -8425,7 +8437,7 @@ mod tests {
     #[test]
     fn kv_cache_budget_monotonic_with_memory_throughput() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8471,7 +8483,7 @@ mod tests {
         let mut prev_epilogue = f64::MAX;
         for regs in reg_counts {
             let hw = ArbiterHwView {
-                is_gpu: false,
+                device: DeviceFamily::Cpu,
                 num_simd_regs: regs,
                 cache_sizes: (65536, 0, 0),
             };
@@ -8497,7 +8509,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8550,11 +8562,11 @@ mod tests {
     #[test]
     fn arbiter_hw_view_manual_construction() {
         let view = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (16384, 131072, 4194304),
         };
-        assert!(!view.is_gpu);
+        assert!(view.device == DeviceFamily::Cpu);
         assert_eq!(view.num_simd_regs, 8);
         assert_eq!(view.cache_sizes.0, 16384);
         assert_eq!(view.cache_sizes.1, 131072);
@@ -8566,12 +8578,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_partial_eq() {
         let a = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -8601,7 +8613,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_zero_shared_mem_boundary() {
         let view = ArbiterHwView::gpu(0);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.cache_sizes.0, 0);
         assert_eq!(view.cache_sizes.1, 0);
         assert_eq!(view.cache_sizes.2, 0);
@@ -8612,7 +8624,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_large_shared_mem() {
         let view = ArbiterHwView::gpu(256 * 1024);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.cache_sizes.0, 256 * 1024);
     }
 
@@ -8838,7 +8850,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 2,
             cache_sizes: (0, 0, 0),
         };
@@ -8890,7 +8902,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8910,7 +8922,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -8930,12 +8942,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -8960,12 +8972,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -8990,12 +9002,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -9017,7 +9029,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9037,7 +9049,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9057,7 +9069,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9070,7 +9082,7 @@ mod tests {
     #[test]
     fn moe_modulation_high_parallelism_increases_eviction() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9102,7 +9114,7 @@ mod tests {
     #[test]
     fn moe_modulation_high_parallelism_increases_prefetch() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9134,7 +9146,7 @@ mod tests {
     #[test]
     fn moe_modulation_low_parallelism_no_eviction_change() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9162,7 +9174,7 @@ mod tests {
     #[test]
     fn fusion_profitable_monotonic_decreases_cost() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9191,7 +9203,7 @@ mod tests {
     #[test]
     fn pipeline_valuable_monotonic_decreases_cost() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9220,7 +9232,7 @@ mod tests {
     #[test]
     fn parallelism_exploitable_monotonic_decreases_cost() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9249,7 +9261,7 @@ mod tests {
     #[test]
     fn memory_intensive_monotonic_kv_cache_budget() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9278,7 +9290,7 @@ mod tests {
     #[test]
     fn memory_intensive_monotonic_quantization() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9307,7 +9319,7 @@ mod tests {
     #[test]
     fn reg_tension_positive_favors_epilogue() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9345,7 +9357,7 @@ mod tests {
     #[test]
     fn reg_tension_negative_favors_k_depth() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9383,7 +9395,7 @@ mod tests {
     #[test]
     fn reg_tension_zero_no_epilogue_k_modulation() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9413,12 +9425,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let small_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (16384, 0, 0),
         };
         let large_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0),
         };
@@ -9443,7 +9455,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (0, 0, 0),
         };
@@ -9464,7 +9476,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9485,12 +9497,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let at_threshold = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
         let above_threshold = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 17,
             cache_sizes: (65536, 0, 0),
         };
@@ -9517,7 +9529,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 2,
             cache_sizes: (65536, 0, 0),
         };
@@ -9560,7 +9572,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9580,7 +9592,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9600,7 +9612,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9620,7 +9632,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9640,7 +9652,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9660,7 +9672,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9680,7 +9692,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9700,12 +9712,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -9749,12 +9761,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let very_large_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (524288, 0, 0),
         };
         let double_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (262144, 0, 0),
         };
@@ -9790,7 +9802,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9810,7 +9822,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9830,7 +9842,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9862,7 +9874,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -9913,12 +9925,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_inequality_different_fields() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -9930,12 +9942,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_inequality_by_gpu_flag() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -9947,12 +9959,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_inequality_by_cache() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 262144, 8388608),
         };
@@ -9971,7 +9983,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 2,
             cache_sizes: (0, 0, 0),
         };
@@ -9987,7 +9999,7 @@ mod tests {
     #[test]
     fn moe_gating_boundary_at_half() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10028,14 +10040,14 @@ mod tests {
     #[test]
     fn arbiter_hw_view_debug_output_completeness() {
         let view = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 128,
             cache_sizes: (65536, 524288, 16777216),
         };
         let s = format!("{:?}", view);
-        assert!(s.contains("true"));
+        assert!(s.contains("Gpu"));
         assert!(s.contains("128"));
-        assert!(s.contains("is_gpu"));
+        assert!(s.contains("device"));
         assert!(s.contains("num_simd_regs"));
         assert!(s.contains("cache_sizes"));
     }
@@ -10051,7 +10063,7 @@ mod tests {
         let sizes = [0usize, 16384, 32768, 49152, 65536, 98304, 131072, 196608];
         for &size in &sizes {
             let view = ArbiterHwView::gpu(size);
-            assert!(view.is_gpu);
+            assert!(view.device == DeviceFamily::Gpu);
             assert_eq!(view.num_simd_regs, 255);
             assert_eq!(view.cache_sizes, (size, 0, 0));
         }
@@ -10078,7 +10090,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let neutral = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10215,7 +10227,7 @@ mod tests {
     #[test]
     fn l1_4kb_throughput_fusion_clamped_to_max() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (4096, 0, 0),
         };
@@ -10252,12 +10264,12 @@ mod tests {
     #[test]
     fn register_threshold_exactly_16_triggers() {
         let hw_16 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
         let hw_17 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 17,
             cache_sizes: (65536, 0, 0),
         };
@@ -10281,12 +10293,12 @@ mod tests {
     #[test]
     fn register_scarcity_only_two_fields_affected() {
         let hw_low = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
         let hw_high = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10324,7 +10336,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10357,7 +10369,7 @@ mod tests {
             },
         ];
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10372,12 +10384,12 @@ mod tests {
     #[test]
     fn l1_richness_only_affects_fusion_cost() {
         let small_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (8192, 0, 0),
         };
         let large_l1 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0),
         };
@@ -10402,7 +10414,7 @@ mod tests {
     #[test]
     fn combined_low_regs_high_fusion_high_memory() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (32768, 0, 0),
         };
@@ -10505,7 +10517,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_clone_independence() {
         let original = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -10520,7 +10532,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_copy_independence() {
         let mut a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 0, 0),
         };
@@ -10556,7 +10568,7 @@ mod tests {
     fn kv_cache_monotonic_with_memory_intensity() {
         let mem_values = [0.0f64, 0.25, 0.5, 0.75, 1.0];
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10586,7 +10598,7 @@ mod tests {
     fn fusion_cost_monotonic_with_fusion_profitable() {
         let fp_values = [0.0f64, 0.25, 0.5, 0.75, 1.0];
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10682,7 +10694,7 @@ mod tests {
             },
         ];
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10708,7 +10720,7 @@ mod tests {
         };
         let gpu = ArbiterHwView::gpu(65536);
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10724,7 +10736,7 @@ mod tests {
     #[test]
     fn l1_2kb_extreme_fusion_cost_increase() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (2048, 0, 0),
         };
@@ -10747,7 +10759,7 @@ mod tests {
     #[test]
     fn moe_prefetch_linear_with_memory() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10783,7 +10795,7 @@ mod tests {
             pipeline_valuable: 0.33,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -10897,7 +10909,7 @@ mod tests {
         views.push(gpu_a100());
         assert_eq!(views.len(), 3);
         let popped = views.pop();
-        assert!(popped.unwrap().is_gpu);
+        assert!(popped.unwrap().device == DeviceFamily::Gpu);
         assert_eq!(views.len(), 2);
     }
 
@@ -10941,7 +10953,7 @@ mod tests {
     #[test]
     fn low_regs_and_large_l1_combined() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (131072, 0, 0), // 128KB L1, 8 regs
         };
@@ -11024,7 +11036,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11080,12 +11092,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_neq_l2_differs_l1_same() {
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 262144, 8388608),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 524288, 8388608), // L2 differs
         };
@@ -11109,7 +11121,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11134,7 +11146,7 @@ mod tests {
             pipeline_valuable: -0.5,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11160,7 +11172,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11185,7 +11197,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11210,7 +11222,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11278,7 +11290,7 @@ mod tests {
     fn cpu_manual_gpu_flag_with_low_regs_both_adjustments_fire() {
         // Arrange
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -11317,7 +11329,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11343,7 +11355,7 @@ mod tests {
             pipeline_valuable: -1.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11375,7 +11387,7 @@ mod tests {
     fn reg_tension_epilogue_monotonic_with_increasing_fusion() {
         // Arrange
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11434,7 +11446,7 @@ mod tests {
     fn l1_exactly_131072_richness_capped_at_two_fusion_precise() {
         // Arrange
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0), // exactly 2x 65536
         };
@@ -11473,7 +11485,7 @@ mod tests {
     fn throughput_k_depth_monotonic_with_pipeline_valuable() {
         // Arrange
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11514,12 +11526,12 @@ mod tests {
     fn register_scarcity_boundary_at_16_triggers() {
         // Arrange
         let at = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
         let above = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 17,
             cache_sizes: (65536, 0, 0),
         };
@@ -11559,7 +11571,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11579,12 +11591,12 @@ mod tests {
     fn l1_richness_above_two_capped_at_two_fusion_precise() {
         // Arrange
         let hw_very_large = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (200000, 0, 0), // > 2 * 65536
         };
         let hw_capped = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0), // exactly 2 * 65536
         };
@@ -11615,7 +11627,7 @@ mod tests {
     fn epilogue_kdepth_unmodulated_when_reg_tension_absent() {
         // Arrange
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11651,12 +11663,12 @@ mod tests {
     fn gpu_pipeline_boost_exact_twenty_percent() {
         // Arrange
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -11712,7 +11724,7 @@ mod tests {
     fn k_depth_monotonic_with_negative_reg_tension_pipeline_dominant() {
         // Arrange
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11755,7 +11767,7 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11785,7 +11797,7 @@ mod tests {
             pipeline_valuable: -0.1,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 12,
             cache_sizes: (32768, 0, 0),
         };
@@ -11828,7 +11840,7 @@ mod tests {
             pipeline_valuable: -2.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 2,
             cache_sizes: (0, 0, 0),
         };
@@ -11858,7 +11870,7 @@ mod tests {
     fn l1_small_sub_base_fusion_cost_increases_precise() {
         // Arrange
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (16384, 0, 0), // 16KB -> richness = 0.25
         };
@@ -11883,7 +11895,7 @@ mod tests {
     fn register_scarcity_zero_regs_maximum_scarcity() {
         // Arrange
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
@@ -11918,7 +11930,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -11937,12 +11949,12 @@ mod tests {
     fn scarcity_does_not_affect_fusion_or_parallelism_cost() {
         // Arrange
         let hw_scarce = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (65536, 0, 0),
         };
         let hw_rich = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12000,7 +12012,7 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12026,7 +12038,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12048,7 +12060,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12081,7 +12093,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12104,7 +12116,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12120,7 +12132,7 @@ mod tests {
     #[test]
     fn cpu_very_large_l1_no_panic() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (usize::MAX / 2, 0, 0),
         };
@@ -12140,7 +12152,7 @@ mod tests {
     #[test]
     fn cpu_zero_all_caches_l1_richness_zero_skips_branch() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (0, 0, 0),
         };
@@ -12201,7 +12213,7 @@ mod tests {
             pipeline_valuable: 0.8,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12232,7 +12244,7 @@ mod tests {
             pipeline_valuable: f64::NAN,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12248,12 +12260,12 @@ mod tests {
     #[test]
     fn cpu_scarcity_throughput_k_depth_reduced() {
         let hw_low = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
         let hw_high = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12291,7 +12303,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12318,7 +12330,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12340,7 +12352,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12362,7 +12374,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12384,7 +12396,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12401,7 +12413,7 @@ mod tests {
         // k_depth = 1.0 - 0.8125*0.2 = 0.8375
         // Throughput: epilogue = 0.8 * 1.24375 = 0.995, k_depth = 0.8 * 0.8375 = 0.67
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 6,
             cache_sizes: (65536, 0, 0),
         };
@@ -12431,7 +12443,7 @@ mod tests {
             pipeline_valuable: 0.8,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12455,7 +12467,7 @@ mod tests {
             pipeline_valuable: 0.2,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12499,7 +12511,7 @@ mod tests {
     fn arbiter_hw_view_gpu_h100_shared_mem_228kb() {
         let shared = 228 * 1024; // 228KB
         let view = ArbiterHwView::gpu(shared);
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.num_simd_regs, 255);
         assert_eq!(view.cache_sizes.0, shared);
         assert_eq!(view.cache_sizes.1, 0);
@@ -12520,7 +12532,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12537,7 +12549,7 @@ mod tests {
         // k_depth = 1.0 - 0.5625*0.2 = 0.8875
         // Throughput: epilogue = 0.8 * 1.16875 = 0.935, k_depth = 0.8 * 0.8875 = 0.71
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 14,
             cache_sizes: (65536, 0, 0),
         };
@@ -12583,7 +12595,7 @@ mod tests {
         // fusion *= 1/0.866 = 1.1547
         // Throughput baseline=1.0, * 1.1547 = 1.1547
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 0, 0),
         };
@@ -12693,12 +12705,12 @@ mod tests {
     #[test]
     fn arbiter_hw_view_equality_same_fields() {
         let a = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 0),
         };
         let b = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 0),
         };
@@ -12708,14 +12720,14 @@ mod tests {
     // ── 593. ArbiterHwView inequality with different is_gpu ──
 
     #[test]
-    fn arbiter_hw_view_inequality_different_is_gpu() {
+    fn arbiter_hw_view_inequality_different_device() {
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 262144, 0),
         };
@@ -12727,7 +12739,7 @@ mod tests {
     #[test]
     fn cpu_one_simd_register_max_scarcity() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (65536, 0, 0),
         };
@@ -12836,7 +12848,7 @@ mod tests {
             pipeline_valuable: 0.7,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12854,7 +12866,7 @@ mod tests {
     #[test]
     fn l1_exact_64kb_richness_one_fusion_scale() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -12968,7 +12980,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (0, 0, 0),
         };
@@ -13025,7 +13037,7 @@ mod tests {
     #[test]
     fn zero_l1_cache_no_panic() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (0, 0, 0),
         };
@@ -13108,7 +13120,7 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -13135,7 +13147,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -13166,7 +13178,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -13197,7 +13209,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -13214,7 +13226,7 @@ mod tests {
     #[test]
     fn gpu_one_register_gpu_branch_still_applies() {
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 1,
             cache_sizes: (0, 0, 0),
         };
@@ -13241,12 +13253,12 @@ mod tests {
     #[test]
     fn register_scarcity_boundary_at_exactly_16() {
         let hw_16 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
         let hw_17 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 17,
             cache_sizes: (65536, 0, 0),
         };
@@ -13306,7 +13318,7 @@ mod tests {
     #[test]
     fn very_large_l1_reduces_fusion_cost_significantly() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (524288, 0, 0), // 512KB L1
         };
@@ -13330,7 +13342,7 @@ mod tests {
     #[test]
     fn moe_parallelism_exactly_half_no_expert_modulation_precise() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -13406,12 +13418,12 @@ mod tests {
     #[test]
     fn l1_richness_capped_at_two_prevents_over_reduction() {
         let hw_256kb = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (262144, 0, 0), // 256KB L1
         };
         let hw_1mb = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (1048576, 0, 0), // 1MB L1
         };
@@ -13469,7 +13481,7 @@ mod tests {
         };
         let hw_gpu = ArbiterHwView::gpu(32768);
         let hw_cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -13495,7 +13507,7 @@ mod tests {
         };
         let hw_gpu = ArbiterHwView::gpu(32768);
         let hw_cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -13520,7 +13532,7 @@ mod tests {
         };
         let hw_gpu = ArbiterHwView::gpu(32768);
         let hw_cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -13545,7 +13557,7 @@ mod tests {
         };
         let hw_gpu = ArbiterHwView::gpu(32768);
         let hw_cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -13567,7 +13579,7 @@ mod tests {
         };
         let hw_gpu = ArbiterHwView::gpu(32768);
         let hw_cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -13647,12 +13659,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw_32 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let hw_64 = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 64,
             cache_sizes: (65536, 0, 0),
         };
@@ -13675,7 +13687,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -13921,7 +13933,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0), // 128KB L1
         };
@@ -13944,7 +13956,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0), // 32KB L1
         };
@@ -13966,13 +13978,13 @@ mod tests {
         };
         // 低寄存器触发稀缺
         let hw_scarce = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
         // 高寄存器不触发稀缺
         let hw_normal = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14025,17 +14037,17 @@ mod tests {
         assert_approx(bias.pipeline_cost_scale, 0.6 * 1.2, 1e-10);
     }
 
-    /// 通过 arbiter 的全部 2 mode × 2 is_gpu × 3 memory_intensive (0.0/0.5/1.0) 组合，
+    /// 通过 arbiter 的全部 2 mode × 2 device × 3 memory_intensive (0.0/0.5/1.0) 组合，
     /// 验证所有输出值均在 StrategyBias::validate() 的合法范围内。
     /// 覆盖 12 个配置点的边界条件扫描。
     #[test]
     fn full_cross_product_all_outputs_within_validate_bounds() {
         let modes = [InferenceMode::Latency, InferenceMode::Throughput];
-        let gpu_flags = [false, true];
+        let device_families = [DeviceFamily::Cpu, DeviceFamily::Gpu];
         let memory_levels = [0.0_f64, 0.5, 1.0];
         let mut count = 0;
         for &mode in &modes {
-            for &is_gpu in &gpu_flags {
+            for &device in &device_families {
                 for &mem in &memory_levels {
                     let arch = GraphArchetype {
                         compute_intensive: 0.5,
@@ -14044,14 +14056,13 @@ mod tests {
                         fusion_profitable: 0.6,
                         pipeline_valuable: 0.4,
                     };
-                    let hw = if is_gpu {
-                        ArbiterHwView::gpu(49152)
-                    } else {
-                        ArbiterHwView {
-                            is_gpu: false,
+                    let hw = match device {
+                        DeviceFamily::Gpu => ArbiterHwView::gpu(49152),
+                        DeviceFamily::Cpu => ArbiterHwView {
+                            device: DeviceFamily::Cpu,
                             num_simd_regs: 32,
                             cache_sizes: (49152, 262144, 8388608),
-                        }
+                        },
                     };
                     let bias = StrategyArbiter::arbitrate(mode, &arch, &hw);
                     // 所有 13 个字段必须在 validate 的 clamp 范围内
@@ -14112,7 +14123,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
@@ -14134,12 +14145,12 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 17,
             cache_sizes: (65536, 0, 0),
         };
         let hw_baseline = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14165,7 +14176,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14216,7 +14227,7 @@ mod tests {
             pipeline_valuable: 0.1,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14244,7 +14255,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
@@ -14276,7 +14287,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14332,7 +14343,7 @@ mod tests {
             pipeline_valuable: 0.1,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14358,7 +14369,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -14383,7 +14394,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw_cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14410,7 +14421,7 @@ mod tests {
             pipeline_valuable: 0.2,
         };
         let hw_cpu_low = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 4,
             cache_sizes: (8192, 0, 0),
         };
@@ -14436,7 +14447,7 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14460,7 +14471,7 @@ mod tests {
             pipeline_valuable: 0.4,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -14522,7 +14533,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_all_zero_cpu_no_panic_in_arbitrate() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (0, 0, 0),
         };
@@ -14546,7 +14557,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_gpu_1mb_shared_mem_l1_richness_capped() {
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (1_048_576, 0, 0),
         };
@@ -14574,7 +14585,7 @@ mod tests {
         let view1 = ArbiterHwView::from(&dp);
         let view2 = ArbiterHwView::from(&dp);
         assert_eq!(view1, view2, "two conversions from same DeviceProfile must be equal");
-        assert_eq!(view1.is_gpu, false, "DeviceProfile conversion must always produce CPU view");
+        assert_eq!(view1.device, DeviceFamily::Cpu, "DeviceProfile conversion must always produce CPU view");
     }
 
     /// Latency mode produces strictly lower batch_flexibility than Throughput
@@ -14693,7 +14704,7 @@ mod tests {
         };
         // Use neutral hardware (no GPU, no scarcity, 64KB L1 = richness 1.0)
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -14945,7 +14956,7 @@ mod tests {
     #[test]
     fn cpu_zero_l1_zero_l2_zero_l3_skips_fusion_adjustment_no_panic() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (0, 0, 0),
         };
@@ -14988,7 +14999,7 @@ mod tests {
     #[test]
     fn cpu_one_register_extreme_scarcity_epilogue_up_kdepth_down() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 1,
             cache_sizes: (65536, 0, 0),
         };
@@ -15023,12 +15034,12 @@ mod tests {
         };
         // CPU and GPU both with 64KB L1 so fusion adjustment is identical
         let cpu_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu_hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -15073,12 +15084,12 @@ mod tests {
             pipeline_valuable: 0.3,
         };
         let cpu_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
         let gpu_hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (32768, 0, 0),
         };
@@ -15106,7 +15117,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 16,
             cache_sizes: (65536, 0, 0),
         };
@@ -15138,7 +15149,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15162,7 +15173,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15184,7 +15195,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15239,12 +15250,12 @@ mod tests {
             pipeline_valuable: 0.6,
         };
         let cpu_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu_hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -15291,7 +15302,7 @@ mod tests {
                     bias.expert_prefetch_priority,
                 ];
                 for (i, &v) in fields.iter().enumerate() {
-                    assert!(v.is_finite(), "field[{i}] not finite: mode={mode:?}, hw.is_gpu={}", hw.is_gpu);
+                    assert!(v.is_finite(), "field[{i}] not finite: mode={mode:?}, hw.device={:?}", hw.device);
                 }
             }
         }
@@ -15392,7 +15403,7 @@ mod tests {
     #[test]
     fn arbiter_hw_view_zero_registers_max_scarcity_precise_effect() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
@@ -15421,7 +15432,7 @@ mod tests {
     #[test]
     fn reg_tension_zero_both_fusion_pipeline_zero_no_archetype_preference_shift() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15452,7 +15463,7 @@ mod tests {
     #[test]
     fn reg_tension_maximum_positive_precise_epilogue_up_kdepth_down() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15479,7 +15490,7 @@ mod tests {
     #[test]
     fn reg_tension_minimum_negative_precise_kdepth_up_epilogue_down() {
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15513,12 +15524,12 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let gpu_small = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (32768, 0, 0),
         };
         let gpu_large = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (131072, 0, 0),
         };
@@ -15547,12 +15558,12 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let gpu_16k = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (16384, 0, 0),
         };
         let gpu_256k = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (262144, 0, 0),
         };
@@ -15628,12 +15639,12 @@ mod tests {
             pipeline_valuable: 0.2,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
         let gpu = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (65536, 0, 0),
         };
@@ -15759,13 +15770,13 @@ mod tests {
     fn zero_regs_scarcity_score_precise_effect() {
         // Arrange: 0 registers → scarcity = 1.0 - (0/32) = 1.0
         let hw_zero = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
         // Neutral hardware baseline: 32 regs, 64KB L1, no scarcity
         let hw_neutral = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15811,7 +15822,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let neutral_hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15898,7 +15909,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -15947,7 +15958,7 @@ mod tests {
             pipeline_valuable: 0.3,  // same → reg_tension = 0
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -16070,7 +16081,7 @@ mod tests {
         let dp = DeviceProfile::detect();
         let view = ArbiterHwView::from(&dp);
         // Assert: is_gpu is always false for CPU DeviceProfile
-        assert!(!view.is_gpu, "from(&DeviceProfile) must produce is_gpu=false");
+        assert!(view.device == DeviceFamily::Cpu, "from(&DeviceProfile) must produce CPU view");
         // num_simd_regs must match
         assert_eq!(
             view.num_simd_regs, dp.num_simd_regs(),
@@ -16102,7 +16113,7 @@ mod tests {
         ];
         let profiles: Vec<ArbiterHwView> = vec![
             ArbiterHwView {
-                is_gpu: false, num_simd_regs: 16, cache_sizes: (32768, 262144, 8388608),
+                device: DeviceFamily::Cpu, num_simd_regs: 16, cache_sizes: (32768, 262144, 8388608),
             },
             ArbiterHwView::gpu(49152),
         ];
@@ -16239,7 +16250,7 @@ mod tests {
         // Arrange: L1 = 32768, richness = 32768/65536 = 0.5
         // fusion_cost_scale multiplier = 1/sqrt(0.5) = sqrt(2) ≈ 1.4142
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (32768, 0, 0),
         };
@@ -16260,7 +16271,7 @@ mod tests {
     fn register_scarcity_boundary_32_no_adjustment() {
         // Arrange: num_simd_regs=32 → scarcity = 1 - 32/32 = 0.0
         let hw_no_scarcity = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0), // richness = 1.0, no fusion change
         };
@@ -16282,7 +16293,7 @@ mod tests {
         // Arrange: scarcity = 1 - 8/32 = 0.75
         // epilogue *= 1 + 0.75*0.3 = 1.225, k_depth *= 1 - 0.75*0.2 = 0.85
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0), // richness = 1.0
         };
@@ -16305,8 +16316,8 @@ mod tests {
     fn arbiter_hw_view_hashmap_dedup_same_views() {
         // Arrange
         use std::collections::HashMap;
-        let view_a = ArbiterHwView { is_gpu: false, num_simd_regs: 16, cache_sizes: (32768, 0, 0) };
-        let view_b = ArbiterHwView { is_gpu: false, num_simd_regs: 16, cache_sizes: (32768, 0, 0) };
+        let view_a = ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 16, cache_sizes: (32768, 0, 0) };
+        let view_b = ArbiterHwView { device: DeviceFamily::Cpu, num_simd_regs: 16, cache_sizes: (32768, 0, 0) };
         let mut map: HashMap<ArbiterHwView, i32> = HashMap::new();
         // Act: insert same key twice
         map.insert(view_a, 1);
@@ -16384,7 +16395,7 @@ mod tests {
     fn gpu_zero_registers_gpu_branch_takes_priority_over_scarcity() {
         // Arrange: GPU with 0 regs — GPU branch fires, scarcity branch also fires
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 0,
             cache_sizes: (65536, 0, 0),
         };
@@ -16409,7 +16420,7 @@ mod tests {
         // Arrange: L1 = 131072 → richness = 131072/65536 = 2.0 (capped)
         // fusion multiplier = 1/sqrt(2.0) = 0.7071...
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (131072, 0, 0),
         };
@@ -16490,7 +16501,7 @@ mod tests {
         // Act
         let view = ArbiterHwView::gpu(shared);
         // Assert
-        assert!(view.is_gpu);
+        assert!(view.device == DeviceFamily::Gpu);
         assert_eq!(view.num_simd_regs, 255);
         assert_eq!(view.cache_sizes, (shared, 0, 0));
     }
@@ -16501,14 +16512,14 @@ mod tests {
     fn arbiter_hw_view_struct_update_syntax() {
         // Arrange: base CPU view
         let base = cpu_avx2();
-        // Act: override is_gpu and L1, inherit the rest
+        // Act: override device and L1, inherit the rest
         let derived = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             cache_sizes: (65536, base.cache_sizes.1, base.cache_sizes.2),
             ..base
         };
         // Assert: overridden fields changed, inherited fields unchanged
-        assert!(derived.is_gpu);
+        assert!(derived.device == DeviceFamily::Gpu);
         assert_eq!(derived.cache_sizes.0, 65536);
         assert_eq!(derived.num_simd_regs, base.num_simd_regs);
         assert_eq!(derived.cache_sizes.1, base.cache_sizes.1);
@@ -16593,17 +16604,17 @@ mod tests {
     fn arbiter_hw_view_partial_eq_identical_and_different() {
         // Arrange
         let a = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 1048576, 33554432),
         };
         let b = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 1048576, 33554432),
         };
         let c = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 32,
             cache_sizes: (49152, 1048576, 33554432),
         };
@@ -16618,7 +16629,7 @@ mod tests {
     fn zero_l1_cache_no_division_fusion_scale_unchanged_by_hw() {
         // Arrange: L1 = 0 → l1_richness = 0, so the L1 branch is skipped
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32, // no scarcity adjustment at 32
             cache_sizes: (0, 262144, 8388608),
         };
@@ -16711,7 +16722,7 @@ mod tests {
     fn arbiter_large_simd_regs_no_overflow_in_scarcity_calc() {
         // Arrange: extreme register count, should not trigger scarcity
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: usize::MAX,
             cache_sizes: (32768, 262144, 8388608),
         };
@@ -16769,7 +16780,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -16792,7 +16803,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -16817,7 +16828,7 @@ mod tests {
             pipeline_valuable: 0.50,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -16844,7 +16855,7 @@ mod tests {
             pipeline_valuable: 0.50,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -16917,7 +16928,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -16933,7 +16944,7 @@ mod tests {
     fn arbiter_hw_view_manual_cpu_not_equal_gpu_constructor() {
         // Arrange: same cache sizes but different is_gpu flag
         let cpu = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -16955,7 +16966,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17050,7 +17061,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17070,7 +17081,7 @@ mod tests {
         // Scarcity: scarcity = 1.0 - 8/32 = 0.75, epilogue *= 1 + 0.75*0.3 = 1.225
         // Combined epilogue: 1.5 (baseline) * 1.2 (gpu) * 1.225 (scarcity) = 2.205
         let gpu_low_reg = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 8,
             cache_sizes: (65536, 0, 0),
         };
@@ -17109,7 +17120,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17134,7 +17145,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17159,7 +17170,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17175,7 +17186,7 @@ mod tests {
     fn gpu_max_registers_skips_scarcity_no_panic() {
         // Arrange: GPU with absurdly high register count
         let gpu_max_reg = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: usize::MAX,
             cache_sizes: (65536, 0, 0),
         };
@@ -17313,7 +17324,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17344,7 +17355,7 @@ mod tests {
         for size in sizes {
             let view = ArbiterHwView::gpu(size);
             // Assert
-            assert!(view.is_gpu, "gpu({}) should set is_gpu=true", size);
+            assert!(view.device == DeviceFamily::Gpu, "gpu({}) should set device=Gpu", size);
             assert_eq!(view.num_simd_regs, 255, "gpu({}) should set 255 regs", size);
             assert_eq!(view.cache_sizes.0, size, "gpu({}) L1 mismatch", size);
             assert_eq!(view.cache_sizes.1, 0, "gpu({}) L2 should be 0", size);
@@ -17366,7 +17377,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17447,7 +17458,7 @@ mod tests {
             pipeline_valuable: 0.1,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17492,7 +17503,7 @@ mod tests {
             pipeline_valuable: 0.5,
         };
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (49152, 0, 0),
         };
@@ -17529,7 +17540,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17551,7 +17562,7 @@ mod tests {
         // L1 richness = 1.0/65536.0 ≈ 0.0000153, sqrt ≈ 0.0039
         // fusion_cost *= 1/0.0039 ≈ 256 → validate clamps to 3.0
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 255,
             cache_sizes: (1, 0, 0),
         };
@@ -17589,7 +17600,7 @@ mod tests {
             pipeline_valuable: 1.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17713,7 +17724,7 @@ mod tests {
         // After cumulative HW: epilogue=1.5*1.47=2.205, k_depth=1.3*1.02=1.326
         // L1=49152 → richness=0.75, sqrt=0.866 → fusion *= 1/0.866=1.155
         let hw = ArbiterHwView {
-            is_gpu: true,
+            device: DeviceFamily::Gpu,
             num_simd_regs: 8,
             cache_sizes: (49152, 0, 0),
         };
@@ -17747,7 +17758,7 @@ mod tests {
             pipeline_valuable: 0.0,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };
@@ -17791,7 +17802,7 @@ mod tests {
             pipeline_valuable: 0.9,
         };
         let hw = ArbiterHwView {
-            is_gpu: false,
+            device: DeviceFamily::Cpu,
             num_simd_regs: 32,
             cache_sizes: (65536, 0, 0),
         };

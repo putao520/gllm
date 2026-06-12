@@ -391,12 +391,7 @@ impl MegaKernelExecutor {
             scratchpad_base_bytes: output.logits_scratch_offset,
             vocab_size: output.vocab_size,
             hidden: output.hidden,
-            elem_bytes: { let eb = geometry.compute_dtype.size_bytes();
-                eprintln!("[DIAG-EXEC-DTYPE] compute_dtype={:?} elem_bytes={} num_kv_heads={} head_dim={} kv_row_stride={}",
-                    geometry.compute_dtype, eb, geometry.num_kv_heads, geometry.head_dim,
-                    geometry.num_kv_heads * geometry.head_dim * eb);
-                eb
-            },
+            elem_bytes: geometry.compute_dtype.size_bytes(),
 
             gpu_code,
             source_map: output.source_map,
@@ -417,7 +412,7 @@ impl MegaKernelExecutor {
                 let mut registry = crate::jit::variant_registry::VariantRegistry::new();
                 // Register default Direct variant (the compiled mega-kernel itself)
                 let default_key = crate::jit::variant_registry::VariantRegistry::derive_key(
-                    "default", false, false, None, false, 64, None, None, None,
+                    "default", None, false, None, false, 64, None, None, None,
                 );
                 let default_variant = crate::jit::variant_registry::CompiledVariant {
                     code: Vec::new(),                  // The actual code lives in mega_compiled
@@ -431,7 +426,7 @@ impl MegaKernelExecutor {
                 // §19 KV-OPT-009: Register KIVI4 variant (compiled with Kivi4 kv_load_mode).
                 if let Some(ref kivi4) = kivi4_exec {
                     let kivi4_key = crate::jit::variant_registry::VariantRegistry::derive_key(
-                        "default", false, false, None, false, 64, None, Some("KIVI4".to_string()), None,
+                        "default", None, false, None, false, 64, None, Some("KIVI4".to_string()), None,
                     );
                     let kivi4_variant = crate::jit::variant_registry::CompiledVariant {
                         code: kivi4.layer_code.code_bytes().to_vec(),
@@ -765,6 +760,15 @@ impl MegaKernelExecutor {
             // Save MXCSR before JIT call — JIT may modify FP exception masks
             let mut mxcsr_saved: u32 = 0;
             std::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr_saved, options(nostack));
+            // NaN-TRAP: Enable Invalid Operation exception (bit 0 = IE unmask)
+            // When GLLM_NAN_TRAP=1, any NaN-producing FP op triggers SIGFPE,
+            // allowing precise identification of the first NaN generation site.
+            let mxcsr_nan_trap = if std::env::var("GLLM_NAN_TRAP").is_ok() {
+                0x1F80 & !0x01 // Unmask IE (Invalid Exception) — bit 0
+            } else {
+                0x1F80 // Default: all exceptions masked
+            };
+            std::arch::asm!("ldmxcsr [{}]", in(reg) &mxcsr_nan_trap, options(nostack));
             let result = (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
@@ -789,10 +793,13 @@ impl MegaKernelExecutor {
                 page_table_ptr,     // page_table_ptr: NULL = contiguous KV, u32[] = paged KV
                 ctx.batch_ctx_ptr,
             );
+            // Read MXCSR after JIT call — check if JIT modified FP exception state
+            let mut mxcsr_after: u32 = 0;
+            std::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr_after, options(nostack));
             // Restore MXCSR: reset all FP exception flags and set default masks
             // Default MXCSR = 0x1F80 (all exceptions masked, round-to-nearest, no flush-to-zero)
             std::arch::asm!("ldmxcsr [{}]", in(reg) &0x1F80u32, options(nostack));
-            let _ = mxcsr_saved; // used for save/restore pattern, suppress unused warning
+            let _ = (mxcsr_saved, mxcsr_after); // suppress unused warnings
             result
         };
 
@@ -804,75 +811,6 @@ impl MegaKernelExecutor {
             self.eos_token_id,
             output_tokens.first().copied().unwrap_or(0),
         );
-        // DIAG: dump output tokens, logits at pos 0, activation buffers
-        {
-            let n_dump = 20.min(output_tokens.len());
-            eprintln!("[DIAG-OUTPUT] output_tokens[0..{}]: {:?}", n_dump, &output_tokens[..n_dump]);
-            eprintln!("[DIAG-INPUT] prompt_len={} input_ids={:?}", prompt_len, &input_ids[..prompt_len.min(20)]);
-            // Logits at pos 0 (after decode, this is the last decode step's logits)
-            let logits_off = mega.logits_scratch_offset;
-            let vocab = mega.vocab_size;
-            for &check_pos in &[0usize, prompt_len.saturating_sub(1)] {
-                let byte_off = logits_off + check_pos * vocab * 4;
-                if byte_off + vocab * 4 <= scratchpad.len() {
-                    let full = unsafe { std::slice::from_raw_parts(scratchpad[byte_off..].as_ptr() as *const f32, vocab) };
-                    let max_val = full.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    let min_val = full.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let nan_n = full.iter().filter(|x| x.is_nan()).count();
-                    eprintln!("[DIAG-LOGITS] pos={} nan={} min={:.4} max={:.4} first8={:?}",
-                        check_pos, nan_n, min_val, max_val, &full[..8.min(vocab)]);
-                    if max_val > f32::NEG_INFINITY {
-                        let mut idx: Vec<(usize, f32)> = full.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-                        idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        eprintln!("[DIAG-TOP5] pos={} {:?}", check_pos, &idx[..5]);
-                    }
-                }
-            }
-            // Activation buffers at pos 0
-            let hidden = mega.hidden;
-            let row_bytes = hidden * 4;
-            for (label, off) in [("act_a", mega.buffer_layout.activation_a_offset), ("act_b", mega.buffer_layout.activation_b_offset)] {
-                if off + row_bytes <= scratchpad.len() {
-                    let v = unsafe { std::slice::from_raw_parts(scratchpad[off..].as_ptr() as *const f32, 8.min(hidden)) };
-                    eprintln!("[DIAG-ACT-POS0] {} {:?}", label, v);
-                }
-            }
-            // KV cache dump for layer 0 (K and V at positions 0 and prompt_len-1)
-            if !kv_cache.is_empty() {
-                let kv_ptr = kv_cache.as_ptr();
-                let kv_len = kv_cache.len();
-                let max_seq = mega.max_seq_len;
-                let kv_row_stride = mega.num_kv_heads * mega.head_dim * 4;
-                let kv_layer_stride = 2 * max_seq * kv_row_stride;
-                let v_offset_in_layer = max_seq * kv_row_stride;
-                for &pos in &[0usize, prompt_len.saturating_sub(1)] {
-                    let k_off = pos * kv_row_stride;
-                    let v_off = v_offset_in_layer + pos * kv_row_stride;
-                    let n = 8.min(kv_row_stride / 4);
-                    if k_off + n * 4 <= kv_len {
-                        let k_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(k_off) as *const f32, n) };
-                        eprintln!("[DIAG-KV] layer=0 pos={} k={:?} all_zero={}", pos, &k_vals[..n], k_vals.iter().all(|&x| x == 0.0));
-                    }
-                    if v_off + n * 4 <= kv_len {
-                        let v_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(v_off) as *const f32, n) };
-                        eprintln!("[DIAG-KV] layer=0 pos={} v={:?} all_zero={}", pos, &v_vals[..n], v_vals.iter().all(|&x| x == 0.0));
-                    }
-                }
-                for &layer_idx in &[1usize, 4] {
-                    let n = 4.min(kv_row_stride / 4);
-                    let k_off_0 = layer_idx * kv_layer_stride;
-                    let k_off_last = layer_idx * kv_layer_stride + (prompt_len - 1) * kv_row_stride;
-                    if k_off_0 + n * 4 <= kv_len {
-                        let k_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(k_off_0) as *const f32, n) };
-                        eprintln!("[DIAG-KV] layer={} pos=0 k={:?}", layer_idx, k_vals);
-                    }
-                    if k_off_last + n * 4 <= kv_len {
-                        let k_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(k_off_last) as *const f32, n) };
-                        eprintln!("[DIAG-KV] layer={} pos={} k={:?}", layer_idx, prompt_len - 1, k_vals);
-                    }
-                }
-            }
-        }
         let actual_count = if generated_count == 0 && max_new_tokens > 0 && output_tokens[0] != 0 {
             1
         } else {

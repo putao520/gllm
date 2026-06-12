@@ -94,5 +94,5 @@ pub use intent_tracker::{
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
 
-pub use engine::arbiter::{ArbiterHwView, GraphArchetype, InferenceMode, StrategyArbiter, StrategyBias};
+pub use engine::arbiter::{ArbiterHwView, DeviceFamily, GraphArchetype, InferenceMode, StrategyArbiter, StrategyBias};
 pub use graph::profile::{AttentionKind, FfnKind, GraphProfile, GraphProfiler, ResidualKind};

@@ -84,13 +84,13 @@ impl ComputeCoordinator {
 
     pub fn classify_request_shape(
         &self,
-        is_moe: bool,
+        has_moe_ops: bool,
         gating_threshold: f32,
     ) -> crate::jit::sub_batch::GraphShape {
         let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
         let delta_rho = self.telemetry_aggregator.residual_delta_rho();
         self.sub_batch_dispatcher
-            .classify_request(dead_ratio, delta_rho, is_moe, gating_threshold)
+            .classify_request(dead_ratio, delta_rho, has_moe_ops, gating_threshold)
     }
 
     pub fn collapse_seq_len(&mut self, seq_len: usize) -> usize {

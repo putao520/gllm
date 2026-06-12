@@ -4,6 +4,14 @@
 //! weight-page / three-tier-swap management. Split from executor.rs to keep it
 //! under the 2000-line limit.
 
+/// Default ratio for early-exit layer placement (§9.3 ResidualBus).
+/// Exit layer = num_layers × 0.786, rounded down.
+const EARLY_EXIT_LAYER_RATIO: f64 = 0.786;
+
+/// Default ratio for intent-recall layer placement (§9.3 ResidualBus).
+/// Intent layer = num_layers × 0.75, rounded down.
+const INTENT_RECALL_LAYER_RATIO: f64 = 0.75;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -94,15 +102,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         });
         let page_size = scheduler.page_size();
 
-        let kv_dtype = if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend<E>>() {
-            DType::F32
-        } else {
-            geometry.compute_dtype
-        };
+        // ARCH-JIT-DATA-YIELDS: KV cache dtype follows model config, not backend type.
+        // CPU JIT accumulates in F32 but can store KV in the model's native dtype.
+        let kv_dtype = geometry.compute_dtype;
         let kv_cache_config = KvCacheConfig {
             geometry: geometry.clone(), kv_dtype, page_size, swap_config: None,
         };
-        let is_moe = geometry.is_moe();
+        // ARCH-JIT-DATA-YIELDS: MoE config derived from geometry topology, not bool flag.
+        let moe_config = if geometry.is_moe() {
+            Some(gllm_kernels::compiler::MoeConfig {
+                num_experts: geometry.num_experts,
+                top_k: geometry.moe_top_k,
+            })
+        } else {
+            None
+        };
         let tokenizer = TokenizerHandle::from_loader(loader, manifest.kind)?;
         let weights = loader.upload_weights(backend)?;
 
@@ -122,13 +136,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let sg_ring_buffer = std::sync::Arc::new(
             crate::semantic_gatekeeper::GatekeeperRingBuffer::new(
-                geometry.num_heads * geometry.head_dim, DType::F32.size_bytes(),
+                geometry.num_heads * geometry.head_dim, geometry.compute_dtype.size_bytes(),
             ),
         );
         let qtap_cfg = gllm_kernels::compiler::graph::QTapGraphConfig {
             sink_ptr: sg_ring_buffer.sink_ptr(),
             step_index_ptr: sg_ring_buffer.step_index_ptr(),
-            dtype: DType::F32,
+            dtype: geometry.compute_dtype,
             position: gllm_kernels::compiler::graph::QTapPosition::LastToken,
             num_slots: 2,
         };
@@ -139,7 +153,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(LoaderContext {
             geometry, model_config, forward_config, scheduler, kv_cache_config,
             tokenizer, weights, memory_manager, topology, sg_ring_buffer,
-            qtap_cfg, sg_shared_memory, is_moe,
+            qtap_cfg, sg_shared_memory, moe_config,
         })
     }
 
@@ -156,7 +170,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             crate::compat::cpu_backend::PagedKvPool::memory_comparison(
                 g.num_layers, g.num_kv_heads, g.max_seq_len,
                 g.head_dim, g.kv_dim(), g.compute_dtype.size_bytes(), page_size, total_blocks,
-                g.is_mla(),
+                if g.is_mla() { crate::compat::KvLayoutStrategy::MlaCompressed } else { crate::compat::KvLayoutStrategy::Standard },
             );
         if let Ok(pressure) = crate::compat::memory::get_system_memory_pressure() {
             if pressure > 0.8 {
@@ -179,7 +193,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let pool = crate::compat::cpu_backend::PagedKvPool::new(
             total_blocks, page_size, g.num_layers, g.num_kv_heads,
-            g.head_dim, g.kv_dim(), g.compute_dtype.size_bytes(), g.is_mla(),
+            g.head_dim, g.kv_dim(), g.compute_dtype.size_bytes(),
+            if g.is_mla() { crate::compat::KvLayoutStrategy::MlaCompressed } else { crate::compat::KvLayoutStrategy::Standard },
         );
         log::info!(
             "[executor] §PA-006 PagedKvPool: {} pages × {} bytes = {} MB",
@@ -247,22 +262,23 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// Build inference coordinator with MoE, speculative decoding, and residual bus.
     pub(crate) fn build_inference_coordinator(
         geometry: &crate::model_config::ModelGeometry,
-        is_moe: bool,
+        moe_config: Option<&gllm_kernels::compiler::MoeConfig>,
         moe_thermal: Option<crate::moe::thermal::ExpertThermalManager>,
         moe_fault_handler: Option<crate::moe::fault_handler::ExpertFaultHandler>,
         moe_dispatcher: Option<crate::moe::dispatch::MoeHardwareDispatcher>,
         moe_prefetcher: Option<crate::moe::prefetch::ExpertWeightPrefetcher>,
         hot_patch_manager: Option<crate::moe::hot_patch::HotPatchManager>,
     ) -> super::coordinator::inference::InferenceCoordinator {
+        let has_moe_ops = moe_config.is_some();
         let mut bus = crate::routing::ResidualBus::new(geometry.hidden_size, geometry.num_layers);
         let rag_layer = geometry.num_layers / 2;
         bus.register(crate::routing::BusPort::injection(rag_layer, crate::routing::BusPortTag::RagInjection));
-        let exit_layer = (geometry.num_layers as f64 * 0.786) as usize;
+        let exit_layer = (geometry.num_layers as f64 * EARLY_EXIT_LAYER_RATIO) as usize;
         bus.register(crate::routing::BusPort::recall(
             exit_layer.min(geometry.num_layers.saturating_sub(1)),
             crate::routing::BusPortTag::EarlyExit,
         ));
-        let intent_layer = (geometry.num_layers as f64 * 0.75) as usize;
+        let intent_layer = (geometry.num_layers as f64 * INTENT_RECALL_LAYER_RATIO) as usize;
         bus.register(crate::routing::BusPort::recall(
             intent_layer.min(geometry.num_layers.saturating_sub(1)),
             crate::routing::BusPortTag::IntentRecall,
@@ -279,7 +295,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         super::coordinator::inference::InferenceCoordinator {
             moe_thermal, moe_fault_handler, moe_dispatcher, moe_prefetcher,
-            prefetch_pipeline: is_moe.then_some(
+            prefetch_pipeline: has_moe_ops.then_some(
                 crate::moe::prefetch_pipeline::PrefetchPipeline::new(geometry.num_layers),
             ),
             hot_patch_manager,
@@ -310,7 +326,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mega_kernel: Option<super::mega_kernel::MegaKernelExecutor> = None;
 
         let (moe_thermal, moe_fault_handler, moe_dispatcher, moe_prefetcher, jit_director, hot_patch_manager) =
-            Self::init_moe_subsystem(&ctx.geometry, ctx.is_moe);
+            Self::init_moe_subsystem(&ctx.geometry, ctx.moe_config.as_ref());
         let (pre_topology, compiler_constraints, probe_result, compact_platform) =
             Self::detect_system_topology(&ctx.geometry, &ctx.model_config);
 
@@ -319,7 +335,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             &ctx, mega_kernel, &compiler_constraints, &probe_result, &compact_platform, jit_director,
         )?;
         let inference = Self::build_inference_coordinator(
-            &ctx.geometry, ctx.is_moe,
+            &ctx.geometry, ctx.moe_config.as_ref(),
             moe_thermal, moe_fault_handler, moe_dispatcher, moe_prefetcher, hot_patch_manager,
         );
 
@@ -395,7 +411,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         let num_layers = self.model_ctx.geometry.num_layers;
-        let is_moe = self.inference.moe_thermal.is_some();
+        let has_moe_ops = self.inference.moe_thermal.is_some();
 
         for layer_idx in 0..num_layers {
             // Each layer gets one weight page entry (physical ID = layer_idx for simplicity)
@@ -406,7 +422,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
             // Create UnifiedVirtualPage using compute dtype (may differ from storage dtype)
             let dtype = self.model_ctx.geometry.compute_dtype;
-            let uvp = if is_moe {
+            let uvp = if has_moe_ops {
                 // Each layer gets a single weight page entry.
                 // expert_id=0 used as placeholder for layer-level page;
                 // per-expert pages can be created at fault/prefetch time.
@@ -435,7 +451,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             );
 
             // Register in HGAL's weight_page_table (used by select_victim_weight_pages)
-            if is_moe {
+            if has_moe_ops {
                 self.dispatch.scheduler.hgal.register_expert_weight_page(page_id, layer_idx);
             } else {
                 self.dispatch.scheduler.hgal.register_dense_layer_weight_page(page_id, layer_idx);
@@ -462,8 +478,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         log::info!(
             "executor: §21 WP-002 registered {} weight page groups (moe={}, pinned={})",
             num_layers,
-            is_moe,
-            !is_moe,
+            has_moe_ops,
+            !has_moe_ops,
         );
     }
 

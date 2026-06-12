@@ -6,6 +6,18 @@
 //! - `CpuBackend<E>` / `CudaBackend<E>` stub implementations
 //! - Backward-compatible re-export modules (`kernel_types`, `backend_trait`, `cpu_backend`)
 
+/// KV cache layout strategy — derived from model topology, not from bool flags.
+///
+/// ARCH-JIT-DATA-YIELDS: layout strategy is a topology-derived enum, not a bool flag.
+/// Different KV cache organizations genuinely require different sizing/addressing logic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KvLayoutStrategy {
+    /// Standard: [layers][2][kv_heads][seq][head_dim]
+    Standard,
+    /// MLA compressed: [layers][seq][kv_dim] (single compressed vector, no K/V split)
+    MlaCompressed,
+}
+
 pub(crate) mod weight_helpers;
 pub(crate) mod sampling;
 
