@@ -760,11 +760,7 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -5416,27 +5412,18 @@ mod tests {
     }
 
     // ======================================================================
-    // ArchitectureFeatures: is_vision, is_audio, has_classifier, tie_lm_head fields
+    // ArchitectureFeatures: has_classifier field
     // @trace TEST-EXEC-COMPILE-008
     // ======================================================================
 
     #[test]
-    fn auto_features_vision_audio_classifier_fields() {
+    fn auto_features_classifier_field() {
         let mut features = make_auto_features();
-        assert!(!features.is_vision);
-        assert!(!features.is_audio);
         assert!(!features.has_classifier);
-        assert!(!features.tie_lm_head);
 
-        features.is_vision = true;
-        features.is_audio = true;
         features.has_classifier = true;
-        features.tie_lm_head = true;
 
-        assert!(features.is_vision);
-        assert!(features.is_audio);
         assert!(features.has_classifier);
-        assert!(features.tie_lm_head);
     }
 
     // ======================================================================

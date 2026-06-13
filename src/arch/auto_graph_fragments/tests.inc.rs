@@ -502,11 +502,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -611,11 +611,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -698,11 +698,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -791,11 +791,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -887,11 +887,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -973,11 +973,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -1048,11 +1048,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -1254,11 +1254,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -1391,11 +1391,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -1472,11 +1472,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -1690,11 +1690,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: true,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: true,
             causal: false,
             has_absolute_position_embed: true,
@@ -1744,11 +1744,11 @@ mod tests {
             mla_latent_dim: 512,
             mla_rope_dim: 64,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -1798,43 +1798,6 @@ mod tests {
         assert_eq!(features.family, Family::Encoder);
         assert!(!features.has_rope);
         assert!(features.has_classifier);
-    }
-
-    #[test]
-    fn analyze_vision_detection() {
-        let ri = make_role_index(vec![
-            (TensorRole::Embedding, None, "embed.weight"),
-            (TensorRole::OutputHead, None, "lm_head.weight"),
-            (TensorRole::FinalNorm, None, "norm.weight"),
-            (TensorRole::PatchEmbed, None, "vision.patch_embed.weight"),
-        ]);
-        let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None, None);
-        assert!(features.is_vision);
-    }
-
-    #[test]
-    fn analyze_tie_lm_head() {
-        let ri = make_role_index(vec![
-            (TensorRole::Embedding, None, "shared.weight"),
-            (TensorRole::OutputHead, None, "shared.weight"),
-            (TensorRole::FinalNorm, None, "norm.weight"),
-        ]);
-        let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None, None);
-        assert!(features.tie_lm_head);
-    }
-
-    #[test]
-    fn analyze_untied_lm_head() {
-        let ri = make_role_index(vec![
-            (TensorRole::Embedding, None, "embed_tokens.weight"),
-            (TensorRole::OutputHead, None, "lm_head.weight"),
-            (TensorRole::FinalNorm, None, "norm.weight"),
-        ]);
-        let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None, None);
-        assert!(!features.tie_lm_head);
     }
 
     // ── NormType tests ──
@@ -1901,22 +1864,6 @@ mod tests {
         let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(features.family, Family::Decoder, "FinalNorm alone → Decoder");
         assert!(features.has_rope, "Decoder with AttentionKey should have RoPE");
-    }
-
-    // ── analyze_architecture: audio detection via DepthwiseConv ──
-
-    #[test]
-    fn analyze_audio_detection() {
-        let ri = make_role_index(vec![
-            (TensorRole::Embedding, None, "embed.weight"),
-            (TensorRole::OutputHead, None, "lm_head.weight"),
-            (TensorRole::FinalNorm, None, "norm.weight"),
-            (TensorRole::DepthwiseConv, Some(0), "model.layers.0.dw_conv.weight"),
-        ]);
-        let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None, None);
-        assert!(features.is_audio, "DepthwiseConv role → audio detected");
-        assert!(!features.is_vision, "DepthwiseConv should not trigger vision");
     }
 
     // ── analyze_architecture: attention_sinks detection ──
@@ -2122,18 +2069,6 @@ mod tests {
         assert_eq!(features.norm_type, NormType::LayerNorm, "post-norm default → LayerNorm");
     }
 
-    // ── analyze_architecture: tie_lm_head false when no OutputHead ──
-
-    #[test]
-    fn analyze_tie_lm_head_false_without_output_head() {
-        let ri = make_role_index(vec![
-            (TensorRole::Embedding, None, "embed.weight"),
-            (TensorRole::ClassifierOutProj, None, "classifier.weight"),
-        ]);
-        let ws = make_weight_shapes(vec![]);
-        let features = analyze_architecture(&ri, &ws, None, None);
-        assert!(!features.tie_lm_head, "no OutputHead → tie_lm_head false");
-    }
 
     // ── analyze_architecture: moe_top_k = 0 when no experts ──
 
@@ -2177,11 +2112,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2240,11 +2175,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2307,11 +2242,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2371,11 +2306,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: true,
             causal: false,
             has_absolute_position_embed: true,
@@ -2448,11 +2383,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2530,11 +2465,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2683,11 +2618,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2746,11 +2681,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2849,11 +2784,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -2912,11 +2847,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3004,11 +2939,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: true,
             causal: false,
             has_absolute_position_embed: true,
@@ -3035,10 +2970,7 @@ mod tests {
         assert!(!features.has_shared_experts);
         assert!(!features.is_mla);
         assert!(!features.mla_use_unabsorbed);
-        assert!(!features.is_vision);
-        assert!(!features.is_audio);
         assert!(!features.has_classifier);
-        assert!(!features.tie_lm_head);
     }
 
     // ── FfnType Debug formatting ──
@@ -3078,11 +3010,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3119,7 +3051,6 @@ mod tests {
         ]);
         let features = analyze_architecture(&ri, &ws, None, None);
         assert!(features.is_moe);
-        assert!(features.is_vision);
         assert_eq!(features.num_experts, 8);
     }
 
@@ -3258,11 +3189,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3358,11 +3289,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3447,11 +3378,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3737,11 +3668,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3780,27 +3711,6 @@ mod tests {
     //   quant config handling, special float values, empty/boundary inputs
     // ────────────────────────────────────────────────────────────────────────
 
-    // ── 1. Fragment matching: decoder with tied lm_head uses embed tensor for lm_head ──
-
-    #[test]
-    fn analyze_tie_lm_head_decoder_family() {
-        // Arrange: shared weight for Embedding and OutputHead
-        let ri = make_role_index(vec![
-            (TensorRole::Embedding, None, "shared.weight"),
-            (TensorRole::OutputHead, None, "shared.weight"),
-            (TensorRole::FinalNorm, None, "norm.weight"),
-            (TensorRole::AttentionKey, Some(0), "L0.k_proj"),
-        ]);
-        let ws = make_weight_shapes(vec![]);
-
-        // Act
-        let features = analyze_architecture(&ri, &ws, None, None);
-
-        // Assert: tied + OutputHead → Decoder + tie_lm_head
-        assert_eq!(features.family, Family::Decoder, "OutputHead present → Decoder");
-        assert!(features.tie_lm_head, "same name for Embedding+OutputHead → tied");
-        assert!(features.has_rope, "pre-norm decoder with AttentionKey has RoPE");
-    }
 
     // ── 2. Arch detection edge case: gemma4 arch_name is case-sensitive ──
 
@@ -3868,11 +3778,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -3960,11 +3870,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4093,11 +4003,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4224,11 +4134,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4315,8 +4225,6 @@ mod tests {
         // Assert: all features active simultaneously
         assert!(features.attention_sinks, "AttentionSinks at layer 0 → attention_sinks");
         assert!(features.is_moe, "MoEGate at layer 0 → is_moe");
-        assert!(features.is_vision, "PatchEmbed → is_vision");
-        assert!(features.is_audio, "DepthwiseConv → is_audio");
         assert!(features.has_attention_bias, "q_proj.bias → attention_bias");
         assert_eq!(features.num_experts, 4);
     }
@@ -4350,11 +4258,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4444,11 +4352,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4548,11 +4456,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4654,11 +4562,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4739,11 +4647,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,
@@ -4819,11 +4727,11 @@ mod tests {
             mla_latent_dim: 0,
             mla_rope_dim: 0,
             mla_use_unabsorbed: false,
-            is_vision: false,
-            is_audio: false,
+
+
             has_classifier: false,
-            tie_lm_head: false,
-            has_norm_residual: false,
+
+
             is_post_norm: false,
             causal: true,
             has_absolute_position_embed: false,

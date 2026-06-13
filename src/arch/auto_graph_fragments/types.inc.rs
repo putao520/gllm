@@ -82,17 +82,8 @@ pub struct ArchitectureFeatures {
     /// Used for short prefill where compute is saturated (REQ-MLA-004).
     pub mla_use_unabsorbed: bool,
 
-    // Vision/Audio
-    pub is_vision: bool,
-    pub is_audio: bool,
-
     // Special
     pub has_classifier: bool,
-    pub tie_lm_head: bool,
-    /// Whether norm weights use (1 + weight) residual convention (Gemma 1/2/3).
-    /// Gemma 4 dropped this pattern — uses standard RMSNorm without +1.
-    /// SPEC/39: topology-driven, replaces hardcoded `has_gemma_norm_residual = false`.
-    pub has_norm_residual: bool,
     /// Post-norm architecture (BERT/XLM-R): norm applied after residual, not before.
     /// Detected by: presence of `TensorRole::EmbedNorm` (embeddings.LayerNorm weight).
     pub is_post_norm: bool,
@@ -296,10 +287,6 @@ pub fn analyze_architecture(
     // Default to 2 (Mixtral/DeepSeek common); executor overrides from config.
     let moe_top_k = if num_experts > 0 { 2 } else { 0 };
 
-    // ── Vision/Audio ──
-    let is_vision = role_index.contains_key(&(TensorRole::PatchEmbed, None));
-    let is_audio = role_index.keys().any(|(role, _)| *role == TensorRole::DepthwiseConv);
-
     // ── MLA (Multi-head Latent Attention) ──
     let is_mla = role_index.keys().any(|(role, _)| {
         matches!(role, TensorRole::MlaKvCompress | TensorRole::MlaKeyAbsorb)
@@ -321,19 +308,6 @@ pub fn analyze_architecture(
         0
     };
 
-    // ── Tie lm_head ──
-    let tie_lm_head = if has_output_head {
-        if let (Some(embed_name), Some(lm_name)) = (
-            role_index.get(&(TensorRole::Embedding, None)),
-            role_index.get(&(TensorRole::OutputHead, None)),
-        ) {
-            embed_name == lm_name
-        } else {
-            false
-        }
-    } else {
-        false
-    };
 
     ArchitectureFeatures {
         family,
@@ -358,14 +332,7 @@ pub fn analyze_architecture(
         mla_latent_dim,
         mla_rope_dim,
         mla_use_unabsorbed: hints.and_then(|h| h.mla_use_unabsorbed).unwrap_or(false),
-        is_vision,
-        is_audio,
         has_classifier,
-        tie_lm_head,
-        // Gemma 1/2/3 use (1+weight) residual norm convention.
-        // Gemma 4 dropped this pattern (identified by has_qk_norm=true).
-        // All non-Gemma models also don't use residual norm.
-        has_norm_residual: has_embedding_scale && !has_qk_norm,
         is_post_norm,
         causal,
         has_absolute_position_embed,
