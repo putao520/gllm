@@ -16,6 +16,7 @@ pub struct ComputeCoordinator {
     pub seq_histogram: SeqHistogram,
     pub ragged_compaction: RaggedCompaction,
     pub turboquant: TurboQuantRuntime,
+    pub has_moe_ops: bool,
 }
 
 impl ComputeCoordinator {
@@ -84,13 +85,12 @@ impl ComputeCoordinator {
 
     pub fn classify_request_shape(
         &self,
-        has_moe_ops: bool,
         gating_threshold: f32,
     ) -> crate::jit::sub_batch::GraphShape {
         let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
         let delta_rho = self.telemetry_aggregator.residual_delta_rho();
         self.sub_batch_dispatcher
-            .classify_request(dead_ratio, delta_rho, has_moe_ops, gating_threshold)
+            .classify_request(dead_ratio, delta_rho, self.has_moe_ops, gating_threshold)
     }
 
     pub fn collapse_seq_len(&mut self, seq_len: usize) -> usize {
@@ -121,7 +121,14 @@ mod tests {
             seq_histogram: SeqHistogram::new(100, 4096),
             ragged_compaction: RaggedCompaction::new(CompactPlatform::X86Avx2),
             turboquant: TurboQuantRuntime::disabled(),
+            has_moe_ops: false,
         }
+    }
+
+    fn make_compute_moe() -> ComputeCoordinator {
+        let mut coord = make_compute();
+        coord.has_moe_ops = true;
+        coord
     }
 
     #[test]
@@ -208,25 +215,25 @@ mod tests {
         let coord = make_compute();
 
         // Default telemetry (dead_ratio=0, delta_rho=0) → FullPrecision
-        let shape = coord.classify_request_shape(false, 0.0);
+        let shape = coord.classify_request_shape(0.0);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::FullPrecision);
     }
 
     #[test]
     fn classify_request_shape_moe_sparse_when_gating_low() {
-        let coord = make_compute();
+        let coord = make_compute_moe();
 
-        // is_moe=true + low gating_threshold → MoeSparse
-        let shape = coord.classify_request_shape(true, 0.3);
+        // has_moe_ops=true + low gating_threshold → MoeSparse
+        let shape = coord.classify_request_shape(0.3);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::MoeSparse);
     }
 
     #[test]
     fn classify_request_shape_moe_full_precision_when_gating_high() {
-        let coord = make_compute();
+        let coord = make_compute_moe();
 
-        // is_moe=true + gating_threshold >= 0.5 → not MoeSparse → FullPrecision
-        let shape = coord.classify_request_shape(true, 0.8);
+        // has_moe_ops=true + gating_threshold >= 0.5 → not MoeSparse → FullPrecision
+        let shape = coord.classify_request_shape(0.8);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::FullPrecision);
     }
 
@@ -433,7 +440,7 @@ mod tests {
             &crate::jit::epilogue::EpilogueSignal::ResidualDeltaRho { delta_rho: 0.8 },
         );
 
-        let shape = coord.classify_request_shape(false, 0.0);
+        let shape = coord.classify_request_shape(0.0);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::NarrowQuant);
     }
 
@@ -446,23 +453,23 @@ mod tests {
             &crate::jit::epilogue::EpilogueSignal::DeadNeuronRatio { ratio: 0.8 },
         );
 
-        let shape = coord.classify_request_shape(false, 0.0);
+        let shape = coord.classify_request_shape(0.0);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::SkipAttention);
     }
 
     #[test]
     fn classify_request_shape_moe_with_high_gating_is_full_precision() {
-        let coord = make_compute();
-        // is_moe=true + gating_threshold=0.5 → NOT MoeSparse → FullPrecision
-        let shape = coord.classify_request_shape(true, 0.5);
+        let coord = make_compute_moe();
+        // has_moe_ops=true + gating_threshold=0.5 → NOT MoeSparse → FullPrecision
+        let shape = coord.classify_request_shape(0.5);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::FullPrecision);
     }
 
     #[test]
     fn classify_request_shape_moe_with_just_below_threshold() {
-        let coord = make_compute();
-        // is_moe=true + gating_threshold=0.499 → MoeSparse
-        let shape = coord.classify_request_shape(true, 0.499);
+        let coord = make_compute_moe();
+        // has_moe_ops=true + gating_threshold=0.499 → MoeSparse
+        let shape = coord.classify_request_shape(0.499);
         assert_eq!(shape, crate::jit::sub_batch::GraphShape::MoeSparse);
     }
 

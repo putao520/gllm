@@ -647,44 +647,6 @@ mod tests {
     // SPEC/39: derived from rope_theta, not manifest.kind.
     // ========================================================================
 
-    fn determine_position_encoding(rope_theta: f64) -> PositionEncoding {
-        if rope_theta > 0.0 {
-            PositionEncoding::Rope
-        } else {
-            PositionEncoding::None
-        }
-    }
-
-    #[test]
-    fn position_encoding_zero_theta() {
-        let encoding = determine_position_encoding(0.0);
-        assert_eq!(encoding, PositionEncoding::None);
-    }
-
-    #[test]
-    fn position_encoding_negative_theta() {
-        let encoding = determine_position_encoding(-100.0);
-        assert_eq!(encoding, PositionEncoding::None);
-    }
-
-    #[test]
-    fn position_encoding_positive_theta() {
-        let encoding = determine_position_encoding(10000.0);
-        assert_eq!(encoding, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_large_theta() {
-        let encoding = determine_position_encoding(500000.0);
-        assert_eq!(encoding, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_small_positive_theta() {
-        let encoding = determine_position_encoding(100.0);
-        assert_eq!(encoding, PositionEncoding::Rope);
-    }
-
     // ========================================================================
     // Pure computation: layer index calculations
     // (mirrors build_inference_coordinator logic)

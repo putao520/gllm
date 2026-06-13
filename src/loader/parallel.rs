@@ -38,22 +38,6 @@ impl ParallelLoader {
     }
 }
 
-pub fn enforce_parallel(has_moe_ops: bool, requested: bool) -> bool {
-    if has_moe_ops {
-        true
-    } else {
-        requested
-    }
-}
-
-pub fn decide_parallel(has_moe_ops: bool, requested: bool, shards: usize) -> bool {
-    if has_moe_ops {
-        true
-    } else {
-        requested && shards > 1
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,44 +97,7 @@ mod tests {
         assert!(cloned.enabled());
     }
 
-    // ── enforce_parallel ───────────────────────────────────────────────
-
-    #[test]
-    fn enforce_parallel_moe_always_true() {
-        assert!(enforce_parallel(true, false));
-        assert!(enforce_parallel(true, true));
-    }
-
-    #[test]
-    fn enforce_parallel_non_moe_uses_requested() {
-        assert!(!enforce_parallel(false, false));
-        assert!(enforce_parallel(false, true));
-    }
-
-    // ── decide_parallel ────────────────────────────────────────────────
-
-    #[test]
-    fn decide_parallel_moe_always_true() {
-        assert!(decide_parallel(true, false, 1));
-        assert!(decide_parallel(true, false, 0));
-    }
-
-    #[test]
-    fn decide_parallel_non_moe_requested_and_multiple_shards() {
-        assert!(decide_parallel(false, true, 4));
-    }
-
-    #[test]
-    fn decide_parallel_non_moe_requested_single_shard() {
-        assert!(!decide_parallel(false, true, 1));
-    }
-
-    #[test]
-    fn decide_parallel_non_moe_not_requested() {
-        assert!(!decide_parallel(false, false, 4));
-    }
-
-    // ── New tests (TEST-PAR-14 .. TEST-PAR-26) ─────────────────────────
+    // ── Additional tests (TEST-PAR-14 .. TEST-PAR-36) ─────────────────────
 
     #[test]
     // @trace TEST-PAR-14 [req:REQ-LOADER] [level:unit]
@@ -285,40 +232,6 @@ mod tests {
     }
 
     #[test]
-    // @trace TEST-PAR-22 [req:REQ-LOADER] [level:unit]
-    fn decide_parallel_non_moe_shards_zero() {
-        // Arrange: shards=0 should not enable parallel (0 is not > 1)
-        // Act & Assert
-        assert!(!decide_parallel(false, true, 0));
-    }
-
-    #[test]
-    // @trace TEST-PAR-23 [req:REQ-LOADER] [level:unit]
-    fn decide_parallel_moe_shards_zero_still_true() {
-        // Arrange: MoE always true regardless of shards
-        // Act & Assert
-        assert!(decide_parallel(true, false, 0));
-    }
-
-    #[test]
-    // @trace TEST-PAR-24 [req:REQ-LOADER] [level:unit]
-    fn decide_parallel_boundary_shards_two() {
-        // Arrange: shards=2 is > 1, so requested=true should enable parallel
-        // Act & Assert
-        assert!(decide_parallel(false, true, 2));
-    }
-
-    #[test]
-    // @trace TEST-PAR-25 [req:REQ-LOADER] [level:unit]
-    fn enforce_parallel_all_combinations() {
-        // Arrange & Act & Assert — exhaustive truth table
-        assert!(enforce_parallel(true, true), "moe=true, req=true");
-        assert!(enforce_parallel(true, false), "moe=true, req=false");
-        assert!(enforce_parallel(false, true), "moe=false, req=true");
-        assert!(!enforce_parallel(false, false), "moe=false, req=false");
-    }
-
-    #[test]
     // @trace TEST-PAR-26 [req:REQ-LOADER] [level:unit]
     fn map_paths_disabled_all_errors() {
         // Arrange
@@ -441,22 +354,6 @@ mod tests {
     }
 
     #[test]
-    // @trace TEST-PAR-33 [req:REQ-LOADER] [level:unit]
-    fn decide_parallel_vs_enforce_semantics() {
-        // Arrange — decide_parallel requires shards > 1 for non-MoE,
-        // but enforce_parallel ignores shards entirely.
-        // Act & Assert
-        assert!(
-            !decide_parallel(false, true, 1),
-            "decide: non-moe, requested, single shard => false"
-        );
-        assert!(
-            enforce_parallel(false, true),
-            "enforce: non-moe, requested => true (ignores shards)"
-        );
-    }
-
-    #[test]
     // @trace TEST-PAR-34 [req:REQ-LOADER] [level:unit]
     fn map_paths_returns_unit_tuple() {
         // Arrange — T = (), testing zero-sized return type
@@ -468,16 +365,6 @@ mod tests {
 
         // Assert
         assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    // @trace TEST-PAR-35 [req:REQ-LOADER] [level:unit]
-    fn enforce_parallel_truth_table_is_deterministic() {
-        // Arrange & Act & Assert — call many times, same inputs => same outputs
-        for _ in 0..100 {
-            assert!(enforce_parallel(true, false));
-            assert!(!enforce_parallel(false, false));
-        }
     }
 
     #[test]
