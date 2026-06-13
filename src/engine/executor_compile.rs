@@ -571,9 +571,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         )
         .map_err(|e| ExecutorError::Backend(BackendError::Other(format!("auto_graph build failed: {}", e))))?;
 
-        // DEBUG: verify embed op kind after graph build
-        let embed_op = graph.ops.iter().find(|op| op.label == "embed_gather");
-        eprintln!("[GRAPH-CHECK] embed_gather op kind = {:?}", embed_op.map(|op| &op.kind));
         Ok(graph)
     }
 
