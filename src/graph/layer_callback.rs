@@ -398,7 +398,6 @@ mod tests {
                         interleaved: false,
                         precompute: false,
                     },
-                    position_encoding: crate::engine::executor::PositionEncoding::Rope,
                     arch_family: crate::manifest::ArchFamily::Decoder,
                     rerank_yes_token_id: None,
                     rerank_no_token_id: None,
@@ -4151,7 +4150,6 @@ mod tests {
                     interleaved: false,
                     precompute: false,
                 },
-                position_encoding: crate::engine::executor::PositionEncoding::Rope,
                 arch_family: crate::manifest::ArchFamily::Decoder,
                 rerank_yes_token_id: None,
                 rerank_no_token_id: None,
@@ -4649,15 +4647,6 @@ mod tests {
         let holder = CtxHolder::new();
         let ctx = holder.ctx(0, 0);
         assert!(matches!(ctx.model_config.arch_family, crate::manifest::ArchFamily::Decoder));
-    }
-
-    // -- LayerContext: model_config position_encoding is Rope --
-
-    #[test]
-    fn test_layer_context_position_encoding_rope() {
-        let holder = CtxHolder::new();
-        let ctx = holder.ctx(0, 0);
-        assert!(matches!(ctx.model_config.position_encoding, crate::engine::executor::PositionEncoding::Rope));
     }
 
     // -- LayerContext: model_config rope config fields --
@@ -7677,19 +7666,6 @@ mod tests {
 
         // Assert
         assert_eq!(action, CallbackAction::SkipThisNode);
-    }
-
-    #[test]
-    fn test_layer_context_position_encoding_field_matches_config() {
-        // Arrange: verify position_encoding is accessible through context
-        let holder = CtxHolder::new();
-        let ctx = holder.ctx(0, 0);
-
-        // Assert: position_encoding matches what was configured in CtxHolder
-        assert!(matches!(
-            ctx.model_config.position_encoding,
-            crate::engine::executor::PositionEncoding::Rope
-        ));
     }
 
     #[test]

@@ -32,7 +32,7 @@ use gllm_kernels::types::DType;
 
 use super::executor::{
     Executor, ExecutorError, ExecutorResult, GeneratorForwardConfig, KvCacheConfig,
-    LoaderContext, PagedKvConfig, PositionEncoding, RoPEConfig,
+    LoaderContext, PagedKvConfig, RoPEConfig,
 };
 
 use super::mega_kernel_callback::MegaKernelCallbackTable;
@@ -59,16 +59,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             )));
         }
 
-        // Position encoding derived from rope_theta, not manifest.kind.
-        // rope_theta > 0 → model has RoPE weights → Rope.
-        // rope_theta <= 0 → no RoPE → None (absolute position embeddings handled by graph builder).
-        // SPEC/39: topology-driven, not kind-driven.
-        let position_encoding = if model_config.rope_theta > 0.0 {
-            PositionEncoding::Rope
-        } else {
-            PositionEncoding::None
-        };
-
         let geometry = Arc::new(crate::model_config::ModelGeometry::from_config(
             &model_config, manifest.moe_config,
         ));
@@ -81,7 +71,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 interleaved: geometry.rope_interleaved,
                 precompute: true,
             },
-            position_encoding,
             arch_family: manifest.family(),
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -256,6 +245,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             seq_histogram: crate::jit::histogram::SeqHistogram::new(10000, g.max_seq_len.max(4096)),
             ragged_compaction: crate::jit::ragged::RaggedCompaction::new(*compact_platform),
             turboquant,
+            has_moe_ops: g.is_moe(),
         })
     }
 
@@ -1766,39 +1756,6 @@ mod tests {
     // ========================================================================
 
     // ========================================================================
-    // PositionEncoding: additional boundary and variant coverage
-    // ========================================================================
-
-    #[test]
-    fn position_encoding_all_variants_are_exhaustive() {
-        // Arrange: enumerate all PositionEncoding variants
-        let variants = [PositionEncoding::None, PositionEncoding::Rope];
-        // Act & Assert: every variant is self-equal
-        for v in &variants {
-            assert_eq!(*v, *v);
-        }
-    }
-
-    #[test]
-    fn position_encoding_debug_output() {
-        // Arrange
-        let none = PositionEncoding::None;
-        let rope = PositionEncoding::Rope;
-        // Act
-        let debug_none = format!("{none:?}");
-        let debug_rope = format!("{rope:?}");
-        // Assert: Debug output contains variant name
-        assert!(debug_none.contains("None"));
-        assert!(debug_rope.contains("Rope"));
-    }
-
-    #[test]
-    fn position_encoding_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<PositionEncoding>();
-    }
-
-    // ========================================================================
     // SamplingConfig: boundary values, zero, extreme values
     // ========================================================================
 
@@ -2536,7 +2493,6 @@ mod tests {
         assert_eq!(cfg.num_kv_heads(), 2);
         assert_eq!(cfg.head_dim(), 16);
         assert_eq!(cfg.max_seq_len(), 512);
-        assert_eq!(cfg.position_encoding, PositionEncoding::Rope);
         assert!(cfg.moe_config.is_none());
     }
 

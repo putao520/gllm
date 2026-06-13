@@ -79,7 +79,7 @@ pub use batch_executor::{BatchExecutor, BatchInferenceState, GenerateRequest, Ge
 pub use executor::{
     AttentionHeadConfig, AttentionMaskType, AttentionTopology, BackendError, BatchInput,
     GeneratorForwardConfig, KvCacheConfig, KvCacheHandle, LogitsHandle, PagedKvConfig,
-    PositionEncoding, RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
+    RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
 };
 
 pub use coordinator::dispatch::DispatchCoordinator;
@@ -1052,20 +1052,6 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert!(set.contains(&AttentionMaskType::Bidirectional));
         assert!(set.contains(&AttentionMaskType::Causal));
-    }
-
-    // ---- PositionEncoding: Copy and exhaustive equality ----
-
-    #[test]
-    fn position_encoding_copy_and_reflexive_equality() {
-        // Arrange
-        let a = PositionEncoding::Rope;
-        let b = a; // Copy
-
-        // Assert: copy preserves value
-        assert_eq!(a, b);
-        assert_eq!(a, PositionEncoding::Rope);
-        assert_ne!(a, PositionEncoding::None);
     }
 
     // ---- SwapConfig: boundary values ----

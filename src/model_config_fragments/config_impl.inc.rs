@@ -638,7 +638,7 @@ impl ModelConfig {
 
         // Ω1: rope_theta 从模型配置或 manifest 中读取。
         // Encoder 模型（BERT/XLM-R）使用绝对位置编码，不含 rope_theta → 默认 0.0（表示无 RoPE）。
-        // 下游 executor 通过 PositionEncoding::None 正确处理 rope_theta == 0.0 的 encoder 模型。
+        // 下游 executor 根据 rope_theta == 0.0 正确处理 encoder 模型（无 RoPE）。
         let rope_theta = if let Some(override_value) = manifest.rope_base_override {
             override_value
         } else {
@@ -708,7 +708,7 @@ impl ModelConfig {
         }
 
         // Ω1: rope_theta == 0.0 合法 — encoder 模型（BERT/XLM-R）有 attention 但不使用 RoPE。
-        // 下游 executor 会根据 (ModelKind, rope_theta) 选择 PositionEncoding::None 或 Rope。
+        // 下游 executor 根据 rope_theta 值决定是否使用 RoPE（> 0 → 有 RoPE，≤ 0 → 无 RoPE）。
 
         let kv_cache_block_size = find_usize(
             value,

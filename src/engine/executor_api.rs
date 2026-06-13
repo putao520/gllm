@@ -1700,36 +1700,6 @@ mod tests {
         assert_eq!(super::super::executor_types::effective_kv_max_seq_len(1 << 20), 1 << 20);
     }
 
-    // ── PositionEncoding: all variants and traits ──
-
-    #[test]
-    fn position_encoding_variants_distinct() {
-        use super::super::executor_types::PositionEncoding;
-        assert_ne!(PositionEncoding::None, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_copy_trait() {
-        use super::super::executor_types::PositionEncoding;
-        let a = PositionEncoding::Rope;
-        let b = a;
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn position_encoding_debug_trait() {
-        use super::super::executor_types::PositionEncoding;
-        let debug = format!("{:?}", PositionEncoding::Rope);
-        assert!(debug.contains("Rope"), "expected Rope in debug, got: {debug}");
-    }
-
-    #[test]
-    fn position_encoding_eq_trait() {
-        use super::super::executor_types::PositionEncoding;
-        assert_eq!(PositionEncoding::None, PositionEncoding::None);
-        assert_eq!(PositionEncoding::Rope, PositionEncoding::Rope);
-    }
-
     // ── AttentionMaskType: all variants and traits ──
 
     #[test]

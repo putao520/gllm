@@ -1316,36 +1316,6 @@ mod tests {
     // ── Wave 12x36 new tests (13 tests) ────────────────────────────────────
 
     #[test]
-    fn position_encoding_variants_are_distinct() {
-        // Arrange
-        use crate::engine::executor::PositionEncoding;
-        let none = PositionEncoding::None;
-        let rope = PositionEncoding::Rope;
-
-        // Assert: two variants are distinct
-        assert_ne!(none, rope);
-        assert_eq!(none, PositionEncoding::None);
-        assert_eq!(rope, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_debug_format() {
-        // Arrange
-        use crate::engine::executor::PositionEncoding;
-        let none = PositionEncoding::None;
-        let rope = PositionEncoding::Rope;
-
-        // Act
-        let debug_none = format!("{none:?}");
-        let debug_rope = format!("{rope:?}");
-
-        // Assert
-        assert!(debug_none.contains("None"));
-        assert!(debug_rope.contains("Rope"));
-        assert_ne!(debug_none, debug_rope);
-    }
-
-    #[test]
     fn attention_mask_type_variants_and_hash() {
         // Arrange
         use std::collections::HashSet;

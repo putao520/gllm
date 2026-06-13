@@ -80,24 +80,6 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // PositionEncoding
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn position_encoding_variants_are_distinct() {
-        let a = PositionEncoding::None;
-        let b = PositionEncoding::Rope;
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn position_encoding_is_copy() {
-        let a = PositionEncoding::Rope;
-        let b = a;
-        assert_eq!(a, b);
-    }
-
-    // ---------------------------------------------------------------
     // SamplingConfig::default
     // ---------------------------------------------------------------
 
@@ -183,7 +165,6 @@ mod tests {
                 interleaved: false,
                 precompute: false,
             },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -845,15 +826,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // GeneratorForwardConfig: position_encoding None, Encoder arch family
+    // GeneratorForwardConfig: Encoder arch family
     // ---------------------------------------------------------------
-
-    #[test]
-    fn forward_config_position_encoding_none() {
-        let mut cfg = make_forward_config();
-        cfg.position_encoding = PositionEncoding::None;
-        assert_eq!(cfg.position_encoding, PositionEncoding::None);
-    }
 
     #[test]
     fn forward_config_encoder_family() {
@@ -1848,7 +1822,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: geo,
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -1867,7 +1840,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -1889,7 +1861,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -1907,7 +1878,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::None,
             arch_family: crate::manifest::ArchFamily::Encoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -1916,7 +1886,6 @@ mod tests {
             callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
         };
         assert_eq!(cfg.arch_family, crate::manifest::ArchFamily::Encoder);
-        assert_eq!(cfg.position_encoding, PositionEncoding::None);
     }
 
     // ---- effective_kv_max_seq_len: more edge cases ----
@@ -2055,7 +2024,6 @@ mod tests {
         let cfg = GeneratorForwardConfig::default_for_test();
         assert!((cfg.rope_theta() - 10000.0).abs() < 1e-6);
         assert!((cfg.rope_scale() - 1.0).abs() < 1e-6);
-        assert_eq!(cfg.position_encoding, PositionEncoding::Rope);
     }
 
     #[test]
@@ -2109,7 +2077,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: geo,
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2133,7 +2100,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: geo,
             rope: RoPEConfig { theta: 500000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2154,7 +2120,6 @@ mod tests {
         assert_eq!(cloned.hidden_size(), cfg.hidden_size());
         assert_eq!(cloned.num_layers(), cfg.num_layers());
         assert_eq!(cloned.vocab_size(), cfg.vocab_size());
-        assert_eq!(cloned.position_encoding, cfg.position_encoding);
         assert_eq!(cloned.arch_family, cfg.arch_family);
     }
 
@@ -2169,7 +2134,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: geo,
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2187,7 +2151,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2209,7 +2172,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2560,16 +2522,6 @@ mod tests {
         assert_eq!(format!("{err}"), "backend error: ");
     }
 
-    // ---- PositionEncoding: Debug trait ----
-
-    #[test]
-    fn position_encoding_debug_format() {
-        let debug_none = format!("{:?}", PositionEncoding::None);
-        let debug_rope = format!("{:?}", PositionEncoding::Rope);
-        assert!(debug_none.contains("None"));
-        assert!(debug_rope.contains("Rope"));
-    }
-
     // ---- ExecutorError: from KvCacheError ----
 
     #[test]
@@ -2712,21 +2664,6 @@ mod tests {
     #[test]
     fn effective_kv_max_seq_len_usize_max() {
         assert_eq!(effective_kv_max_seq_len(usize::MAX), usize::MAX);
-    }
-
-    // ---- PositionEncoding: Eq trait consistency ----
-
-    #[test]
-    fn position_encoding_eq_consistency() {
-        assert_eq!(PositionEncoding::None, PositionEncoding::None);
-        assert_eq!(PositionEncoding::Rope, PositionEncoding::Rope);
-        // Reflexive: a == a
-        let a = PositionEncoding::Rope;
-        assert_eq!(a, a);
-        // Symmetric: a == b implies b == a
-        let b = PositionEncoding::None;
-        assert_ne!(a, b);
-        assert_ne!(b, a);
     }
 
     // ---- AttentionHeadConfig: from_geometry with MLA geometry ----
@@ -2912,24 +2849,6 @@ mod tests {
         assert_eq!(effective_kv_max_seq_len(1), 1);
         assert_eq!(effective_kv_max_seq_len(2), 2);
         assert_eq!(effective_kv_max_seq_len(3), 3);
-    }
-
-    // ---- PositionEncoding: exhaustive variant check ----
-
-    #[test]
-    fn position_encoding_exhaustive_variants() {
-        // Verify both variants exist and are distinguishable via match
-        let variants = [PositionEncoding::None, PositionEncoding::Rope];
-        let mut none_count = 0;
-        let mut rope_count = 0;
-        for &v in &variants {
-            match v {
-                PositionEncoding::None => none_count += 1,
-                PositionEncoding::Rope => rope_count += 1,
-            }
-        }
-        assert_eq!(none_count, 1);
-        assert_eq!(rope_count, 1);
     }
 
     // ---- SamplingConfig: top_k at usize::MAX ----
@@ -3416,7 +3335,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: geo,
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,

@@ -3441,36 +3441,6 @@ mod tests {
     }
 
     // ======================================================================
-    // PositionEncoding: variants and equality
-    // ======================================================================
-
-    #[test]
-    fn position_encoding_none() {
-        use crate::engine::executor_types::PositionEncoding;
-        assert_eq!(PositionEncoding::None, PositionEncoding::None);
-    }
-
-    #[test]
-    fn position_encoding_rope() {
-        use crate::engine::executor_types::PositionEncoding;
-        assert_eq!(PositionEncoding::Rope, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_distinct() {
-        use crate::engine::executor_types::PositionEncoding;
-        assert_ne!(PositionEncoding::None, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_copy() {
-        use crate::engine::executor_types::PositionEncoding;
-        let a = PositionEncoding::Rope;
-        let b = a; // Copy
-        assert_eq!(a, b);
-    }
-
-    // ======================================================================
     // RoPEConfig: construction and equality
     // ======================================================================
 
@@ -4745,17 +4715,6 @@ mod tests {
         assert_eq!(geo.effective_kv_layer(4), 1);
         // Layer 5 has type 1; scan 3..0: L3=1 => donor is L3
         assert_eq!(geo.effective_kv_layer(5), 3);
-    }
-
-    // ======================================================================
-    // GeneratorForwardConfig: position_encoding field
-    // ======================================================================
-
-    #[test]
-    fn forward_config_position_encoding_default_is_rope() {
-        use crate::engine::executor_types::GeneratorForwardConfig;
-        let cfg = GeneratorForwardConfig::default_for_test();
-        assert_eq!(cfg.position_encoding, crate::engine::executor_types::PositionEncoding::Rope);
     }
 
     // ======================================================================

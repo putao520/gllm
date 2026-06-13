@@ -218,7 +218,6 @@ mod tests {
             });
             crate::engine::executor::GeneratorForwardConfig {
                 geometry: geom,
-                position_encoding: crate::engine::executor::PositionEncoding::Rope,
                 arch_family: crate::manifest::ArchFamily::Decoder,
                 rope: crate::engine::executor::RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: true },
                 rerank_yes_token_id: None, rerank_no_token_id: None,

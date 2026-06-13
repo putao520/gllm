@@ -260,7 +260,7 @@ mod tests {
     use super::*;
     use crate::engine::executor::{
         AttentionHeadConfig, AttentionMaskType, BackendError, BatchInput, KvCacheConfig,
-        PagedKvConfig, PositionEncoding, RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
+        PagedKvConfig, RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
     };
     use crate::model_config::ModelGeometry;
     use gllm_kernels::types::DType;
@@ -911,17 +911,6 @@ mod tests {
     }
 
     #[test]
-    fn position_encoding_variants_distinct() {
-        // Arrange: PositionEncoding has two variants
-        let none = PositionEncoding::None;
-        let rope = PositionEncoding::Rope;
-        // Assert: variants are distinct and PartialEq works
-        assert_ne!(none, rope);
-        assert_eq!(none, PositionEncoding::None);
-        assert_eq!(rope, PositionEncoding::Rope);
-    }
-
-    #[test]
     fn rope_config_fields_preserved() {
         // Arrange
         let config = RoPEConfig {
@@ -1349,7 +1338,6 @@ mod tests {
         let cfg = GeneratorForwardConfig::default_for_test();
         assert!((cfg.rope_theta() - 10000.0).abs() < f64::EPSILON);
         assert!((cfg.rope_scale() - 1.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.position_encoding, PositionEncoding::Rope);
     }
 
     #[test]

@@ -1568,34 +1568,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn position_encoding_variants_are_distinct() {
-        // Arrange
-        use crate::engine::executor::PositionEncoding;
-        let none = PositionEncoding::None;
-        let rope = PositionEncoding::Rope;
-        // Assert: the two variants are distinct and self-equal
-        assert_ne!(none, rope, "None and Rope should be distinct");
-        assert_eq!(none, PositionEncoding::None);
-        assert_eq!(rope, PositionEncoding::Rope);
-        // Assert: Copy + Clone semantics
-        let copied = rope;
-        assert_eq!(copied, PositionEncoding::Rope);
-        assert_eq!(rope, PositionEncoding::Rope, "Copy leaves original usable");
-    }
-
-    #[test]
-    fn position_encoding_debug_output() {
-        // Arrange
-        use crate::engine::executor::PositionEncoding;
-        // Act
-        let none_debug = format!("{:?}", PositionEncoding::None);
-        let rope_debug = format!("{:?}", PositionEncoding::Rope);
-        // Assert: Debug output contains variant name
-        assert!(none_debug.contains("None"), "Expected 'None' in debug, got: {none_debug}");
-        assert!(rope_debug.contains("Rope"), "Expected 'Rope' in debug, got: {rope_debug}");
-    }
-
-    #[test]
     fn rope_config_construction_and_copy_semantics() {
         // Arrange
         use crate::engine::executor::RoPEConfig;
@@ -1820,8 +1792,6 @@ mod tests {
         assert_eq!(cfg.rope.scale, 1.0);
         assert!(!cfg.rope.interleaved);
         assert!(!cfg.rope.precompute);
-        // Assert: position encoding
-        assert_eq!(cfg.position_encoding, crate::engine::executor::PositionEncoding::Rope);
     }
 
     #[test]

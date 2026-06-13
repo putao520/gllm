@@ -466,7 +466,6 @@ mod tests {
                         interleaved: false,
                         precompute: false,
                     },
-                    position_encoding: crate::engine::executor::PositionEncoding::Rope,
                     arch_family: crate::manifest::ArchFamily::Decoder,
                     rerank_yes_token_id: None,
                     rerank_no_token_id: None,

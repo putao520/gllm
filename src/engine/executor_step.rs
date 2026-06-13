@@ -3433,38 +3433,6 @@ mod tests {
     }
 
     // =======================================================================
-    // PositionEncoding enum
-    // =======================================================================
-
-    #[test]
-    fn position_encoding_equality() {
-        assert_eq!(
-            crate::engine::executor_types::PositionEncoding::None,
-            crate::engine::executor_types::PositionEncoding::None
-        );
-        assert_eq!(
-            crate::engine::executor_types::PositionEncoding::Rope,
-            crate::engine::executor_types::PositionEncoding::Rope
-        );
-    }
-
-    #[test]
-    fn position_encoding_inequality() {
-        assert_ne!(
-            crate::engine::executor_types::PositionEncoding::None,
-            crate::engine::executor_types::PositionEncoding::Rope
-        );
-    }
-
-    #[test]
-    fn position_encoding_debug_format() {
-        let none_debug = format!("{:?}", crate::engine::executor_types::PositionEncoding::None);
-        assert_eq!(none_debug, "None");
-        let rope_debug = format!("{:?}", crate::engine::executor_types::PositionEncoding::Rope);
-        assert_eq!(rope_debug, "Rope");
-    }
-
-    // =======================================================================
     // SamplingConfig default and construction
     // =======================================================================
 

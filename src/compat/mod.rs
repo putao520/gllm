@@ -48,7 +48,7 @@ pub use gllm_kernels::traits::Element;
 // Backward-compatible re-export modules
 pub mod kernel_types {
     pub use crate::engine::executor::{
-        GeneratorForwardConfig, KvCacheConfig, PositionEncoding, SamplingConfig, SwapConfig,
+        GeneratorForwardConfig, KvCacheConfig, SamplingConfig, SwapConfig,
     };
     pub use crate::scheduler::types::{PageId, PageState, PhysicalId, RequestId, StorageKey};
 }

@@ -8,7 +8,7 @@ mod tests {
     use crate::engine::{
         AttentionHeadConfig, AttentionMaskType, AttentionTopology, BackendError, BatchInput,
         GeneratorForwardConfig, KvCacheConfig, KvCacheHandle, LogitsHandle, PagedKvConfig,
-        PositionEncoding, RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
+        RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
     };
     use crate::engine::executor::{Executor, ExecutorF32, LoaderContext};
     use crate::engine::executor_types::{
@@ -66,15 +66,6 @@ mod tests {
         assert_eq!(effective_kv_max_seq_len(512), 512);
         assert_eq!(effective_kv_max_seq_len(4096), 4096);
         assert_eq!(effective_kv_max_seq_len(1), 1);
-    }
-
-    // ── PositionEncoding ──
-
-    #[test]
-    fn position_encoding_variants() {
-        assert_eq!(PositionEncoding::None, PositionEncoding::None);
-        assert_eq!(PositionEncoding::Rope, PositionEncoding::Rope);
-        assert_ne!(PositionEncoding::None, PositionEncoding::Rope);
     }
 
     // ── SamplingConfig ──
@@ -476,7 +467,6 @@ mod tests {
                 interleaved: false,
                 precompute: false,
             },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -643,18 +633,6 @@ mod tests {
     fn effective_kv_max_seq_len_large_and_max() {
         assert_eq!(effective_kv_max_seq_len(131072), 131072);
         assert_eq!(effective_kv_max_seq_len(usize::MAX), usize::MAX);
-    }
-
-    // ---- PositionEncoding: Copy, Debug ----
-
-    #[test]
-    fn position_encoding_copy_and_debug() {
-        let a = PositionEncoding::Rope;
-        let b = a;
-        assert_eq!(a, b);
-        assert!(format!("{a:?}").contains("Rope"));
-        let none = PositionEncoding::None;
-        assert!(format!("{none:?}").contains("None"));
     }
 
     // ---- SamplingConfig: boundary floats ----
@@ -948,15 +926,14 @@ mod tests {
 
         let no_pos = GeneratorForwardConfig {
             geometry: geo.clone(), rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::None, arch_family: crate::manifest::ArchFamily::Decoder,
+            arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None, rerank_no_token_id: None, moe_config: None,
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 }, callback_chain: CallbackChainHandle::new(),
         };
-        assert_eq!(no_pos.position_encoding, PositionEncoding::None);
 
         let with_rerank = GeneratorForwardConfig {
             geometry: geo, rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope, arch_family: crate::manifest::ArchFamily::Decoder,
+            arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: Some(1), rerank_no_token_id: Some(0), moe_config: None,
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 }, callback_chain: CallbackChainHandle::new(),
         };
@@ -968,14 +945,13 @@ mod tests {
         use crate::engine::coordinator::callback_slot::CallbackChainHandle;
         let cfg = GeneratorForwardConfig {
             geometry: minimal_geometry(), rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope, arch_family: crate::manifest::ArchFamily::Decoder,
+            arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None, rerank_no_token_id: None, moe_config: None,
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 }, callback_chain: CallbackChainHandle::new(),
         };
         let cloned = cfg.clone();
         assert_eq!(cfg.hidden_size(), cloned.hidden_size());
         assert_eq!(cfg.num_layers(), cloned.num_layers());
-        assert_eq!(cfg.position_encoding, cloned.position_encoding);
     }
 
     // ---- RequestData: fused_prefill_hidden, Debug ----
@@ -1901,29 +1877,6 @@ mod tests {
         assert!((cfg.top_p - 1.0).abs() < 1e-6, "default top_p should be 1.0");
     }
 
-    // ---- PositionEncoding: exhaustive variant checks ----
-
-    #[test]
-    fn position_encoding_none_is_valid() {
-        let enc = PositionEncoding::None;
-        assert_eq!(enc, PositionEncoding::None);
-        assert_ne!(enc, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_rope_is_valid() {
-        let enc = PositionEncoding::Rope;
-        assert_eq!(enc, PositionEncoding::Rope);
-        assert_ne!(enc, PositionEncoding::None);
-    }
-
-    #[test]
-    fn position_encoding_clone_matches() {
-        let a = PositionEncoding::Rope;
-        let b = a.clone();
-        assert_eq!(a, b);
-    }
-
     // ---- KvCacheConfig: more field validation ----
 
     #[test]
@@ -2058,7 +2011,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: true, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2070,12 +2022,11 @@ mod tests {
     }
 
     #[test]
-    fn generator_forward_config_position_encoding_none_field() {
+    fn generator_forward_config_encoder_arch_family() {
         use crate::engine::coordinator::callback_slot::CallbackChainHandle;
         let cfg = GeneratorForwardConfig {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::None,
             arch_family: crate::manifest::ArchFamily::Encoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2083,7 +2034,6 @@ mod tests {
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
             callback_chain: CallbackChainHandle::new(),
         };
-        assert_eq!(cfg.position_encoding, PositionEncoding::None);
         assert_eq!(cfg.arch_family, crate::manifest::ArchFamily::Encoder);
     }
 
@@ -2093,7 +2043,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
@@ -2116,7 +2065,6 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: Some(7386),
             rerank_no_token_id: Some(3617),

@@ -28,13 +28,6 @@ pub fn effective_kv_max_seq_len(geometry_max_seq_len: usize) -> usize {
 
 // ---- Engine types (moved from compat) ----
 
-/// Positional encoding variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PositionEncoding {
-    None,
-    Rope,
-}
-
 /// Sampling hyper-parameters for a single request.
 #[derive(Debug, Clone, Copy)]
 pub struct SamplingConfig {
@@ -95,7 +88,6 @@ pub struct GeneratorForwardConfig {
     pub geometry: Arc<crate::model_config::ModelGeometry>,
     /// RoPE config (convenience view, derived from geometry).
     pub rope: RoPEConfig,
-    pub position_encoding: PositionEncoding,
     /// Architecture family (Encoder vs Decoder).
     pub arch_family: crate::manifest::ArchFamily,
     /// Token ID for "yes" (used by decoder-based rerankers without a score head).
@@ -242,7 +234,6 @@ impl GeneratorForwardConfig {
                 interleaved: false,
                 precompute: false,
             },
-            position_encoding: PositionEncoding::Rope,
             arch_family: crate::manifest::ArchFamily::Decoder,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,

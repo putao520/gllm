@@ -3160,30 +3160,6 @@ mod tests {
         assert!(format!("{:?}", AttentionMaskType::Causal).contains("Causal"));
     }
 
-    // ── PositionEncoding: Debug, Clone, Copy, PartialEq, Eq ──
-
-    #[test]
-    fn position_encoding_variants_distinct() {
-        use crate::engine::executor::PositionEncoding;
-        assert_ne!(PositionEncoding::None, PositionEncoding::Rope);
-        assert_eq!(PositionEncoding::Rope, PositionEncoding::Rope);
-    }
-
-    #[test]
-    fn position_encoding_copy_semantics() {
-        use crate::engine::executor::PositionEncoding;
-        let a = PositionEncoding::Rope;
-        let b = a;
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn position_encoding_debug_format() {
-        use crate::engine::executor::PositionEncoding;
-        assert!(format!("{:?}", PositionEncoding::None).contains("None"));
-        assert!(format!("{:?}", PositionEncoding::Rope).contains("Rope"));
-    }
-
     // ── RequestKind: additional derives ──
 
     #[test]
