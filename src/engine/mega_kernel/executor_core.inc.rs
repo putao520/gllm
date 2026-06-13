@@ -2,7 +2,6 @@
 ///
 /// 唯一推理路径: 编译 → 单次 CALL。
 /// 编译在模型加载时完成，推理时零 Rust 开销。
-#[allow(dead_code)]
 pub struct MegaKernelExecutor {
     /// Mega-kernel 编译产物 (唯一路径 — SPEC/39 统一架构)
     mega_compiled: Option<MegaKernelCompiled>,
@@ -10,6 +9,7 @@ pub struct MegaKernelExecutor {
     num_layers: usize,
     hidden_size: usize,
     vocab_size: usize,
+    #[allow(dead_code)]
     dtype: DType,
     /// EOS token ID — 从 ModelConfig 读取，传给 JIT 停止条件
     eos_token_id: u32,

@@ -290,9 +290,9 @@ pub enum MegaKernelError {
 ///
 /// 持有完整的 mega-kernel 机器码（embedding → layer loop → logits-producer → sampling → generate loop）
 /// + 全模型权重布局 + 缓冲布局。推理时通过单次 CALL 执行。
-#[allow(dead_code)]
 struct MegaKernelCompiled {
     /// graph.weight_layout() — 权重 blob 中每个 tensor 的偏移
+    #[allow(dead_code)]
     weight_layout: gllm_kernels::compiler::graph::WeightLayout,
     /// (canonical_name, byte_offset) 对 — 用于诊断查询
     named_offsets: Vec<(String, usize)>,

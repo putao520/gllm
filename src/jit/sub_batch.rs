@@ -201,7 +201,6 @@ pub enum DispatchReason {
 ///
 /// 负责将 batch 中的请求按图形状分类，创建子批次，
 /// 并将子批次分配到硬件分区。
-#[allow(dead_code)]
 pub struct SubBatchDispatcher {
     /// IR 约束变量
     constraints: CompilerConstraints,

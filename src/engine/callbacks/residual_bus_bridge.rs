@@ -17,7 +17,6 @@ use crate::routing::{BusPortKind, BusPortTag, InjectionPayload, ResidualBus};
 /// Per SPEC §9.3: the residual stream `x_out = x_in + Layer(x_in)` has physical
 /// Injection Ports and Recall Ports. This callback mediates bus operations at
 /// the appropriate layers during the node loop.
-#[allow(dead_code)]
 pub struct ResidualBusBridgeCallback {
     /// Snapshot of bus port metadata (layer → tags) for fast lookup
     injection_layers: Vec<(usize, BusPortTag)>,
@@ -27,6 +26,7 @@ pub struct ResidualBusBridgeCallback {
     /// Recalled data from recall ports (populated during forward pass)
     recalled_data: Vec<RecalledEntry>,
     /// Hidden size for validation
+    #[allow(dead_code)]
     hidden_size: usize,
     /// Previous layer's hidden state for recall cosine similarity
     prev_hidden: Vec<f32>,

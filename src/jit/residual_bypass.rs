@@ -46,13 +46,13 @@ pub struct LayerBypassRecord {
 /// - 从 TelemetryAggregator / KvPageHeader 提取信号
 /// - 逐层做出跳过决策
 /// - 记录决策历史
-#[allow(dead_code)]
 pub struct ResidualBypassLayer {
     /// 决策器
     detector: ResidualBypassDetector,
     /// 逐层决策记录 (layer_idx → record)
     history: Vec<LayerBypassRecord>,
     /// 总层数 (从模型配置获取)
+    #[allow(dead_code)]
     num_layers: usize,
     /// 累计跳过的层数
     total_bypassed_layers: usize,
