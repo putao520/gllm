@@ -15,6 +15,7 @@ use crate::engine::executor::{BackendError as BE, GeneratorForwardConfig, KvCach
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use crate::scheduler::types::StorageKey;
 
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use super::KvLayoutStrategy;
 
 /// Metadata for a GPU-resident KV cache buffer, needed for swap operations.

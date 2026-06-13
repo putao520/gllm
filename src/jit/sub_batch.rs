@@ -207,8 +207,6 @@ pub struct SubBatchDispatcher {
     constraints: CompilerConstraints,
     /// 最小子批次大小（低于此值的请求归入兜底路径）
     min_sub_batch_size: usize,
-    /// 最大子批次数（防止过度分片）
-    max_sub_batches: usize,
     /// Build-time constant: whether the model has MoE ops.
     /// ARCH-JIT-DATA-YIELDS: derived from graph topology at construction, not passed per-call.
     has_moe_ops: bool,
@@ -220,7 +218,6 @@ impl SubBatchDispatcher {
         Self {
             constraints,
             min_sub_batch_size: 4,
-            max_sub_batches: 4,
             has_moe_ops: false,
         }
     }

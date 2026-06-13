@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::compat::backend_trait::{Backend, Element};
-use crate::compat::CpuBackend;
 use crate::loader::Loader;
 use crate::kv_cache::KvCacheSlot;
 use crate::manifest::{ModelKind, ModelManifest};
@@ -28,7 +27,6 @@ use crate::scheduler::{
     BasicObserver, GlobalMemoryManager, PagedScheduler, PolicyVariant,
 };
 use crate::tokenizer::TokenizerHandle;
-use gllm_kernels::types::DType;
 
 use super::executor::{
     Executor, ExecutorError, ExecutorResult, GeneratorForwardConfig, KvCacheConfig,
@@ -628,6 +626,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gllm_kernels::types::DType;
     use crate::engine::executor_types::{effective_kv_max_seq_len, AttentionTopology, SamplingConfig};
 
     // ========================================================================

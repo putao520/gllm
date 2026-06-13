@@ -145,8 +145,9 @@ impl MegaKernelExecutor {
         // Gemma 1/2/3: has_embedding_scale=true, has_qk_norm=false → (1+weight) residual
         // Gemma 4+: has_qk_norm=true → standard RMSNorm, no residual
         // All other models: no embedding_scale → no residual
-        let has_gemma_norm_residual = graph.embedding_scale.is_some()
-            && !graph.ops.iter().any(|op| matches!(op.kind, gllm_kernels::compiler::graph::OpKind::QkNorm { .. }));
+        // ARCH-JIT-DATA-YIELDS: topology derived from graph ops, not pre-scan bool.
+        let topology = gllm_kernels::compiler::codegen::vm::topology::GraphTopologyAnalysis::analyze(&graph);
+        let has_gemma_norm_residual = graph.embedding_scale.is_some() && !topology.has_qk_norm;
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler
             .compile_mega_kernel_from_graph(graph, &config, hetero_layout)
