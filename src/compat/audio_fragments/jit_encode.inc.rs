@@ -156,6 +156,7 @@ fn build_conformer_block_graph(
             head_dim,
             causal: false,
             attention_sinks: false,
+            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
         },
         vec![q, k, v],
         vec![attn_out],

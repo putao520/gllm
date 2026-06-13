@@ -577,7 +577,8 @@ mod tests {
                 head_dim: hd,
                 causal: false,
                 attention_sinks: false,
-            },
+            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
+        },
             vec![q, k, v],
             vec![out],
             "mha",
@@ -984,6 +985,7 @@ mod tests {
         let attn_out = g.add_tensor_concrete("attn_out", &[seq, h], dt);
         g.add_op(OpKind::MultiHeadAttention {
             seq_len: s.clone(), num_heads: nh, num_kv_heads: nh, head_dim: hd, causal: false, attention_sinks: false,
+            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
         }, vec![q, k, v], vec![attn_out], "attn_mha");
         let attn_proj = g.add_tensor_concrete("attn_proj", &[seq, h], dt);
         g.add_op(OpKind::Gemm{ m: s, n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_out, w_o], vec![attn_proj], "attn_o");
@@ -1164,6 +1166,7 @@ mod tests {
         let attn_out = g.add_tensor_concrete("attn_out", &[seq, h], dt);
         g.add_op(OpKind::MultiHeadAttention {
             seq_len: s.clone(), num_heads: nh, num_kv_heads: nh, head_dim: hd, causal: false, attention_sinks: false,
+            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
         }, vec![q, k, v], vec![attn_out], "mha");
         let attn_proj = g.add_tensor_concrete("attn_proj", &[seq, h], dt);
         g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_out, w_o], vec![attn_proj], "o");

@@ -695,6 +695,7 @@ pub fn build_compiler_graph(
                 OpKind::MultiHeadAttention {
                     seq_len: s.clone(), num_heads: this_num_q_heads, num_kv_heads, head_dim: this_head_dim, causal,
                     attention_sinks: features.attention_sinks,
+                    kv_source: gllm_kernels::compiler::graph::KvSource::FromCache,
                 },
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
@@ -1352,6 +1353,7 @@ pub fn build_compiler_graph(
                     OpKind::MultiHeadAttention {
                         seq_len: s.clone(), num_heads, num_kv_heads: num_heads, head_dim, causal,
                         attention_sinks: false,
+                        kv_source: gllm_kernels::compiler::graph::KvSource::FromCache,
                     },
                     vec![rope_q, rope_k, v_restored],
                     vec![attn],
@@ -1366,6 +1368,7 @@ pub fn build_compiler_graph(
                     OpKind::MlaAttention {
                         seq_len: s.clone(), num_heads, head_dim,
                         d_c: mla_d_c, d_rope: mla_d_rope, causal,
+                        kv_source: gllm_kernels::compiler::graph::KvSource::FromCache,
                     },
                     vec![q_absorbed, c_kv, k_pe, uv_w],
                     vec![attn],
@@ -1597,6 +1600,7 @@ pub fn build_compiler_graph(
                 OpKind::MultiHeadAttention {
                     seq_len: s.clone(), num_heads, num_kv_heads, head_dim, causal,
                     attention_sinks: features.attention_sinks,
+                    kv_source: gllm_kernels::compiler::graph::KvSource::FromCache,
                 },
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],

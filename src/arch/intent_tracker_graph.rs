@@ -191,6 +191,7 @@ pub fn build_intent_tracker_graph(
             head_dim,
             causal: true,
             attention_sinks: false,
+            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
         },
         vec![q_proj, k_proj, v_modulated],
         vec![attn_out],

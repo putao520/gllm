@@ -503,6 +503,7 @@ fn build_vision_encoder_graph(
                 head_dim,
                 causal: false,
                 attention_sinks: false,
+                kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
             },
             vec![q, k, v],
             vec![attn],
