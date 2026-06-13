@@ -55,10 +55,9 @@ impl MegaKernelExecutor {
 
         // Build slim config with only non-derivable fields.
         // SPEC/39: mtp_config 已迁移到图拓扑（OpKind::MtpDraft），不再从 BusinessConfig 读取。
-        let mtp_depth = graph.ops.iter().find_map(|op| match &op.kind {
-            gllm_kernels::compiler::graph::OpKind::MtpDraft { depth, .. } => Some(*depth),
-            _ => None,
-        }).unwrap_or(0);
+        // ARCH-JIT-DATA-YIELDS: mtp_depth derived from topology, not graph.ops.iter().find_map.
+        let topology = gllm_kernels::compiler::codegen::vm::topology::GraphTopologyAnalysis::analyze(&graph);
+        let mtp_depth = topology.mtp_config.map(|c| c.depth).unwrap_or(0);
         // SPEC/39: BusinessConfig no longer nested in CompileConfig.
         // debug_jit promoted to CompileConfig top level — the only business
         // parameter the compiler reads directly.
@@ -145,8 +144,6 @@ impl MegaKernelExecutor {
         // Gemma 1/2/3: has_embedding_scale=true, has_qk_norm=false → (1+weight) residual
         // Gemma 4+: has_qk_norm=true → standard RMSNorm, no residual
         // All other models: no embedding_scale → no residual
-        // ARCH-JIT-DATA-YIELDS: topology derived from graph ops, not pre-scan bool.
-        let topology = gllm_kernels::compiler::codegen::vm::topology::GraphTopologyAnalysis::analyze(&graph);
         let has_gemma_norm_residual = graph.embedding_scale.is_some() && !topology.has_qk_norm;
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler
