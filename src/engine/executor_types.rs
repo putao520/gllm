@@ -88,7 +88,9 @@ pub struct GeneratorForwardConfig {
     pub geometry: Arc<crate::model_config::ModelGeometry>,
     /// RoPE config (convenience view, derived from geometry).
     pub rope: RoPEConfig,
-    /// Architecture family (Encoder vs Decoder).
+    /// BUILD-stage constant: used only for rerank is_generative decision at model load time.
+    /// ARCH-BUILD-COMPILE-BOUNDARY: this is a BUILD-stage strategy decision, not a compiler branch.
+    /// TODO(I-6-2): derive from graph topology (has Argmax → generative rerank).
     pub arch_family: crate::manifest::ArchFamily,
     /// Token ID for "yes" (used by decoder-based rerankers without a score head).
     pub rerank_yes_token_id: Option<u32>,
