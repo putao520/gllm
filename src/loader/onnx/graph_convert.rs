@@ -373,10 +373,17 @@ impl<'a> ConvertContext<'a> {
 
         let output_name = node.outputs.first().cloned().unwrap_or_default();
         let in_shape = self.get_tensor_shape(input_name);
-        let out_tid = self.graph.add_tensor(&output_name, in_shape, self.dtype);
+        let out_tid = self.graph.add_tensor(&output_name, in_shape.clone(), self.dtype);
+
+        let feature_dim = in_shape.last()
+            .and_then(|d| d.as_concrete())
+            .ok_or_else(|| ConvertError::ShapeInferenceFailed {
+                name: input_name.to_string(),
+                reason: "LayerNorm requires concrete last dimension for feature_dim".to_string(),
+            })?;
 
         self.graph.add_op(
-            OpKind::LayerNorm { eps },
+            OpKind::LayerNorm { feature_dim, eps },
             vec![in_tid, scale_tid, bias_tid],
             vec![out_tid],
             &node.name,
@@ -401,10 +408,17 @@ impl<'a> ConvertContext<'a> {
 
         let output_name = node.outputs.first().cloned().unwrap_or_default();
         let in_shape = self.get_tensor_shape(input_name);
-        let out_tid = self.graph.add_tensor(&output_name, in_shape, self.dtype);
+        let out_tid = self.graph.add_tensor(&output_name, in_shape.clone(), self.dtype);
+
+        let feature_dim = in_shape.last()
+            .and_then(|d| d.as_concrete())
+            .ok_or_else(|| ConvertError::ShapeInferenceFailed {
+                name: input_name.to_string(),
+                reason: "RmsNorm requires concrete last dimension for feature_dim".to_string(),
+            })?;
 
         self.graph.add_op(
-            OpKind::RmsNorm { eps },
+            OpKind::RmsNorm { feature_dim, eps },
             vec![in_tid, scale_tid],
             vec![out_tid],
             &node.name,

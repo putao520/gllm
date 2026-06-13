@@ -200,7 +200,7 @@ pub fn build_intent_tracker_graph(
     // ── Step 5: Per-head LayerNorm ──
     let attn_normed = g.add_tensor("attn_normed", vec![b.clone(), s.clone(), SymDim::Concrete(h)], dt);
     g.add_op(
-        OpKind::LayerNorm { eps: 1e-5 },
+        OpKind::LayerNorm { feature_dim: h, eps: 1e-5 },
         vec![attn_out, per_head_norm_w, per_head_norm_b],
         vec![attn_normed],
         "attn_layernorm",
@@ -241,7 +241,7 @@ pub fn build_intent_tracker_graph(
     // LayerNorm on dual context
     let context_normed = g.add_tensor("context_normed", vec![b.clone(), SymDim::Concrete(h)], dt);
     g.add_op(
-        OpKind::LayerNorm { eps: 1e-5 },
+        OpKind::LayerNorm { feature_dim: h, eps: 1e-5 },
         vec![dual_context, context_norm_w, context_norm_b],
         vec![context_normed],
         "context_layernorm",

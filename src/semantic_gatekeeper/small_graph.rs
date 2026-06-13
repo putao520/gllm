@@ -412,7 +412,7 @@ impl KProjOnlyGraph {
         gn.inputs = vec![norm_in, norm_w];
         gn.outputs = vec![norm_out];
         gn.add_op(
-            OpKind::RmsNorm { eps: rms_eps },
+            OpKind::RmsNorm { feature_dim: hidden_size, eps: rms_eps },
             vec![norm_in, norm_w],
             vec![norm_out],
             "sg_rmsnorm",

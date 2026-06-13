@@ -89,7 +89,7 @@ fn build_conformer_block_graph(
     // 已对齐 BERT encoder 用法(见 compiler/codegen/vm/lower.rs lower_layernorm)。
     let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::LayerNorm { eps },
+        OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![input, ff1_norm_w, ff1_norm_b],
         vec![ff1_normed],
         "ff1_layernorm",
@@ -121,7 +121,7 @@ fn build_conformer_block_graph(
     // ── Self-Attention (full, non-causal) ──
     let attn_normed = g.add_tensor_concrete("attn_normed", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::LayerNorm { eps },
+        OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_ff1, attn_norm_w, attn_norm_b],
         vec![attn_normed],
         "attn_layernorm",
@@ -181,7 +181,7 @@ fn build_conformer_block_graph(
     // LayerNorm → SiLU → PointwiseConv2 → Residual
     let conv_normed = g.add_tensor_concrete("conv_normed", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::LayerNorm { eps },
+        OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_attn, conv_norm_w, conv_norm_b],
         vec![conv_normed],
         "conv_layernorm",
@@ -208,7 +208,7 @@ fn build_conformer_block_graph(
     );
     let conv_bn_out = g.add_tensor_concrete("conv_bn", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::LayerNorm { eps },
+        OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![conv_dw, conv_bn_w, conv_bn_b],
         vec![conv_bn_out],
         "conv_bn_layernorm",
@@ -233,7 +233,7 @@ fn build_conformer_block_graph(
     // ── FF2 half-step ──
     let ff2_normed = g.add_tensor_concrete("ff2_normed", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::LayerNorm { eps },
+        OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_conv, ff2_norm_w, ff2_norm_b],
         vec![ff2_normed],
         "ff2_layernorm",
@@ -265,7 +265,7 @@ fn build_conformer_block_graph(
     // ── Block-end LayerNorm ──
     let out = g.add_tensor_concrete("output", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::LayerNorm { eps },
+        OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_ff2, final_norm_w, final_norm_b],
         vec![out],
         "block_final_layernorm",
@@ -392,6 +392,7 @@ fn build_final_norm_graph(num_frames: usize, config: &AudioConfig) -> CompilerGr
     let out = g.add_tensor_concrete("output", &[num_frames, config.hidden_size], dt);
     g.add_op(
         OpKind::LayerNorm {
+            feature_dim: config.hidden_size,
             eps: config.layer_norm_eps,
         },
         vec![input, w, b],

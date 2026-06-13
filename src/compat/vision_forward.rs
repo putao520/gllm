@@ -427,6 +427,7 @@ fn build_vision_encoder_graph(
         );
         g.add_op(
             OpKind::LayerNorm {
+                feature_dim: hidden,
                 eps: VISION_LAYERNORM_EPS,
             },
             vec![current_hidden, layer.ln1_weight, layer.ln1_bias],
@@ -548,6 +549,7 @@ fn build_vision_encoder_graph(
         );
         g.add_op(
             OpKind::LayerNorm {
+                feature_dim: hidden,
                 eps: VISION_LAYERNORM_EPS,
             },
             vec![after_attn, layer.ln2_weight, layer.ln2_bias],
@@ -630,6 +632,7 @@ fn build_vision_encoder_graph(
     );
     g.add_op(
         OpKind::LayerNorm {
+            feature_dim: hidden,
             eps: VISION_LAYERNORM_EPS,
         },
         vec![

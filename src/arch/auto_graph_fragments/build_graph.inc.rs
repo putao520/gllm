@@ -236,14 +236,14 @@ pub fn build_compiler_graph(
                 let eln_b = g.add_tensor_concrete(eln_bias_cn, &eln_bias_shape, tdt(eln_bias_cn));
                 let normed = g.add_tensor("embed_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 g.add_op(
-                    OpKind::LayerNorm { eps: embed_ln_eps },
+                    OpKind::LayerNorm { feature_dim: hidden, eps: embed_ln_eps },
                     vec![hidden_0, eln_w, eln_b], vec![normed], "embed_norm",
                 );
                 hidden_0 = normed;
             } else {
                 let normed = g.add_tensor("embed_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 g.add_op(
-                    OpKind::RmsNorm { eps: embed_ln_eps },
+                    OpKind::RmsNorm { feature_dim: hidden, eps: embed_ln_eps },
                     vec![hidden_0, eln_w], vec![normed], "embed_norm",
                 );
                 hidden_0 = normed;
@@ -430,10 +430,10 @@ pub fn build_compiler_graph(
                 let router_normed = g.add_tensor(&ptname("router_normed"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 if let Some(rn_w) = altup_router_norm_w {
-                    g.add_op(OpKind::RmsNorm { eps },
+                    g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                         vec![active_in, rn_w], vec![router_normed], &ptname("altup_router_norm"));
                 } else {
-                    g.add_op(OpKind::RmsNorm { eps },
+                    g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                         vec![active_in], vec![router_normed], &ptname("altup_router_norm"));
                 }
 
@@ -499,7 +499,7 @@ pub fn build_compiler_graph(
                 normed = hidden_tid;
             } else {
                 let n = g.add_tensor(&ptname("normed"), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op(OpKind::RmsNorm { eps }, vec![hidden_tid, norm_w_tid], vec![n], &ptname("input_norm"));
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![hidden_tid, norm_w_tid], vec![n], &ptname("input_norm"));
                 normed = n;
             }
 
@@ -603,7 +603,7 @@ pub fn build_compiler_graph(
             // ValueNorm (optional)
             if features.has_value_norm {
                 let v_normed = g.add_tensor(&ptname("v_normed"), vec![s.clone(), SymDim::Concrete(v_n)], dt);
-                g.add_op_guarded(OpKind::ValueNorm { eps },
+                g.add_op_guarded(OpKind::ValueNorm { feature_dim: v_n, eps },
                     vec![v_out], vec![v_normed], &ptname("v_norm"), kv_guard);
                 v_out = v_normed;
             }
@@ -737,7 +737,7 @@ pub fn build_compiler_graph(
 
                 let laurel_normed = g.add_tensor(&ptname("laurel_normed"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op(OpKind::RmsNorm { eps },
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                     vec![laurel_proj, ln_w], vec![laurel_normed], &ptname("laurel_norm"));
                 laurel_out_tid = Some(laurel_normed);
             }
@@ -750,7 +750,7 @@ pub fn build_compiler_graph(
                 byte_cursor += weight_physical_bytes(&attn_sandwich_cn, sandwich_shape);
                 let normed = g.add_tensor(&ptname("post_attn_sandwich"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op(OpKind::RmsNorm { eps }, vec![o_out, sandwich_w], vec![normed], &ptname("post_attn_sandwich_norm"));
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![o_out, sandwich_w], vec![normed], &ptname("post_attn_sandwich_norm"));
                 normed
             } else {
                 o_out
@@ -779,7 +779,7 @@ pub fn build_compiler_graph(
             byte_cursor += weight_physical_bytes(&post_cn, &post_norm_shape);
 
             let post_normed = g.add_tensor(&ptname("post_normed"), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op(OpKind::RmsNorm { eps }, vec![resid, post_norm_w], vec![post_normed], &ptname("post_norm"));
+            g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![resid, post_norm_w], vec![post_normed], &ptname("post_norm"));
 
             // FFN (SwiGLU — all Gemma 4 variants use SwiGLU)
             let ffn_resid_src = resid;
@@ -830,7 +830,7 @@ pub fn build_compiler_graph(
                 byte_cursor += weight_physical_bytes(&ffn_sandwich_cn, sandwich_shape);
                 let normed = g.add_tensor(&ptname("post_ffn_sandwich"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op(OpKind::RmsNorm { eps }, vec![down_out, sandwich_w], vec![normed], &ptname("post_ffn_sandwich_norm"));
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![down_out, sandwich_w], vec![normed], &ptname("post_ffn_sandwich_norm"));
                 normed
             } else {
                 down_out
@@ -895,7 +895,7 @@ pub fn build_compiler_graph(
                 if weight_shapes.contains_key(&ple_norm_cn) {
                     let norm_shape = get_shape(weight_shapes, &ple_norm_cn)?;
                     let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
-                    g.add_op(OpKind::RmsNorm { eps },
+                    g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                         vec![projected, norm_w], vec![normalized], &ptname("ple_norm"));
                 } else {
                     normalized = projected;
@@ -959,7 +959,7 @@ pub fn build_compiler_graph(
                     let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
                     wtids.push((norm_w, byte_cursor));
                     byte_cursor += weight_physical_bytes(&ple_norm_cn, &norm_shape);
-                    g.add_op(OpKind::RmsNorm { eps },
+                    g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                         vec![projected, norm_w], vec![normalized], &ptname("ple_norm"));
                 } else {
                     normalized = projected;
@@ -1051,12 +1051,12 @@ pub fn build_compiler_graph(
             let router_normed = g.add_tensor("layer.router_normed",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(rn_w) = altup_router_norm_w {
-                g.add_op(OpKind::RmsNorm { eps },
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                     vec![active_in, rn_w], vec![router_normed], "layer.altup_router_norm");
             } else {
                 // Fallback: use standard RmsNorm weight from layer template
                 // (router shares input_norm weight in some configs)
-                g.add_op(OpKind::RmsNorm { eps },
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                     vec![active_in], vec![router_normed], "layer.altup_router_norm");
             }
 
@@ -1147,9 +1147,9 @@ pub fn build_compiler_graph(
             // Pre-norm: InputNorm applied before attention
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = input_norm_bias_tid {
-                g.add_op(OpKind::LayerNorm { eps }, vec![hidden_tid, norm_w_tid, bias], vec![n], "layer.input_norm");
+                g.add_op(OpKind::LayerNorm { feature_dim: hidden, eps }, vec![hidden_tid, norm_w_tid, bias], vec![n], "layer.input_norm");
             } else {
-                g.add_op(OpKind::RmsNorm { eps }, vec![hidden_tid, norm_w_tid], vec![n], "layer.input_norm");
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![hidden_tid, norm_w_tid], vec![n], "layer.input_norm");
             }
             normed = n;
         }
@@ -1478,7 +1478,7 @@ pub fn build_compiler_graph(
                 let v_n_for_norm = weight_shapes.get(&cn_layer(0, "v_proj"))
                     .map(|s| s[0]).unwrap_or(k_dim);
                 let v_normed = g.add_tensor("layer.v_normed", vec![s.clone(), SymDim::Concrete(v_n_for_norm)], dt);
-                g.add_op_guarded(OpKind::ValueNorm { eps },
+                g.add_op_guarded(OpKind::ValueNorm { feature_dim: v_n_for_norm, eps },
                     vec![v_out], vec![v_normed], "layer.v_norm", kv_guard);
                 v_out = v_normed;
             }
@@ -1657,7 +1657,7 @@ pub fn build_compiler_graph(
             // RMSNorm(laurel_proj, laurel_norm) → [S, H]
             let laurel_normed = g.add_tensor("layer.laurel_normed",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op(OpKind::RmsNorm { eps },
+            g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                 vec![laurel_proj, ln_w], vec![laurel_normed], "layer.laurel_norm");
             laurel_out_tid = Some(laurel_normed);
         }
@@ -1705,18 +1705,18 @@ pub fn build_compiler_graph(
             // Post-norm: apply InputNorm (attention.output.LayerNorm) after attn residual → FFN input
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = input_norm_bias_tid {
-                g.add_op(OpKind::LayerNorm { eps }, vec![resid, norm_w_tid, bias], vec![n], "layer.input_norm");
+                g.add_op(OpKind::LayerNorm { feature_dim: hidden, eps }, vec![resid, norm_w_tid, bias], vec![n], "layer.input_norm");
             } else {
-                g.add_op(OpKind::RmsNorm { eps }, vec![resid, norm_w_tid], vec![n], "layer.input_norm");
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![resid, norm_w_tid], vec![n], "layer.input_norm");
             }
             post_normed = n;
         } else {
             // Pre-norm: apply PostAttnNorm to resid → FFN input
             let pn = g.add_tensor("layer.post_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = post_norm_bias_tid {
-                g.add_op(OpKind::LayerNorm { eps }, vec![resid, post_norm_w, bias], vec![pn], "layer.post_norm");
+                g.add_op(OpKind::LayerNorm { feature_dim: hidden, eps }, vec![resid, post_norm_w, bias], vec![pn], "layer.post_norm");
             } else {
-                g.add_op(OpKind::RmsNorm { eps }, vec![resid, post_norm_w], vec![pn], "layer.post_norm");
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![resid, post_norm_w], vec![pn], "layer.post_norm");
             }
             post_normed = pn;
         }
@@ -2019,7 +2019,7 @@ pub fn build_compiler_graph(
             if weight_shapes.contains_key(&ple_norm_cn) {
                 let norm_shape = get_shape(weight_shapes, &ple_norm_cn)?;
                 let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
-                g.add_op(OpKind::RmsNorm { eps },
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                     vec![projected, norm_w], vec![normalized], "layer.ple_norm");
             } else {
                 normalized = projected;
@@ -2078,7 +2078,7 @@ pub fn build_compiler_graph(
             if weight_shapes.contains_key(&ple_norm_cn) {
                 let norm_shape = get_shape(weight_shapes, &ple_norm_cn)?;
                 let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
-                g.add_op(OpKind::RmsNorm { eps },
+                g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps },
                     vec![projected, norm_w], vec![normalized], "layer.ple_norm");
             } else {
                 normalized = projected;
@@ -2096,10 +2096,10 @@ pub fn build_compiler_graph(
                 let post_ffn_normed = g.add_tensor("layer.post_ffn_normed",
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 if let Some(bias) = post_norm_bias_tid {
-                    g.add_op(OpKind::LayerNorm { eps }, vec![gated, post_norm_w, bias],
+                    g.add_op(OpKind::LayerNorm { feature_dim: hidden, eps }, vec![gated, post_norm_w, bias],
                         vec![post_ffn_normed], "layer.post_norm");
                 } else {
-                    g.add_op(OpKind::RmsNorm { eps }, vec![gated, post_norm_w],
+                    g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![gated, post_norm_w],
                         vec![post_ffn_normed], "layer.post_norm");
                 }
                 layer_output = post_ffn_normed;
@@ -2266,10 +2266,10 @@ pub fn build_compiler_graph(
         let final_norm_w = g.add_tensor_concrete("final_norm", &[hidden], tdt("final_norm"));
         let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
         if use_rms {
-            g.add_op(OpKind::RmsNorm { eps }, vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
+            g.add_op(OpKind::RmsNorm { feature_dim: hidden, eps }, vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
         } else {
             let bias_tid = g.add_tensor_concrete("final_norm.bias", &[hidden], tdt("final_norm.bias"));
-            g.add_op(OpKind::LayerNorm { eps }, vec![final_hidden, final_norm_w, bias_tid], vec![final_normed], "final_norm");
+            g.add_op(OpKind::LayerNorm { feature_dim: hidden, eps }, vec![final_hidden, final_norm_w, bias_tid], vec![final_normed], "final_norm");
         }
 
         // ── lm_head → LogitSoftcap → Argmax → StoreToken → CheckStopCondition ──
