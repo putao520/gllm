@@ -199,8 +199,8 @@ impl StrategyArbiter {
 
 // ── Helper functions (SPEC §10) ─────────────────────────────────────────────
 
+#[cfg(test)]
 #[inline]
-#[allow(dead_code)]
 fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }

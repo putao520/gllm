@@ -162,7 +162,6 @@ impl BatchContext {
 
     /// Extension area start offset (only valid when has_v2_extension).
     #[cfg(test)]
-    #[allow(dead_code)]
     fn ext_offset(&self) -> usize {
         BATCH_CTX_HEADER_SIZE + self.max_batch_size * SEQ_META_STRIDE
     }

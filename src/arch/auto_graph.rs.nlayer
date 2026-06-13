@@ -307,7 +307,7 @@ pub fn build_compiler_graph(
     let dt = DType::F32;
     let tdt = |_: &str| -> DType { dt };
 
-    let is_encoder = features.family == Family::Encoder;
+    let is_encoder_family = features.family == Family::Encoder;
     let eps = 1e-5f32;
 
     // ── Derive dimensions from weight shapes (canonical names) ──
@@ -536,7 +536,7 @@ pub fn build_compiler_graph(
         }
 
         // ── Attention ──
-        let causal = !is_encoder;
+        let causal = !is_encoder_family;
         let attn_out = g.add_tensor(&format!("L{}_attn", i), vec![s.clone(), SymDim::Concrete(q_n)], dt);
         g.add_op(
             OpKind::MultiHeadAttention {
@@ -872,7 +872,7 @@ pub fn build_compiler_graph(
         .ok_or_else(|| GraphBuildError::InvalidDimension("no hidden_0 after layer loop".into()))?;
 
     // ── Encoder post-layer: MeanPool → Classifier head ──
-    if is_encoder {
+    if is_encoder_family {
         // MeanPool: average over seq dimension → [hidden]
         let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
         g.add_op(OpKind::MeanPool { seq_len: 0, hidden, cls_mode: false }, vec![final_hidden], vec![pooled], "meanpool");
@@ -934,7 +934,7 @@ pub fn build_compiler_graph(
     }
 
     // ── Decoder post-layer ──
-    if !is_encoder {
+    if !is_encoder_family {
         let final_norm_w = g.add_tensor_concrete("final_norm", &[hidden], tdt("final_norm"));
         let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
         if use_rms {

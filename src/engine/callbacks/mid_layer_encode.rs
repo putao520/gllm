@@ -148,6 +148,8 @@ impl MidLayerEncodeCallback {
             && output.len() >= numel.checked_mul(2)?
         {
             let live = &output[..numel * 2];
+            // ARCH-JIT-DATA-YIELDS: declared_dtype is a build-time constant from model config.
+            // TODO: bake into a typed closure when this callback moves to JIT-generated code.
             match declared_dtype {
                 DType::F16 => {
                     let mut out = Vec::with_capacity(numel);

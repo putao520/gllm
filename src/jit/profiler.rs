@@ -356,7 +356,6 @@ impl LatencyProfiler {
         Ok(MicroKernel {
             binary,
             seq_len,
-            hidden,
         })
     }
 
@@ -507,11 +506,9 @@ impl LatencyProfiler {
 }
 
 /// 微型 kernel（编译后的二进制）
-#[allow(dead_code)]
 struct MicroKernel {
     binary: Vec<u8>,
     seq_len: usize,
-    hidden: usize,
 }
 
 /// Latency Probe 错误类型
@@ -1085,7 +1082,6 @@ mod tests {
         };
         assert_eq!(kernel.binary, vec![0x90, 0x90, 0xC3]);
         assert_eq!(kernel.seq_len, 128);
-        assert_eq!(kernel.hidden, 768);
     }
 
     #[test]
@@ -1097,7 +1093,6 @@ mod tests {
         };
         assert!(kernel.binary.is_empty());
         assert_eq!(kernel.seq_len, 1);
-        assert_eq!(kernel.hidden, 1);
     }
 
     #[test]
@@ -1109,7 +1104,6 @@ mod tests {
         };
         assert_eq!(kernel.binary.len(), 4096);
         assert_eq!(kernel.seq_len, usize::MAX);
-        assert_eq!(kernel.hidden, usize::MAX);
     }
 
     // ── ProbeConfig timeout default value ──
@@ -1715,10 +1709,8 @@ mod tests {
         };
         kernel.binary.push(0xC3);
         kernel.seq_len = 128;
-        kernel.hidden = 1024;
         assert_eq!(kernel.binary, vec![0x90, 0xC3]);
         assert_eq!(kernel.seq_len, 128);
-        assert_eq!(kernel.hidden, 1024);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1733,7 +1725,6 @@ mod tests {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(1, 64, &profile)
             .expect("compiling micro GEMM with seq_len=1 should succeed");
         assert_eq!(kernel.seq_len, 1);
-        assert_eq!(kernel.hidden, 64);
     }
 
     #[test]
@@ -1742,7 +1733,6 @@ mod tests {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(128, 768, &profile)
             .expect("compiling micro GEMM with seq_len=128 should succeed");
         assert_eq!(kernel.seq_len, 128);
-        assert_eq!(kernel.hidden, 768);
     }
 
     #[test]
@@ -1751,7 +1741,6 @@ mod tests {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(32, 8192, &profile)
             .expect("compiling micro GEMM with large hidden_size should succeed");
         assert_eq!(kernel.seq_len, 32);
-        assert_eq!(kernel.hidden, 8192);
     }
 
     // ── benchmark_kernel timing ──
@@ -2195,7 +2184,6 @@ mod tests {
             hidden: 0,
         };
         assert_eq!(kernel.seq_len, 0);
-        assert_eq!(kernel.hidden, 0);
     }
 
     // ── compile_micro_gemm_cpu: seq_len=1, hidden=1 ──
@@ -2206,7 +2194,6 @@ mod tests {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(1, 1, &profile)
             .expect("minimal GEMM should compile");
         assert_eq!(kernel.seq_len, 1);
-        assert_eq!(kernel.hidden, 1);
     }
 
     // ── probe_cpu with very small range and hidden ──
@@ -3080,7 +3067,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(64, 64, &profile)
             .expect("square GEMM should compile");
         assert_eq!(kernel.seq_len, 64);
-        assert_eq!(kernel.hidden, 64);
     }
 
     // ── compile_micro_gemm_cpu: hidden_size = 1 ──
@@ -3090,7 +3076,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let profile = DeviceProfile::detect();
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(32, 1, &profile)
             .expect("hidden=1 should compile");
-        assert_eq!(kernel.hidden, 1);
     }
 
     // ── compile_micro_gemm_cpu: result binary is currently placeholder ──
@@ -3291,7 +3276,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
             .expect("should compile");
         // Verify exact field values match inputs
         assert_eq!(kernel.seq_len, 256);
-        assert_eq!(kernel.hidden, 1024);
         assert!(kernel.binary.is_empty()); // placeholder
     }
 
@@ -3575,7 +3559,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(0, 64, &profile)
             .expect("seq_len=0 should compile (trivial GEMM)");
         assert_eq!(kernel.seq_len, 0);
-        assert_eq!(kernel.hidden, 64);
     }
 
     // ── ProbeConfig: for_model with usize::MAX hidden_size ──
@@ -3753,7 +3736,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(16, 0, &profile)
             .expect("hidden=0 should compile (trivial GEMM)");
         assert_eq!(kernel.seq_len, 16);
-        assert_eq!(kernel.hidden, 0);
     }
 
     // ── sample_points: very large max with high density avoids excessive iteration ──
@@ -4056,7 +4038,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(0, 0, &profile)
             .expect("zero-dimension GEMM should compile");
         assert_eq!(kernel.seq_len, 0);
-        assert_eq!(kernel.hidden, 0);
         assert!(kernel.binary.is_empty());
     }
 
@@ -4399,7 +4380,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let odd_hidden = 333;
         let kernel = LatencyProfiler::compile_micro_gemm_cpu(16, odd_hidden, &profile)
             .expect("compile with odd hidden_size should succeed");
-        assert_eq!(kernel.hidden, odd_hidden);
         assert_eq!(kernel.seq_len, 16);
     }
 
