@@ -209,6 +209,9 @@ pub struct SubBatchDispatcher {
     min_sub_batch_size: usize,
     /// 最大子批次数（防止过度分片）
     max_sub_batches: usize,
+    /// Build-time constant: whether the model has MoE ops.
+    /// ARCH-JIT-DATA-YIELDS: derived from graph topology at construction, not passed per-call.
+    has_moe_ops: bool,
 }
 
 impl SubBatchDispatcher {
@@ -218,7 +221,14 @@ impl SubBatchDispatcher {
             constraints,
             min_sub_batch_size: 4,
             max_sub_batches: 4,
+            has_moe_ops: false,
         }
+    }
+
+    /// 设置 MoE 存在性（build-time constant）
+    pub fn with_has_moe_ops(mut self, has_moe_ops: bool) -> Self {
+        self.has_moe_ops = has_moe_ops;
+        self
     }
 
     /// 设置最小子批次大小
@@ -357,11 +367,10 @@ impl SubBatchDispatcher {
         &self,
         attention_sparsity: f32,  // 0.0 = 全有效, 1.0 = 全跳过
         dead_neuron_ratio: f32,    // 0.0 = 全活, 1.0 = 全死
-        has_moe_ops: bool,
         moe_active_experts: f32,   // 活跃专家比例 (0.0-1.0)
     ) -> GraphShape {
         // §12.1 分类规则
-        if has_moe_ops && moe_active_experts < 0.5 {
+        if self.has_moe_ops && moe_active_experts < 0.5 {
             GraphShape::MoeSparse
         } else if dead_neuron_ratio > 0.6 {
             GraphShape::NarrowQuant
@@ -405,20 +414,20 @@ mod tests {
 
     #[test]
     fn test_graph_shape_classify() {
-        let constraints = CompilerConstraints::default();
-        let dispatcher = SubBatchDispatcher::new(constraints);
+        let dispatcher = SubBatchDispatcher::new(CompilerConstraints::default());
 
         // Full precision (default)
-        assert_eq!(dispatcher.classify_request(0.1, 0.1, false, 0.0), GraphShape::FullPrecision);
+        assert_eq!(dispatcher.classify_request(0.1, 0.1, 0.0), GraphShape::FullPrecision);
 
         // Skip attention
-        assert_eq!(dispatcher.classify_request(0.8, 0.1, false, 0.0), GraphShape::SkipAttention);
+        assert_eq!(dispatcher.classify_request(0.8, 0.1, 0.0), GraphShape::SkipAttention);
 
         // Narrow quant
-        assert_eq!(dispatcher.classify_request(0.1, 0.7, false, 0.0), GraphShape::NarrowQuant);
+        assert_eq!(dispatcher.classify_request(0.1, 0.7, 0.0), GraphShape::NarrowQuant);
 
-        // MoE sparse
-        assert_eq!(dispatcher.classify_request(0.1, 0.1, true, 0.3), GraphShape::MoeSparse);
+        // MoE sparse — needs has_moe_ops=true dispatcher
+        let moe_dispatcher = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        assert_eq!(moe_dispatcher.classify_request(0.1, 0.1, 0.3), GraphShape::MoeSparse);
     }
 
     #[test]
@@ -680,14 +689,14 @@ mod tests {
 
     #[test]
     fn test_classify_moe_boundary() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
 
         // moe_active_experts exactly at 0.5 → NOT sparse (condition is < 0.5)
-        let shape = d.classify_request(0.0, 0.0, true, 0.5);
+        let shape = d.classify_request(0.0, 0.0, 0.5);
         assert_eq!(shape, GraphShape::FullPrecision);
 
         // Just below 0.5 → sparse
-        let shape = d.classify_request(0.0, 0.0, true, 0.49);
+        let shape = d.classify_request(0.0, 0.0, 0.49);
         assert_eq!(shape, GraphShape::MoeSparse);
     }
 
@@ -697,11 +706,11 @@ mod tests {
 
         // dead_neuron_ratio exactly at 0.6 → NarrowQuant (condition is > 0.6 is false, so 0.6 stays)
         // Wait, condition is > 0.6, so 0.6 is NOT > 0.6
-        let shape = d.classify_request(0.0, 0.6, false, 0.0);
+        let shape = d.classify_request(0.0, 0.6, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
 
         // Just above 0.6 → NarrowQuant
-        let shape = d.classify_request(0.0, 0.61, false, 0.0);
+        let shape = d.classify_request(0.0, 0.61, 0.0);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
@@ -710,20 +719,20 @@ mod tests {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
 
         // attention_sparsity exactly at 0.7 → NOT skip (> 0.7 is false)
-        let shape = d.classify_request(0.7, 0.0, false, 0.0);
+        let shape = d.classify_request(0.7, 0.0, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
 
         // Just above 0.7 → SkipAttention
-        let shape = d.classify_request(0.71, 0.0, false, 0.0);
+        let shape = d.classify_request(0.71, 0.0, 0.0);
         assert_eq!(shape, GraphShape::SkipAttention);
     }
 
     #[test]
     fn test_classify_moe_takes_priority() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
 
         // Even with high dead_neuron_ratio, MoE with low active_experts wins
-        let shape = d.classify_request(0.9, 0.9, true, 0.1);
+        let shape = d.classify_request(0.9, 0.9, 0.1);
         assert_eq!(shape, GraphShape::MoeSparse);
     }
 
@@ -1206,15 +1215,15 @@ mod tests {
     fn test_classify_all_low_values_is_full_precision() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // All values well below thresholds, non-MoE
-        let shape = d.classify_request(0.0, 0.0, false, 0.0);
+        let shape = d.classify_request(0.0, 0.0, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
     #[test]
     fn test_classify_moe_not_sparse_active_above_threshold() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        // is_moe=true but active_experts=0.8 (>= 0.5) → NOT sparse
-        let shape = d.classify_request(0.0, 0.0, true, 0.8);
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        // MoE but active_experts=0.8 (>= 0.5) → NOT sparse
+        let shape = d.classify_request(0.0, 0.0, 0.8);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
@@ -1438,8 +1447,8 @@ mod tests {
 
     #[test]
     fn test_classify_moe_zero_active_experts_is_sparse() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, true, 0.0);
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        let shape = d.classify_request(0.0, 0.0, 0.0);
         assert_eq!(shape, GraphShape::MoeSparse);
     }
 
@@ -1450,7 +1459,7 @@ mod tests {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // Both dead_neuron_ratio > 0.6 and attention_sparsity > 0.7 are true,
         // but dead_neuron check comes first → NarrowQuant
-        let shape = d.classify_request(0.9, 0.9, false, 0.0);
+        let shape = d.classify_request(0.9, 0.9, 0.0);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
@@ -1460,7 +1469,7 @@ mod tests {
     fn test_classify_negative_values_is_full_precision() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // Negative values are below all thresholds → FullPrecision
-        let shape = d.classify_request(-1.0, -1.0, false, -1.0);
+        let shape = d.classify_request(-1.0, -1.0, -1.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
@@ -1500,52 +1509,52 @@ mod tests {
 
     #[test]
     fn test_classify_moe_active_experts_exactly_zero_is_sparse() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, true, 0.0);
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        let shape = d.classify_request(0.0, 0.0, 0.0);
         assert_eq!(shape, GraphShape::MoeSparse);
     }
 
     #[test]
     fn test_classify_moe_active_experts_exactly_one_not_sparse() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, true, 1.0);
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        let shape = d.classify_request(0.0, 0.0, 1.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
     #[test]
     fn test_classify_moe_high_active_experts_but_high_dead_neurons() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         // MoE active_experts = 0.8 (>= 0.5, not sparse) → check dead neurons
-        let shape = d.classify_request(0.0, 0.7, true, 0.8);
+        let shape = d.classify_request(0.0, 0.7, 0.8);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
     #[test]
     fn test_classify_moe_high_active_experts_high_sparsity_skip() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         // MoE not sparse, dead neurons low, attention sparsity high → SkipAttention
-        let shape = d.classify_request(0.8, 0.1, true, 0.8);
+        let shape = d.classify_request(0.8, 0.1, 0.8);
         assert_eq!(shape, GraphShape::SkipAttention);
     }
 
     #[test]
     fn test_classify_dead_neuron_exactly_sixty_one_is_narrow() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.61, false, 0.0);
+        let shape = d.classify_request(0.0, 0.61, 0.0);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
     #[test]
     fn test_classify_sparsity_exactly_seventy_one_is_skip() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.71, 0.0, false, 0.0);
+        let shape = d.classify_request(0.71, 0.0, 0.0);
         assert_eq!(shape, GraphShape::SkipAttention);
     }
 
     #[test]
     fn test_classify_all_zero_non_moe_is_full_precision() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, false, 0.0);
+        let shape = d.classify_request(0.0, 0.0, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
@@ -1553,22 +1562,22 @@ mod tests {
     fn test_classify_very_high_values_non_moe_is_narrow() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // dead_neuron_ratio > 0.6 takes priority over sparsity
-        let shape = d.classify_request(0.99, 0.99, false, 0.0);
+        let shape = d.classify_request(0.99, 0.99, 0.0);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
     #[test]
     fn test_classify_just_below_all_thresholds_is_full_precision() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.69, 0.59, false, 0.0);
+        let shape = d.classify_request(0.69, 0.59, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
     #[test]
     fn test_classify_moe_sparse_beats_dead_neuron() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         // MoE sparse check comes first in the if-else chain
-        let shape = d.classify_request(0.0, 0.99, true, 0.1);
+        let shape = d.classify_request(0.0, 0.99, 0.1);
         assert_eq!(shape, GraphShape::MoeSparse);
     }
 
@@ -2172,13 +2181,14 @@ mod tests {
 
     #[test]
     fn test_classify_all_four_shapes_from_one_dispatcher() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let non_moe = SubBatchDispatcher::new(CompilerConstraints::default());
+        let moe = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
 
         let shapes: std::collections::HashSet<GraphShape> = [
-            d.classify_request(0.0, 0.0, false, 0.0),          // FullPrecision
-            d.classify_request(0.8, 0.0, false, 0.0),          // SkipAttention
-            d.classify_request(0.0, 0.7, false, 0.0),          // NarrowQuant
-            d.classify_request(0.0, 0.0, true, 0.3),           // MoeSparse
+            non_moe.classify_request(0.0, 0.0, 0.0),          // FullPrecision
+            non_moe.classify_request(0.8, 0.0, 0.0),          // SkipAttention
+            non_moe.classify_request(0.0, 0.7, 0.0),          // NarrowQuant
+            moe.classify_request(0.0, 0.0, 0.3),              // MoeSparse
         ].into_iter().collect();
 
         assert_eq!(shapes.len(), 4, "classify_request must produce all 4 distinct shapes");
@@ -2186,46 +2196,46 @@ mod tests {
 
     #[test]
     fn test_classify_moe_not_sparse_goes_to_dead_neuron_path() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         // MoE but active_experts=0.6 >= 0.5 → not sparse → dead neuron check
-        let shape = d.classify_request(0.0, 0.8, true, 0.6);
+        let shape = d.classify_request(0.0, 0.8, 0.6);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
     #[test]
     fn test_classify_moe_not_sparse_goes_to_skip_attention_path() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         // MoE not sparse, dead_neuron low, sparsity high
-        let shape = d.classify_request(0.9, 0.1, true, 0.9);
+        let shape = d.classify_request(0.9, 0.1, 0.9);
         assert_eq!(shape, GraphShape::SkipAttention);
     }
 
     #[test]
     fn test_classify_moe_not_sparse_goes_to_full_precision() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         // MoE not sparse, low dead neurons, low sparsity
-        let shape = d.classify_request(0.1, 0.1, true, 0.6);
+        let shape = d.classify_request(0.1, 0.1, 0.6);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
     #[test]
     fn test_classify_dead_neuron_just_above_sixty_is_narrow() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.6001, false, 0.0);
+        let shape = d.classify_request(0.0, 0.6001, 0.0);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
     #[test]
     fn test_classify_sparsity_just_above_seventy_is_skip() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.7001, 0.0, false, 0.0);
+        let shape = d.classify_request(0.7001, 0.0, 0.0);
         assert_eq!(shape, GraphShape::SkipAttention);
     }
 
     #[test]
     fn test_classify_dead_neuron_at_exactly_sixty_is_full_precision() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.6, false, 0.0);
+        let shape = d.classify_request(0.0, 0.6, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
@@ -2233,21 +2243,21 @@ mod tests {
     fn test_classify_sparsity_at_exactly_seventy_is_full_precision() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // dead_neuron 0.0 (not > 0.6), sparsity 0.7 (not > 0.7)
-        let shape = d.classify_request(0.7, 0.0, false, 0.0);
+        let shape = d.classify_request(0.7, 0.0, 0.0);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
     #[test]
     fn test_classify_moe_at_exactly_half_not_sparse() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, true, 0.5);
+        let shape = d.classify_request(0.0, 0.0, 0.5);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 
     #[test]
     fn test_classify_moe_just_below_half_is_sparse() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, true, 0.4999);
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        let shape = d.classify_request(0.0, 0.0, 0.4999);
         assert_eq!(shape, GraphShape::MoeSparse);
     }
 
@@ -2255,7 +2265,7 @@ mod tests {
     fn test_classify_very_large_positive_values_non_moe() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // dead_neuron_ratio > 0.6 → NarrowQuant (even though sparsity is also huge)
-        let shape = d.classify_request(100.0, 100.0, false, 100.0);
+        let shape = d.classify_request(100.0, 100.0, 100.0);
         assert_eq!(shape, GraphShape::NarrowQuant);
     }
 
@@ -2263,7 +2273,7 @@ mod tests {
     fn test_classify_is_moe_false_never_produces_moe_sparse() {
         let d = SubBatchDispatcher::new(CompilerConstraints::default());
         // is_moe=false, so MoeSparse should never be returned regardless of moe_active_experts
-        let shape = d.classify_request(0.0, 0.0, false, 0.0);
+        let shape = d.classify_request(0.0, 0.0, 0.0);
         assert_ne!(shape, GraphShape::MoeSparse);
     }
 
@@ -2947,10 +2957,10 @@ mod tests {
 
     #[test]
     fn test_classify_deterministic_same_inputs() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
         for _ in 0..10 {
             assert_eq!(
-                d.classify_request(0.5, 0.3, true, 0.2),
+                d.classify_request(0.5, 0.3, 0.2),
                 GraphShape::MoeSparse,
             );
         }
@@ -3259,8 +3269,8 @@ mod tests {
 
     #[test]
     fn test_classify_moe_active_experts_just_above_half() {
-        let d = SubBatchDispatcher::new(CompilerConstraints::default());
-        let shape = d.classify_request(0.0, 0.0, true, 0.5001);
+        let d = SubBatchDispatcher::new(CompilerConstraints::default()).with_has_moe_ops(true);
+        let shape = d.classify_request(0.0, 0.0, 0.5001);
         assert_eq!(shape, GraphShape::FullPrecision);
     }
 

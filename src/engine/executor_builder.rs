@@ -238,14 +238,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ),
             sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher::new(
                 compiler_constraints.clone(),
-            ),
+            ).with_has_moe_ops(g.is_moe()),
             golden_buckets: crate::jit::golden_bucket::GoldenBucketRegistry::from_probe_results(
                 probe_result, compiler_constraints.clone(),
             ),
             seq_histogram: crate::jit::histogram::SeqHistogram::new(10000, g.max_seq_len.max(4096)),
             ragged_compaction: crate::jit::ragged::RaggedCompaction::new(*compact_platform),
             turboquant,
-            has_moe_ops: g.is_moe(),
         })
     }
 

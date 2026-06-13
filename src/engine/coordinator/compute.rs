@@ -16,7 +16,6 @@ pub struct ComputeCoordinator {
     pub seq_histogram: SeqHistogram,
     pub ragged_compaction: RaggedCompaction,
     pub turboquant: TurboQuantRuntime,
-    pub has_moe_ops: bool,
 }
 
 impl ComputeCoordinator {
@@ -90,7 +89,7 @@ impl ComputeCoordinator {
         let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
         let delta_rho = self.telemetry_aggregator.residual_delta_rho();
         self.sub_batch_dispatcher
-            .classify_request(dead_ratio, delta_rho, self.has_moe_ops, gating_threshold)
+            .classify_request(dead_ratio, delta_rho, gating_threshold)
     }
 
     pub fn collapse_seq_len(&mut self, seq_len: usize) -> usize {
@@ -121,14 +120,25 @@ mod tests {
             seq_histogram: SeqHistogram::new(100, 4096),
             ragged_compaction: RaggedCompaction::new(CompactPlatform::X86Avx2),
             turboquant: TurboQuantRuntime::disabled(),
-            has_moe_ops: false,
         }
     }
 
     fn make_compute_moe() -> ComputeCoordinator {
-        let mut coord = make_compute();
-        coord.has_moe_ops = true;
-        coord
+        ComputeCoordinator {
+            mega_kernel: None,
+            jit_director: None,
+            telemetry_aggregator: TelemetryAggregator::new(),
+            epilogue_subsystem: EpilogueSubsystem::new(EpilogueConfig::default()),
+            sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher::new(
+                crate::jit::compiler_constraints::CompilerConstraints::default(),
+            ).with_has_moe_ops(true),
+            golden_buckets: GoldenBucketRegistry::empty(
+                crate::jit::compiler_constraints::CompilerConstraints::default(),
+            ),
+            seq_histogram: SeqHistogram::new(100, 4096),
+            ragged_compaction: RaggedCompaction::new(CompactPlatform::X86Avx2),
+            turboquant: TurboQuantRuntime::disabled(),
+        }
     }
 
     #[test]
