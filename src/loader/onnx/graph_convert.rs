@@ -375,8 +375,15 @@ impl<'a> ConvertContext<'a> {
         let in_shape = self.get_tensor_shape(input_name);
         let out_tid = self.graph.add_tensor(&output_name, in_shape.clone(), self.dtype);
 
+        // feature_dim: prefer input shape last dim, fallback to scale tensor length.
         let feature_dim = in_shape.last()
             .and_then(|d| d.as_concrete())
+            .or_else(|| {
+                // Fallback: scale/bias tensor last dim == feature_dim
+                self.onnx.initializers.get(scale_name)
+                    .and_then(|init| init.shape.last().copied())
+                    .and_then(|len| if len > 0 { Some(len) } else { None })
+            })
             .ok_or_else(|| ConvertError::ShapeInferenceFailed {
                 name: input_name.to_string(),
                 reason: "LayerNorm requires concrete last dimension for feature_dim".to_string(),
@@ -410,8 +417,15 @@ impl<'a> ConvertContext<'a> {
         let in_shape = self.get_tensor_shape(input_name);
         let out_tid = self.graph.add_tensor(&output_name, in_shape.clone(), self.dtype);
 
+        // feature_dim: prefer input shape last dim, fallback to scale tensor length.
         let feature_dim = in_shape.last()
             .and_then(|d| d.as_concrete())
+            .or_else(|| {
+                // Fallback: scale tensor last dim == feature_dim
+                self.onnx.initializers.get(scale_name)
+                    .and_then(|init| init.shape.last().copied())
+                    .and_then(|len| if len > 0 { Some(len) } else { None })
+            })
             .ok_or_else(|| ConvertError::ShapeInferenceFailed {
                 name: input_name.to_string(),
                 reason: "RmsNorm requires concrete last dimension for feature_dim".to_string(),
@@ -808,7 +822,7 @@ mod tests {
 
         let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm_op.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm_op.kind {
             assert!((eps - 1e-6).abs() < 1e-10, "eps should be 1e-6, got {eps}");
         }
     }
@@ -1767,7 +1781,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 1e-12).abs() < 1e-20, "eps should be 1e-12, got {eps}");
         }
         assert_eq!(ln.inputs.len(), 3, "LayerNorm should have 3 inputs (x, scale, bias)");
@@ -1803,7 +1817,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 1e-5).abs() < 1e-15, "default eps should be 1e-5, got {eps}");
         }
     }
@@ -1833,7 +1847,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1e-5).abs() < 1e-15, "default eps should be 1e-5, got {eps}");
         }
         assert_eq!(norm.inputs.len(), 2, "RmsNorm should have 2 inputs (x, scale)");
@@ -3239,7 +3253,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
                 "Non-float epsilon attribute should fall back to default 1e-5, got {eps}"
@@ -3290,7 +3304,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
                 "Non-float epsilon attribute should fall back to default 1e-5, got {eps}"
@@ -5414,7 +5428,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert_eq!(eps, 0.0, "eps should be exactly 0.0");
         }
     }
@@ -5449,7 +5463,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1e-30).abs() < 1e-35, "eps should be ~1e-30, got {eps}");
         }
     }
@@ -9237,7 +9251,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!(eps.is_nan(), "NaN epsilon should be preserved as NaN");
         }
     }
@@ -9274,7 +9288,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!(eps.is_infinite() && eps.is_sign_positive(), "Inf epsilon should be preserved");
         }
     }
@@ -9309,7 +9323,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!(eps.is_infinite() && eps.is_sign_negative(), "NegInf epsilon should be preserved");
         }
     }
@@ -10366,7 +10380,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 100.0).abs() < 0.01, "Large epsilon should be preserved");
         }
     }
@@ -11550,7 +11564,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 1e-5).abs() < 1e-10, "Non-float epsilon should use default 1e-5, got {eps}");
         }
     }
@@ -12374,11 +12388,11 @@ mod tests {
         assert_eq!(rms_ops.len(), 1);
         assert_eq!(ln_ops.len(), 1);
         // RMS default eps = 1e-5
-        if let OpKind::RmsNorm { eps } = rms_ops[0].kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = rms_ops[0].kind {
             assert!((eps - 1e-5).abs() < 1e-10);
         }
         // LayerNorm default eps = 1e-5
-        if let OpKind::LayerNorm { eps } = ln_ops[0].kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln_ops[0].kind {
             assert!((eps - 1e-5).abs() < 1e-10);
         }
     }
@@ -13132,7 +13146,7 @@ mod tests {
 
         // Assert
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).unwrap();
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 0.1).abs() < 1e-10);
         }
     }
@@ -13184,7 +13198,7 @@ mod tests {
 
         // Assert
         let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).unwrap();
-        if let OpKind::RmsNorm { eps } = rms.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = rms.kind {
             assert!((eps - 1e-12).abs() < 1e-20);
         }
     }
@@ -14380,7 +14394,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!(eps.is_nan(), "NaN epsilon should be preserved as-is");
         }
     }
@@ -17383,7 +17397,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         if let Some(norm) = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })) {
-            if let OpKind::RmsNorm { eps } = norm.kind {
+            if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
                 assert!((eps - 1e10).abs() < 1.0, "Large epsilon should be preserved");
             }
         }
@@ -17420,7 +17434,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         if let Some(ln) = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })) {
-            if let OpKind::LayerNorm { eps } = ln.kind {
+            if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
                 assert_eq!(eps, 0.0, "Zero epsilon should be preserved");
             }
         }
@@ -19857,7 +19871,7 @@ mod tests {
         let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("should have LayerNorm op");
         match ln_op.kind {
-            OpKind::LayerNorm { eps } => {
+            OpKind::LayerNorm { feature_dim: _, eps } => {
                 assert!((eps - 1e-5).abs() < 1e-10, "int epsilon should default to 1e-5, got {eps}");
             }
             ref other => panic!("expected LayerNorm, got {other:?}"),
@@ -19914,7 +19928,7 @@ mod tests {
         let rn_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("should have RmsNorm op");
         match rn_op.kind {
-            OpKind::RmsNorm { eps } => {
+            OpKind::RmsNorm { feature_dim: _, eps } => {
                 assert!((eps - 1e-5).abs() < 1e-10, "string epsilon should default to 1e-5, got {eps}");
             }
             ref other => panic!("expected RmsNorm, got {other:?}"),
@@ -20509,7 +20523,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { eps } = &ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = &ln.kind {
             assert_eq!(*eps, 0.0, "Explicit zero epsilon should be preserved");
         }
     }
@@ -21823,7 +21837,7 @@ mod tests {
         // Assert
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1.0).abs() < 1e-10, "eps should be 1.0, got {eps}");
         }
     }
@@ -22072,7 +22086,7 @@ mod tests {
         // Assert: epsilon value should be exactly what was provided
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = norm.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - (-1e-5)).abs() < 1e-10, "eps should be -1e-5, got {eps}");
         }
     }
@@ -22111,7 +22125,7 @@ mod tests {
         // Assert
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1e-12).abs() < 1e-15, "eps should be 1e-12, got {eps}");
         }
     }
@@ -22866,7 +22880,7 @@ mod tests {
         // Assert
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1e-15).abs() < 1e-25, "eps should be 1e-15, got {eps}");
         }
     }
@@ -23281,7 +23295,7 @@ mod tests {
         let ln = graph.ops.iter()
             .find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 1e-5).abs() < 1e-12,
                 "Default epsilon should be 1e-5, got {eps}");
         }
@@ -23654,7 +23668,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { eps } = norm_op.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm_op.kind {
             assert!((eps - 1e-5).abs() < 1e-10, "Default eps should be 1e-5, got {eps}");
         }
     }
@@ -23786,7 +23800,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { eps } = ln_op.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln_op.kind {
             assert!((eps - 1e-5).abs() < 1e-10, "Default LayerNorm eps should be 1e-5, got {eps}");
         }
     }
@@ -23914,7 +23928,7 @@ mod tests {
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
         // Assert: Ints epsilon attribute falls back to default 1e-5
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1e-5).abs() < 1e-15,
                 "Ints epsilon attribute should fall back to default 1e-5, got {eps}");
         }
@@ -23957,7 +23971,7 @@ mod tests {
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
         // Assert: Floats (vector) epsilon should fall back to default 1e-5
-        if let OpKind::RmsNorm { eps } = norm.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
             assert!((eps - 1e-5).abs() < 1e-15,
                 "Floats epsilon attribute should fall back to default 1e-5, got {eps}");
         }
@@ -28472,7 +28486,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: epsilon should be the value from the attribute
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 1e10).abs() < 1.0, "epsilon should be 1e10, got {eps}");
         }
     }
@@ -29183,7 +29197,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: default epsilon is 1e-5
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
-        if let OpKind::LayerNorm { eps } = ln.kind {
+        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
             assert!((eps - 1e-5).abs() < 1e-10, "default epsilon should be 1e-5, got {eps}");
         }
     }
@@ -29469,7 +29483,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: epsilon should be exactly f32::MIN_POSITIVE
         let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("RmsNorm");
-        if let OpKind::RmsNorm { eps } = rms.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = rms.kind {
             assert_eq!(eps.to_bits(), f32::MIN_POSITIVE.to_bits(),
                 "epsilon should be exactly f32::MIN_POSITIVE, got {eps}");
         }
@@ -29520,7 +29534,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: negative infinity should be preserved as-is
         let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("RmsNorm");
-        if let OpKind::RmsNorm { eps } = rms.kind {
+        if let OpKind::RmsNorm { feature_dim: _, eps } = rms.kind {
             assert!(eps.is_infinite() && eps.is_sign_negative(),
                 "epsilon should be negative infinity, got {eps}");
         }

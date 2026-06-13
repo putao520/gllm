@@ -1078,7 +1078,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: vec![0x90, 0x90, 0xC3], // NOP NOP RET
             seq_len: 128,
-            hidden: 768,
         };
         assert_eq!(kernel.binary, vec![0x90, 0x90, 0xC3]);
         assert_eq!(kernel.seq_len, 128);
@@ -1089,7 +1088,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 1,
-            hidden: 1,
         };
         assert!(kernel.binary.is_empty());
         assert_eq!(kernel.seq_len, 1);
@@ -1100,7 +1098,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: vec![0u8; 4096],
             seq_len: usize::MAX,
-            hidden: usize::MAX,
         };
         assert_eq!(kernel.binary.len(), 4096);
         assert_eq!(kernel.seq_len, usize::MAX);
@@ -1705,7 +1702,6 @@ mod tests {
         let mut kernel = MicroKernel {
             binary: vec![0x90],
             seq_len: 64,
-            hidden: 512,
         };
         kernel.binary.push(0xC3);
         kernel.seq_len = 128;
@@ -1750,7 +1746,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 16,
-            hidden: 64,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 7, Duration::from_secs(10))
             .expect("benchmark should succeed");
@@ -1762,7 +1757,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 8,
-            hidden: 32,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 1, Duration::from_secs(10))
             .expect("benchmark with repeat_count=1 should succeed");
@@ -1776,7 +1770,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: vec![0x90],
             seq_len: 4,
-            hidden: 16,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 5, Duration::from_secs(10))
             .expect("benchmark should succeed");
@@ -1793,7 +1786,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 64,
-            hidden: 1024,
         };
         // With zero timeout, the very first iteration will always exceed it
         let result = LatencyProfiler::benchmark_kernel(&kernel, 1, Duration::ZERO);
@@ -2153,7 +2145,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 8,
-            hidden: 32,
         };
         // Very long timeout should not trigger
         let result = LatencyProfiler::benchmark_kernel(&kernel, 3, Duration::from_secs(3600));
@@ -2169,19 +2160,17 @@ mod tests {
         let kernel = MicroKernel {
             binary: binary.clone(),
             seq_len: 1,
-            hidden: 1,
         };
         assert_eq!(kernel.binary, binary);
     }
 
-    // ── MicroKernel: zero seq_len and hidden ──
+    // ── MicroKernel: zero seq_len ──
 
     #[test]
     fn test_micro_kernel_zero_fields() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 0,
-            hidden: 0,
         };
         assert_eq!(kernel.seq_len, 0);
     }
@@ -2316,7 +2305,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 1,
-            hidden: 1,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 0, Duration::from_secs(10))
             .expect("0 repeats should succeed with empty result");
@@ -2498,7 +2486,6 @@ mod tests {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 999,
-            hidden: 512,
         };
         let result = LatencyProfiler::benchmark_kernel(&kernel, 1, Duration::ZERO);
         if let Err(ProbeError::Timeout { seq_len, elapsed }) = result {
@@ -2986,7 +2973,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary,
             seq_len: 512,
-            hidden: 4096,
         };
         assert_eq!(kernel.binary.len(), 1024 * 1024);
     }
@@ -2998,7 +2984,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let mut kernel = MicroKernel {
             binary: vec![0x90, 0xC3],
             seq_len: 8,
-            hidden: 64,
         };
         kernel.binary.clear();
         assert!(kernel.binary.is_empty());
@@ -3007,25 +2992,21 @@ fn test_probe_config_for_model_inherits_repeat_count() {
     // ── MicroKernel: seq_len larger than hidden ──
 
     #[test]
-    fn test_micro_kernel_seq_larger_than_hidden() {
+    fn test_micro_kernel_seq_larger_than_zero() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 8192,
-            hidden: 64,
         };
-        assert!(kernel.seq_len > kernel.hidden);
+        assert!(kernel.seq_len > 0);
     }
 
-    // ── MicroKernel: hidden larger than seq_len ──
-
     #[test]
-    fn test_micro_kernel_hidden_larger_than_seq() {
+    fn test_micro_kernel_large_seq() {
         let kernel = MicroKernel {
             binary: Vec::new(),
-            seq_len: 4,
-            hidden: 4096,
+            seq_len: 4096,
         };
-        assert!(kernel.hidden > kernel.seq_len);
+        assert!(kernel.seq_len > 0);
     }
 
     // ── benchmark_kernel: many repeats produce consistent count ──
@@ -3035,7 +3016,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 1,
-            hidden: 1,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 100, Duration::from_secs(10))
             .expect("benchmark should succeed");
@@ -3049,7 +3029,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 16,
-            hidden: 32,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 10, Duration::from_secs(10))
             .expect("benchmark should succeed");
@@ -3357,7 +3336,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 8,
-            hidden: 32,
         };
         let times1 = LatencyProfiler::benchmark_kernel(&kernel, 5, Duration::from_secs(10))
             .expect("benchmark 1");
@@ -3373,7 +3351,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 1,
-            hidden: 1,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 1, Duration::from_secs(10))
             .expect("should succeed");
@@ -3530,7 +3507,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: binary.clone(),
             seq_len: 32,
-            hidden: 64,
         };
         assert!(kernel.binary.iter().all(|&b| b == 0xFF));
         assert_eq!(kernel.binary.len(), 256);
@@ -3802,7 +3778,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 1,
-            hidden: 1,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 0, Duration::from_secs(5))
             .expect("zero repeats should succeed");
@@ -3964,7 +3939,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 42,
-            hidden: 16,
         };
         let result = LatencyProfiler::benchmark_kernel(&kernel, 1, Duration::ZERO);
         if let Err(ProbeError::Timeout { seq_len, elapsed }) = result {
@@ -4012,7 +3986,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: vec![0xC3], // RET
             seq_len: 1,
-            hidden: 1,
         };
         assert_eq!(kernel.binary.len(), 1);
         assert_eq!(kernel.binary[0], 0xC3);
@@ -4157,7 +4130,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: vec![0x90, 0xC3],
             seq_len: 32,
-            hidden: 128,
         };
         let timeout = Duration::from_secs(10);
         let times = LatencyProfiler::benchmark_kernel(&kernel, 20, timeout)
@@ -4226,7 +4198,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel2 = LatencyProfiler::compile_micro_gemm_cpu(64, 512, &profile)
             .expect("second compile should succeed");
         assert_eq!(kernel1.seq_len, kernel2.seq_len);
-        assert_eq!(kernel1.hidden, kernel2.hidden);
         assert_eq!(kernel1.binary.len(), kernel2.binary.len());
     }
 
@@ -4323,7 +4294,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let kernel = MicroKernel {
             binary: vec![0x90],
             seq_len: 16,
-            hidden: 64,
         };
         let times = LatencyProfiler::benchmark_kernel(&kernel, 10, Duration::from_secs(10))
             .expect("benchmark should succeed");
@@ -4557,7 +4527,6 @@ fn test_probe_config_for_model_inherits_repeat_count() {
         let mut kernel = MicroKernel {
             binary: Vec::new(),
             seq_len: 32,
-            hidden: 256,
         };
         kernel.binary.extend_from_slice(&[0x48, 0x31, 0xC0, 0xC3]); // xor rax,rax; ret
         assert_eq!(kernel.binary.len(), 4);

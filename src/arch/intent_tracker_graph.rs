@@ -1310,7 +1310,7 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         let ln_ops: Vec<f32> = graph.ops.iter()
             .filter_map(|op| match op.kind {
-                OpKind::LayerNorm { eps } => Some(eps),
+                OpKind::LayerNorm { feature_dim: _, eps } => Some(eps),
                 _ => None,
             })
             .collect();

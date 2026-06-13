@@ -1276,7 +1276,7 @@ mod tests {
         let ln_b = g.add_tensor_concrete("ln_b", &[h], dt);
         g.inputs = vec![input, ln_w, ln_b];
         let out = g.add_tensor_concrete("out", &[seq, h], dt);
-        g.add_op(OpKind::LayerNorm { eps: 1e-6 }, vec![input, ln_w, ln_b], vec![out], "ln");
+        g.add_op(OpKind::LayerNorm { feature_dim: h, eps: 1e-6 }, vec![input, ln_w, ln_b], vec![out], "ln");
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
@@ -1357,7 +1357,7 @@ mod tests {
         g.inputs = vec![input, ln_w, ln_b, w];
 
         let normed = g.add_tensor_concrete("normed", &[m, k], dt);
-        g.add_op(OpKind::LayerNorm { eps: 1e-6 }, vec![input, ln_w, ln_b], vec![normed], "ln");
+        g.add_op(OpKind::LayerNorm { feature_dim: k, eps: 1e-6 }, vec![input, ln_w, ln_b], vec![normed], "ln");
 
         let out = g.add_tensor_concrete("out", &[m, n], dt);
         g.add_op(
@@ -1456,7 +1456,7 @@ mod tests {
 
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
         g.add_op(
-            OpKind::LayerNorm { eps: 1e-6 },
+            OpKind::LayerNorm { feature_dim: h, eps: 1e-6 },
             vec![input, ln_w, ln_b],
             vec![normed],
             "ln",
