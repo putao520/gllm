@@ -521,6 +521,10 @@ pub fn audio_encode(
     for layer_idx in 0..config.num_layers {
         let weights_packed = pack_layer_weights(layer_idx, weights)?;
 
+        // Reset scratch between layers — JIT code may leave residual data
+        // that corrupts pointer computation in subsequent layers.
+        for b in scratch_block.iter_mut() { *b = 0; }
+
         unsafe {
             block_compiled.execute_as_mega_kernel(
                 hidden_buf.as_ptr() as *const u8,
