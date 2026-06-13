@@ -13,8 +13,6 @@
 //! - `mega_kernel/executor_ops.inc.rs`   — MegaKernelExecutor diagnostic/encode/rerank/辅助方法
 //! - `mega_kernel/pack_observe.inc.rs`   — 权重打包 + 遥测观测 + 诊断 scratchpad
 
-use gllm_kernels::types::DType;
-
 include!("mega_kernel/abi_types.inc.rs");
 include!("mega_kernel/executor_core.inc.rs");
 include!("mega_kernel/executor_ops.inc.rs");

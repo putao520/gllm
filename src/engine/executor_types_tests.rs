@@ -204,28 +204,6 @@ mod tests {
         assert_eq!(attn.head_dim, 64);
     }
 
-    #[test]
-    fn forward_config_attention_geometry() {
-        let cfg = make_forward_config();
-        let ag = cfg.attention_geometry();
-        assert_eq!(ag.num_heads, 16);
-        assert_eq!(ag.num_kv_heads, 4);
-        assert_eq!(ag.head_dim, 64);
-        assert_eq!(ag.q_dim, 16 * 64);
-        assert_eq!(ag.kv_dim, 4 * 64);
-        assert_eq!(ag.heads_per_group, 16 / 4);
-    }
-
-    #[test]
-    fn forward_config_layer_dims() {
-        let cfg = make_forward_config();
-        let ld = cfg.layer_dims();
-        assert_eq!(ld.hidden, 1024);
-        assert_eq!(ld.inter, 4096);
-        assert_eq!(ld.eps, 1e-5);
-        assert_eq!(ld.rope_theta, 10000.0);
-    }
-
     // ---------------------------------------------------------------
     // SwapConfig
     // ---------------------------------------------------------------
@@ -1809,32 +1787,6 @@ mod tests {
         assert!(format!("{err}").contains("MoERouter"));
     }
 
-    // ---- GeneratorForwardConfig: attention_geometry with GQA ----
-
-    #[test]
-    fn generator_forward_config_attention_geometry_gqa() {
-        let geo = Arc::new(ModelGeometry {
-            num_heads: 32,
-            num_kv_heads: 4,
-            head_dim: 128,
-            ..make_geometry()
-        });
-        let cfg = GeneratorForwardConfig {
-            geometry: geo,
-            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            arch_family: crate::manifest::ArchFamily::Decoder,
-            rerank_yes_token_id: None,
-            rerank_no_token_id: None,
-            moe_config: None,
-            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
-            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
-        };
-        let ag = cfg.attention_geometry();
-        assert_eq!(ag.heads_per_group, 8); // 32 / 4
-        assert_eq!(ag.q_dim, 32 * 128);
-        assert_eq!(ag.kv_dim, 4 * 128);
-    }
-
     #[test]
     fn generator_forward_config_moe_config_some() {
         let cfg = GeneratorForwardConfig {
@@ -2062,53 +2014,6 @@ mod tests {
     fn default_for_test_norm_eps() {
         let cfg = GeneratorForwardConfig::default_for_test();
         assert!((cfg.norm_eps() - 1e-5).abs() < 1e-10);
-    }
-
-    // ---- GeneratorForwardConfig: attention with MHA (1:1 heads) ----
-
-    #[test]
-    fn forward_config_attention_mha_heads_equal_kv_heads() {
-        let geo = Arc::new(ModelGeometry {
-            num_heads: 16,
-            num_kv_heads: 16,
-            head_dim: 64,
-            ..make_geometry()
-        });
-        let cfg = GeneratorForwardConfig {
-            geometry: geo,
-            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
-            arch_family: crate::manifest::ArchFamily::Decoder,
-            rerank_yes_token_id: None,
-            rerank_no_token_id: None,
-            moe_config: None,
-            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
-            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
-        };
-        let ag = cfg.attention_geometry();
-        assert_eq!(ag.heads_per_group, 1);
-        assert_eq!(ag.q_dim, ag.kv_dim);
-    }
-
-    // ---- GeneratorForwardConfig: layer_dims with custom rope_theta ----
-
-    #[test]
-    fn forward_config_layer_dims_custom_rope_theta() {
-        let geo = Arc::new(ModelGeometry {
-            rope_theta: 500000.0,
-            ..make_geometry()
-        });
-        let cfg = GeneratorForwardConfig {
-            geometry: geo,
-            rope: RoPEConfig { theta: 500000.0, scale: 1.0, interleaved: false, precompute: false },
-            arch_family: crate::manifest::ArchFamily::Decoder,
-            rerank_yes_token_id: None,
-            rerank_no_token_id: None,
-            moe_config: None,
-            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
-            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
-        };
-        let ld = cfg.layer_dims();
-        assert!((ld.rope_theta - 500000.0).abs() < 1e-6);
     }
 
     // ---- GeneratorForwardConfig: Clone ----
@@ -2914,18 +2819,6 @@ mod tests {
         };
         assert_eq!(cfg.page_size, 0);
         assert!(cfg.page_table.is_none());
-    }
-
-    // ---- GeneratorForwardConfig::default_for_test layer_dims ----
-
-    #[test]
-    fn default_for_test_layer_dims() {
-        let cfg = GeneratorForwardConfig::default_for_test();
-        let ld = cfg.layer_dims();
-        assert_eq!(ld.hidden, 64);
-        assert_eq!(ld.inter, 128);
-        assert!((ld.eps - 1e-5).abs() < 1e-10);
-        assert!((ld.rope_theta - 10000.0).abs() < 1e-6);
     }
 
     // ---- KvCacheConfig: F16 dtype with large page_size ----

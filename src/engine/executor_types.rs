@@ -162,32 +162,6 @@ impl GeneratorForwardConfig {
 
 
 impl GeneratorForwardConfig {
-    /// Extract attention head geometry as a grouped struct.
-    #[allow(dead_code)]
-    pub(crate) fn attention_geometry(&self) -> crate::compat::types::AttentionGeometry {
-        let q_dim = self.geometry.num_heads * self.geometry.head_dim;
-        let kv_dim = self.geometry.num_kv_heads * self.geometry.head_dim;
-        crate::compat::types::AttentionGeometry {
-            num_heads: self.geometry.num_heads,
-            num_kv_heads: self.geometry.num_kv_heads,
-            head_dim: self.geometry.head_dim,
-            q_dim,
-            kv_dim,
-            heads_per_group: self.geometry.num_heads / self.geometry.num_kv_heads.max(1),
-        }
-    }
-
-    /// Extract per-layer dimension constants.
-    #[allow(dead_code)]
-    pub(crate) fn layer_dims(&self) -> crate::compat::types::LayerDims {
-        crate::compat::types::LayerDims {
-            hidden: self.geometry.hidden_size,
-            inter: self.geometry.intermediate_size,
-            eps: self.geometry.norm_eps,
-            rope_theta: self.rope.theta,
-        }
-    }
-
     /// Create a minimal default config for use in tests.
     #[cfg(test)]
     pub fn default_for_test() -> Self {

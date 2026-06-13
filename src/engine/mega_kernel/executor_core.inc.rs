@@ -9,8 +9,6 @@ pub struct MegaKernelExecutor {
     num_layers: usize,
     hidden_size: usize,
     vocab_size: usize,
-    #[allow(dead_code)]
-    dtype: DType,
     /// EOS token ID — 从 ModelConfig 读取，传给 JIT 停止条件
     eos_token_id: u32,
     /// §19 KV-OPT-009: Mega-Kernel Variant 矩阵 (按 PrecisionTier 编译独立 Variant)
@@ -378,7 +376,6 @@ impl MegaKernelExecutor {
 
         let mtp_depth_extracted = mtp_depth;
         let mega_compiled = MegaKernelCompiled {
-            weight_layout,
             named_offsets,
             buffer_layout: output.buffer_layout,
             logits_scratch_offset: output.logits_scratch_offset,
@@ -404,7 +401,6 @@ impl MegaKernelExecutor {
             num_layers: geometry.num_layers,
             hidden_size: geometry.hidden,
             vocab_size: geometry.vocab_size,
-            dtype: geometry.compute_dtype,
             eos_token_id,
             variant_registry: {
                 let mut registry = crate::jit::variant_registry::VariantRegistry::new();

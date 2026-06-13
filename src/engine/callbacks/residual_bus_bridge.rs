@@ -25,9 +25,6 @@ pub struct ResidualBusBridgeCallback {
     pending_injections: Vec<InjectionPayload>,
     /// Recalled data from recall ports (populated during forward pass)
     recalled_data: Vec<RecalledEntry>,
-    /// Hidden size for validation
-    #[allow(dead_code)]
-    hidden_size: usize,
     /// Previous layer's hidden state for recall cosine similarity
     prev_hidden: Vec<f32>,
 }
@@ -72,7 +69,6 @@ impl ResidualBusBridgeCallback {
             recall_layers,
             pending_injections: Vec::new(),
             recalled_data: Vec::new(),
-            hidden_size: bus.hidden_size(),
             prev_hidden: Vec::new(),
         }
     }
@@ -352,8 +348,8 @@ mod tests {
     #[test]
     fn bridge_hidden_size_propagated_from_bus() {
         let bus = ResidualBus::new(128, 24);
-        let bridge = ResidualBusBridgeCallback::from_bus(&bus);
-        assert_eq!(bridge.hidden_size, 128);
+        let _bridge = ResidualBusBridgeCallback::from_bus(&bus);
+        assert_eq!(bus.hidden_size(), 128);
     }
 
     #[test]
@@ -1306,8 +1302,8 @@ mod tests {
     #[test]
     fn bridge_from_bus_large_hidden_size() {
         let bus = ResidualBus::new(4096, 32);
-        let bridge = ResidualBusBridgeCallback::from_bus(&bus);
-        assert_eq!(bridge.hidden_size, 4096);
+        let _bridge = ResidualBusBridgeCallback::from_bus(&bus);
+        assert_eq!(bus.hidden_size(), 4096);
     }
 
     #[test]
@@ -1872,15 +1868,15 @@ mod tests {
     #[test]
     fn bridge_hidden_size_one() {
         let bus = ResidualBus::new(1, 4);
-        let bridge = ResidualBusBridgeCallback::from_bus(&bus);
-        assert_eq!(bridge.hidden_size, 1);
+        let _bridge = ResidualBusBridgeCallback::from_bus(&bus);
+        assert_eq!(bus.hidden_size(), 1);
     }
 
     #[test]
     fn bridge_hidden_size_large() {
         let bus = ResidualBus::new(65536, 64);
-        let bridge = ResidualBusBridgeCallback::from_bus(&bus);
-        assert_eq!(bridge.hidden_size, 65536);
+        let _bridge = ResidualBusBridgeCallback::from_bus(&bus);
+        assert_eq!(bus.hidden_size(), 65536);
     }
 
     // ── New tests: queue_injection edge cases ──
@@ -2867,7 +2863,7 @@ mod tests {
     fn bridge_from_bus_zero_hidden_size() {
         let bus = ResidualBus::new(0, 8);
         let bridge = ResidualBusBridgeCallback::from_bus(&bus);
-        assert_eq!(bridge.hidden_size, 0);
+        assert_eq!(bus.hidden_size(), 0);
         assert!(bridge.injection_layers.is_empty());
         assert!(bridge.recall_layers.is_empty());
     }
@@ -2881,7 +2877,7 @@ mod tests {
         let bridge = ResidualBusBridgeCallback::from_bus(&bus);
         assert_eq!(bridge.injection_layers.len(), 2);
         assert_eq!(bridge.recall_layers.len(), 1);
-        assert_eq!(bridge.hidden_size, 4);
+        assert_eq!(bus.hidden_size(), 4);
     }
 
     #[test]

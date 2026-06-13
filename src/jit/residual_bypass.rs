@@ -51,9 +51,6 @@ pub struct ResidualBypassLayer {
     detector: ResidualBypassDetector,
     /// 逐层决策记录 (layer_idx → record)
     history: Vec<LayerBypassRecord>,
-    /// 总层数 (从模型配置获取)
-    #[allow(dead_code)]
-    num_layers: usize,
     /// 累计跳过的层数
     total_bypassed_layers: usize,
     /// 累计执行的层数
@@ -66,7 +63,6 @@ impl ResidualBypassLayer {
         Self {
             detector: ResidualBypassDetector::new(config),
             history: Vec::with_capacity(num_layers),
-            num_layers,
             total_bypassed_layers: 0,
             total_executed_layers: 0,
         }

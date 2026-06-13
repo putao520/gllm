@@ -4918,54 +4918,6 @@ mod tests {
     }
 
     // ======================================================================
-    // GeneratorForwardConfig: attention_geometry returns correct dims
-    // ======================================================================
-
-    #[test]
-    fn forward_config_attention_geometry_dims() {
-        use crate::engine::executor_types::GeneratorForwardConfig;
-
-        // Arrange
-        let cfg = GeneratorForwardConfig::default_for_test();
-        // geometry: num_heads=4, num_kv_heads=2, head_dim=16
-
-        // Act
-        let geo = cfg.attention_geometry();
-
-        // Assert
-        assert_eq!(geo.num_heads, 4);
-        assert_eq!(geo.num_kv_heads, 2);
-        assert_eq!(geo.head_dim, 16);
-        // q_dim = num_heads * head_dim = 4 * 16 = 64
-        assert_eq!(geo.q_dim, 64);
-        // kv_dim = num_kv_heads * head_dim = 2 * 16 = 32
-        assert_eq!(geo.kv_dim, 32);
-        // heads_per_group = num_heads / max(num_kv_heads, 1) = 4 / 2 = 2
-        assert_eq!(geo.heads_per_group, 2);
-    }
-
-    // ======================================================================
-    // GeneratorForwardConfig: layer_dims returns correct values
-    // ======================================================================
-
-    #[test]
-    fn forward_config_layer_dims_values() {
-        use crate::engine::executor_types::GeneratorForwardConfig;
-
-        // Arrange
-        let cfg = GeneratorForwardConfig::default_for_test();
-        // hidden=64, inter=128, eps=1e-5
-
-        // Act
-        let dims = cfg.layer_dims();
-
-        // Assert
-        assert_eq!(dims.hidden, 64);
-        assert_eq!(dims.inter, 128);
-        assert!((dims.eps - 1e-5).abs() < 1e-10);
-    }
-
-    // ======================================================================
     // KvCacheConfig: BF16 dtype reports correct size_bytes
     // ======================================================================
 

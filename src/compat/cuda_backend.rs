@@ -3480,24 +3480,6 @@ mod tests {
         assert_eq!(max_seq, 8192, "max_seq_len should be identity passthrough");
     }
 
-    #[test]
-    fn generator_forward_config_attention_geometry_derivation() {
-        // Arrange: attention_geometry() computes q_dim, kv_dim, heads_per_group from geometry
-        use crate::engine::executor::GeneratorForwardConfig;
-        let cfg = GeneratorForwardConfig::default_for_test();
-        // Act
-        let geo = cfg.attention_geometry();
-        // Assert: derived values match geometry fields
-        assert_eq!(geo.num_heads, 4, "num_heads from geometry");
-        assert_eq!(geo.num_kv_heads, 2, "num_kv_heads from geometry");
-        assert_eq!(geo.head_dim, 16, "head_dim from geometry");
-        // Assert: q_dim = num_heads * head_dim = 4 * 16 = 64
-        assert_eq!(geo.q_dim, 64, "q_dim = num_heads * head_dim");
-        // Assert: kv_dim = num_kv_heads * head_dim = 2 * 16 = 32
-        assert_eq!(geo.kv_dim, 32, "kv_dim = num_kv_heads * head_dim");
-        // Assert: heads_per_group = num_heads / num_kv_heads = 4 / 2 = 2
-        assert_eq!(geo.heads_per_group, 2, "GQA group size");
-    }
 
     #[test]
     fn tensor_role_layer_norm_maps_to_input_norm() {
