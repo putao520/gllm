@@ -455,6 +455,9 @@ pub fn audio_encode(
 
     let mut compiler = InferenceCompiler::new();
 
+    // ── Compile ALL graphs first (before any execution) ──
+    // This avoids heap corruption from JIT execution affecting subsequent compilation.
+
     // ── 2. Mel projection GEMM ──
     let proj_graph = build_mel_projection_graph(num_frames, config);
     let proj_config = CompileConfig {
@@ -467,6 +470,31 @@ pub fn audio_encode(
         .map_err(|e| BackendError::Other(format!("audio_encode: mel projection compile: {e}")))?
         .layer_code;
 
+    // ── 3. Conformer blocks ──
+    let block_graph = build_conformer_block_graph(num_frames, config);
+    let block_config = CompileConfig {
+        max_seq_len: num_frames,
+        debug_jit: false,
+        hetero: None,
+    };
+    let block_compiled = compiler
+        .compile_mega_kernel_from_graph(block_graph, &block_config, None)
+        .map_err(|e| BackendError::Other(format!("audio_encode: conformer block compile: {e}")))?
+        .layer_code;
+
+    // ── 4. Encoder final LayerNorm ──
+    let final_graph = build_final_norm_graph(num_frames, config);
+    let final_config = CompileConfig {
+        max_seq_len: num_frames,
+        debug_jit: false,
+        hetero: None,
+    };
+    let final_compiled = compiler
+        .compile_mega_kernel_from_graph(final_graph, &final_config, None)
+        .map_err(|e| BackendError::Other(format!("audio_encode: final norm compile: {e}")))?
+        .layer_code;
+
+    // ── Execute: Mel projection ──
     let proj_w = weights
         .get_audio_tensor("audio_tower.feature_projection.weight")
         .ok_or_else(|| {
@@ -501,20 +529,7 @@ pub fn audio_encode(
         )));
     }
 
-    // ── 3. Conformer blocks ──
-    // 同一 seq_len 下所有 block 的 graph 结构等价,编译一次复用 num_layers 次
-
-    let block_graph = build_conformer_block_graph(num_frames, config);
-    let block_config = CompileConfig {
-        max_seq_len: num_frames,
-        debug_jit: false,
-        hetero: None,
-    };
-    let block_compiled = compiler
-        .compile_mega_kernel_from_graph(block_graph, &block_config, None)
-        .map_err(|e| BackendError::Other(format!("audio_encode: conformer block compile: {e}")))?
-        .layer_code;
-
+    // ── Execute: Conformer blocks ──
     let mut scratch_block = vec![0u8; block_compiled.scratchpad_bytes.max(65536)];
     let mut out_buf = vec![0.0f32; num_frames * hidden];
 
@@ -544,18 +559,7 @@ pub fn audio_encode(
         std::mem::swap(&mut hidden_buf, &mut out_buf);
     }
 
-    // ── 4. Encoder final LayerNorm ──
-    let final_graph = build_final_norm_graph(num_frames, config);
-    let final_config = CompileConfig {
-        max_seq_len: num_frames,
-        debug_jit: false,
-        hetero: None,
-    };
-    let final_compiled = compiler
-        .compile_mega_kernel_from_graph(final_graph, &final_config, None)
-        .map_err(|e| BackendError::Other(format!("audio_encode: final norm compile: {e}")))?
-        .layer_code;
-
+    // ── Execute: Encoder final LayerNorm ──
     let final_w = weights
         .get_audio_tensor("audio_tower.encoder.final_norm.weight")
         .ok_or_else(|| {
