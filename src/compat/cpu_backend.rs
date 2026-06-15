@@ -903,11 +903,59 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
     }
 
     fn upload_weights_f32_owned(&self, data: Vec<f32>) -> Result<Self::Tensor, BE> {
-        // Safety: Self::Tensor = Vec<E>, and this is only called when E == f32.
-        // Transmute the Vec<f32> to Vec<E> without copying.
-        let tensor: Vec<E> = unsafe {
+        // Multi-dtype path: reuse upload_weights_owned by reinterpreting
+        // the f32 buffer as raw little-endian bytes.
+        // Safety: f32 is always 4-byte aligned, little-endian on supported targets,
+        // and length is a whole multiple of 4.
+        let byte_len = data.len() * core::mem::size_of::<f32>();
+        let bytes: Vec<u8> = unsafe {
             let mut v = std::mem::ManuallyDrop::new(data);
-            Vec::from_raw_parts(v.as_mut_ptr() as *mut E, v.len(), v.capacity())
+            Vec::from_raw_parts(v.as_mut_ptr() as *mut u8, byte_len, byte_len)
+        };
+        self.upload_weights_owned(bytes, gllm_kernels::types::DType::F32)
+    }
+
+    fn upload_weights_owned(
+        &self,
+        bytes: Vec<u8>,
+        dtype: gllm_kernels::types::DType,
+    ) -> Result<Self::Tensor, BE> {
+        // CPU backend's Tensor is Vec<E>. For E == f32 only F32 data fits.
+        // Reject any non-F32 dtype: the typed Vec<E> cannot carry other dtypes
+        // without changing the associated type (which would break callers).
+        // BackendError::Unimplemented takes &'static str — use static match arms.
+        if dtype != gllm_kernels::types::DType::F32 {
+            let what = match dtype {
+                gllm_kernels::types::DType::F16 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got F16)",
+                gllm_kernels::types::DType::BF16 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got BF16)",
+                gllm_kernels::types::DType::U8 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got U8)",
+                gllm_kernels::types::DType::F8E4M3 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got F8E4M3)",
+                gllm_kernels::types::DType::F8E5M2 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got F8E5M2)",
+                gllm_kernels::types::DType::F6E3M2 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got F6E3M2)",
+                gllm_kernels::types::DType::F6E2M3 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got F6E2M3)",
+                gllm_kernels::types::DType::F4E2M1 => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got F4E2M1)",
+                _ => "upload_weights_owned: CPU tensor is Vec<E>; only F32 accepted (got unknown dtype)",
+            };
+            return Err(BE::Unimplemented(what));
+        }
+        let elem_bytes = core::mem::size_of::<E>();
+        if elem_bytes == 0 || bytes.len() % elem_bytes != 0 {
+            return Err(BE::Cpu(format!(
+                "upload_weights_owned: byte length {} not a whole multiple of E size {}",
+                bytes.len(),
+                elem_bytes
+            )));
+        }
+        let new_len = bytes.len() / elem_bytes;
+        // Safety: Self::Tensor = Vec<E>. We reinterpret the same allocation
+        // (capacity in E units = floor(byte_capacity / elem_bytes), conservative
+        // since Vec<u8> capacity is >= len). We pass new_len as both len and
+        // capacity to keep the Vec in a valid state; any spare bytes beyond
+        // byte_len are not owned by us anyway.
+        let tensor: Vec<E> = unsafe {
+            let mut v = std::mem::ManuallyDrop::new(bytes);
+            let ptr = v.as_mut_ptr() as *mut E;
+            Vec::from_raw_parts(ptr, new_len, new_len)
         };
         Ok(tensor)
     }

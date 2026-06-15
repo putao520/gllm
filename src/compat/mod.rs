@@ -216,6 +216,23 @@ pub mod backend_trait {
             Err(BackendError::Unimplemented("upload_weights_f32_owned: backend does not support zero-copy f32 upload"))
         }
 
+        /// Upload weights from raw bytes with an explicit element dtype.
+        ///
+        /// This is the multi-dtype entry point. `bytes.len()` must be a whole
+        /// multiple of `dtype.size_bytes()`. Backends whose `Self::Tensor` is
+        /// typed as `Vec<f32>` (or `Vec<E>` with `E == f32`) only accept
+        /// `DType::F32`; any other dtype returns `Unimplemented`.
+        ///
+        /// The default implementation returns `Unimplemented`. CPU backend
+        /// overrides it to reinterpret F32 bytes as `Vec<E>` without copy.
+        fn upload_weights_owned(
+            &self,
+            _bytes: Vec<u8>,
+            _dtype: gllm_kernels::types::DType,
+        ) -> Result<Self::Tensor, BackendError> {
+            Err(BackendError::Unimplemented("upload_weights_owned: backend does not support raw-byte weight upload"))
+        }
+
         /// Quantized matrix multiplication dispatching to K-Quant/Classic/IQ kernels.
         #[allow(clippy::too_many_arguments)]
         fn quantized_matmul(
