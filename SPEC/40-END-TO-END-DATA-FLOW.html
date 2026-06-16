@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="">
+  <head>
+    <meta charset="UTF-8">
+    <meta content="40-END-TO-END-DATA-FLOW" name="spec-file">
+    <meta content="other" name="spec-category">
+
+    <script type="application/ld+json">
+    { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"40-END-TO-END-DATA-FLOW", "dependencies":["08-EXECUTOR","07-LOADER","39-UNIFIED-MEGA-KERNEL","ARCH-DATA-FLOW-CONTRACT"], "children":[] }
+    </script>
+  </head>
+  <body>
+    <header data-spec-header="">
+      <h1>端到端数据流 (SSOT)</h1>
+      <nav data-spec-breadcrumb="">
+        <a href="./00-INDEX.html">SPEC</a> &gt; <span>40-END-TO-END-DATA-FLOW</span>
+      </nav>
+    </header>
+    <main data-spec-content="">
+      <section id="s-端到端数据流-ssot" data-section="null">
+        <h2>端到端数据流 (SSOT)</h2>
+        <p>&gt; <strong>核心定位</strong>: 本文档是用户 API 调用到推理结果返回的完整数据流唯一真源。从 <code>client.generate(prompt)</code> 到 <code>GenerationResponse</code> 的每一步数据转换，在此文档中有且仅有一个权威描述。任何代码注释、变量名或口头描述与此文档矛盾时，以此文档为准。</p>
+        <p>&gt; <strong>与 SPEC 39 的关系</strong>: SPEC 39 定义编译器行为（编译时），本文档覆盖编译时 + 推理时全链路。SPEC 39 的 §0.1 两仓职责边界在本文档中有完整的端到端数据流验证。</p>
+        <p>&gt; <strong>与 ARCH-DATA-FLOW-CONTRACT 的关系</strong>: ARCH-DATA-FLOW-CONTRACT 定义 executor/loader 内部数据流的唯一来源契约，本文档覆盖更广范围（从用户 API 到结果返回），但 executor/loader 内部数据流的 SSOT 仍以 ARCH-DATA-FLOW-CONTRACT 为准。</p>
+        <p>&gt; <strong>三时态重组 (A5-1 修复)</strong>: 原文档混合了 BUILD-TIME、COMPILE-TIME、RUNTIME 三时态描述。本次修复按三时态重组为三个 Part，每个 Part 头部明确标注时态标签，读者可清晰识别约束生效时机。</p>
+      </section>
+
+      <section id="s0" data-section="0">
+        <h3>§0 概述</h3>
+
+        <h4>§0.1 端到端数据流总览图</h4>
+        <pre><code>┌───────────────────────────── 编译时（一次性）─────────────────────────────┐
+│                                                                            │
+│  ClientBuilder::build_state()                                              │
+│       │                                                                    │
+│       ├─ Loader::from_source() ── 下载/加载 ── 格式检测                     │
+│       │       │                                                            │
+│       │       └─ detect_architecture() ── 架构名称                         │
+│       │               │                                                    │
+│       │               └─ analyze_architecture() ── ArchitectureFeatures    │
+│       │                       │                                            │
+│       │                       └─ Family (Decoder/Encoder)                  │
+│       │                                                                    │
+│       ├─ build_business_config() ── OutputMode + SgConfig                  │
+│       │                                                                    │
+│       ├─ build_compiler_graph() ── Family + OutputMode → CompilerGraph     │
+│       │       │         ▲ BUILD 阶段边界                                    │
+│       │       │         ╳ BusinessConfig 在此以上被消费                      │
+│       │       │         ▼ COMPILE 阶段边界                                   │
+│       │       │                                                            │
+│       │       └─ GraphTopologyAnalysis::analyze() ── 拓扑推导一切          │
+│       │               │                                                    │
+│       │               └─ compile_mega_kernel_vm() ── VmInstr emit          │
+│       │                       │                                            │
+│       │                       └─ ISA Lowering ── 机器码                     │
+│       │                                                                    │
+│       └─ pack_weights() ── 权重打包到连续 blob                             │
+│                                                                            │
+│  产出: MegaKernelCompiled { entry_fn, weight_blob, buffer_layout }          │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────── 推理时（每次调用）────────────────────────────┐
+│                                                                            │
+│  client.generate(prompt)                                                   │
+│       │                                                                    │
+│       ├─ tokenizer.encode(prompt) ── String → Vec&lt;u32&gt;                    │
+│       │                                                                    │
+│       ├─ 分配运行时 buffer (input_ids, output_tokens, scratchpad, kv)      │
+│       │                                                                    │
+│       ├─ 一次 CALL: entry_fn(input_ids, weight_blob, kv, ..., args)       │
+│       │       │                                                            │
+│       │       └─ JIT 内部: embed → N layers → logits → sampling → output  │
+│       │                                                                    │
+│       ├─ output_tokens → tokenizer.decode() ── Vec&lt;u32&gt; → String          │
+│       │                                                                    │
+│       └─ 返回 GenerationResponse { text, ... }                            │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘</code></pre>
+
+        <h4>§0.2 两阶段模型</h4>
+        <table>
+          <tr><th>阶段</th><th>触发时机</th><th>核心操作</th><th>产出</th></tr>
+          <tr><td><strong>编译时</strong></td><td><code>Client::new()</code> 期间，一次性</td><td>模型下载 → 架构检测 → 图构建 → JIT 编译 → 权重打包</td><td><code>MegaKernelCompileOutput</code> + <code>weight_blob</code></td></tr>
+          <tr><td><strong>推理时</strong></td><td>每次 API 调用</td><td>tokenizer encode → buffer 分配 → 一次 CALL → tokenizer decode</td><td>用户响应（text/embeddings/score）</td></tr>
+        </table>
+
+        <h4>§0.3 BUILD vs COMPILE 边界声明</h4>
+        <p>编译时内部存在两个正交阶段，由 <code>build_compiler_graph()</code> 返回值作为分界线：</p>
+        <table>
+          <tr><th>维度</th><th>BUILD 阶段</th><th>COMPILE 阶段</th></tr>
+          <tr><td><strong>分界线</strong></td><td colspan="2"><code>build_compiler_graph()</code> 返回 <code>CompilerGraph</code> 为界</td></tr>
+          <tr><td><strong>合法消费</strong></td><td><code>Family</code>/<code>OutputMode</code>/<code>BusinessConfig</code></td><td><code>CompileConfig</code>（仅 <code>max_seq_len</code>, <code>debug_jit</code>, <code>hetero</code>）</td></tr>
+          <tr><td><strong>驱动者</strong></td><td>gllm 层服务形态决策</td><td><code>GraphTopologyAnalysis</code> 从图拓扑推导一切</td></tr>
+          <tr><td><strong>编译器访问</strong></td><td>编译器零 BusinessConfig 访问</td><td>编译器只读 <code>CompilerGraph</code> + <code>CompileConfig</code></td></tr>
+        </table>
+      </section>
+
+      <!-- ================================================================================== -->
+      <!-- Part A: BUILD-TIME - 图构建阶段 -->
+      <!-- ================================================================================== -->
+      <section id="part-a-build-time" data-section="A">
+        <h2 id="part-a-build-time-h2">Part A [BUILD-TIME] - 图构建阶段</h2>
+        <p><strong>时态声明</strong>: 本 Part 所有约束、数据流、决策仅在 BUILD 阶段生效。BUILD 阶段 = 从模型加载到 <code>build_compiler_graph()</code> 返回 <code>CompilerGraph</code> 为止。任何涉及 <code>Family</code>、<code>OutputMode</code>、<code>BusinessConfig</code> 的描述仅在此阶段有效。</p>
+        <p><strong>关键产物</strong>: <code>CompilerGraph</code>（BUILD→COMPILE 边界标志）。编译器从此仅读图拓扑，零业务配置访问。</p>
+
+        <section id="s3" data-section="3">
+          <h3>§3 架构检测层</h3>
+
+          <h4>§3.1 detect_architecture()</h4>
+          <p>架构检测入口（loader_impl.inc.rs:363）：</p>
+          <ul>
+            <li><strong>输入</strong>：Loader 自身（持有 weight 文件和 config）</li>
+            <li><strong>输出</strong>：规范架构名称（<code>"llama"</code>, <code>"qwen3"</code>, <code>"xlmr"</code> 等）</li>
+            <li><strong>四级优先级</strong>：GGUF metadata → .gllm metadata → config.json → tensor name 模式</li>
+          </ul>
+
+          <h4>§3.2 ARCH_TABLE</h4>
+          <p>架构 token 别名查找表（registry.rs:12-49）：<code>const</code> 查找表，格式 <code>(token, canonical_name, family, moe_router)</code></p>
+          <p>ARCH_TABLE 将 GGUF/config.json 中的模型标识 token 映射为规范架构名称和 Family。这是从文件格式元数据到 gllm 内部架构标识的唯一转换通道。</p>
+
+          <h4>§3.3 analyze_architecture()</h4>
+          <p>从权重张量角色推导架构特征（types.inc.rs:136）：</p>
+          <pre><code class="language-rust">pub fn analyze_architecture(
+    role_index: &amp;HashMap&lt;(TensorRole, Option&lt;usize&gt;), String&gt;,
+    weight_shapes: &amp;HashMap&lt;String, Vec&lt;usize&gt;&gt;,
+    arch_name: Option&lt;&amp;str&gt;,
+) -&gt; ArchitectureFeatures</code></pre>
+
+          <p><code>ArchitectureFeatures</code> 关键字段推导方式：</p>
+          <table>
+            <tr><th>字段</th><th>推导方式</th></tr>
+            <tr><td><code>family: Family</code></td><td>OutputHead/FinalNorm present → Decoder；否则 → Encoder</td></tr>
+            <tr><td><code>num_layers</code></td><td><code>role_index</code> key 最大 <code>layer_idx + 1</code></td></tr>
+            <tr><td><code>has_rope</code></td><td><code>!is_post_norm &amp;&amp; AttentionKey present</code></td></tr>
+            <tr><td><code>is_moe</code></td><td>MoEGate role 存在</td></tr>
+            <tr><td><code>is_mla</code></td><td>MlaKvCompress/MlaKeyAbsorb role 存在</td></tr>
+            <tr><td><code>has_qk_norm</code></td><td><code>config.qk_norm</code> OR tensor absence（无 q_norm/k_norm weight 且无 head_rms_norm）</td></tr>
+            <tr><td><code>has_value_norm</code></td><td><code>config.value_norm</code> OR default false</td></tr>
+            <tr><td><code>has_embedding_scale</code></td><td><code>config.embedding_scale_factor &gt; 0</code></td></tr>
+            <tr><td><code>ffn_type</code></td><td>GeGLU when <code>config.hidden_act == GeluNew</code>（from <code>hidden_activation: "gelu_pytorch_tanh"</code>）</td></tr>
+            <tr><td><code>mla_use_unabsorbed</code></td><td><code>config.mla_use_unabsorbed</code>（default false）</td></tr>
+          </table>
+
+          <h4>§3.4 Family 枚举</h4>
+          <pre><code class="language-rust">pub enum Family {
+    Decoder,  // → generate-loop graph strategy
+    Encoder,  // → single-pass (MeanPool/Classify output)
+}</code></pre>
+          <p><strong>Family 仅驱动 BUILD 阶段策略选择</strong>（图构建器发哪些 ops），不影响 JIT 编译器代码路径。编译器从图拓扑推导一切（SPEC 39 §0.1），不读 Family。</p>
+        </section>
+
+        <section id="s4" data-section="4">
+          <h3>§4 图构建层</h3>
+
+          <h4>§4.1 build_compiler_graph()</h4>
+          <p>图构建入口（build_graph.inc.rs:39）：</p>
+          <pre><code class="language-rust">pub fn build_compiler_graph(
+    features: &amp;ArchitectureFeatures,
+    config: &amp;ResolvedConfig,
+    weight_shapes: &amp;HashMap&lt;String, Vec&lt;usize&gt;&gt;,
+    weight_dtypes: &amp;HashMap&lt;String, DType&gt;,
+    weight_quant_types: &amp;HashMap&lt;String, QuantType&gt;,
+    business_config: &amp;BusinessConfig,
+    max_seq_len: usize,
+) -&gt; Result&lt;CompilerGraph, GraphBuildError&gt;;</code></pre>
+
+          <h4>§4.2 关键数据转换</h4>
+          <p>图构建阶段从权重形状和配置推导图的几何信息：</p>
+          <ol>
+            <li>从 <code>weight_shapes["embed"]</code> 提取 <code>vocab_size × hidden_size</code></li>
+            <li>从 <code>weight_shapes["L0.q_proj"/"L0.qkv_proj"]</code> 推导 <code>q_dim</code>, <code>k_dim</code></li>
+            <li>从 <code>config</code> 读取 <code>num_heads</code>, <code>num_kv_heads</code>, <code>head_dim</code></li>
+            <li>根据 <code>features.family</code> 和 <code>business_config.output_modes</code> 发出不同尾部 ops</li>
+          </ol>
+
+          <h4>§4.3 OutputMode 裁剪</h4>
+          <p>OutputMode 决定图的尾部 ops（executor_compile.rs:483-497）：</p>
+          <table>
+            <tr><th>ModelKind</th><th>OutputMode</th><th>图尾部 ops</th></tr>
+            <tr><td>Embedding</td><td><code>EncodeToLayer { anchor_layer, pool_mode }</code></td><td>MeanPool + L2Norm</td></tr>
+            <tr><td>Reranker</td><td><code>ClassifyBinary { positive/negative_token_id }</code></td><td>CLS pooling + ClassifierDense</td></tr>
+            <tr><td>Classifier</td><td><code>ClassifyMultiway { label_token_ids }</code></td><td>ClassifierDense + ClassifierOutProj</td></tr>
+            <tr><td>Chat</td><td><code>Generate { max_new_tokens, eos_token_id }</code></td><td>Argmax 生成循环</td></tr>
+          </table>
+          <p><strong>OutputMode 只裁剪尾部 ops，不修改模型大类。</strong> 模型大类由 <code>ArchitectureFeatures.family</code> 决定。OutputMode 被放入 <code>BusinessConfig.output_modes</code>，图构建器根据此决定尾部 ops。裁剪后的 <code>CompilerGraph</code> 编码了所有编译信息，编译器零 OutputMode 访问。</p>
+        </section>
+
+        <section id="s5" data-section="5">
+          <h3>§5 BusinessConfig → CompileConfig 边界</h3>
+
+          <h4>§5.1 BusinessConfig（BUILD 阶段消费）</h4>
+          <pre><code class="language-rust">pub struct BusinessConfig {
+    pub output_modes: Vec&lt;OutputMode&gt;,          // 图构建时裁剪尾部 ops
+    pub semantic_gatekeeper: Option&lt;SgConfig&gt;,  // 图构建时添加 SgDetect/SgInject ops
+    pub debug_jit: bool,                        // 提升到 CompileConfig top-level
+    pub guardrail_enabled: bool,                // 图构建时添加 Guardrail ops
+    pub cot_step_config: Option&lt;CotStepConfig&gt;,  // 图构建时添加 CoT ops
+    // ... 其他 BUILD 阶段字段
+}</code></pre>
+
+          <h4>§5.2 CompileConfig（COMPILE 阶段消费）</h4>
+          <pre><code class="language-rust">pub struct CompileConfig {
+    pub max_seq_len: usize,    // buffer 分配上界
+    pub debug_jit: bool,       // INT3 插入 + source map 生成
+    pub hetero: Option&lt;HeteroLayerConfig&gt;,  // 异构层编译配置
+}</code></pre>
+
+          <h4>§5.3 边界声明</h4>
+          <table>
+            <tr><th>规则</th><th>说明</th></tr>
+            <tr><td>BusinessConfig 在 BUILD 阶段被 <code>build_compiler_graph()</code> 消费</td><td>图构建器读取 <code>output_modes</code>, <code>sg_config</code>, <code>guardrail_enabled</code>, <code>cot_step_config</code></td></tr>
+            <tr><td>CompileConfig 在 COMPILE 阶段被 <code>compile_mega_kernel_vm()</code> 消费</td><td>编译器只读 <code>max_seq_len</code>, <code>debug_jit</code>, <code>hetero</code></td></tr>
+            <tr><td><code>debug_jit</code> 是唯一跨边界的字段</td><td>从 BusinessConfig 提升到 CompileConfig top-level，因为 INT3 插入需要在编译管线中生效</td></tr>
+            <tr><td>编译器零 BusinessConfig 访问</td><td>SPEC 39 彻底分离，编译器不关心"为什么"要编译这个图</td></tr>
+          </table>
+        </section>
+
+        <section id="s13-2-1" data-section="13-2-1">
+          <h3>§13.2.1 结构差异（Family 驱动 BUILD 侧裁剪）</h3>
+          <p>图构建器（build_graph.inc.rs）<strong>不按 OutputMode 物理裁剪 ops</strong>。图始终构建完整的模型结构。裁剪通过两种机制实现：</p>
+          <p><strong>结构差异（Family 驱动）</strong>：Encoder（post-norm）和 Decoder（pre-norm）的图结构本身不同，这是 <code>ArchitectureFeatures.family</code> 驱动的，不是 OutputMode 驱动的：</p>
+          <table>
+            <tr><th>Family</th><th>图尾部 ops</th><th>条件</th></tr>
+            <tr><td>Encoder (post-norm)</td><td>MeanPool → (可选 classifier head: Dense → Tanh → OutProj)</td><td><code>features.is_post_norm = true</code></td></tr>
+            <tr><td>Decoder (pre-norm)</td><td>final_norm → lm_head → (LogitSoftcap) → (MTP) → Argmax → StoreToken → CheckStopCondition</td><td><code>features.is_post_norm = false</code></td></tr>
+          </table>
+          <p>这是 BUILD 阶段的结构决策。不同的 Family 产生根本不同的图拓扑，编译器后续从图拓扑推导控制流（见 Part B §13.2.2）。</p>
+        </section>
+      </section>
+
+      <!-- ================================================================================== -->
+      <!-- Part B: COMPILE-TIME - JIT 编译阶段 -->
+      <!-- ================================================================================== -->
+      <section id="part-b-compile-time" data-section="B">
+        <h2 id="part-b-compile-time-h2">Part B [COMPILE-TIME] - JIT 编译阶段</h2>
+        <p><strong>时态声明</strong>: 本 Part 所有约束、数据流、决策仅在 COMPILE 阶段生效。COMPILE 阶段 = 从 <code>compile_from_auto_graph()</code> 入口到 <code>ISA Lowering</code> 产出机器码为止。编译器只读 <code>CompilerGraph</code> + <code>CompileConfig</code>，零业务配置访问。</p>
+        <p><strong>关键驱动</strong>: <code>GraphTopologyAnalysis</code> 从图拓扑推导一切（loop_bound、output_sink、has_generate_loop）。不同图拓扑 → 不同 JIT 机器码。</p>
+
+        <section id="s6" data-section="6">
+          <h3>§6 JIT 编译层</h3>
+
+          <h4>§6.1 编译入口调用链</h4>
+          <pre><code>compile_from_auto_graph()                           [executor_core.inc.rs:39]
+  → GraphDerivedGeometry::from_graph(&amp;graph)        [graph_geometry.rs:58]
+  → CompileConfig { max_seq_len, debug_jit, hetero }[executor_core.inc.rs:65]
+  → InferenceCompiler::compile_mega_kernel_from_graph(graph, &amp;config, hetero_layout)  [mod.rs:433]</code></pre>
+
+          <h4>§6.2 GraphDerivedGeometry</h4>
+          <p><code>GraphDerivedGeometry::from_graph()</code>（graph_geometry.rs:58）：</p>
+          <ul>
+            <li><strong>输入</strong>：<code>&amp;CompilerGraph</code>（唯一数据源）</li>
+            <li><strong>输出</strong>：<code>hidden</code>, <code>num_layers</code>, <code>num_heads</code>, <code>num_kv_heads</code>, <code>head_dim</code>, <code>vocab_size</code>, <code>intermediate</code>, <code>dtype</code></li>
+            <li><strong>推导规则</strong>：所有几何信息从图的 tensor shapes 和 ops 推导，不接受外部参数覆盖</li>
+          </ul>
+
+          <h4>§6.3 GraphTopologyAnalysis</h4>
+          <p><code>GraphTopologyAnalysis::analyze()</code>（topology.rs:79）：</p>
+          <ul>
+            <li><strong>输入</strong>：<code>&amp;CompilerGraph</code></li>
+            <li><strong>输出</strong>：<code>outer_loop_bound</code>, <code>seq_len_source</code>, <code>vocab_size</code>, <code>logits_producer_op_idx</code>, <code>logits_output_tid</code>, <code>mtp_config</code>, <code>layer_num_layers</code>, <code>layer_activation_alias</code></li>
+            <li><strong>推导规则</strong>：所有拓扑信息从图的 OpKind 存在性/参数推导</li>
+          </ul>
+          <p><code>GraphTopologyAnalysis</code> 是编译器行为决策的唯一真源，替代了已删除的 <code>is_encoder</code>/<code>needs_kv_for_decode</code> bool 参数。</p>
+
+          <h4>§6.4 编译管线 15 阶段</h4>
+          <table>
+            <tr><th>#</th><th>阶段</th><th>函数</th><th>输出</th></tr>
+            <tr><td>1</td><td>几何推导</td><td><code>GraphDerivedGeometry::from_graph()</code></td><td>GraphDerivedGeometry</td></tr>
+            <tr><td>2</td><td>缓冲布局</td><td><code>BufferLayout::from_graph_geometry()</code></td><td>BufferLayout</td></tr>
+            <tr><td>3</td><td>瓶颈分析</td><td><code>PainPointAnalyzer::analyze()</code></td><td>OpBottleneckMap</td></tr>
+            <tr><td>4</td><td>执行计划</td><td><code>ExecutionPlan::from_profile_with_bottlenecks()</code></td><td>ExecutionPlan</td></tr>
+            <tr><td>5</td><td>标量注册</td><td><code>ScalarOpRegistry::with_defaults()</code></td><td>ScalarOpRegistry</td></tr>
+            <tr><td>6</td><td>语义 DAG</td><td><code>SemanticDAG::from_graph()</code></td><td>SemanticDAG</td></tr>
+            <tr><td>7</td><td>融合决策</td><td><code>fuse_with_dag_prebuilt()</code></td><td>FusionPlan</td></tr>
+            <tr><td>8</td><td>HW 约束</td><td><code>enforce_constraints()</code></td><td>()</td></tr>
+            <tr><td>9</td><td>布局协商</td><td><code>LayoutNegotiator::negotiate()</code></td><td>LayoutAssignment</td></tr>
+            <tr><td>10</td><td>虚拟张量</td><td><code>DataFlowOptimizer::eliminate()</code></td><td>VirtualTensorMap</td></tr>
+            <tr><td>11</td><td>生命周期</td><td><code>analyze_lifetimes()</code></td><td>TensorLifetimes</td></tr>
+            <tr><td>12</td><td>缓冲分配</td><td><code>allocate_buffers_aligned()</code></td><td>BufferAllocation</td></tr>
+            <tr><td>13</td><td>资源规划</td><td><code>plan_mega_kernel_resources()</code></td><td>GraphResourcePlan</td></tr>
+            <tr><td>14</td><td>拓扑分析</td><td><code>GraphTopologyAnalysis::analyze()</code></td><td>GraphTopologyAnalysis</td></tr>
+            <tr><td>15</td><td>代码生成</td><td><code>compile_mega_kernel_vm()</code></td><td>(VmProgram, RopeCache, scratch_bytes)</td></tr>
+          </table>
+
+          <h4>§6.5 compile_mega_kernel_vm() emit 各阶段</h4>
+          <table>
+            <tr><th>阶段</th><th>关键 VmInstr</th><th>说明</th></tr>
+            <tr><td>ABI prologue</td><td><code>LoadPtr { AbiArg/StackArg }</code></td><td>加载 22 个 ABI 参数</td></tr>
+            <tr><td>ForwardPhaseDispatch</td><td><code>BranchIfPtrNonNull</code></td><td>batch_ctx 非空跳转</td></tr>
+            <tr><td>Outer loop setup</td><td><code>LoopBegin { bound }</code></td><td>DynamicTotalIters 或 Const(1)</td></tr>
+            <tr><td>层循环 + 融合组</td><td><code>emit_fusion_groups()</code></td><td>按 FusionPlan 逐组 emit</td></tr>
+            <tr><td>采样管线</td><td><code>TemperatureScale, Softmax, TopK, TopP, Sample</code></td><td>仅 Argmax 存在</td></tr>
+            <tr><td>StoreToken + CheckStop</td><td><code>StoreToken, CheckStopCondition</code></td><td>仅 Argmax 存在</td></tr>
+            <tr><td>LoopEnd + return</td><td><code>LoopEnd, BreakLoop</code></td><td>返回 token 数</td></tr>
+          </table>
+
+          <h4>§6.6 ISA Lowering 三后端分发</h4>
+          <p>ISA Lowering 在编译管线末端，将 VmProgram 分发到具体硬件后端（compile.inc.rs:167）：</p>
+          <table>
+            <tr><th>后端</th><th>Lowerer</th><th>输出格式</th></tr>
+            <tr><td>x86_64</td><td><code>X86Lower</code></td><td><code>Vec&lt;u8&gt;</code>（iced_x86 机器码）</td></tr>
+            <tr><td>AArch64</td><td><code>AArch64Lower</code></td><td><code>Vec&lt;u8&gt;</code>（手写编码）</td></tr>
+            <tr><td>GPU (CUDA/HIP/Metal)</td><td><code>GpuLower</code></td><td><code>String</code>（PTX/HIP/MSL 文本）</td></tr>
+          </table>
+        </section>
+
+        <section id="s14" data-section="14">
+          <h3>§14 图变换完整管线 (TraceOp Pipeline)</h3>
+          <p>&gt; <strong>SSOT</strong>: 图变换管线的完整定义见 <code>SPEC/01-JIT-PIPELINE</code>。本节描述端到端数据流中图变换的位置和关键转换点。</p>
+
+          <h4>§14.1 管线总览</h4>
+          <pre><code>Scalar Rust (extern "C" fn)
+    ↓  [注册]
+ScalarOpRegistry::with_defaults()
+    ↓  [SymExec trace 提取]
+SymbolicExecutor::extract_trace() → Vec&lt;TraceOp&gt;
+    ↓  [模式分类]
+classify_pattern(body) → ComputePattern
+    ↓  [语义 DAG]
+SemanticDAG::from_graph(graph, registry) → OpClass + AI + Bottleneck
+    ↓  [融合决策]
+fuse_with_dag_prebuilt() → FusionPlan
+    ↓  [自动指令选择]
+auto_lower_trace_raw() → VmInstr + VRegId
+    ↓  [ISA Lowering]
+X86Lower/AArch64Lower/GpuLower.lower_instr() → 机器码</code></pre>
+
+          <h4>§14.2 注册阶段</h4>
+          <p><code>ScalarOpRegistry::with_defaults()</code>（registry_fragments/defaults.inc.rs:1）注册 ~50 个算子。每个算子通过三级回退注册：</p>
+          <ol>
+            <li><code>auto_register_structured()</code>（auto.inc.rs:73）— CFG 多循环 SymExec</li>
+            <li><code>auto_register_from_symexec()</code>（auto.inc.rs:11）— 线性 SymExec trace</li>
+            <li>手动 <code>inject_trace()</code>（core.inc.rs:32）— 直接注入 OpTrace</li>
+          </ol>
+          <p>注册入口签名（core.inc.rs:17）：</p>
+          <pre><code class="language-rust">pub fn register(&amp;mut self, key: OpKindKey, sig: ScalarFnSignature)</code></pre>
+
+          <h4>§14.3 SymExec Trace 提取</h4>
+          <p><code>SymbolicExecutor</code>（symexec/engine.rs:34）对编译后的 scalar 函数执行符号执行：</p>
+          <pre><code class="language-rust">pub fn extract_trace(&amp;self) -&gt; Result&lt;Vec&lt;TraceOp&gt;, SymExecError&gt;  // engine.rs:871</code></pre>
+          <p>自动注册 SymExec 入口（auto.inc.rs:11）：</p>
+          <pre><code class="language-rust">pub fn auto_register_from_symexec(
+    &amp;mut self, key: OpKindKey, fn_sig: ScalarFnSignature, op_kind: OpKind,
+) -&gt; Result&lt;ComputePattern, RegistryError&gt;;</code></pre>
+          <p>内部流程：<code>analyze_scalar_fn()</code> → 反汇编为 iced-x86 → 逐指令符号执行 → <code>extract_trace()</code> → <code>classify_pattern()</code> → <code>OpTrace</code></p>
+
+          <h4>§14.4 TraceOp 与 ComputePattern</h4>
+          <p><code>TraceOp</code> 枚举定义（trace.rs:157），关键分类：</p>
+          <table>
+            <tr><th>类别</th><th>变体示例</th><th>说明</th></tr>
+            <tr><td>核心算术</td><td><code>Add/Sub/Mul/Div/Fma/Neg/Exp/Sqrt/Tanh/Sigmoid</code></td><td>SSA 逐元素</td></tr>
+            <tr><td>量化混合精度</td><td><code>QuantFma/BlockScale/Cast</code></td><td>混合精度融合</td></tr>
+            <tr><td>水平归约</td><td><code>HReduce { src, op: ReduceKind }</code></td><td>向量归约</td></tr>
+            <tr><td>结构型内存</td><td><code>ScalarLoad/StrideMul/VecLoadIndexed/GatherLoad/ScatterStore/TableLookup</code></td><td>索引计算、行复制</td></tr>
+            <tr><td>量化解码</td><td><code>Mxfp4Dequant/QuantCodebookLookup/QuantExtractBits</code> 等 20+ 变体</td><td>量化格式解码</td></tr>
+            <tr><td>结构型标记</td><td><code>QuantGather/QuantGemm</code></td><td>量化 GEMM 融合</td></tr>
+            <tr><td>SPEC 27 扩展</td><td><code>Loop/PanelLoad/SharedMemDeclare/TileMma/MlaAttnScore</code></td><td>模板驱动 codegen</td></tr>
+          </table>
+          <p><code>ComputePattern</code>（trace.rs:31）是 TraceOp 的语义分类：</p>
+          <pre><code class="language-rust">pub enum ComputePattern {
+    Elementwise { body },           // → OpClass::ElemWise
+    BinaryElementwise { body },     // → OpClass::ElemWise
+    Injective { body, num_inputs, num_outputs },  // → OpClass::Injective (RoPE 等)
+    Reduction { identity, combine, second_pass, normalize },  // → OpClass::Reduction
+    NormLike { reduce, finalize, transform },     // → OpClass::Reduction (RmsNorm/LayerNorm)
+    Gemm,                           // → OpClass::Gemm
+    QuantDecode { block_size, decode },  // → OpClass::Opaque
+}</code></pre>
+          <p><code>classify_pattern()</code>（trace.rs:98）从 TraceOp body 自动推导 ComputePattern。</p>
+
+          <h4>§14.5 语义 DAG</h4>
+          <p><code>SemanticDAG::from_graph(graph, registry)</code>（semantic_dag.rs:116）为每个 op：</p>
+          <ol>
+            <li>从注册表查找 <code>OpTrace</code></li>
+            <li>从 <code>ComputePattern</code> 推导 <code>OpClass</code>（semantic_dag.rs:178）</li>
+            <li>计算算术强度 + 瓶颈（Compute/Memory/Mixed）</li>
+          </ol>
+          <p><code>OpClass</code>（semantic_dag.rs:13）：<code>ElemWise | Injective | Reduction | Gemm | Opaque</code></p>
+
+          <h4>§14.6 自动指令选择</h4>
+          <p><code>auto_lower_trace_raw()</code>（auto_select.rs:178）是 TraceOp → VmInstr 的自动查表入口：</p>
+          <pre><code class="language-rust">pub fn auto_lower_trace_raw(
+    prog: &amp;mut VmProgram, body: &amp;[TraceOp], inputs: &amp;[VRegId],
+    width: SimdWidth, default_dtype: QuantPrecision,
+) -&gt; Result&lt;Vec&lt;VRegId&gt;, CompilerError&gt;;</code></pre>
+          <p>核心 dispatch：<code>dispatch_trace_op()</code>（auto_select.rs:362）为每个 TraceOp 变体分配 <code>VRegId</code> 并 <code>prog.emit(VmInstr::...)</code>。</p>
+          <p>变体族：</p>
+          <table>
+            <tr><th>函数</th><th>说明</th><th>文件:行号</th></tr>
+            <tr><td><code>auto_lower_trace_raw()</code></td><td>原始 VRegId 输出</td><td>auto_select.rs:178</td></tr>
+            <tr><td><code>auto_lower_trace_typed()</code></td><td>TypedSlot dtype 感知输出</td><td>auto_select.rs:41</td></tr>
+            <tr><td><code>auto_lower_trace()</code></td><td>便捷包装，写回 inputs[0]</td><td>auto_select.rs:288</td></tr>
+            <tr><td><code>auto_lower_trace_into()</code></td><td>直写到指定 dst VRegId</td><td>auto_select.rs:205</td></tr>
+            <tr><td><code>auto_lower_trace_multi()</code></td><td>多输出（Injective/RoPE）</td><td>auto_select.rs:322</td></tr>
+          </table>
+
+          <h4>§14.7 端到端数据流总结</h4>
+          <pre><code>LayerIR
+  → CompilerGraph::from_layer_ir()
+  → ScalarOpRegistry::with_defaults()
+       [per op: register_with_symexec_fallback()
+         → Level1: auto_register_structured() [CFG multi-loop]
+         → Level2: auto_register_from_symexec() [linear symexec]
+           → analyze_scalar_fn() → SymbolicExecutor
+           → extract_trace() → Vec&lt;TraceOp&gt;
+           → classify_pattern() → ComputePattern
+           → build OpTrace { op_kind, pattern, signature }
+         → Level3: manual trace injection]
+  → SemanticDAG::from_graph(graph, registry)
+       [per node: registry.get_trace() → derive_op_class() → OpClass]
+  → emit_elementwise / plan_lower / quant_pipeline
+       [per op: extract OpTrace.pattern.body → Vec&lt;TraceOp&gt;]
+  → auto_select::auto_lower_trace_raw/typed/into/multi()
+       [per TraceOp: dispatch_trace_op() → VmInstr + VRegId]
+  → VmProgram { instrs: Vec&lt;VmInstr&gt; }
+  → IsaLower (x86/aarch64/gpu) → machine code</code></pre>
+        </section>
+
+        <section id="s15" data-section="15">
+          <h3>§15 硬件改写图 (DeviceProfile-Driven)</h3>
+          <p>&gt; <strong>SSOT</strong>: 硬件感知编译的完整规范见 <code>SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL</code> §0.7-§0.8 和 <code>SPEC/16-DEVICE-FUSION</code>。本节描述 DeviceProfile 从探测到影响代码生成的完整数据流链路。</p>
+
+          <h4>§15.1 DeviceProfile 探测与全局缓存</h4>
+          <pre><code>DeviceProfile::detect()                              [device_profile.rs:152]
+    ↓ 一次性探测 MicroArch + HwInfo + NumaTopology + IsaLevel + 量化能力
+device_profile() (OnceLock global)                   [dispatch/mod.rs:15]
+    ↓ 进程生命周期内只探测一次
+InferenceCompiler { profile: DeviceProfile }          [compiler/mod.rs:172]</code></pre>
+
+          <h4>§15.2 DeviceProfile 在编译管线中的流向</h4>
+          <p><code>compile_mega_kernel_from_graph()</code>（mod.rs:433）中 <code>self.profile</code> 依次流入：</p>
+          <table>
+            <tr><th>#</th><th>消费方</th><th>DeviceProfile 影响</th><th>文件:行号</th></tr>
+            <tr><td>1</td><td><code>PainPointAnalyzer::analyze(&amp;graph, &amp;profile)</code></td><td>Roofline 分析：peak_gflops/peak_bandwidth → ComputeBound/MemoryBound</td><td>mod.rs:456</td></tr>
+            <tr><td>2</td><td><code>ExecutionPlan::from_profile_with_bottlenecks(&amp;profile, bottleneck_map)</code></td><td>HwOptEngine 统一求解：Fusion + Blocking + Thread + CacheBudget</td><td>planner.rs:504</td></tr>
+            <tr><td>3</td><td><code>enforce_constraints(&amp;mut groups, &amp;graph, &amp;exec_plan)</code></td><td>违反硬件约束的融合组拆分为 Standalone（寄存器压力/L1 容量/epilogue 限制）</td><td>hw_constraints.rs:372</td></tr>
+            <tr><td>4</td><td><code>LayoutNegotiator::negotiate(groups, registry, &amp;profile, ...)</code></td><td>为每个 op 查询最佳加速指令并确定偏好布局</td><td>layout_negotiator.rs:117</td></tr>
+            <tr><td>5</td><td><code>DataFlowOptimizer::eliminate(..., &amp;profile)</code></td><td>虚拟张量消除：中间值不物化</td><td>mod.rs:480</td></tr>
+            <tr><td>6</td><td><code>IsaProfile::from_device_profile(&amp;profile)</code></td><td>DeviceProfile → ISA 寄存器池/ABI/特性集/k_unroll/dot_cap</td><td>isa_profile.rs:383</td></tr>
+            <tr><td>7</td><td><code>compile_mega_kernel_vm(..., &amp;profile, ...)</code></td><td>IsaProfile 驱动 VmInstr emit 和 reg 分配</td><td>mod.rs:563</td></tr>
+            <tr><td>8</td><td>ISA Lowering: <code>X86Lower { use_avx512 }</code> / <code>GpuLower { dialect }</code></td><td>DeviceProfile → IsaProfile → has_avx512 / sm_version → 机器码指令选择</td><td>mod.rs:612-773</td></tr>
+          </table>
+
+          <h4>§15.3 hw_constraints 约束执行</h4>
+          <p><code>enforce_constraints()</code>（hw_constraints.rs:372）：</p>
+          <pre><code class="language-rust">pub fn enforce_constraints(
+    groups: &amp;mut Vec&lt;FusionGroup&gt;,
+    graph: &amp;CompilerGraph,
+    plan: &amp;ExecutionPlan,
+);</code></pre>
+          <p>工作方式：通过 <code>HwConstraintChecker::new(plan)</code> 逐组检查每个 <code>FusionGroup</code>。违反约束的组被拆分回每个 op 独立的 <code>FusionMode::Standalone</code>。约束类型：寄存器压力超限、L1 缓存容量不足、epilogue scratch 寄存器超限。</p>
+
+          <h4>§15.4 布局协商</h4>
+          <p><code>LayoutNegotiator::negotiate()</code>（layout_negotiator.rs:117）：</p>
+          <pre><code class="language-rust">pub fn negotiate(
+    groups: &amp;[FusionGroup], registry: &amp;AccelerationRegistry,
+    device: &amp;DeviceProfile, dag: &amp;SemanticDAG,
+    bottleneck_map: &amp;OpBottleneckMap, graph: &amp;CompilerGraph,
+) -&gt; LayoutAssignment;</code></pre>
+          <p><code>DeviceProfile</code> 直接作为参数传入，决定：哪些加速指令可用、SIMD 寄存器宽度约束、跨组布局转换代价。</p>
+
+          <h4>§15.5 DeviceProfile 派生链</h4>
+          <p>DeviceProfile 影响编译管线的三个关键派生路径：</p>
+          <table>
+            <tr><th>派生目标</th><th>函数</th><th>用途</th></tr>
+            <tr><td><code>IsaProfile</code></td><td><code>IsaProfile::from_device_profile(&amp;profile)</code>（isa_profile.rs:383）</td><td>ISA 寄存器池、ABI 约定、特性集、k_unroll_factor、dot_cap</td></tr>
+            <tr><td><code>HardwareProfile</code></td><td><code>HardwareProfile::detect(&amp;profile)</code>（hardware_profile.rs:40）</td><td>12 种硬件拓扑类型 → 融合偏好决策</td></tr>
+            <tr><td><code>JitContext</code></td><td><code>JitContext::from_device_profile()</code>（jit_context.rs:288）</td><td>资源生命周期追踪器</td></tr>
+          </table>
+
+          <h4>§15.6 dtype 感知编译</h4>
+          <p>dtype 从模型 TensorMeta 自动推断，编译时穿透所有 emit 函数，运行时零 dtype 分支。传播链：</p>
+          <pre><code>TensorMeta.dtype (DType)
+  → TypedSlot.dtype (QuantPrecision)
+    → infer_result_dtype(op, slots) [trace.rs:1215]
+      → VmInstr { ..., dtype } [auto_select.rs dispatch]
+        → dtype.x86_elem_strategy() [x86_lower.rs]
+          → Native(elem_bytes) / WidenCompute / Unsupported</code></pre>
+          <p>关键入口：<code>auto_lower_trace_typed()</code>（auto_select.rs:41）携带 <code>TypedSlot</code> dtype 信息。</p>
+
+          <h4>§15.7 ISA Lowering 三后端分发</h4>
+          <table>
+            <tr><th>后端</th><th>Lowerer</th><th>核心方法</th><th>DeviceProfile 影响</th></tr>
+            <tr><td>x86_64</td><td><code>X86Lower { use_avx512, asm }</code></td><td><code>lower_instr(instr, alloc)</code>（x86_lower.rs:73）</td><td>use_avx512 从 IsaProfile.platform 提取</td></tr>
+            <tr><td>AArch64</td><td><code>AArch64Lower { platform, code }</code></td><td><code>lower_instr(instr, alloc)</code>（aarch64_lower.rs:29）</td><td>platform: NEON/SVE/SME 特性集</td></tr>
+            <tr><td>GPU</td><td><code>GpuLower { dialect, ir }</code></td><td><code>lower_instr(instr, alloc)</code>（gpu_lower.rs:42）</td><td><code>GpuDialect::Ptx { sm_version }</code> / <code>Hip { gfx_arch }</code> / <code>Metal { gpu_family }</code></td></tr>
+          </table>
+          <p>所有三个后端共享相同的 <code>lower_instr(instr, alloc)</code> 接口，由 <code>VmInstr</code> + <code>RegAllocation</code> 驱动。</p>
+        </section>
+
+        <section id="s17" data-section="17">
+          <h3>§17 融合引擎引用</h3>
+          <p>&gt; <strong>SSOT</strong>: 融合引擎的完整定义见 <code>SPEC/01-JIT-PIPELINE</code> §4.1-§4.11。本节提供端到端数据流视角的概要。</p>
+
+          <h4>§17.1 融合决策入口</h4>
+          <pre><code class="language-rust">pub fn fuse(graph: &amp;CompilerGraph, profile: &amp;DeviceProfile) -&gt; FusionPlan;  // 01-JIT-PIPELINE §4.1</code></pre>
+          <p>融合决策由 <code>HwOptEngine</code> 统一求解的 <code>HwOptPlan.fusion</code> 驱动，不直接读取 <code>DeviceProfile</code> 做策略决策。</p>
+
+          <h4>§17.2 九种融合模式</h4>
+          <table>
+            <tr><th>模式</th><th>说明</th><th>SPEC 章节</th></tr>
+            <tr><td>Standalone</td><td>不融合，独立执行</td><td>§4.3</td></tr>
+            <tr><td>LoopFusion</td><td>多个 elemwise 合并为单循环</td><td>§4.5</td></tr>
+            <tr><td>EpilogueInjection</td><td>GEMM 累加器原地执行 epilogue</td><td>§4.4</td></tr>
+            <tr><td>TileLevelFusion</td><td>前驱嵌入 GEMM MC 循环（输出 &gt; 75% L1）</td><td>§4.6</td></tr>
+            <tr><td>ComputeRoot</td><td>前驱完整计算后驻留 L1（输出 ≤ 75% L1）</td><td>§4.6</td></tr>
+            <tr><td>QkvSharedInput</td><td>Q/K/V GEMM 共享 pack_a</td><td>§4.7</td></tr>
+            <tr><td>NormIntoGemm</td><td>Norm 输出直接喂入 GEMM</td><td>§4.8</td></tr>
+            <tr><td>FFNBlock</td><td>gate/up/down 三个 GEMM 融合</td><td>§4.9</td></tr>
+            <tr><td>CrossLayerResidual</td><td>跨层残差连接融合</td><td>§4.10</td></tr>
+          </table>
+
+          <h4>§17.3 融合组划分规则</h4>
+          <p>基于 TVM 融合规则，在后支配树上从叶子向根遍历（01-JIT-PIPELINE §4.2）：</p>
+          <ul>
+            <li>生产者有多个消费者 → 不融合</li>
+            <li>融合后寄存器压力 &gt; <code>profile.num_simd_regs()</code> → 拒绝</li>
+            <li>Epilogue scratch 寄存器 &gt; 微内核剩余 → 拒绝 epilogue injection</li>
+          </ul>
+        </section>
+
+        <section id="s18" data-section="18">
+          <h3>§18 优化 Pass 引用</h3>
+          <p>&gt; <strong>SSOT</strong>: 编译管线优化 pass 的完整定义见 <code>SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL</code> §0.7（管线不变量）和 §0.8（dtype 感知编译）。本节提供端到端数据流视角的概要。</p>
+
+          <h4>§18.1 七轮虚拟化求解</h4>
+          <p>编译管线 Phase 2 包含 7 轮虚拟化求解（GRAPH-SHAPE-DRIVEN-MEGA-KERNEL §0.7），每轮输入/输出形成增强线性链：</p>
+          <table>
+            <tr><th>轮次</th><th>虚拟化维度</th><th>输出</th><th>说明</th></tr>
+            <tr><td>R0</td><td>瓶颈虚拟化</td><td>OpBottleneckMap</td><td>编译时推导 ComputeBound/MemoryBound</td></tr>
+            <tr><td>R1</td><td>分组虚拟化</td><td>FusionPlan</td><td>虚拟融合组，中间值不物化</td></tr>
+            <tr><td>R1.5</td><td>布局虚拟化</td><td>LayoutAssignment</td><td>流水线级联协商</td></tr>
+            <tr><td>R2</td><td>数据流虚拟化</td><td>VirtualTensorMap</td><td>哪些 tensor 是虚拟的</td></tr>
+            <tr><td>R3</td><td>空间虚拟化</td><td>GlobalBufferLayout</td><td>scratch offset 规划</td></tr>
+            <tr><td>R4</td><td>寄存器虚拟化</td><td>RegAllocResult</td><td>VReg → PhysReg 映射</td></tr>
+            <tr><td>R5</td><td>时序虚拟化</td><td>StackFrame</td><td>最终栈帧布局</td></tr>
+          </table>
+          <p><strong>管线不变量</strong>：Phase 0-2 的输出全部是虚拟资源，Phase 3 ISA Lowering 是唯一物化点。任何 Phase 0-2 的输出如果包含物理机器码字节，则违反管线不变量。</p>
+
+          <h4>§18.2 gllm 侧图优化 Pass</h4>
+          <p>gllm 侧 <code>src/graph/optimizer/</code> 中的优化 pass 在 <code>CompilerGraph</code> 进入 gllm-kernels 编译管线之前执行：</p>
+          <table>
+            <tr><th>Pass</th><th>说明</th><th>文件</th></tr>
+            <tr><td>PatternFusion</td><td>6 种模式识别（FlashAttn/SwiGLU/FusedQkvRope/FusedQkvNormRope/MoERouting/FusedRMSLinear）</td><td>pattern_fusion.rs</td></tr>
+            <tr><td>HardwareFusionPass</td><td>硬件不支持时降级到 Atomic（SPEC 授权 fallback A4）</td><td>hardware_fusion.rs</td></tr>
+            <tr><td>ConstantFolding</td><td>常量折叠</td><td>constant_folding.rs</td></tr>
+            <tr><td>DeadCodeElimination</td><td>移除未使用节点</td><td>dead_code.rs</td></tr>
+          </table>
+
+          <h4>§18.3 dtype 感知编译</h4>
+          <p>dtype 感知编译的完整规范见 <code>GRAPH-SHAPE-DRIVEN-MEGA-KERNEL</code> §0.8（REQ-DTYPE-001~008）：</p>
+          <ul>
+            <li>LoweringContext.dtype 穿透所有 emit 函数</li>
+            <li>融合组 dtype 连续性保证</li>
+            <li>布局协商 dtype 感知</li>
+            <li>GEMM 累加策略按 dtype 选择</li>
+            <li>Epilogue 窄化写回</li>
+            <li>代数重关联消除不必要 dtype 变换</li>
+          </ul>
+        </section>
+
+        <section id="s13-2-2" data-section="13-2-2">
+          <h3>§13.2.2 拓扑推导（编译器驱动控制流）</h3>
+          <p><code>GraphTopologyAnalysis::analyze()</code>（topology.rs:77）从图 OpKind 存在性推导控制流：</p>
+          <pre><code>let has_argmax = graph.ops.iter().any(|op| matches!(op.kind, OpKind::Argmax { .. }));
+let has_store_token = graph.ops.iter().any(|op| matches!(op.kind, OpKind::StoreToken));
+let has_check_stop = graph.ops.iter().any(|op| matches!(op.kind, OpKind::CheckStopCondition));
+let has_kv_cache_write = graph.ops.iter().any(|op| matches!(op.kind, OpKind::KvCacheWrite { .. }));
+
+let outer_loop_bound = if has_argmax &amp;&amp; has_store_token &amp;&amp; has_check_stop {
+    TopologyBound::DynamicTotalIters
+} else {
+    TopologyBound::Const(1)
+};</code></pre>
+          <p>编译器根据 Argmax 存在性推导循环 bound 和采样管线；KvCacheWrite 存在性决定 kv_cache_ptr/page_table_ptr 加载。所有编译决策由 OpKind 存在性局部推导，不经中间 bool 字段传播。不同图拓扑 → 不同 JIT 机器码，编译器零 OutputMode 访问。</p>
+        </section>
+      </section>
+
+      <!-- ================================================================================== -->
+      <!-- Part C: RUNTIME - 运行时执行阶段 -->
+      <!-- ================================================================================== -->
+      <section id="part-c-runtime" data-section="C">
+        <h2 id="part-c-runtime-h2">Part C [RUNTIME] - 运行时执行阶段</h2>
+        <p><strong>时态声明</strong>: 本 Part 所有约束、数据流、决策仅在 RUNTIME 阶段生效。RUNTIME 阶段 = 从用户 API 调用到结果返回。运行时只做 buffer 分配和 CALL，零计算编排、零 JIT 编译行为。</p>
+        <p><strong>关键不变式</strong>: 推理热路径零编译、零数据结构（HashMap/String/Vec）、零 Rust 循环编排。所有计算在 JIT 机器码内部完成。</p>
+
+        <section id="s1" data-section="1">
+          <h3>§1 用户 API 层</h3>
+
+          <h4>§1.1 四个 API 入口</h4>
+          <table>
+            <tr><th>API</th><th>函数</th><th>源文件</th><th>输出类型</th></tr>
+            <tr><td>generate</td><td><code>Client::generate(prompt)</code></td><td>client_impl.inc.rs:319</td><td>GenerationBuilder → execute_generation()</td></tr>
+            <tr><td>embed</td><td><code>Client::embed(inputs)</code></td><td>client_impl.inc.rs:324</td><td>EmbeddingsResponse</td></tr>
+            <tr><td>rerank</td><td><code>Client::rerank(query, docs)</code></td><td>client_impl.inc.rs:372</td><td>RerankResponse</td></tr>
+            <tr><td>classify</td><td><code>Client::classify(inputs)</code></td><td>client_impl.inc.rs:405</td><td>ClassifyResponse</td></tr>
+          </table>
+
+          <h4>§1.2 Client 结构</h4>
+          <p><code>Client</code> 是用户持有的顶层推理客户端（client_impl.inc.rs:118）：</p>
+          <pre><code class="language-rust">pub struct Client {
+    state: Arc&lt;ArcSwapOption&lt;ClientState&gt;&gt;,
+    multimodal_encoder: Arc&lt;Mutex&lt;Option&lt;Arc&lt;dyn MultimodalEncoder&gt;&gt;&gt;&gt;,
+    guardrails: Arc&lt;Mutex&lt;HashMap&lt;u64, GuardrailRegistration&gt;&gt;&gt;,
+    sg_callback: Arc&lt;Mutex&lt;Option&lt;Arc&lt;Mutex&lt;SemanticGatekeeperCallback&gt;&gt;&gt;&gt;&gt;,
+}</code></pre>
+          <p><code>ClientState</code> 是编译时一次性构建的推理状态（error_config.inc.rs:127）：</p>
+          <pre><code class="language-rust">pub struct ClientState {
+    pub model_id: String,
+    pub manifest: Arc&lt;ModelManifest&gt;,
+    pub backend: Arc&lt;BackendContext&gt;,
+    pub inference_mode: InferenceMode,
+    pub reranker_state: Option&lt;PipelineModelState&gt;,
+    pub generator_state: Option&lt;PipelineModelState&gt;,
+    pub execution_plan: Arc&lt;ExecutionPlan&gt;,
+}</code></pre>
+
+          <h4>§1.3 推理 API 共享模式</h4>
+          <p>所有四个 API 共享相同的调用模式：</p>
+          <ol>
+            <li><code>self.require_state()</code> → <code>Arc&lt;ClientState&gt;</code>（ArcSwapOption 无锁读取，零竞争）</li>
+            <li><code>with_execution_plan(plan, || { ... })</code> 推入线程本地存储</li>
+            <li><code>state.backend.executor_mut()</code> → 调用具体执行器方法</li>
+          </ol>
+          <p>数据流关键路径：API 函数 → <code>require_state()</code> → <code>executor_mut()</code> → 具体执行方法（<code>generate_with_sampling()</code> / <code>execute_encode()</code> / <code>execute_rerank()</code>）</p>
+        </section>
+
+        <section id="s2" data-section="2">
+          <h3>§2 模型加载层</h3>
+
+          <h4>§2.1 ClientBuilder</h4>
+          <p><code>ClientBuilder</code> 是模型加载的入口（builder.inc.rs:22）：</p>
+          <pre><code class="language-rust">pub struct ClientBuilder {
+    model_id: Option&lt;String&gt;,
+    kind: Option&lt;ModelKind&gt;,
+    backend: Option&lt;BackendType&gt;,
+    inference_mode: InferenceMode,
+    compute_dtype: Option&lt;DType&gt;,
+    reranker_model_id: Option&lt;String&gt;,
+    generator_model_id: Option&lt;String&gt;,
+    gguf_file_filter: Option&lt;String&gt;,
+    debug_jit: bool,
+    weight_paging_enabled: bool,
+}</code></pre>
+
+          <h4>§2.2 核心加载函数</h4>
+          <p><code>ClientBuilder::build_state()</code> 是编译时入口（builder.inc.rs:254）：</p>
+          <pre><code class="language-rust">pub(crate) fn build_state(
+    model_id: &amp;str, kind: ModelKind, inference_mode: InferenceMode,
+    compute_dtype: Option&lt;DType&gt;, gguf_file_filter: Option&lt;&amp;str&gt;,
+    weight_paging_enabled: bool,
+) -&gt; Result&lt;ClientState, ClientError&gt;;</code></pre>
+
+          <h4>§2.3 下载流程</h4>
+          <p>下载管线（loader_impl.inc.rs:71-152）：</p>
+          <ol>
+            <li>检查 <code>model_id</code> 是否为本地路径（文件存在性检查）</li>
+            <li>远程下载：HuggingFace → ModelScope fallback（REQ-LOADER-016 授权的唯一 fallback）</li>
+            <li>格式检测：safetensors / GGUF / .gllm / ONNX（format_detector.rs:14）</li>
+            <li>优先级：<code>Gllm &gt; SafeTensors &gt; Gguf &gt; Onnx &gt; PyTorch</code></li>
+          </ol>
+          <p>格式检测后根据格式选择对应的 parser：</p>
+          <table>
+            <tr><th>格式</th><th>Parser</th><th>关键特性</th></tr>
+            <tr><td>safetensors</td><td><code>safetensors.rs</code></td><td>零拷贝 mmap</td></tr>
+            <tr><td>GGUF</td><td><code>gguf/reader.rs</code></td><td>零拷贝 slice + 量化元数据</td></tr>
+            <tr><td>.gllm</td><td><code>gguf/reader.rs</code>（兼容路径）</td><td>量化原生存储 + 自描述 Header</td></tr>
+            <tr><td>ONNX</td><td><code>onnx/model.rs</code></td><td>prost protobuf 解析 + Graph Pattern Matching</td></tr>
+            <tr><td>PyTorch</td><td><code>pytorch.rs</code></td><td>pickle 反序列化</td></tr>
+          </table>
+        </section>
+
+        <section id="s7" data-section="7">
+          <h3>§7 编译产出（运行时 ABI 调用）</h3>
+
+          <h4>§7.1 MegaKernelFn ABI 22 参数签名</h4>
+          <p>JIT 编译产物的入口函数签名（mega_kernel_abi.rs:159）：</p>
+          <pre><code class="language-rust">pub type MegaKernelFn = unsafe extern "C" fn(
+    *const u32,   // arg 0:  input_ids_ptr         → rdi
+    *const u8,    // arg 1:  weight_blob_ptr        → rsi
+    *mut u8,      // arg 2:  kv_cache_ptr           → rdx
+    *const u32,   // arg 3:  positions_ptr          → rcx
+    *const u8,    // arg 4:  aux_ptr                → r8
+    usize,        // arg 5:  batch_size             → r9
+    usize,        // arg 6:  prompt_len             → [rbp+16]
+    *mut u8,      // arg 7:  scratchpad_ptr         → [rbp+24]
+    *mut u32,     // arg 8:  output_tokens_ptr      → [rbp+32]
+    usize,        // arg 9:  temperature_u32        → [rbp+40]
+    usize,        // arg 10: top_k                  → [rbp+48]
+    usize,        // arg 11: top_p_u32              → [rbp+56]
+    usize,        // arg 12: max_new_tokens         → [rbp+64]
+    usize,        // arg 13: eos_token_id           → [rbp+72]
+    *const u8,    // arg 14: hook_ctx_ptr           → [rbp+80]
+    *mut u8,      // arg 15: telemetry_ptr          → [rbp+88]
+    usize,        // arg 16: session_position       → [rbp+96]
+    *const u8,    // arg 17: fused_hidden_ptr       → [rbp+104]
+    usize,        // arg 18: num_mm_tokens          → [rbp+112]
+    *const u8,    // arg 19: callback_table_ptr     → [rbp+120]
+    *const u32,   // arg 20: page_table_ptr         → [rbp+128]
+    *const u8,    // arg 21: batch_ctx_ptr          → [rbp+136]
+) -&gt; usize;      // → rax: generated token count | 0</code></pre>
+
+          <h4>§7.2 MegaKernelCompileOutput</h4>
+          <pre><code class="language-rust">pub struct MegaKernelCompileOutput {
+    pub layer_code: CompiledLayer,
+    pub weight_layout: KernelWeightLayout,
+    pub buffer_layout: BufferLayout,
+    pub num_layers: usize,
+    pub vocab_size: usize,
+    pub hidden: usize,
+    pub rope_cache: Option&lt;RopeCacheRequirement&gt;,
+    pub total_scratchpad_bytes: usize,
+    pub logits_scratch_offset: usize,
+    pub hetero_layout: Option&lt;HeteroKernelWeightLayout&gt;,
+    pub source_map: Option&lt;JitSourceMap&gt;,
+}</code></pre>
+          <p><strong>注意</strong>：<code>num_layers</code>/<code>vocab_size</code>/<code>hidden</code> 是编译器的推导结果（图拓扑推导属性，参见 SPEC 39 §0.1.2.A），不是调用方通过 CompileConfig 传入的。</p>
+
+          <h4>§7.3 KernelWeightLayout</h4>
+          <p>权重打包布局（mega_kernel_abi.rs:302）：</p>
+          <ul>
+            <li><strong>打包顺序</strong>：<code>embed → layer_0 → ... → layer_N → final_norm → logits_producer</code></li>
+            <li><strong>每层包含</strong>：<code>attn_norm, q_proj, k_proj, v_proj, o_proj, ffn_norm, gate_proj, up_proj, down_proj</code></li>
+          </ul>
+
+          <h4>§7.4 权重打包</h4>
+          <p>权重打包流程（pack_observe.inc.rs:10）：</p>
+          <ul>
+            <li><strong>raw_floats 路径</strong>：BF16/F16 → F32 转换，Gemma RMSNorm residual 预偏移 <code>gamma = 1.0 + weight</code></li>
+            <li><strong>weight_ptrs 路径</strong>：已量化权重直接 memcpy，JIT 内 QuantGather 运行时反量化</li>
+          </ul>
+        </section>
+
+        <section id="s8" data-section="8">
+          <h3>§8 推理执行层</h3>
+
+          <h4>§8.1 generate_single_sequence()</h4>
+          <p>推理执行入口（executor_core.inc.rs:533）：</p>
+          <pre><code class="language-rust">pub fn generate_single_sequence(
+    &amp;self, prompt_tokens: &amp;[u32], max_new_tokens: usize,
+    temperature: f32, top_k: usize, top_p: f32,
+    hook_ctx_ptr: *const u8, callback_table_ptr: *const u8,
+    page_table: Option&lt;&amp;[u32]&gt;, pool_base: *const u8,
+    session_position: usize, fused_hidden: Option&lt;&amp;[f32]&gt;,
+    num_mm_tokens: usize,
+) -&gt; Result&lt;Vec&lt;u32&gt;, MegaKernelError&gt;;</code></pre>
+
+          <h4>§8.2 执行步骤</h4>
+          <ol>
+            <li>分配 <code>input_ids: Vec&lt;u32&gt;</code>（max_total）</li>
+            <li>分配 <code>output_tokens: Vec&lt;u32&gt;</code>（max_new_tokens × (1 + mtp_depth)）</li>
+            <li>分配 <code>scratchpad: Vec&lt;u8&gt;</code>（runtime_scratchpad_bytes）</li>
+            <li>预填 RoPE cos/sin 到 scratchpad</li>
+            <li>分配 <code>kv_cache: Vec&lt;u8&gt;</code>（num_layers × 2 × max_seq_len × num_kv_heads × head_dim × elem_bytes）</li>
+            <li>一次 CALL：<code>entry_fn(input_ids, weight_blob, kv, positions, aux, batch_size, prompt_len, scratchpad, output_tokens, temperature, top_k, top_p, max_new_tokens, eos_token_id, hook_ctx, telemetry, session_position, fused_hidden, num_mm_tokens, callback_table, page_table, batch_ctx)</code></li>
+            <li>返回 <code>result (usize)</code> = 生成的 token 数</li>
+          </ol>
+
+          <h4>§8.3 运行时 buffer 布局</h4>
+          <table>
+            <tr><th>Buffer</th><th>类型</th><th>大小</th></tr>
+            <tr><td>input_ids</td><td><code>Vec&lt;u32&gt;</code></td><td>max_total × 4</td></tr>
+            <tr><td>output_tokens</td><td><code>Vec&lt;u32&gt;</code></td><td>max_new_tokens × (1+mtp_depth) × 4</td></tr>
+            <tr><td>scratchpad</td><td><code>Vec&lt;u8&gt;</code></td><td>runtime_scratchpad_bytes(max_total)</td></tr>
+            <tr><td>kv_cache</td><td><code>Vec&lt;u8&gt;</code></td><td>num_layers × 2 × max_seq × num_kv_heads × head_dim × elem_bytes</td></tr>
+            <tr><td>weight_blob</td><td><code>Vec&lt;u8&gt;</code></td><td>编译时确定</td></tr>
+          </table>
+
+          <h4>§8.4 Scratchpad 内部布局</h4>
+          <ul>
+            <li><code>[0, logits_scratch_offset)</code>: 中间 tensor（activation ping/pong, RoPE cache）</li>
+            <li><code>[logits_scratch_offset, +)</code>: logits + 采样工作区 + MTP logits + SG 数据</li>
+          </ul>
+        </section>
+
+        <section id="s9" data-section="9">
+          <h3>§9 结果返回层</h3>
+
+          <h4>§9.1 Token ID → Text 解码</h4>
+          <ul>
+            <li><strong>函数</strong>：<code>Executor::decode_tokens()</code>（executor.rs:447）</li>
+            <li><strong>实现</strong>：<code>tokenizer.decode(tokens, true)</code> — BPE 解码器，skip_special_tokens</li>
+          </ul>
+
+          <h4>§9.2 返回传递链</h4>
+          <pre><code>MegaKernelExecutor::generate_single_sequence() → Result&lt;Vec&lt;u32&gt;&gt;
+  → Executor::generate_with_sampling() → ExecutorResult&lt;String&gt;
+    → Client::execute_generation() → Result&lt;GenerationResponse&gt;
+      → GenerationBuilder::generate() → GenerationOutput</code></pre>
+
+          <h4>§9.3 embed/rerank/classify 的结果路径</h4>
+          <table>
+            <tr><th>API</th><th>结果提取方式</th><th>输出</th></tr>
+            <tr><td>embed</td><td><code>execute_encode()</code>: 从 <code>scratchpad[logits_scratch_offset..]</code> 读取 <code>Vec&lt;f32&gt;</code></td><td>Vec&lt;f32&gt; (hidden_size 维)</td></tr>
+            <tr><td>rerank</td><td><code>execute_rerank()</code>: 从 logits 区域读取 yes/no token logit → softmax → score</td><td>Vec&lt;f32&gt; (1 维 score)</td></tr>
+            <tr><td>classify</td><td><code>execute_encode()</code>: 从 logits 区域读取类别分数</td><td>Vec&lt;f32&gt; (类别分数)</td></tr>
+          </table>
+          <p>embed/rerank/classify 不经过 tokenizer decode，直接返回 f32 向量。</p>
+
+          <h4>§9.4 流式模式</h4>
+          <p><code>GenerationStream</code> 逐 token 调用 <code>decode_tokens()</code> 解码增量文本。流式模式下，每次 token 生成后立即解码并返回增量字符串，无需等待全部 token 生成完毕。</p>
+        </section>
+
+        <section id="s10" data-section="10">
+          <h3>§10 四种 API 执行路径差异</h3>
+
+          <h4>§10.1 执行路径对比</h4>
+          <table>
+            <tr><th>API</th><th>Executor 方法</th><th>JIT 内部行为</th><th>输出格式</th></tr>
+            <tr><td>generate</td><td><code>generate_with_sampling()</code></td><td>embed → N layers → logits → Argmax → sampling → generate loop</td><td>Vec&lt;u32&gt; → decode → String</td></tr>
+            <tr><td>embed</td><td><code>execute_encode()</code></td><td>embed → N layers → MeanPool（无 Argmax）</td><td>Vec&lt;f32&gt; (hidden_size 维)</td></tr>
+            <tr><td>rerank</td><td><code>execute_rerank()</code></td><td>embed → N layers → logits → yes/no token softmax</td><td>Vec&lt;f32&gt; (1 维 score)</td></tr>
+            <tr><td>classify</td><td><code>execute_encode()</code></td><td>embed → N layers → classifier head（无 Argmax）</td><td>Vec&lt;f32&gt; (类别分数)</td></tr>
+          </table>
+
+          <h4>§10.2 关键差异点</h4>
+          <ul>
+            <li><strong>generate</strong>：图中含 Argmax + StoreToken + CheckStopCondition → 编译时 emit 采样管线 + 生成循环 → 运行时返回 token 序列 → tokenizer decode → String</li>
+            <li><strong>embed</strong>：图中含 MeanPool + L2Norm，无 Argmax → 编译时不 emit 采样管线 → 运行时单遍执行 → 从 scratchpad 读取 f32 向量</li>
+            <li><strong>rerank</strong>：图中含 ClassifyBinary → 编译时 emit CLS pooling + classifier → 运行时单遍执行 → 从 logits 区域读取 yes/no score</li>
+            <li><strong>classify</strong>：图中含 ClassifyMultiway → 编译时 emit classifier head → 运行时单遍执行 → 从 logits 区域读取类别分数</li>
+          </ul>
+          <p><strong>差异根源</strong>：OutputMode 裁剪导致不同的 CompilerGraph 拓扑，不同的图拓扑 → 不同的 JIT 机器码。编译器从图拓扑推导一切，不感知 API 类型。</p>
+
+          <h4>§10.3 Head Routing</h4>
+          <p>Head Routing（head_routing.rs）允许同一 Client 在运行时切换输出模式：</p>
+          <ul>
+            <li>零权重重载、零 JIT 重编译</li>
+            <li>实现方式：编译时构建多个 MegaKernel（每个 OutputMode 一个），运行时按请求类型选择调用哪个 MegaKernel</li>
+            <li>切换通过后处理实现：从 logits 区域读取不同位置的值</li>
+          </ul>
+        </section>
+
+        <section id="s11" data-section="11">
+          <h3>§11 Session KV Cache 复用</h3>
+
+          <h4>§11.1 session_position 参数传递</h4>
+          <p><code>session_position</code> 通过 ABI arg 16 传入 JIT 机器码，控制 KV cache 复用行为：</p>
+          <ul>
+            <li><code>session_position = 0</code>：全新请求，从 position 0 开始 prefill</li>
+            <li><code>session_position &gt; 0</code>：resume 模式，跳过已有 KV cache 的 prefill，从 <code>session_position</code> 继续</li>
+          </ul>
+
+          <h4>§11.2 Resume 模式数据流</h4>
+          <pre><code>client.generate("续写") with session_position = N
+  → input_ids = [续写 token ids]
+  → positions  = [N, N+1, ..., N+len-1]
+  → JIT 内部: 跳过前 N 个 position 的 KV 写入
+              从 position N 开始计算 attention
+              新 KV cache 追加到已有 cache 之后</code></pre>
+
+          <h4>§11.3 Position-agnostic RoPE</h4>
+          <p>对系统前缀页设置 <code>cos=1, sin=0</code>（REQ-KV-OPT-010），确保 prefix KV cache 与具体 position 无关，可在不同请求间安全复用。</p>
+        </section>
+
+        <section id="s12" data-section="12">
+          <h3>§12 断裂点补齐</h3>
+
+          <h4>§12.1 断裂点 1: API → 加载</h4>
+          <p>完整链路：</p>
+          <pre><code>Client::generate(prompt)
+  → self.require_state() → Arc&lt;ClientState&gt;;
+</code></pre>
+          <p><code>ClientState</code> 在 <code>Client::new()</code> 时一次性构建，推理时通过 <code>ArcSwapOption</code> 无锁读取。推理路径零模型加载逻辑。</p>
+
+          <h4>§12.2 断裂点 2: 加载 → OutputMode 裁剪</h4>
+          <p>OutputMode 在编译时（非推理时）决定图的尾部 ops：</p>
+          <pre><code>build_business_config()
+  → build_output_modes(manifest.kind, max_new_tokens, eos_id)
+     → Vec&lt;OutputMode&gt;  // Embedding→EncodeToLayer, Reranker→ClassifyBinary, Chat→Generate
+→ build_compiler_graph(features, config, ..., business_config, ...)
+  → 图构建器根据 output_modes 决定尾部 ops
+  → 产出不同裁剪的 CompilerGraph
+→ compile_from_auto_graph(graph, ...)
+  → 不同图 → 不同 JIT 机器码（编译时单态化）</code></pre>
+          <p><strong>关键</strong>：OutputMode 裁剪发生在编译时，运行时执行的是已经裁剪好的 JIT 机器码。不存在运行时的 OutputMode 分支判断。</p>
+
+          <h4>§12.3 断裂点 3: BusinessConfig → CompileConfig 边界</h4>
+          <pre><code>BusinessConfig { output_modes, sg_config, debug_jit, ... }
+  │
+  ├─ BUILD 阶段消费: build_compiler_graph() 读取 output_modes
+  │   → 决定尾部 ops（Argmax/MeanPool/ClassifyBinary 等）
+  │
+  └─ COMPILE 阶段消费: 仅 debug_jit 提升到 CompileConfig
+      CompileConfig { max_seq_len, debug_jit, hetero }
+      → compile_mega_kernel_vm() 零 BusinessConfig 访问</code></pre>
+          <p><strong>边界保证</strong>：编译管线内部（阶段 1-15）的任何函数签名中不出现 <code>BusinessConfig</code> 类型。编译器只接受 <code>CompilerGraph</code> + <code>CompileConfig</code>，所有业务语义已编码在图的拓扑中。</p>
+        </section>
+
+        <section id="s13-3" data-section="13-3">
+          <h3>§13.3 运行时输出模式切换</h3>
+          <p>对于 Decoder 图，Head Routing 允许运行时切换输出模式，零重编译：</p>
+          <table>
+            <tr><th>API</th><th>执行方式</th><th>输出提取</th></tr>
+            <tr><td>generate</td><td>完整生成循环（<code>max_new_tokens &gt; 1</code>）</td><td>output_tokens → tokenizer decode</td></tr>
+            <tr><td>embed</td><td><code>max_new_tokens=1</code>，单遍前向</td><td>从 scratchpad logits 区域读取 hidden 向量（executor_ops.inc.rs:184）</td></tr>
+            <tr><td>rerank</td><td><code>max_new_tokens=1</code>，单遍前向</td><td>从 logits 区域读取 yes/no token logits → softmax（executor_ops.inc.rs:278）</td></tr>
+            <tr><td>encode_to_layer</td><td>单遍前向，<code>anchor_layer</code> 参数触发提前退出</td><td>从 scratchpad 读取 anchor 层激活（executor_ops.inc.rs:478）</td></tr>
+          </table>
+        </section>
+
+        <section id="s16" data-section="16">
+          <h3>§16 穿透式多图 (Generator+Reranker 双模型)</h3>
+
+          <h4>§16.1 PipelineModelState 结构</h4>
+          <p><code>PipelineModelState</code>（error_config.inc.rs:148）表示一个独立的编译+推理状态：</p>
+          <pre><code class="language-rust">pub struct PipelineModelState {
+    pub model_id: String,
+    pub manifest: Arc&lt;ModelManifest&gt;,
+    pub backend: Arc&lt;BackendContext&gt;,     // 内含 Executor → MegaKernelExecutor
+    pub shared_encoder: bool,             // true = 与主模型共享同一 backend Arc
+    pub execution_plan: Arc&lt;ExecutionPlan&gt;,
+}</code></pre>
+          <p><code>ClientState</code>（error_config.inc.rs:127）可同时持有三个模型：</p>
+          <ul>
+            <li><code>backend: Arc&lt;BackendContext&gt;</code> — 主模型（embed/generate）</li>
+            <li><code>reranker_state: Option&lt;PipelineModelState&gt;</code> — 独立 reranker</li>
+            <li><code>generator_state: Option&lt;PipelineModelState&gt;</code> — 独立 generator</li>
+          </ul>
+
+          <h4>§16.2 双模型编译触发</h4>
+          <p><code>ClientBuilder::build()</code>（builder.inc.rs:162）中三阶段编译：</p>
+          <pre><code>ClientBuilder.build()
+  │
+  ├─ 1. build_state(primary_model) → ClientState
+  │     └─ BackendContext::new() → Executor::from_loader()
+  │           └─ compile_mega_kernel() → compile_from_auto_graph()
+  │                 BusinessConfig { output_modes: [按 ModelKind 决定] }
+  │                 → MegaKernelCompiled (存储在 Executor.compute.mega_kernel)
+  │
+  ├─ 2. if reranker_model_id:
+  │     build_pipeline_model_with_sharing(reranker_id)
+  │       ├─ 同架构 + 同模型 ID? → PipelineModelState { shared_encoder: true, backend: Arc::clone(primary) }
+  │       └─ 否则 → build_pipeline_model(reranker_id)
+  │             └─ build_state(reranker_id, ModelKind::Reranker)
+  │                   BusinessConfig { output_modes: [ClassifyBinary] }
+  │                   → 独立编译 MegaKernelExecutor
+  │
+  └─ 3. if generator_model_id:
+        build_pipeline_model(generator_id)
+          └─ build_state(generator_id, ModelKind::Chat)
+                BusinessConfig { output_modes: [Generate] }
+                → 独立编译 MegaKernelExecutor</code></pre>
+
+          <h4>§16.3 共享编码器优化</h4>
+          <p><code>build_pipeline_model_with_sharing()</code>（builder.inc.rs:422）：</p>
+          <ul>
+            <li><strong>共享条件</strong>：<code>pipeline_manifest.arch == primary_manifest.arch &amp;&amp; model_id == primary_manifest.model_id</code>（同一模型做 embed 和 rerank）</li>
+            <li><strong>共享路径</strong>：<code>shared_encoder: true</code>，backend 是 <code>Arc::clone(primary_backend)</code>，不重新编译</li>
+            <li><strong>独立路径</strong>：调用 <code>build_pipeline_model()</code>，独立加载权重和编译</li>
+          </ul>
+
+          <h4>§16.4 运行时路由</h4>
+          <p>运行时根据 API 类型选择对应的 MegaKernel：</p>
+          <table>
+            <tr><th>API</th><th>路由目标</th><th>执行器方法</th><th>文件:行号</th></tr>
+            <tr><td>embed (主模型)</td><td><code>state.backend.executor()</code></td><td><code>mega.execute_encode()</code></td><td>client_impl.inc.rs:1076</td></tr>
+            <tr><td>rerank (主模型)</td><td><code>state.backend.executor()</code></td><td><code>mega.execute_rerank()</code></td><td>client_impl.inc.rs:1088</td></tr>
+            <tr><td>rerank (pipeline reranker)</td><td><code>reranker_state.backend.executor()</code></td><td><code>executor.rerank_pair()</code></td><td>client_impl.inc.rs:1229</td></tr>
+            <tr><td>generate (pipeline generator)</td><td><code>generator_state.backend.executor()</code></td><td><code>executor.generate()</code></td><td>client_impl.inc.rs:1309</td></tr>
+          </table>
+          <p>每条 API 路由通过 <code>with_execution_plan(plan, || ...)</code> 推入对应 PipelineModelState 的 ExecutionPlan 到线程本地存储，确保 JIT codegen 读取正确的 plan。</p>
+
+          <h4>§16.5 Executor 层 rerank 路由</h4>
+          <p><code>executor_api.rs:615</code> 区分生成式 reranker 和编码器式 reranker：</p>
+          <ul>
+            <li><strong>生成式 reranker</strong>（Decoder + ModelKind::Reranker）：<code>mega.execute_rerank(&amp;tokens, yes_id, no_id)</code> — 使用 JIT 编译的 yes/no token 评分路径</li>
+            <li><strong>编码器式 reranker</strong>（Encoder + ModelKind::Reranker）：<code>mega.execute_encode(&amp;tokens, output_elems)</code> — 使用 CLS pooling 路径</li>
+          </ul>
+        </section>
+      </section>
+
+      <!-- Entity Tables (unchanged) -->
+      <section data-entity-model-type="relational" data-entity="" id="data-client"><h3>Entity: Client</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="state" data-type="string" data-required="true"><td>state</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="multimodal_encoder" data-type="string" data-required="false"><td>multimodal_encoder</td><td>string</td><td>否</td><td></td><td></td></tr><tr data-field="guardrails" data-type="string" data-required="true"><td>guardrails</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="sg_callback" data-type="string" data-required="false"><td>sg_callback</td><td>string</td><td>否</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-clientstate"><h3>Entity: ClientState</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="model_id" data-type="string" data-required="true"><td>model_id</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="manifest" data-type="string" data-required="true"><td>manifest</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="backend" data-type="string" data-required="true"><td>backend</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="inference_mode" data-type="string" data-required="true"><td>inference_mode</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="reranker_state" data-type="string" data-required="false"><td>reranker_state</td><td>string</td><td>否</td><td></td><td></td></tr><tr data-field="generator_state" data-type="string" data-required="false"><td>generator_state</td><td>string</td><td>否</td><td></td><td></td></tr><tr data-field="execution_plan" data-type="string" data-required="true"><td>execution_plan</td><td>string</td><td>是</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-pipelinemodelstate"><h3>Entity: PipelineModelState</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="model_id" data-type="string" data-required="true"><td>model_id</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="manifest" data-type="string" data-required="true"><td>manifest</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="backend" data-type="string" data-required="true"><td>backend</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="shared_encoder" data-type="boolean" data-required="true"><td>shared_encoder</td><td>boolean</td><td>是</td><td></td><td></td></tr><tr data-field="execution_plan" data-type="string" data-required="true"><td>execution_plan</td><td>string</td><td>是</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-businessconfig"><h3>Entity: BusinessConfig</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="output_modes" data-type="string" data-required="true"><td>output_modes</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="semantic_gatekeeper" data-type="string" data-required="false"><td>semantic_gatekeeper</td><td>string</td><td>否</td><td></td><td></td></tr><tr data-field="debug_jit" data-type="boolean" data-required="true"><td>debug_jit</td><td>boolean</td><td>是</td><td></td><td></td></tr><tr data-field="guardrail_enabled" data-type="boolean" data-required="false"><td>guardrail_enabled</td><td>boolean</td><td>否</td><td></td><td></td></tr><tr data-field="cot_step_config" data-type="string" data-required="false"><td>cot_step_config</td><td>string</td><td>否</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-compileconfig"><h3>Entity: CompileConfig</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="max_seq_len" data-type="number" data-required="true"><td>max_seq_len</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="debug_jit" data-type="boolean" data-required="true"><td>debug_jit</td><td>boolean</td><td>是</td><td></td><td></td></tr><tr data-field="hetero" data-type="string" data-required="false"><td>hetero</td><td>string</td><td>否</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-architecturefeatures"><h3>Entity: ArchitectureFeatures</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="family" data-type="string" data-required="true"><td>family</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="num_layers" data-type="number" data-required="true"><td>num_layers</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="has_rope" data-type="boolean" data-required="true"><td>has_rope</td><td>boolean</td><td>是</td><td></td><td></td></tr><tr data-field="is_moe" data-type="boolean" data-required="true"><td>is_moe</td><td>boolean</td><td>是</td><td></td><td></td></tr><tr data-field="is_mla" data-type="boolean" data-required="true"><td>is_mla</td><td>boolean</td><td>是</td><td></td><td></td></tr><tr data-field="is_post_norm" data-type="boolean" data-required="true"><td>is_post_norm</td><td>boolean</td><td>是</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-outputmode"><h3>Entity: OutputMode</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="kind" data-type="string" data-required="true"><td>kind</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="model_id" data-type="string" data-required="true"><td>model_id</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="output_mode" data-type="string" data-required="true"><td>output_mode</td><td>string</td><td>是</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-graphtopologyanalysis"><h3>Entity: GraphTopologyAnalysis</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="outer_loop_bound" data-type="string" data-required="true"><td>outer_loop_bound</td><td>string</td><td>是</td><td></td><td></td></tr><tr data-field="logits_producer_op_idx" data-type="number" data-required="true"><td>logits_producer_op_idx</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="logits_output_tid" data-type="number" data-required="true"><td>logits_output_tid</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="mtp_config" data-type="string" data-required="false"><td>mtp_config</td><td>string</td><td>否</td><td></td><td></td></tr><tr data-field="layer_num_layers" data-type="number" data-required="true"><td>layer_num_layers</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="layer_activation_alias" data-type="string" data-required="true"><td>layer_activation_alias</td><td>string</td><td>是</td><td></td><td></td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="" id="data-graphderivedgeometry"><h3>Entity: GraphDerivedGeometry</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hidden" data-type="number" data-required="true"><td>hidden</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="num_layers" data-type="number" data-required="true"><td>num_layers</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="num_heads" data-type="number" data-required="true"><td>num_heads</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="num_kv_heads" data-type="number" data-required="true"><td>num_kv_heads</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="head_dim" data-type="number" data-required="true"><td>head_dim</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="vocab_size" data-type="number" data-required="true"><td>vocab_size</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="intermediate" data-type="number" data-required="true"><td>intermediate</td><td>number</td><td>是</td><td></td><td></td></tr><tr data-field="dtype" data-type="string" data-required="true"><td>dtype</td><td>string</td><td>是</td><td></td><td></td></tr></table></section>
+
+      <!-- REQs (unchanged) -->
+      <section data-req-api="POST /ffi/mega_kernel_fn" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="e2e" data-req-status="implemented" data-req="REQ-E2E-001" id="req-e2e-001"><h3>REQ-E2E-001 §0 两阶段模型与 BUILD/COMPILE 边界</h3><p>端到端数据流必须遵循两阶段模型：编译时一次性 + 推理时每次调用。编译时内部存在 BUILD 和 COMPILE 两个正交阶段，由 build_compiler_graph() 返回值作为分界线。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>推理热路径零编译行为：执行 <code>grep -rn 'compile\|build_compiler_graph' src/engine/mega_kernel/executor_core.inc.rs src/engine/mega_kernel/executor_ops.inc.rs</code> 返回 0 匹配。</li><li>BUILD 阶段产物可识别：<code>build_compiler_graph()</code> 返回 CompilerGraph 作为 BUILD→COMPILE 边界标志，调用点位于 <code>src/arch/auto_graph.rs</code>，禁止出现在 <code>src/engine/</code> 或 <code>src/jit/</code>。</li><li>COMPILE 唯一入口：<code>InferenceCompiler::compile()</code>（API <code>POST /compile</code>）是 MegaKernelFn 的唯一生产者，<code>grep -rn 'fn compile\b\|fn compile(' src/</code> 仅命中此入口。</li><li>推理时一次 CALL：<code>generate_single_sequence()</code> 通过 MegaKernelFn ABI（<code>unsafe extern "C" fn(ctx: *const u8) -&gt; u32</code>）完成完整 mega-kernel，单次函数指针调用，运行时无再编译。</li><li>E2E 测试断言（<code>cargo test --test test_e2e_generator</code>）：单次 <code>MegaKernelFn</code> 调用后 output_buffer 中存在完整 UTF-8 文本，验证运行时零编译。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-002" data-req="REQ-E2E-002" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-002 §1 用户 API 层一致性</h3><p>用户 API 层通过 Client 提供四个推理入口，所有 API 共享相同的调用模式。ClientState 在编译时一次性构建。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>四入口齐全：执行 <code>grep -n 'pub fn generate\|pub fn embed\|pub fn rerank\|pub fn classify' src/client.rs src/client_fragments/</code> 四入口各有 1+ 命中。</li><li>ClientState 编译时构建：ClientState 字段（compiled_layer、session_state、KernelContext 等）在 <code>ClientBuilder::build()</code> 内一次性初始化，<code>grep -n 'ClientState' src/client.rs</code> 字段声明无 <code>Cell</code>/<code>RefCell</code>/<code>Mutex</code> 可变容器（除 callback_table_ptr 共享内存指针外）。</li><li>共享调用模式：四入口最终都通过 <code>MegaKernelFn(ctx: *const u8) -&gt; u32</code> 单次 ABI CALL 完成，<code>grep -n 'mega_kernel_fn(' src/client_fragments/</code> 在四入口各有 1 次调用。</li><li>无 API 类型分支在编译器：<code>grep -rn 'api_type\|api_kind' src/jit/ src/compiler/</code> 返回 0 匹配（编译器只感知图拓扑）。</li><li>E2E 测试断言：<code>cargo test --test test_e2e_generator --test test_e2e_embedding --test test_e2e_reranker</code> 全部通过，四入口输出格式正确。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-003" data-req="REQ-E2E-003" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-003 §3 架构检测与 Family 策略选择</h3><p>架构检测层从模型权重推导架构特征，Family 仅驱动 BUILD 阶段图构建策略选择（发哪些 ops），编译器从图拓扑推导一切。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>Family 仅驱动 BUILD：执行 <code>grep -rn 'match.*Family' src/arch/ src/graph/</code> 仅在图构建阶段命中（决定发哪些 ops），不在 <code>src/jit/</code> 或 <code>src/compiler/</code> 中命中。</li><li>编译器零 Family 读取：<code>grep -rn 'Family\b' src/jit/ src/compiler/</code> 返回 0 匹配（编译器从图拓扑推导一切）。</li><li>禁用变量名残留：<code>grep -rn 'is_encoder\b\|needs_kv_for_decode\b' src/compiler/ src/jit/</code> 返回 0 匹配（铁律 ARCH-NO-MISLEADING-TERMINOLOGY）。</li><li>GraphTopologyAnalysis 替代 bool：<code>grep -rn 'GraphTopologyAnalysis' src/jit/</code> 在编译器入口命中，提供 loop_topology、output_sink 等拓扑推导字段。</li><li>E2E 测试断言：Qwen3（decoder）与 XLM-R（无 Argmax 图）走同一 <code>InferenceCompiler::compile()</code> 入口，<code>cargo test --test test_e2e_generator --test test_e2e_embedding</code> 均通过。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-004" data-req="REQ-E2E-004" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-004 §13 OP裁剪：OutputMode 驱动的尾部 ops 选择</h3><p>OutputMode 决定图的尾部 ops（Argmax/MeanPool/ClassifyBinary 等），但图构建器不按 OutputMode 物理裁剪 ops。裁剪通过 Family 驱动的结构差异和 GraphTopologyAnalysis 拓扑推导实现。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>OutputMode 驱动尾部 ops：执行 <code>grep -rn 'OutputMode' src/graph/</code> 命中图构建逻辑，且不同 OutputMode（Generate/Embed/Rerank/Classify）产生不同尾部 op（Argmax/MeanPool/ClassifyBinary）。</li><li>构建器不物理裁剪：<code>grep -rn 'truncate\|remove.*ops\|filter.*OpKind' src/graph/builders/</code> 返回 0 匹配（裁剪通过结构差异实现）。</li><li>拓扑推导尾部：<code>GraphTopologyAnalysis.output_sink</code> 字段从图尾部 ops 推导（<code>ScratchpadLogits</code> | <code>CallerBuffer</code>），<code>grep -n 'output_sink' src/jit/</code> 命中。</li><li>无 OutputMode 在编译器：<code>grep -rn 'OutputMode' src/jit/ src/compiler/</code> 返回 0 匹配。</li><li>E2E 测试断言：同模型不同 OutputMode 产生不同 <code>config_hash</code>，<code>cargo test --test test_e2e_embedding --test test_e2e_reranker</code> 通过且不互相干扰。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-005" data-req="REQ-E2E-005" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-005 §5 BusinessConfig/CompileConfig 边界分离</h3><p>BusinessConfig 与 CompileConfig 彻底分离。编译器只接受 CompilerGraph + CompileConfig，所有业务语义已编码在图的拓扑中。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>编译器签名纯净：<code>InferenceCompiler::compile(graph: CompilerGraph, cfg: CompileConfig) -&gt; MegaKernelFn</code>，参数类型仅此两种。</li><li>零 BusinessConfig 引用：执行 <code>grep -rn 'BusinessConfig' src/compiler/ src/jit/</code> 返回 0 匹配（铁律 ARCH-BUILD-COMPILE-BOUNDARY）。</li><li>业务语义编码在图中：Family/OutputMode 在 BUILD 阶段编码为图 ops 拓扑，<code>grep -rn 'BusinessConfig' src/graph/ src/arch/</code> 仅在图构建阶段命中。</li><li>CompileConfig 字段集合：<code>grep -n 'pub struct CompileConfig' src/jit/</code> 仅包含 DeviceProfile、DebugFlag、CacheKey 等编译相关字段，无业务字段。</li><li>测试断言：<code>cargo test --lib compile_config</code> 通过且 CompileConfig serde 序列化不含业务字段。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-006" data-req="REQ-E2E-006" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-006 §6 JIT 编译：图拓扑推导一切</h3><p>JIT 编译层以 CompilerGraph 为唯一数据源，GraphDerivedGeometry 和 GraphTopologyAnalysis 从图拓扑推导一切。编译产出是输入图的纯函数。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>GraphDerivedGeometry 来自图拓扑：执行 <code>grep -n 'GraphDerivedGeometry' src/jit/</code> 字段（num_layers、hidden_size、num_heads 等）从 <code>graph.tensor_meta()</code>/<code>graph.attrs()</code> 推导，无外部参数注入。</li><li>GraphTopologyAnalysis 来自图 ops：<code>grep -n 'GraphTopologyAnalysis' src/jit/</code> 通过遍历 <code>graph.ops()</code> 推导 loop_topology、output_sink 等字段。</li><li>编译产出纯函数：相同 CompilerGraph + 相同 CompileConfig → 相同 <code>config_hash</code> → 相同 MegaKernelFn 机器码，<code>cargo test --lib config_hash_deterministic</code> 通过。</li><li>无外部数据源：编译器除 graph + CompileConfig 外不接受其他参数，<code>InferenceCompiler::compile()</code> 签名纯净（见 REQ-E2E-005）。</li><li>E2E 测试断言：同一模型加载两次编译产出的 <code>config_hash</code> 一致，<code>cargo test --lib compile_determinism</code> 通过。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-007" data-req="REQ-E2E-007" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-007 §8 推理执行：一次 CALL 模型</h3><p>推理执行层通过 generate_single_sequence() 一次 CALL 完成整个 mega-kernel。运行时只做 buffer 分配和 CALL，不做任何计算编排。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>一次 CALL 完成：<code>generate_single_sequence()</code> 函数体仅包含 buffer 分配和 <code>mega_kernel_fn(ctx)</code> 一次调用，<code>grep -A30 'fn generate_single_sequence' src/engine/</code> 验证无 op 编排循环。</li><li>运行时无数据结构：执行 <code>grep -rn 'HashMap\|String\|Vec&lt;\|for.*in.*\\\.\\\.\\\.{' src/engine/mega_kernel/</code> 返回 0 匹配（铁律 ARCH-RUST-IS-CODEGEN）。</li><li>无 Rust 编排引擎：<code>grep -rn 'for.*layer\|for.*op\|fn step\b' src/engine/mega_kernel/executor_core.inc.rs</code> 返回 0 匹配。</li><li>权重和 scratchpad 预分配：所有 buffer 在 <code>ClientBuilder::build()</code> 阶段分配，推理热路径仅传递指针。</li><li>E2E 测试断言：<code>cargo test --test test_e2e_generator</code> 推理延迟 &lt; N ms（N 由 DeviceProfile 决定），profiler 显示 99%+ 时间在 MegaKernelFn 内部。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-008" data-req="REQ-E2E-008" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-008 §9 结果返回：JIT 产出到用户响应</h3><p>结果返回层将 JIT 产出转换为用户响应。generate 通过 tokenizer decode，embed/rerank/classify 直接从 scratchpad logits 区域读取 f32 向量。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>generate 走 tokenizer decode：<code>generate()</code> 返回值通过 <code>tokenizer.decode(token_ids)</code> 转换为 UTF-8 字符串，<code>grep -n 'tokenizer.*decode\|decode.*tokens' src/client_fragments/generator.inc.rs</code> 命中。</li><li>embed/rerank/classify 读 scratchpad：三入口从 <code>scratchpad_logits_ptr</code> 读取 f32 向量，<code>grep -n 'scratchpad_logits\|f32_slice' src/client_fragments/embedding.inc.rs src/client_fragments/reranker.inc.rs src/client_fragments/classifier.inc.rs</code> 三处各命中。</li><li>MegaKernelFn 返回值语义：返回 <code>rax = 生成 token 数（generate）</code> | <code>0（embed/rerank/classify/encode）</code>，<code>grep -n 'return.*token_count\|return.*0' src/jit/codegen/epilogue.rs</code> 验证。</li><li>无 Rust 侧重计算：结果返回层只做内存切片和类型转换，<code>grep -n 'matmul\|gemm\|softmax' src/client_fragments/embedding.inc.rs</code> 返回 0 匹配。</li><li>E2E 测试断言：四入口输出类型分别为 String/Vec&lt;f32&gt;/Vec&lt;f32&gt;/Vec&lt;f32&gt;，<code>cargo test --test test_e2e_*</code> 四套测试均通过。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-009" data-req="REQ-E2E-009" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-009 §10 四种 API 执行路径差异</h3><p>四种 API 执行路径的差异根源是 OutputMode 裁剪导致不同的 CompilerGraph 拓扑，不同的图拓扑→不同的 JIT 机器码。编译器从图拓扑推导一切，不感知 API 类型。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>差异根源在 OutputMode：四 API 差异 = OutputMode → 不同尾部 op → 不同 CompilerGraph 拓扑 → 不同 JIT 机器码，<code>grep -rn 'OutputMode' src/graph/</code> 仅在图构建阶段命中。</li><li>编译器零 API 感知：执行 <code>grep -rn 'api_type\|api_kind\|ApiKind\|Rerank\b\|Embed\b' src/jit/ src/compiler/</code> 返回 0 匹配（编译器只看图拓扑）。</li><li>同一编译入口：四 API 均走 <code>InferenceCompiler::compile()</code>，<code>grep -n 'compile(' src/client.rs src/client_fragments/</code> 调用点统一。</li><li>不同 OutputMode 产生不同 config_hash：四 API 的 CompilerGraph 拓扑不同 → 不同 <code>config_hash</code> → 不同 MegaKernelFn 产物。</li><li>E2E 测试断言：四 API 的编译产物缓存命中率统计独立（<code>cargo test --lib jit_cache_partition</code> 通过），证明产物不同。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-010" data-req="REQ-E2E-010" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-010 §14 图变换管线 (TraceOp Pipeline)</h3><p>图变换管线从 Scalar Rust 到 VmInstr 的完整数据流：注册→SymExec trace 提取→ComputePattern 分类→auto_select 自动指令选择→VmInstr emit。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>管线五阶段齐全：执行 <code>grep -rn 'ScalarOpRegistry\|symexec\|ComputePattern\|auto_lower_trace\|emit_vminstr' src/compiler/</code> 五阶段模块各命中。</li><li>注册唯一入口：<code>ScalarOpRegistry::register()</code> 是新算子注册的唯一入口，<code>grep -n 'register_op\|register_scalar' src/compiler/registry.rs</code> 命中，禁止绕过。</li><li>禁止手写 TraceOp→VmInstr：执行 <code>grep -rn 'match.*OpKind.*=&gt;.*VmInstr\|match.*trace.*=&gt;.*emit' src/compiler/codegen/</code> 仅在 <code>auto_select.rs</code> 命中（铁律 ARCH-AUTO-INSTR-SELECT）。</li><li>auto_lower_trace 查表：<code>grep -n 'fn auto_lower_trace\|auto_lower_trace(' src/compiler/auto_select.rs</code> 命中，禁止 per-OpKind 手写函数（如 <code>emit_meanpool_auto</code>）。</li><li>测试断言：<code>cargo test --lib auto_select</code> 通过，新增算子只需在 registry 注册 scalar 实现即可自动路由到 VmInstr。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-011" data-req="REQ-E2E-011" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-011 §15 硬件改写图 (DeviceProfile-Driven)</h3><p>DeviceProfile 从探测到影响代码生成的完整数据流：PainPointAnalyzer→ExecutionPlan→enforce_constraints→LayoutNegotiator→IsaProfile→ISA Lowering。硬件差异体现在 codegen 层指令选择。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>五阶段管线齐全：执行 <code>grep -rn 'PainPointAnalyzer\|ExecutionPlan\|enforce_constraints\|LayoutNegotiator\|IsaProfile' src/compiler/</code> 五模块各命中。</li><li>DeviceProfile 驱动 codegen：不同 <code>DeviceProfile</code>（x86_64/AArch64/GPU）生成不同 ISA Lowering 产物，<code>grep -n 'match.*DeviceProfile\|x86_elem_strategy\|aarch64_elem_strategy' src/compiler/codegen/</code> 命中。</li><li>禁止硬件 fallback：执行 <code>grep -rn 'fallback\|unwrap_or\|default.*when.*unsupported' src/compiler/fusion.rs src/compiler/hw_constraints.rs</code> 返回 0 匹配（铁律 NO-HW-DEGRADATION / NO-SILENT-FALLBACK）。</li><li>硬件不支持返回 Err：硬件不支持某指令时 <code>Strategy::Unsupported</code>，JIT codegen 返回 <code>Err</code> 而非静默 NOP，<code>grep -n 'Unsupported\|=&gt; Err' src/compiler/codegen/</code> 命中。</li><li>E2E 测试断言：CPU AVX-512 / AVX2 / NEON 三套硬件 profile 编译产物 <code>config_hash</code> 不同，<code>cargo test --lib device_profile_codegen</code> 通过。</li></ul></div></section>
+      <section data-req-api="POST /internal/e2e/validate" id="req-e2e-012" data-req="REQ-E2E-012" data-req-status="implemented" data-req-domain="e2e" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN"><h3>REQ-E2E-012 §16 穿透式多图 (Generator+Reranker)</h3><p>穿透式多图支持 generator+reranker 双模型编译和执行。ClientBuilder 三阶段编译（主模型+reranker+generator），共享编码器优化跳过重复编译。</p><div data-criteria=""><strong>验收标准：</strong><ul><li>三阶段编译：ClientBuilder 在 build 阶段编译三个产物（主模型 MegaKernelFn + reranker MegaKernelFn + generator MegaKernelFn），<code>grep -n 'compile_reranker\|compile_generator\|compile_main' src/client.rs</code> 三阶段命中。</li><li>共享编码器优化：当 reranker/generator 共享同一编码器时，编译器识别相同图拓扑并复用 JIT 缓存，<code>grep -n 'shared_encoder\|encoder_cache_hit' src/jit/</code> 命中。</li><li>独立/联合推理：支持 <code>client.generate_only()</code>、<code>client.rerank_only()</code>、<code>client.rerank_then_generate()</code> 三种模式，<code>grep -n 'rerank_then_generate\|generate_only\|rerank_only' src/client.rs</code> 命中。</li><li>双模型 ABI 一致：reranker 与 generator 共享相同 MegaKernelFn ABI（<code>unsafe extern "C" fn(ctx: *const u8) -&gt; u32</code>），仅 KernelContext 内容不同。</li><li>E2E 测试断言：<code>cargo test --test test_e2e_reranker_then_generator</code> 通过，reranker 输出 top-k 后 generator 基于此生成，整链端到端无 panic。</li></ul></div></section>
+
+      <!-- Tests (unchanged) -->
+      <section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-e2e-001" data-test="TEST-E2E-001" data-req-ref="REQ-E2E-001" data-test-categories="unit"><h4>TEST-E2E-001: REQ-E2E-001 单元测试</h4><p>TODO: 为 REQ-E2E-001 编写测试用例</p></div><div id="test-e2e-002" data-test="TEST-E2E-002" data-req-ref="REQ-E2E-002" data-test-categories="unit"><h4>TEST-E2E-002: REQ-E2E-002 单元测试</h4><p>TODO: 为 REQ-E2E-002 编写测试用例</p></div><div id="test-e2e-003" data-test="TEST-E2E-003" data-req-ref="REQ-E2E-003" data-test-categories="unit"><h4>TEST-E2E-003: REQ-E2E-003 单元测试</h4><p>TODO: 为 REQ-E2E-003 编写测试用例</p></div><div id="test-e2e-004" data-test="TEST-E2E-004" data-req-ref="REQ-E2E-004" data-test-categories="unit"><h4>TEST-E2E-004: REQ-E2E-004 单元测试</h4><p>TODO: 为 REQ-E2E-004 编写测试用例</p></div><div id="test-e2e-005" data-test="TEST-E2E-005" data-req-ref="REQ-E2E-005" data-test-categories="unit"><h4>TEST-E2E-005: REQ-E2E-005 单元测试</h4><p>TODO: 为 REQ-E2E-005 编写测试用例</p></div><div id="test-e2e-006" data-test="TEST-E2E-006" data-req-ref="REQ-E2E-006" data-test-categories="unit"><h4>TEST-E2E-006: REQ-E2E-006 单元测试</h4><p>TODO: 为 REQ-E2E-006 编写测试用例</p></div><div id="test-e2e-007" data-test="TEST-E2E-007" data-req-ref="REQ-E2E-007" data-test-categories="unit"><h4>TEST-E2E-007: REQ-E2E-007 单元测试</h4><p>TODO: 为 REQ-E2E-007 编写测试用例</p></div><div id="test-e2e-008" data-test="TEST-E2E-008" data-req-ref="REQ-E2E-008" data-test-categories="unit"><h4>TEST-E2E-008: REQ-E2E-008 单元测试</h4><p>TODO: 为 REQ-E2E-008 编写测试用例</p></div><div id="test-e2e-009" data-test="TEST-E2E-009" data-req-ref="REQ-E2E-009" data-test-categories="unit"><h4>TEST-E2E-009: REQ-E2E-009 单元测试</h4><p>TODO: 为 REQ-E2E-009 编写测试用例</p></div><div id="test-e2e-010" data-test="TEST-E2E-010" data-req-ref="REQ-E2E-010" data-test-categories="unit"><h4>TEST-E2E-010: REQ-E2E-010 单元测试</h4><p>TODO: 为 REQ-E2E-010 编写测试用例</p></div><div id="test-e2e-011" data-test="TEST-E2E-011" data-req-ref="REQ-E2E-011" data-test-categories="unit"><h4>TEST-E2E-011: REQ-E2E-011 单元测试</h4><p>TODO: 为 REQ-E2E-011 编写测试用例</p></div><div id="test-e2e-012" data-test="TEST-E2E-012" data-req-ref="REQ-E2E-012" data-test-categories="unit"><h4>TEST-E2E-012: REQ-E2E-012 单元测试</h4><p>TODO: 为 REQ-E2E-012 编写测试用例</p></div></section>
+    </main>
+  </body>
+</html>
