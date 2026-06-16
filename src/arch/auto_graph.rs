@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use gllm_kernels::compiler::graph::{
     AttentionGeometry, AttentionMask, AttentionSpec, CompilerGraph, DualRopeSpec, GemmSpec, MlaSpec,
-    NormSpec, Op, OpKind, QuantGemmSpec, RopeSpec, SinksSpec, SymDim, TensorId,
+    NormSpec, Op, QuantGemmSpec, RopeSpec, SinksSpec, SymDim, TensorId,
 };
 use gllm_kernels::compiler::mega_kernel_abi::BusinessConfig;
 use gllm_kernels::types::DType;

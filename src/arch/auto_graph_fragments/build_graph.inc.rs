@@ -68,10 +68,10 @@ pub fn build_compiler_graph(
                               label: &str| {
         if let Some(&qt) = weight_quant_types.get(weight_name) {
             let spec = QuantGemmSpec { m: m.clone(), n, k, quant_type: qt };
-            g.add_op_with_op(Op::QuantGemm(spec), OpKind::QuantGemm { m, n, k, quant_type: qt }, inputs, outputs, label);
+            g.add_op(Op::QuantGemm(spec), inputs, outputs, label);
         } else {
             let spec = GemmSpec { m: m.clone(), n, k, dtype: dt, trans_b: true, has_bias: false };
-            g.add_op_with_op(Op::Gemm(spec), OpKind::Gemm { m, n, k, dtype: dt, trans_b: true },
+            g.add_op(Op::Gemm(spec),
                 inputs, outputs, label);
         }
     };
@@ -153,13 +153,13 @@ pub fn build_compiler_graph(
     // Otherwise use standard Gather (zero-copy F32/BF16 row copy).
     let embed_quant_type = weight_quant_types.get("embed").copied();
     if let Some(qt) = embed_quant_type {
-        g.add_op_with_op(Op::QuantGather { quant_type: qt, vocab_size: vocab_size, hidden_dim: hidden, index_dim: s.clone(), scale: g.embedding_scale }, OpKind::QuantGather { quant_type: qt, vocab_size: vocab_size, hidden_dim: hidden, index_dim: s.clone(), scale: g.embedding_scale }, 
+        g.add_op(Op::QuantGather { quant_type: qt, vocab_size: vocab_size, hidden_dim: hidden, index_dim: s.clone(), scale: g.embedding_scale }, 
             vec![token_ids, embed_w],
             vec![embedding],
             "embed_gather",
         );
     } else {
-        g.add_op_with_op(Op::Gather { table_rows: vocab_size, embed_dim: hidden, index_dim: s.clone(), indices_kind: Default::default(), scale: g.embedding_scale }, OpKind::Gather { table_rows: vocab_size, embed_dim: hidden, index_dim: s.clone(), indices_kind: Default::default(), scale: g.embedding_scale }, 
+        g.add_op(Op::Gather { table_rows: vocab_size, embed_dim: hidden, index_dim: s.clone(), indices_kind: Default::default(), scale: g.embedding_scale }, 
             vec![token_ids, embed_w],
             vec![embedding],
             "embed_gather",
@@ -182,11 +182,11 @@ pub fn build_compiler_graph(
             let pos_shape = get_shape(weight_shapes, "position_embed")?;
             let pos_w = g.add_tensor_concrete("position_embed", &pos_shape, tdt("position_embed"));
             let pos_emb = g.add_tensor("pos_emb", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Gather { table_rows: pos_shape[0], embed_dim: hidden, index_dim: s.clone(), indices_kind: GatherIndicesKind::Arange, scale: None }, OpKind::Gather { table_rows: pos_shape[0], embed_dim: hidden, index_dim: s.clone(), indices_kind: GatherIndicesKind::Arange, scale: None }, 
+            g.add_op(Op::Gather { table_rows: pos_shape[0], embed_dim: hidden, index_dim: s.clone(), indices_kind: GatherIndicesKind::Arange, scale: None }, 
                 vec![token_ids, pos_w], vec![pos_emb], "position_embed",
             );
             let combined = g.add_tensor("embed_plus_pos", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![hidden_0, pos_emb], vec![combined], "embed_add_pos");
+            g.add_op(Op::Add, vec![hidden_0, pos_emb], vec![combined], "embed_add_pos");
             hidden_0 = combined;
         }
 
@@ -195,11 +195,11 @@ pub fn build_compiler_graph(
             let tte_shape = get_shape(weight_shapes, "token_type_embed")?;
             let tte_w = g.add_tensor_concrete("token_type_embed", &tte_shape, tdt("token_type_embed"));
             let tte_emb = g.add_tensor("type_emb", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Gather { table_rows: tte_shape[0], embed_dim: hidden, index_dim: s.clone(), indices_kind: GatherIndicesKind::Zeros, scale: None }, OpKind::Gather { table_rows: tte_shape[0], embed_dim: hidden, index_dim: s.clone(), indices_kind: GatherIndicesKind::Zeros, scale: None }, 
+            g.add_op(Op::Gather { table_rows: tte_shape[0], embed_dim: hidden, index_dim: s.clone(), indices_kind: GatherIndicesKind::Zeros, scale: None }, 
                 vec![token_ids, tte_w], vec![tte_emb], "token_type_embed",
             );
             let combined = g.add_tensor("embed_plus_type", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![hidden_0, tte_emb], vec![combined], "embed_add_type");
+            g.add_op(Op::Add, vec![hidden_0, tte_emb], vec![combined], "embed_add_type");
             hidden_0 = combined;
         }
 
@@ -215,13 +215,13 @@ pub fn build_compiler_graph(
                 let eln_bias_shape = weight_shapes.get(eln_bias_cn).cloned().unwrap_or_else(|| eln_shape.clone());
                 let eln_b = g.add_tensor_concrete(eln_bias_cn, &eln_bias_shape, tdt(eln_bias_cn));
                 let normed = g.add_tensor("embed_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: embed_ln_eps, dtype: dt, has_weight: true }), OpKind::LayerNorm { feature_dim: hidden, eps: embed_ln_eps }, 
+                g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: embed_ln_eps, dtype: dt, has_weight: true }), 
                     vec![hidden_0, eln_w, eln_b], vec![normed], "embed_norm",
                 );
                 hidden_0 = normed;
             } else {
                 let normed = g.add_tensor("embed_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: embed_ln_eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: embed_ln_eps }, 
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: embed_ln_eps, dtype: dt, has_weight: true }), 
                     vec![hidden_0, eln_w], vec![normed], "embed_norm",
                 );
                 hidden_0 = normed;
@@ -400,43 +400,43 @@ pub fn build_compiler_graph(
                 // Active path extraction (same for all types — operates on hidden, not head_dim)
                 let active_in = g.add_tensor(&ptname("altup_active_in"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![fat_in], vec![active_in], &ptname("altup_active_slice"));
+                g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![fat_in], vec![active_in], &ptname("altup_active_slice"));
 
                 let router_normed = g.add_tensor(&ptname("router_normed"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 if let Some(rn_w) = altup_router_norm_w {
-                    g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                    g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                         vec![active_in, rn_w], vec![router_normed], &ptname("altup_router_norm"));
                 } else {
-                    g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                    g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                         vec![active_in], vec![router_normed], &ptname("altup_router_norm"));
                 }
 
                 if let Some(router_w) = altup_modality_router_w {
                     let modalities_raw = g.add_tensor(&ptname("modalities_raw"),
                         vec![s.clone(), SymDim::Concrete(altup_p)], dt);
-                    g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p, k: hidden, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: altup_p, k: hidden, dtype: dt, trans_b: true },  vec![router_normed, router_w], vec![modalities_raw], &ptname("altup_router_gemm"));
+                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p, k: hidden, dtype: dt, trans_b: true, has_bias: false }),  vec![router_normed, router_w], vec![modalities_raw], &ptname("altup_router_gemm"));
 
                     let modalities = g.add_tensor(&ptname("modalities"),
                         vec![s.clone(), SymDim::Concrete(altup_p)], dt);
-                    g.add_op_with_op(Op::Tanh, OpKind::Tanh,
+                    g.add_op(Op::Tanh,
                         vec![modalities_raw], vec![modalities], &ptname("altup_tanh"));
 
                     if let Some(pred_w) = altup_prediction_coefs_w {
                         let pred_coefs_out = g.add_tensor(&ptname("pred_coefs"),
                             vec![s.clone(), SymDim::Concrete(altup_p * altup_p)], dt);
-                        g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true },  vec![modalities, pred_w], vec![pred_coefs_out], &ptname("altup_pred_coefs"));
+                        g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }),  vec![modalities, pred_w], vec![pred_coefs_out], &ptname("altup_pred_coefs"));
 
                         let preds = g.add_tensor(&ptname("predictions"),
                             vec![s.clone(), SymDim::Concrete(altup_p * hidden)], dt);
-                        g.add_op_with_op(Op::AltUpPredict { seq_len: s.clone(), num_preds: altup_p, hidden: hidden }, OpKind::AltUpPredict { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![fat_in, pred_coefs_out], vec![preds], &ptname("altup_predict"));
+                        g.add_op(Op::AltUpPredict { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![fat_in, pred_coefs_out], vec![preds], &ptname("altup_predict"));
                         predictions_tid = Some(preds);
                     }
 
                     if let Some(corr_w) = altup_correction_coefs_w {
                         let corr_coefs = g.add_tensor(&ptname("corr_coefs"),
                             vec![s.clone(), SymDim::Concrete(altup_p * altup_p)], dt);
-                        g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true },  vec![modalities, corr_w], vec![corr_coefs], &ptname("altup_corr_coefs"));
+                        g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }),  vec![modalities, corr_w], vec![corr_coefs], &ptname("altup_corr_coefs"));
                         corr_coefs_tid = Some(corr_coefs);
                     }
                 }
@@ -444,7 +444,7 @@ pub fn build_compiler_graph(
                 let active = g.add_tensor(&ptname("altup_active"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 if let Some(preds) = predictions_tid {
-                    g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![preds], vec![active], &ptname("altup_active_extract"));
+                    g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![preds], vec![active], &ptname("altup_active_extract"));
                 }
                 hidden_tid = active;
             } else {
@@ -463,7 +463,7 @@ pub fn build_compiler_graph(
                 normed = hidden_tid;
             } else {
                 let n = g.add_tensor(&ptname("normed"), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![hidden_tid, norm_w_tid], vec![n], &ptname("input_norm"));
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![hidden_tid, norm_w_tid], vec![n], &ptname("input_norm"));
                 normed = n;
             }
 
@@ -538,10 +538,10 @@ pub fn build_compiler_graph(
 
             let k_out = g.add_tensor(&ptname("k"), vec![s.clone(), SymDim::Concrete(k_n)], dt);
             if let Some(&qt) = weight_quant_types.get(&k_cn) {
-                g.add_op_guarded_with_op(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: k_n, k: k_k, quant_type: qt }), OpKind::QuantGemm { m: s.clone(), n: k_n, k: k_k, quant_type: qt }, 
+                g.add_op_guarded(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: k_n, k: k_k, quant_type: qt }), 
                     vec![normed, k_w], vec![k_out], &ptname("k_proj"), kv_guard);
             } else {
-                g.add_op_guarded_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true }, 
+                g.add_op_guarded(Op::Gemm(GemmSpec { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true, has_bias: false }), 
                     vec![normed, k_w], vec![k_out], &ptname("k_proj"), kv_guard);
             }
 
@@ -557,17 +557,17 @@ pub fn build_compiler_graph(
 
             let mut v_out = g.add_tensor(&ptname("v"), vec![s.clone(), SymDim::Concrete(v_n)], dt);
             if let Some(&qt) = weight_quant_types.get(&v_cn) {
-                g.add_op_guarded_with_op(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: v_n, k: v_k, quant_type: qt }), OpKind::QuantGemm { m: s.clone(), n: v_n, k: v_k, quant_type: qt }, 
+                g.add_op_guarded(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: v_n, k: v_k, quant_type: qt }), 
                     vec![normed, v_w], vec![v_out], &ptname("v_proj"), kv_guard);
             } else {
-                g.add_op_guarded_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true }, 
+                g.add_op_guarded(Op::Gemm(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true, has_bias: false }), 
                     vec![normed, v_w], vec![v_out], &ptname("v_proj"), kv_guard);
             }
 
             // ValueNorm (optional)
             if features.has_value_norm {
                 let v_normed = g.add_tensor(&ptname("v_normed"), vec![s.clone(), SymDim::Concrete(v_n)], dt);
-                g.add_op_guarded_with_op(Op::ValueNorm(NormSpec { feature_dim: v_n, eps: eps, dtype: dt, has_weight: false }), OpKind::ValueNorm { feature_dim: v_n, eps: eps }, 
+                g.add_op_guarded(Op::ValueNorm(NormSpec { feature_dim: v_n, eps: eps, dtype: dt, has_weight: false }), 
                     vec![v_out], vec![v_normed], &ptname("v_norm"), kv_guard);
                 v_out = v_normed;
             }
@@ -585,7 +585,7 @@ pub fn build_compiler_graph(
                     wtids.push((q_norm_w, byte_cursor));
                     byte_cursor += weight_physical_bytes(&q_norm_cn, qn_shape);
                     let q_normed = g.add_tensor(&ptname("q_normed"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
-                    g.add_op_with_op(Op::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps, dtype: dt }, OpKind::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps }, 
+                    g.add_op(Op::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps, dtype: dt }, 
                         vec![q_for_attn, q_norm_w], vec![q_normed], &ptname("q_norm"));
                     q_for_attn = q_normed;
                 }
@@ -596,7 +596,7 @@ pub fn build_compiler_graph(
                     wtids.push((k_norm_w, byte_cursor));
                     byte_cursor += weight_physical_bytes(&k_norm_cn, kn_shape);
                     let k_normed = g.add_tensor(&ptname("k_normed"), vec![s.clone(), SymDim::Concrete(k_n)], dt);
-                    g.add_op_guarded_with_op(Op::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps, dtype: dt }, OpKind::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps }, 
+                    g.add_op_guarded(Op::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps, dtype: dt }, 
                         vec![k_for_attn, k_norm_w], vec![k_normed], &ptname("k_norm"), kv_guard);
                     k_for_attn = k_normed;
                 }
@@ -605,12 +605,12 @@ pub fn build_compiler_graph(
             if features.has_qk_norm && !features.has_head_rms_norm {
                 let qk_norm_eps = 1e-6f32;
                 let q_normed = g.add_tensor(&ptname("qk_normed_q"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
-                g.add_op_with_op(Op::QkNorm { head_dim: this_head_dim, eps: qk_norm_eps }, OpKind::QkNorm { head_dim: this_head_dim, eps: qk_norm_eps }, 
+                g.add_op(Op::QkNorm { head_dim: this_head_dim, eps: qk_norm_eps }, 
                     vec![q_for_attn], vec![q_normed], &ptname("qk_norm_q"));
                 q_for_attn = q_normed;
 
                 let k_normed = g.add_tensor(&ptname("qk_normed_k"), vec![s.clone(), SymDim::Concrete(k_n)], dt);
-                g.add_op_guarded_with_op(Op::QkNorm { head_dim: this_head_dim, eps: qk_norm_eps }, OpKind::QkNorm { head_dim: this_head_dim, eps: qk_norm_eps }, 
+                g.add_op_guarded(Op::QkNorm { head_dim: this_head_dim, eps: qk_norm_eps }, 
                     vec![k_for_attn], vec![k_normed], &ptname("qk_norm_k"), kv_guard);
                 k_for_attn = k_normed;
             }
@@ -618,12 +618,12 @@ pub fn build_compiler_graph(
             // RoPE (using template-specific theta/partial — no DualRoPE needed)
             if features.has_rope {
                 let rope_q = g.add_tensor(&ptname("q_rope"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
-                g.add_op_with_op(Op::RoPE(RopeSpec { num_heads: this_num_q_heads, head_dim: this_head_dim, theta: this_rope_theta, partial: this_rope_partial, rope_scaling: config.rope_scaling }), OpKind::RoPE { num_heads: this_num_q_heads, head_dim: this_head_dim, theta: this_rope_theta, partial: this_rope_partial, rope_scaling: config.rope_scaling }, 
+                g.add_op(Op::RoPE(RopeSpec { num_heads: this_num_q_heads, head_dim: this_head_dim, theta: this_rope_theta, partial: this_rope_partial, rope_scaling: config.rope_scaling }), 
                     vec![q_for_attn], vec![rope_q], &ptname("rope_q"));
                 q_for_attn = rope_q;
 
                 let rope_k = g.add_tensor(&ptname("k_rope"), vec![s.clone(), SymDim::Concrete(k_n)], dt);
-                g.add_op_guarded_with_op(Op::RoPE(RopeSpec { num_heads: num_kv_heads, head_dim: this_head_dim, theta: this_rope_theta, partial: this_rope_partial, rope_scaling: config.rope_scaling }), OpKind::RoPE { num_heads: num_kv_heads, head_dim: this_head_dim, theta: this_rope_theta, partial: this_rope_partial, rope_scaling: config.rope_scaling }, 
+                g.add_op_guarded(Op::RoPE(RopeSpec { num_heads: num_kv_heads, head_dim: this_head_dim, theta: this_rope_theta, partial: this_rope_partial, rope_scaling: config.rope_scaling }), 
                     vec![k_for_attn], vec![rope_k], &ptname("rope_k"), kv_guard);
                 k_for_attn = rope_k;
             }
@@ -632,7 +632,7 @@ pub fn build_compiler_graph(
             // In encode/embedding/rerank graphs, MHA uses K/V directly without persistence.
             // kv_cache_ptr is resolved at lowering time from ABI, not as a graph tensor.
             if !features.is_post_norm {
-                g.add_op_with_op(Op::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: this_head_dim, seq_len: s.clone() }, OpKind::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: this_head_dim, seq_len: s.clone() }, 
+                g.add_op(Op::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: this_head_dim, seq_len: s.clone() }, 
                     vec![k_for_attn, v_out],
                     vec![],
                     &ptname("kv_write"),
@@ -642,7 +642,7 @@ pub fn build_compiler_graph(
             // Attention
             let causal = features.causal;
             let attn = g.add_tensor(&ptname("attn"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
-            g.add_op_with_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), OpKind::MultiHeadAttention { seq_len: s.clone(), num_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim, causal: causal, attention_sinks: features.attention_sinks, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }, 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 &ptname("mha"),
@@ -674,7 +674,7 @@ pub fn build_compiler_graph(
 
                 let laurel_activated = g.add_tensor(&ptname("laurel_activated"),
                     vec![s.clone(), SymDim::Concrete(laurel_rank)], dt);
-                g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![laurel_hidden], vec![laurel_activated], &ptname("laurel_gelu"));
+                g.add_op(Op::Gelu, vec![laurel_hidden], vec![laurel_activated], &ptname("laurel_gelu"));
 
                 let laurel_proj = g.add_tensor(&ptname("laurel_proj"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
@@ -684,7 +684,7 @@ pub fn build_compiler_graph(
 
                 let laurel_normed = g.add_tensor(&ptname("laurel_normed"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                     vec![laurel_proj, ln_w], vec![laurel_normed], &ptname("laurel_norm"));
                 laurel_out_tid = Some(laurel_normed);
             }
@@ -697,7 +697,7 @@ pub fn build_compiler_graph(
                 byte_cursor += weight_physical_bytes(&attn_sandwich_cn, sandwich_shape);
                 let normed = g.add_tensor(&ptname("post_attn_sandwich"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![o_out, sandwich_w], vec![normed], &ptname("post_attn_sandwich_norm"));
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![o_out, sandwich_w], vec![normed], &ptname("post_attn_sandwich_norm"));
                 normed
             } else {
                 o_out
@@ -708,14 +708,14 @@ pub fn build_compiler_graph(
             if let Some(laurel_tid) = laurel_out_tid {
                 let three_sum = g.add_tensor(&ptname("three_sum"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![hidden_tid, attn_sandwich_o_out], vec![three_sum], &ptname("attn_laurel_add12"));
+                g.add_op(Op::Add, vec![hidden_tid, attn_sandwich_o_out], vec![three_sum], &ptname("attn_laurel_add12"));
                 let three_full = g.add_tensor(&ptname("three_full"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![three_sum, laurel_tid], vec![three_full], &ptname("attn_laurel_add3"));
-                g.add_op_with_op(Op::ScaleConst { value: (1.0 / 2.0_f32.sqrt()) }, OpKind::ScaleConst { value: (1.0 / 2.0_f32.sqrt()) }, 
+                g.add_op(Op::Add, vec![three_sum, laurel_tid], vec![three_full], &ptname("attn_laurel_add3"));
+                g.add_op(Op::ScaleConst { value: (1.0 / 2.0_f32.sqrt()) }, 
                     vec![three_full], vec![resid], &ptname("attn_laurel_scale"));
             } else {
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![hidden_tid, attn_sandwich_o_out], vec![resid], &ptname("attn_resid"));
+                g.add_op(Op::Add, vec![hidden_tid, attn_sandwich_o_out], vec![resid], &ptname("attn_resid"));
             }
 
             // Post-attention norm
@@ -726,7 +726,7 @@ pub fn build_compiler_graph(
             byte_cursor += weight_physical_bytes(&post_cn, &post_norm_shape);
 
             let post_normed = g.add_tensor(&ptname("post_normed"), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![resid, post_norm_w], vec![post_normed], &ptname("post_norm"));
+            g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![resid, post_norm_w], vec![post_normed], &ptname("post_norm"));
 
             // FFN (SwiGLU — all Gemma 4 variants use SwiGLU)
             let ffn_resid_src = resid;
@@ -753,10 +753,10 @@ pub fn build_compiler_graph(
             let ffn_act_out = g.add_tensor(&ptname("ffn_act"), vec![s.clone(), SymDim::Concrete(this_intermediate)], dt);
             if matches!(features.ffn_type, FfnType::GeGLU) {
                 // GeGLU: GELU(gate) * up — fused BinaryElementwise trace
-                g.add_op_with_op(Op::GeGlu, OpKind::GeGlu, vec![gate_o, up_o], vec![ffn_act_out], &ptname("geglu"));
+                g.add_op(Op::GeGlu, vec![gate_o, up_o], vec![ffn_act_out], &ptname("geglu"));
             } else {
                 // SwiGLU: SiLU(gate) * up
-                g.add_op_with_op(Op::SwiGlu, OpKind::SwiGlu, vec![gate_o, up_o], vec![ffn_act_out], &ptname("swiglu"));
+                g.add_op(Op::SwiGlu, vec![gate_o, up_o], vec![ffn_act_out], &ptname("swiglu"));
             }
 
             let down_cn = cn_layer(ref_layer, "down_proj");
@@ -777,14 +777,14 @@ pub fn build_compiler_graph(
                 byte_cursor += weight_physical_bytes(&ffn_sandwich_cn, sandwich_shape);
                 let normed = g.add_tensor(&ptname("post_ffn_sandwich"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![down_out, sandwich_w], vec![normed], &ptname("post_ffn_sandwich_norm"));
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![down_out, sandwich_w], vec![normed], &ptname("post_ffn_sandwich_norm"));
                 normed
             } else {
                 down_out
             };
 
             let ffn_resid = g.add_tensor(&ptname("ffn_resid"), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![ffn_resid_src, ffn_sandwich_out], vec![ffn_resid], &ptname("ffn_resid"));
+            g.add_op(Op::Add, vec![ffn_resid_src, ffn_sandwich_out], vec![ffn_resid], &ptname("ffn_resid"));
 
             // AltUp correct + PLE gate + inject
             let layer_output: TensorId;
@@ -794,7 +794,7 @@ pub fn build_compiler_graph(
                 let corrected = g.add_tensor(&ptname("corrected"),
                     vec![s.clone(), SymDim::Concrete(altup_p * hidden)], dt);
                 if let (Some(preds), Some(coefs)) = (predictions_tid, corr_coefs_tid) {
-                    g.add_op_with_op(Op::AltUpCorrect { seq_len: s.clone(), num_preds: altup_p, hidden: hidden }, OpKind::AltUpCorrect { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![preds, coefs, ffn_resid], vec![corrected], &ptname("altup_correct"));
+                    g.add_op(Op::AltUpCorrect { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![preds, coefs, ffn_resid], vec![corrected], &ptname("altup_correct"));
                 } else {
                     return Err(GraphBuildError::InvalidDimension(
                         "AltUp enabled but missing prediction/correction coefficients".into()));
@@ -803,7 +803,7 @@ pub fn build_compiler_graph(
                 let hpl = features.hidden_size_per_layer_input;
                 let corrected_active = g.add_tensor(&ptname("corrected_active"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![corrected], vec![corrected_active], &ptname("corrected_active_slice"));
+                g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![corrected], vec![corrected_active], &ptname("corrected_active_slice"));
 
                 let gate_cn = cn_layer(ref_layer, "per_layer_input_gate");
                 let gate_logits = g.add_tensor(&ptname("ple_gate_logits"),
@@ -815,13 +815,13 @@ pub fn build_compiler_graph(
 
                 let gate = g.add_tensor(&ptname("ple_gate"),
                     vec![s.clone(), SymDim::Concrete(hpl)], dt);
-                g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![gate_logits], vec![gate], &ptname("ple_gelu"));
+                g.add_op(Op::Gelu, vec![gate_logits], vec![gate], &ptname("ple_gelu"));
 
                 let ple_input = g.add_tensor(&ptname("ple_input"),
                     vec![s.clone(), SymDim::Concrete(hpl)], dt);
                 let gated_ple = g.add_tensor(&ptname("gated_ple"),
                     vec![s.clone(), SymDim::Concrete(hpl)], dt);
-                g.add_op_with_op(Op::Mul, OpKind::Mul, vec![gate, ple_input], vec![gated_ple], &ptname("ple_gated_mul"));
+                g.add_op(Op::Mul, vec![gate, ple_input], vec![gated_ple], &ptname("ple_gated_mul"));
 
                 let ple_proj_cn = cn_layer(ref_layer, "per_layer_proj");
                 let projected = g.add_tensor(&ptname("ple_projected"),
@@ -837,7 +837,7 @@ pub fn build_compiler_graph(
                 if weight_shapes.contains_key(&ple_norm_cn) {
                     let norm_shape = get_shape(weight_shapes, &ple_norm_cn)?;
                     let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
-                    g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                    g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                         vec![projected, norm_w], vec![normalized], &ptname("ple_norm"));
                 } else {
                     normalized = projected;
@@ -845,7 +845,7 @@ pub fn build_compiler_graph(
 
                 let fat_out = g.add_tensor(&ptname("fat_out"),
                     vec![s.clone(), SymDim::Concrete(altup_p * hidden)], dt);
-                g.add_op_with_op(Op::AltUpInject { seq_len: s.clone(), num_preds: altup_p, hidden: hidden }, OpKind::AltUpInject { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![corrected, normalized], vec![fat_out], &ptname("altup_inject"));
+                g.add_op(Op::AltUpInject { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![corrected, normalized], vec![fat_out], &ptname("altup_inject"));
 
                 layer_output = ffn_resid;
                 fat_output_for_post = Some(fat_out);
@@ -869,14 +869,14 @@ pub fn build_compiler_graph(
                 // GELU(gate_logits) → gate [S, hpl]
                 let gate = g.add_tensor(&ptname("ple_gate"),
                     vec![s.clone(), SymDim::Concrete(hpl)], dt);
-                g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![gate_logits], vec![gate], &ptname("ple_gelu"));
+                g.add_op(Op::Gelu, vec![gate_logits], vec![gate], &ptname("ple_gelu"));
 
                 // gate × ple_input → gated_ple [S, hpl]
                 let ple_input = g.add_tensor(&ptname("ple_input"),
                     vec![s.clone(), SymDim::Concrete(hpl)], dt);
                 let gated_ple = g.add_tensor(&ptname("gated_ple"),
                     vec![s.clone(), SymDim::Concrete(hpl)], dt);
-                g.add_op_with_op(Op::Mul, OpKind::Mul, vec![gate, ple_input], vec![gated_ple], &ptname("ple_gated_mul"));
+                g.add_op(Op::Mul, vec![gate, ple_input], vec![gated_ple], &ptname("ple_gated_mul"));
 
                 // GEMM(gated_ple, per_layer_proj) → projected [S, H]
                 let ple_proj_cn = cn_layer(ref_layer, "per_layer_proj");
@@ -899,7 +899,7 @@ pub fn build_compiler_graph(
                     let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
                     wtids.push((norm_w, byte_cursor));
                     byte_cursor += weight_physical_bytes(&ple_norm_cn, &norm_shape);
-                    g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                    g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                         vec![projected, norm_w], vec![normalized], &ptname("ple_norm"));
                 } else {
                     normalized = projected;
@@ -908,7 +908,7 @@ pub fn build_compiler_graph(
                 // residual: ffn_resid + normalized
                 let ple_resid = g.add_tensor(&ptname("ple_resid"),
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![ffn_resid, normalized], vec![ple_resid], &ptname("ple_resid"));
+                g.add_op(Op::Add, vec![ffn_resid, normalized], vec![ple_resid], &ptname("ple_resid"));
 
                 layer_output = ple_resid;
                 fat_output_for_post = None;
@@ -982,18 +982,18 @@ pub fn build_compiler_graph(
             // active = fat_in[0] (ColumnSlice the first H columns)
             let active_in = g.add_tensor("layer.altup_active_in",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![fat_in], vec![active_in], "layer.altup_active_slice");
+            g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![fat_in], vec![active_in], "layer.altup_active_slice");
 
             // RMSNorm(active, router_norm) → router_normed [S, H]
             let router_normed = g.add_tensor("layer.router_normed",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(rn_w) = altup_router_norm_w {
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                     vec![active_in, rn_w], vec![router_normed], "layer.altup_router_norm");
             } else {
                 // Fallback: use standard RmsNorm weight from layer template
                 // (router shares input_norm weight in some configs)
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                     vec![active_in], vec![router_normed], "layer.altup_router_norm");
             }
 
@@ -1001,24 +1001,24 @@ pub fn build_compiler_graph(
             if let Some(router_w) = altup_modality_router_w {
                 let modalities_raw = g.add_tensor("layer.modalities_raw",
                     vec![s.clone(), SymDim::Concrete(altup_p)], dt);
-                g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p, k: hidden, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: altup_p, k: hidden, dtype: dt, trans_b: true },  vec![router_normed, router_w], vec![modalities_raw], "layer.altup_router_gemm");
+                g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p, k: hidden, dtype: dt, trans_b: true, has_bias: false }),  vec![router_normed, router_w], vec![modalities_raw], "layer.altup_router_gemm");
 
                 // Tanh(modalities_raw) → modalities [S, P]
                 let modalities = g.add_tensor("layer.modalities",
                     vec![s.clone(), SymDim::Concrete(altup_p)], dt);
-                g.add_op_with_op(Op::Tanh, OpKind::Tanh,
+                g.add_op(Op::Tanh,
                     vec![modalities_raw], vec![modalities], "layer.altup_tanh");
 
                 // GEMM(modalities, prediction_coefs) → prediction_coefs_out [S, P²]
                 if let Some(pred_w) = altup_prediction_coefs_w {
                     let pred_coefs_out = g.add_tensor("layer.pred_coefs",
                         vec![s.clone(), SymDim::Concrete(altup_p * altup_p)], dt);
-                    g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true },  vec![modalities, pred_w], vec![pred_coefs_out], "layer.altup_pred_coefs");
+                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p * altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }),  vec![modalities, pred_w], vec![pred_coefs_out], "layer.altup_pred_coefs");
 
                     // AltUpPredict: fat_buffer + pred_coefs → predictions [S, P*H]
                     let preds = g.add_tensor("layer.predictions",
                         vec![s.clone(), SymDim::Concrete(altup_p * hidden)], dt);
-                    g.add_op_with_op(Op::AltUpPredict { seq_len: s.clone(), num_preds: altup_p, hidden: hidden }, OpKind::AltUpPredict { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![fat_in, pred_coefs_out], vec![preds], "layer.altup_predict");
+                    g.add_op(Op::AltUpPredict { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![fat_in, pred_coefs_out], vec![preds], "layer.altup_predict");
                     predictions_tid = Some(preds);
                 }
 
@@ -1027,7 +1027,7 @@ pub fn build_compiler_graph(
                 if let Some(corr_w) = altup_correction_coefs_w {
                     let corr_coefs = g.add_tensor("layer.corr_coefs",
                         vec![s.clone(), SymDim::Concrete(altup_p)], dt);
-                    g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: altup_p, k: altup_p, dtype: dt, trans_b: true },  vec![modalities, corr_w], vec![corr_coefs], "layer.altup_corr_coefs");
+                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: altup_p, k: altup_p, dtype: dt, trans_b: true, has_bias: false }),  vec![modalities, corr_w], vec![corr_coefs], "layer.altup_corr_coefs");
                     corr_coefs_tid = Some(corr_coefs);
                 }
             }
@@ -1036,7 +1036,7 @@ pub fn build_compiler_graph(
             if let Some(preds) = predictions_tid {
                 let active = g.add_tensor("layer.altup_active",
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![preds], vec![active], "layer.altup_active_extract");
+                g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![preds], vec![active], "layer.altup_active_extract");
                 hidden_tid = active;
             } else {
                 // No prediction coefs — fall back to direct active path from fat buffer
@@ -1073,9 +1073,9 @@ pub fn build_compiler_graph(
             // Pre-norm: InputNorm applied before attention
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = input_norm_bias_tid {
-                g.add_op_with_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::LayerNorm { feature_dim: hidden, eps: eps },  vec![hidden_tid, norm_w_tid, bias], vec![n], "layer.input_norm");
+                g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![hidden_tid, norm_w_tid, bias], vec![n], "layer.input_norm");
             } else {
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![hidden_tid, norm_w_tid], vec![n], "layer.input_norm");
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![hidden_tid, norm_w_tid], vec![n], "layer.input_norm");
             }
             normed = n;
         }
@@ -1176,7 +1176,7 @@ pub fn build_compiler_graph(
             layer_weight_byte_cursor += weight_physical_bytes(&dkv_cn, &[dkv_n, dkv_k]);
 
             let c_kv = g.add_tensor("layer.c_kv", vec![s.clone(), SymDim::Concrete(dkv_n)], dt);
-            g.add_op_with_op(Op::MlaKvCompress { m: s.clone(), d_c: dkv_n, hidden: dkv_k }, OpKind::MlaKvCompress { m: s.clone(), d_c: dkv_n, hidden: dkv_k }, 
+            g.add_op(Op::MlaKvCompress { m: s.clone(), d_c: dkv_n, hidden: dkv_k }, 
                 vec![normed, dkv_w], vec![c_kv], "layer.kv_compress");
 
             // 3. RoPE key: k_pe_proj → k_pe [M, d_rope]
@@ -1203,7 +1203,7 @@ pub fn build_compiler_graph(
 
             let q_absorbed = g.add_tensor("layer.q_absorbed",
                 vec![s.clone(), SymDim::Concrete(uk_n * num_heads)], dt);
-            g.add_op_with_op(Op::MlaQAbsorb { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: uk_n }, OpKind::MlaQAbsorb { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: uk_n }, 
+            g.add_op(Op::MlaQAbsorb { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: uk_n }, 
                 vec![q_raw, uk_w], vec![q_absorbed], "layer.q_absorb");
 
             // 5. V restore weight: W_UV (v_b_proj) — passed to MlaAttention for internal V restore
@@ -1238,27 +1238,27 @@ pub fn build_compiler_graph(
                 let rope_q = g.add_tensor("layer.q_rope",
                     vec![s.clone(), SymDim::Concrete(qb_n)], dt);
                 if use_dual_mla {
-                    g.add_op_with_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), OpKind::DualRoPE { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }, 
+                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
                         vec![q_raw], vec![rope_q], "layer.rope_q_mla_unabs");
                 } else {
-                    g.add_op_with_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), OpKind::RoPE { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }, 
+                    g.add_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
                         vec![q_raw], vec![rope_q], "layer.rope_q_mla_unabs");
                 }
 
                 let rope_k = g.add_tensor("layer.k_rope",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], dt);
                 if use_dual_mla {
-                    g.add_op_with_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), OpKind::DualRoPE { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }, 
+                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
                         vec![k_restored], vec![rope_k], "layer.rope_k_mla_unabs");
                 } else {
-                    g.add_op_with_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), OpKind::RoPE { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }, 
+                    g.add_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
                         vec![k_restored], vec![rope_k], "layer.rope_k_mla_unabs");
                 }
 
                 // Standard MHA (not MLA attention)
                 let attn = g.add_tensor("layer.attn",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], dt);
-                g.add_op_with_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), OpKind::MultiHeadAttention { seq_len: s.clone(), num_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim, causal: causal, attention_sinks: false, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }, 
+                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
                     vec![rope_q, rope_k, v_restored],
                     vec![attn],
                     "layer.mha_mla_unabs",
@@ -1268,7 +1268,7 @@ pub fn build_compiler_graph(
                 // ── MLA Absorbed Path (default, bandwidth-optimized) ──
                 let attn = g.add_tensor("layer.attn",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], dt);
-                g.add_op_with_op(Op::MlaAttention(MlaSpec { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: mla_d_c, d_rope: mla_d_rope, causal: causal, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }), OpKind::MlaAttention { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: mla_d_c, d_rope: mla_d_rope, causal: causal, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }, 
+                g.add_op(Op::MlaAttention(MlaSpec { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: mla_d_c, d_rope: mla_d_rope, causal: causal, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }), 
                     vec![q_absorbed, c_kv, k_pe, uv_w],
                     vec![attn],
                     "layer.mla_attn",
@@ -1290,7 +1290,7 @@ pub fn build_compiler_graph(
                 add_gemm_or_quant(&mut g, &fqkv_cn, s.clone(), fused_n, fused_k,
                     vec![normed, fqkv_w], vec![fused_out], "layer.qkv_proj");
                 let q_slice = g.add_tensor("layer.q", vec![s.clone(), SymDim::Concrete(q_dim)], dt);
-                g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: 0, slice_dim: q_dim }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: 0, slice_dim: q_dim }, 
+                g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: 0, slice_dim: q_dim }, 
                     vec![fused_out], vec![q_slice], "layer.q_slice");
                 (q_slice, Some((fused_out, fused_n)), q_dim)
             } else {
@@ -1308,7 +1308,7 @@ pub fn build_compiler_graph(
                     let q_bias = g.add_tensor_concrete(&q_bias_cn, bias_shape, tdt(&q_bias_cn));
                     layer_weight_tids.push((q_bias, layer_weight_byte_cursor));
                     layer_weight_byte_cursor += weight_physical_bytes(&q_bias_cn, bias_shape);
-                    g.add_op_with_op(Op::GemmBias(GemmSpec { m: s.clone(), n: q_n, k: q_k, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: s.clone(), n: q_n, k: q_k, dtype: dt, trans_b: true }, 
+                    g.add_op(Op::GemmBias(GemmSpec { m: s.clone(), n: q_n, k: q_k, dtype: dt, trans_b: true, has_bias: true }), 
                         vec![normed, q_w, q_bias], vec![q_out], "layer.q_proj");
                 } else {
                     add_gemm_or_quant(&mut g, &q_cn, s.clone(), q_n, q_k,
@@ -1320,10 +1320,10 @@ pub fn build_compiler_graph(
             // ── K and V projections ──
             let (k_for_attn_final, mut v_out) = if let Some((ref fused_out_tid, fused_n)) = fused_qkv_out {
                 let k_slice = g.add_tensor("layer.k", vec![s.clone(), SymDim::Concrete(k_dim)], dt);
-                g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: q_dim, slice_dim: k_dim }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: q_dim, slice_dim: k_dim }, 
+                g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: q_dim, slice_dim: k_dim }, 
                     vec![*fused_out_tid], vec![k_slice], "layer.k_slice");
                 let v_slice = g.add_tensor("layer.v", vec![s.clone(), SymDim::Concrete(k_dim)], dt);
-                g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: q_dim + k_dim, slice_dim: k_dim }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: q_dim + k_dim, slice_dim: k_dim }, 
+                g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: q_dim + k_dim, slice_dim: k_dim }, 
                     vec![*fused_out_tid], vec![v_slice], "layer.v_slice");
                 (k_slice, v_slice)
             } else {
@@ -1341,12 +1341,12 @@ pub fn build_compiler_graph(
                     let k_bias = g.add_tensor_concrete(&k_bias_cn, bias_shape, tdt(&k_bias_cn));
                     layer_weight_tids.push((k_bias, layer_weight_byte_cursor));
                     layer_weight_byte_cursor += weight_physical_bytes(&k_bias_cn, bias_shape);
-                    g.add_op_guarded_with_op(Op::GemmBias(GemmSpec { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true }, 
+                    g.add_op_guarded(Op::GemmBias(GemmSpec { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true, has_bias: true }), 
                         vec![normed, k_w, k_bias], vec![k_out], "layer.k_proj", kv_guard);
                 } else if let Some(&qt) = weight_quant_types.get(&k_cn) {
-                    g.add_op_guarded_with_op(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: k_n, k: k_k, quant_type: qt }), OpKind::QuantGemm { m: s.clone(), n: k_n, k: k_k, quant_type: qt },  vec![normed, k_w], vec![k_out], "layer.k_proj", kv_guard);
+                    g.add_op_guarded(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: k_n, k: k_k, quant_type: qt }),  vec![normed, k_w], vec![k_out], "layer.k_proj", kv_guard);
                 } else {
-                    g.add_op_guarded_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true },  vec![normed, k_w], vec![k_out], "layer.k_proj", kv_guard);
+                    g.add_op_guarded(Op::Gemm(GemmSpec { m: s.clone(), n: k_n, k: k_k, dtype: dt, trans_b: true, has_bias: false }),  vec![normed, k_w], vec![k_out], "layer.k_proj", kv_guard);
                 }
 
                 let v_s = weight_shapes.get(&cn_layer(0, "v_proj"));
@@ -1363,12 +1363,12 @@ pub fn build_compiler_graph(
                     let v_bias = g.add_tensor_concrete(&v_bias_cn, bias_shape, tdt(&v_bias_cn));
                     layer_weight_tids.push((v_bias, layer_weight_byte_cursor));
                     layer_weight_byte_cursor += weight_physical_bytes(&v_bias_cn, bias_shape);
-                    g.add_op_guarded_with_op(Op::GemmBias(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true }, 
+                    g.add_op_guarded(Op::GemmBias(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true, has_bias: true }), 
                         vec![normed, v_w, v_bias], vec![v_out], "layer.v_proj", kv_guard);
                 } else if let Some(&qt) = weight_quant_types.get(&v_cn) {
-                    g.add_op_guarded_with_op(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: v_n, k: v_k, quant_type: qt }), OpKind::QuantGemm { m: s.clone(), n: v_n, k: v_k, quant_type: qt },  vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
+                    g.add_op_guarded(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: v_n, k: v_k, quant_type: qt }),  vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
                 } else {
-                    g.add_op_guarded_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true },  vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
+                    g.add_op_guarded(Op::Gemm(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: dt, trans_b: true, has_bias: false }),  vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
                 }
 
                 (k_out, v_out)
@@ -1380,7 +1380,7 @@ pub fn build_compiler_graph(
                 let v_n_for_norm = weight_shapes.get(&cn_layer(0, "v_proj"))
                     .map(|s| s[0]).unwrap_or(k_dim);
                 let v_normed = g.add_tensor("layer.v_normed", vec![s.clone(), SymDim::Concrete(v_n_for_norm)], dt);
-                g.add_op_guarded_with_op(Op::ValueNorm(NormSpec { feature_dim: v_n_for_norm, eps: eps, dtype: dt, has_weight: false }), OpKind::ValueNorm { feature_dim: v_n_for_norm, eps: eps }, 
+                g.add_op_guarded(Op::ValueNorm(NormSpec { feature_dim: v_n_for_norm, eps: eps, dtype: dt, has_weight: false }), 
                     vec![v_out], vec![v_normed], "layer.v_norm", kv_guard);
                 v_out = v_normed;
             }
@@ -1396,7 +1396,7 @@ pub fn build_compiler_graph(
                 layer_weight_byte_cursor += weight_physical_bytes(&q_norm_cn, &[head_dim]);
 
                 let q_normed = g.add_tensor("layer.q_normed", vec![s.clone(), SymDim::Concrete(q_n)], dt);
-                g.add_op_with_op(Op::HeadRmsNorm { head_dim: head_dim, eps: head_rms_eps, dtype: dt }, OpKind::HeadRmsNorm { head_dim: head_dim, eps: head_rms_eps }, 
+                g.add_op(Op::HeadRmsNorm { head_dim: head_dim, eps: head_rms_eps, dtype: dt }, 
                     vec![q_for_attn, q_norm_w], vec![q_normed], "layer.q_norm");
                 q_for_attn = q_normed;
 
@@ -1408,7 +1408,7 @@ pub fn build_compiler_graph(
                 let k_n_for_norm = weight_shapes.get(&cn_layer(0, "k_proj"))
                     .map(|s| s[0]).unwrap_or(k_dim);
                 let k_normed = g.add_tensor("layer.k_normed", vec![s.clone(), SymDim::Concrete(k_n_for_norm)], dt);
-                g.add_op_guarded_with_op(Op::HeadRmsNorm { head_dim: head_dim, eps: head_rms_eps, dtype: dt }, OpKind::HeadRmsNorm { head_dim: head_dim, eps: head_rms_eps }, 
+                g.add_op_guarded(Op::HeadRmsNorm { head_dim: head_dim, eps: head_rms_eps, dtype: dt }, 
                     vec![k_for_attn, k_norm_w], vec![k_normed], "layer.k_norm", kv_guard);
                 k_for_attn = k_normed;
             }
@@ -1419,14 +1419,14 @@ pub fn build_compiler_graph(
             if features.has_qk_norm && !features.has_head_rms_norm {
                 let qk_norm_eps = 1e-6f32;
                 let q_normed = g.add_tensor("layer.qk_normed_q", vec![s.clone(), SymDim::Concrete(q_n)], dt);
-                g.add_op_with_op(Op::QkNorm { head_dim: head_dim, eps: qk_norm_eps }, OpKind::QkNorm { head_dim: head_dim, eps: qk_norm_eps }, 
+                g.add_op(Op::QkNorm { head_dim: head_dim, eps: qk_norm_eps }, 
                     vec![q_for_attn], vec![q_normed], "layer.qk_norm_q");
                 q_for_attn = q_normed;
 
                 let k_n_for_qk_norm = weight_shapes.get(&cn_layer(0, "k_proj"))
                     .map(|s| s[0]).unwrap_or(k_dim);
                 let k_normed = g.add_tensor("layer.qk_normed_k", vec![s.clone(), SymDim::Concrete(k_n_for_qk_norm)], dt);
-                g.add_op_guarded_with_op(Op::QkNorm { head_dim: head_dim, eps: qk_norm_eps }, OpKind::QkNorm { head_dim: head_dim, eps: qk_norm_eps }, 
+                g.add_op_guarded(Op::QkNorm { head_dim: head_dim, eps: qk_norm_eps }, 
                     vec![k_for_attn], vec![k_normed], "layer.qk_norm_k", kv_guard);
                 k_for_attn = k_normed;
             }
@@ -1439,10 +1439,10 @@ pub fn build_compiler_graph(
                 let use_dual = config.global_rope_theta > 0.0;
                 let rope_q = g.add_tensor("layer.q_rope", vec![s.clone(), SymDim::Concrete(q_n)], dt);
                 if use_dual {
-                    g.add_op_with_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), OpKind::DualRoPE { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }, 
+                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
                         vec![q_for_attn], vec![rope_q], "layer.rope_q");
                 } else {
-                    g.add_op_with_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), OpKind::RoPE { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }, 
+                    g.add_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
                         vec![q_for_attn], vec![rope_q], "layer.rope_q");
                 }
                 q_for_attn = rope_q;
@@ -1451,10 +1451,10 @@ pub fn build_compiler_graph(
                     .map(|s| s[0]).unwrap_or(k_dim);
                 let rope_k = g.add_tensor("layer.k_rope", vec![s.clone(), SymDim::Concrete(k_n_for_rope)], dt);
                 if use_dual {
-                    g.add_op_guarded_with_op(Op::DualRoPE(DualRopeSpec { num_heads: num_kv_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), OpKind::DualRoPE { num_heads: num_kv_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }, 
+                    g.add_op_guarded(Op::DualRoPE(DualRopeSpec { num_heads: num_kv_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
                         vec![k_for_attn], vec![rope_k], "layer.rope_k", kv_guard);
                 } else {
-                    g.add_op_guarded_with_op(Op::RoPE(RopeSpec { num_heads: num_kv_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), OpKind::RoPE { num_heads: num_kv_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }, 
+                    g.add_op_guarded(Op::RoPE(RopeSpec { num_heads: num_kv_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
                         vec![k_for_attn], vec![rope_k], "layer.rope_k", kv_guard);
                 }
                 k_for_attn = rope_k;
@@ -1464,7 +1464,7 @@ pub fn build_compiler_graph(
             // In encode/embedding/rerank graphs, MHA uses K/V directly without persistence.
             // kv_cache_ptr is resolved at lowering time from ABI, not as a graph tensor.
             if !features.is_post_norm {
-                g.add_op_with_op(Op::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: head_dim, seq_len: s.clone() }, OpKind::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: head_dim, seq_len: s.clone() }, 
+                g.add_op(Op::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: head_dim, seq_len: s.clone() }, 
                     vec![k_for_attn, v_out],
                     vec![],
                     "layer.kv_write",
@@ -1474,7 +1474,7 @@ pub fn build_compiler_graph(
             // ── Attention ──
             let causal = features.causal;
             let attn = g.add_tensor("layer.attn", vec![s.clone(), SymDim::Concrete(q_n)], dt);
-            g.add_op_with_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), OpKind::MultiHeadAttention { seq_len: s.clone(), num_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim, causal: causal, attention_sinks: features.attention_sinks, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }, 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 "layer.mha",
@@ -1497,7 +1497,7 @@ pub fn build_compiler_graph(
             let o_bias = g.add_tensor_concrete(&o_bias_cn, bias_shape, tdt(&o_bias_cn));
             layer_weight_tids.push((o_bias, layer_weight_byte_cursor));
             layer_weight_byte_cursor += weight_physical_bytes(&o_bias_cn, bias_shape);
-            g.add_op_with_op(Op::GemmBias(GemmSpec { m: s.clone(), n: o_n, k: o_k_dim, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: s.clone(), n: o_n, k: o_k_dim, dtype: dt, trans_b: true }, 
+            g.add_op(Op::GemmBias(GemmSpec { m: s.clone(), n: o_n, k: o_k_dim, dtype: dt, trans_b: true, has_bias: true }), 
                 vec![attn_out, o_w, o_bias], vec![o_out], "layer.o_proj");
         } else {
             add_gemm_or_quant(&mut g, &o_cn, s.clone(), o_n, o_k_dim,
@@ -1522,7 +1522,7 @@ pub fn build_compiler_graph(
             // GELU(laurel_hidden)
             let laurel_activated = g.add_tensor("layer.laurel_activated",
                 vec![s.clone(), SymDim::Concrete(laurel_rank)], dt);
-            g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![laurel_hidden], vec![laurel_activated], "layer.laurel_gelu");
+            g.add_op(Op::Gelu, vec![laurel_hidden], vec![laurel_activated], "layer.laurel_gelu");
 
             // GEMM(laurel_activated, laurel_down) → [S, H]
             let laurel_proj = g.add_tensor("layer.laurel_proj",
@@ -1534,7 +1534,7 @@ pub fn build_compiler_graph(
             // RMSNorm(laurel_proj, laurel_norm) → [S, H]
             let laurel_normed = g.add_tensor("layer.laurel_normed",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+            g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                 vec![laurel_proj, ln_w], vec![laurel_normed], "layer.laurel_norm");
             laurel_out_tid = Some(laurel_normed);
         }
@@ -1547,15 +1547,15 @@ pub fn build_compiler_graph(
             // 3-way residual + √2 scaling
             let three_sum = g.add_tensor("layer.three_sum",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![hidden_tid, o_out], vec![three_sum], "layer.attn_laurel_add12");
+            g.add_op(Op::Add, vec![hidden_tid, o_out], vec![three_sum], "layer.attn_laurel_add12");
             let three_full = g.add_tensor("layer.three_full",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![three_sum, laurel_tid], vec![three_full], "layer.attn_laurel_add3");
+            g.add_op(Op::Add, vec![three_sum, laurel_tid], vec![three_full], "layer.attn_laurel_add3");
             // Divide by √2: 1/√2 ≈ 0.70710678
-            g.add_op_with_op(Op::ScaleConst { value: (1.0 / 2.0_f32.sqrt()) }, OpKind::ScaleConst { value: (1.0 / 2.0_f32.sqrt()) }, 
+            g.add_op(Op::ScaleConst { value: (1.0 / 2.0_f32.sqrt()) }, 
                 vec![three_full], vec![resid], "layer.attn_laurel_scale");
         } else {
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![hidden_tid, o_out], vec![resid], "layer.attn_resid");
+            g.add_op(Op::Add, vec![hidden_tid, o_out], vec![resid], "layer.attn_resid");
         }
 
         // ── Post-attention norm / FFN input norm ──
@@ -1582,18 +1582,18 @@ pub fn build_compiler_graph(
             // Post-norm: apply InputNorm (attention.output.LayerNorm) after attn residual → FFN input
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = input_norm_bias_tid {
-                g.add_op_with_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::LayerNorm { feature_dim: hidden, eps: eps },  vec![resid, norm_w_tid, bias], vec![n], "layer.input_norm");
+                g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![resid, norm_w_tid, bias], vec![n], "layer.input_norm");
             } else {
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![resid, norm_w_tid], vec![n], "layer.input_norm");
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![resid, norm_w_tid], vec![n], "layer.input_norm");
             }
             post_normed = n;
         } else {
             // Pre-norm: apply PostAttnNorm to resid → FFN input
             let pn = g.add_tensor("layer.post_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = post_norm_bias_tid {
-                g.add_op_with_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::LayerNorm { feature_dim: hidden, eps: eps },  vec![resid, post_norm_w, bias], vec![pn], "layer.post_norm");
+                g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![resid, post_norm_w, bias], vec![pn], "layer.post_norm");
             } else {
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![resid, post_norm_w], vec![pn], "layer.post_norm");
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![resid, post_norm_w], vec![pn], "layer.post_norm");
             }
             post_normed = pn;
         }
@@ -1620,11 +1620,11 @@ pub fn build_compiler_graph(
                         vec![post_normed, gate_w], vec![fused_out], "layer.gate_up_proj");
 
                     let gate_slice = g.add_tensor("layer.gate", vec![s.clone(), SymDim::Concrete(intermediate_size)], dt);
-                    g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: 0, slice_dim: intermediate_size }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: 0, slice_dim: intermediate_size }, 
+                    g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: 0, slice_dim: intermediate_size }, 
                         vec![fused_out], vec![gate_slice], "layer.gate_slice");
 
                     let up_slice = g.add_tensor("layer.up", vec![s.clone(), SymDim::Concrete(intermediate_size)], dt);
-                    g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: intermediate_size, slice_dim: intermediate_size }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: intermediate_size, slice_dim: intermediate_size }, 
+                    g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: fused_n, start: intermediate_size, slice_dim: intermediate_size }, 
                         vec![fused_out], vec![up_slice], "layer.up_slice");
                     (gate_slice, up_slice)
                 } else {
@@ -1651,10 +1651,10 @@ pub fn build_compiler_graph(
                 let ffn_act_out = g.add_tensor("layer.ffn_act", vec![s.clone(), SymDim::Concrete(intermediate_size)], dt);
                 if matches!(features.ffn_type, FfnType::GeGLU) {
                     // GeGLU: GELU(gate) * up — fused BinaryElementwise trace
-                    g.add_op_with_op(Op::GeGlu, OpKind::GeGlu, vec![gate_out, up_out], vec![ffn_act_out], "layer.geglu");
+                    g.add_op(Op::GeGlu, vec![gate_out, up_out], vec![ffn_act_out], "layer.geglu");
                 } else {
                     // SwiGLU: SiLU(gate) * up
-                    g.add_op_with_op(Op::SwiGlu, OpKind::SwiGlu, vec![gate_out, up_out], vec![ffn_act_out], "layer.swiglu");
+                    g.add_op(Op::SwiGlu, vec![gate_out, up_out], vec![ffn_act_out], "layer.swiglu");
                 }
 
                 let down_cn = cn_layer(0, "down_proj");
@@ -1668,7 +1668,7 @@ pub fn build_compiler_graph(
                     vec![ffn_act_out, down_w], vec![down_out], "layer.down_proj");
 
                 let ffn_resid = g.add_tensor("layer.ffn_resid", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![ffn_resid_src, down_out], vec![ffn_resid], "layer.ffn_resid");
+                g.add_op(Op::Add, vec![ffn_resid_src, down_out], vec![ffn_resid], "layer.ffn_resid");
                 ffn_resid_tid = Some(ffn_resid);
             }
             FfnType::Standard => {
@@ -1684,7 +1684,7 @@ pub fn build_compiler_graph(
                     let up_bias = g.add_tensor_concrete(&up_bias_cn, bias_shape, tdt(&up_bias_cn));
                     layer_weight_tids.push((up_bias, layer_weight_byte_cursor));
                     layer_weight_byte_cursor += weight_physical_bytes(&up_bias_cn, bias_shape);
-                    g.add_op_with_op(Op::GemmBias(GemmSpec { m: s.clone(), n: up_n, k: hidden, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: s.clone(), n: up_n, k: hidden, dtype: dt, trans_b: true }, 
+                    g.add_op(Op::GemmBias(GemmSpec { m: s.clone(), n: up_n, k: hidden, dtype: dt, trans_b: true, has_bias: true }), 
                         vec![post_normed, up_w, up_bias], vec![up_out], "layer.up_proj");
                 } else {
                     add_gemm_or_quant(&mut g, &up_cn, s.clone(), up_n, hidden,
@@ -1692,7 +1692,7 @@ pub fn build_compiler_graph(
                 }
 
                 let act_out = g.add_tensor("layer.act", vec![s.clone(), SymDim::Concrete(up_n)], dt);
-                g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![up_out], vec![act_out], "layer.gelu");
+                g.add_op(Op::Gelu, vec![up_out], vec![act_out], "layer.gelu");
 
                 let down_cn = cn_layer(0, "down_proj");
                 let down_w = g.add_tensor_concrete(&down_cn, &[hidden, up_n], tdt(&down_cn));
@@ -1705,7 +1705,7 @@ pub fn build_compiler_graph(
                     let down_bias = g.add_tensor_concrete(&down_bias_cn, bias_shape, tdt(&down_bias_cn));
                     layer_weight_tids.push((down_bias, layer_weight_byte_cursor));
                     layer_weight_byte_cursor += weight_physical_bytes(&down_bias_cn, bias_shape);
-                    g.add_op_with_op(Op::GemmBias(GemmSpec { m: s.clone(), n: hidden, k: up_n, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: s.clone(), n: hidden, k: up_n, dtype: dt, trans_b: true }, 
+                    g.add_op(Op::GemmBias(GemmSpec { m: s.clone(), n: hidden, k: up_n, dtype: dt, trans_b: true, has_bias: true }), 
                         vec![act_out, down_w, down_bias], vec![down_out], "layer.down_proj");
                 } else {
                     add_gemm_or_quant(&mut g, &down_cn, s.clone(), hidden, up_n,
@@ -1713,7 +1713,7 @@ pub fn build_compiler_graph(
                 }
 
                 let ffn_resid = g.add_tensor("layer.ffn_resid", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![ffn_resid_src, down_out], vec![ffn_resid], "layer.ffn_resid");
+                g.add_op(Op::Add, vec![ffn_resid_src, down_out], vec![ffn_resid], "layer.ffn_resid");
                 ffn_resid_tid = Some(ffn_resid);
             }
             FfnType::MoE => {
@@ -1736,12 +1736,12 @@ pub fn build_compiler_graph(
                 layer_weight_byte_cursor += weight_physical_bytes(&router_cn, &[router_n, router_k]);
 
                 let gate_probs = g.add_tensor("layer.gate_probs", vec![s.clone(), SymDim::Concrete(num_experts)], dt);
-                g.add_op_with_op(Op::MoEGate { seq_len: SymDim::Concrete(max_seq_len), num_experts: num_experts, hidden: hidden, top_k: top_k }, OpKind::MoEGate { seq_len: max_seq_len, num_experts: num_experts, hidden: hidden, top_k: top_k },
+                g.add_op(Op::MoEGate { seq_len: SymDim::Concrete(max_seq_len), num_experts: num_experts, hidden: hidden, top_k: top_k },
                     vec![post_normed, w_router], vec![gate_probs], "layer.moe_gate");
 
                 let topk_idx = g.add_tensor("layer.topk_idx", vec![s.clone(), SymDim::Concrete(top_k)], DType::F32);
                 let topk_w = g.add_tensor("layer.topk_w", vec![s.clone(), SymDim::Concrete(top_k)], DType::F32);
-                g.add_op_with_op(Op::TopK { seq_len: SymDim::Concrete(max_seq_len), num_experts: num_experts, top_k: top_k }, OpKind::TopK { seq_len: max_seq_len, num_experts: num_experts, top_k: top_k },
+                g.add_op(Op::TopK { seq_len: SymDim::Concrete(max_seq_len), num_experts: num_experts, top_k: top_k },
                     vec![gate_probs], vec![topk_idx, topk_w], "layer.topk");
 
                 let mut current_acc = g.add_tensor("layer.expert_acc", vec![s.clone(), SymDim::Concrete(hidden)], dt);
@@ -1753,11 +1753,11 @@ pub fn build_compiler_graph(
                     layer_weight_byte_cursor += weight_physical_bytes(&gate_exp_cn, &[hidden, inter]);
 
                     let gate_out = g.add_tensor(&format!("layer.exp{}.gate", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true }, 
+                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true, has_bias: false }), 
                         vec![post_normed, w_gate_e], vec![gate_out], &format!("layer.exp{}.gate_gemm", e));
 
                     let mask_out = g.add_tensor(&format!("layer.exp{}.mask", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op_with_op(Op::GateMask { hidden: inter }, OpKind::GateMask { hidden: inter },  vec![gate_out], vec![mask_out], &format!("layer.exp{}.gate_mask", e));
+                    g.add_op(Op::GateMask { hidden: inter },  vec![gate_out], vec![mask_out], &format!("layer.exp{}.gate_mask", e));
 
                     let up_exp_cn = cn_expert(0, e, "up_proj");
                     let w_up_e = g.add_tensor_concrete(&up_exp_cn, &[hidden, inter], tdt(&up_exp_cn));
@@ -1765,11 +1765,11 @@ pub fn build_compiler_graph(
                     layer_weight_byte_cursor += weight_physical_bytes(&up_exp_cn, &[hidden, inter]);
 
                     let up_out = g.add_tensor(&format!("layer.exp{}.up", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op_with_op(Op::MaskedGemm { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true }, OpKind::MaskedGemm { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true }, 
+                    g.add_op(Op::MaskedGemm { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true }, 
                         vec![post_normed, w_up_e, mask_out], vec![up_out], &format!("layer.exp{}.up_gemm", e));
 
                     let swiglu_out = g.add_tensor(&format!("layer.exp{}.swiglu", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op_with_op(Op::SwiGlu, OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], &format!("layer.exp{}.swiglu", e));
+                    g.add_op(Op::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], &format!("layer.exp{}.swiglu", e));
 
                     let down_exp_cn = cn_expert(0, e, "down_proj");
                     let w_down_e = g.add_tensor_concrete(&down_exp_cn, &[inter, hidden], tdt(&down_exp_cn));
@@ -1777,11 +1777,11 @@ pub fn build_compiler_graph(
                     layer_weight_byte_cursor += weight_physical_bytes(&down_exp_cn, &[inter, hidden]);
 
                     let down_out = g.add_tensor(&format!("layer.exp{}.down", e), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                    g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: hidden, k: inter, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: hidden, k: inter, dtype: dt, trans_b: true }, 
+                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: hidden, k: inter, dtype: dt, trans_b: true, has_bias: false }), 
                         vec![swiglu_out, w_down_e], vec![down_out], &format!("layer.exp{}.down_gemm", e));
 
                     let next_acc = g.add_tensor(&format!("layer.exp{}.acc", e), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                    g.add_op_with_op(Op::MoEConditionalAdd { seq_len: s.clone(), hidden: hidden, num_experts: num_experts, expert_idx: e }, OpKind::MoEConditionalAdd { seq_len: s.clone(), hidden: hidden, num_experts: num_experts, expert_idx: e }, 
+                    g.add_op(Op::MoEConditionalAdd { seq_len: s.clone(), hidden: hidden, num_experts: num_experts, expert_idx: e }, 
                         vec![current_acc, down_out, gate_probs], vec![next_acc], &format!("layer.exp{}.cond_add", e));
                     current_acc = next_acc;
                 }
@@ -1814,15 +1814,15 @@ pub fn build_compiler_graph(
                         vec![post_normed, se_gate_w], vec![se_gate], "layer.shared_gate_gemm");
                     add_gemm_or_quant(&mut g, &se_up_cn, s.clone(), inter, hidden,
                         vec![post_normed, se_up_w], vec![se_up], "layer.shared_up_gemm");
-                    g.add_op_with_op(Op::SwiGlu, OpKind::SwiGlu, vec![se_gate, se_up], vec![se_swiglu], "layer.shared_swiglu");
+                    g.add_op(Op::SwiGlu, vec![se_gate, se_up], vec![se_swiglu], "layer.shared_swiglu");
                     add_gemm_or_quant(&mut g, &se_down_cn, s.clone(), hidden, inter,
                         vec![se_swiglu, se_down_w], vec![se_down], "layer.shared_down_gemm");
-                    g.add_op_with_op(Op::Add, OpKind::Add, vec![current_acc, se_down], vec![se_out], "layer.shared_add");
+                    g.add_op(Op::Add, vec![current_acc, se_down], vec![se_out], "layer.shared_add");
                     current_acc = se_out;
                 }
 
                 let ffn_resid = g.add_tensor("layer.ffn_resid", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op_with_op(Op::Add, OpKind::Add, vec![ffn_resid_src, current_acc], vec![ffn_resid], "layer.moe_resid");
+                g.add_op(Op::Add, vec![ffn_resid_src, current_acc], vec![ffn_resid], "layer.moe_resid");
                 ffn_resid_tid = Some(ffn_resid);
             }
         }
@@ -1839,7 +1839,7 @@ pub fn build_compiler_graph(
             let corrected = g.add_tensor("layer.corrected",
                 vec![s.clone(), SymDim::Concrete(altup_p * hidden)], dt);
             if let (Some(preds), Some(coefs)) = (predictions_tid, corr_coefs_tid) {
-                g.add_op_with_op(Op::AltUpCorrect { seq_len: s.clone(), num_preds: altup_p, hidden: hidden }, OpKind::AltUpCorrect { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![preds, coefs, gated], vec![corrected], "layer.altup_correct");
+                g.add_op(Op::AltUpCorrect { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![preds, coefs, gated], vec![corrected], "layer.altup_correct");
             } else {
                 return Err(GraphBuildError::InvalidDimension(
                     "AltUp enabled but missing prediction/correction coefficients".into()));
@@ -1849,7 +1849,7 @@ pub fn build_compiler_graph(
             let hpl = features.hidden_size_per_layer_input;
             let corrected_active = g.add_tensor("layer.corrected_active",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![corrected], vec![corrected_active], "layer.corrected_active_slice");
+            g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![corrected], vec![corrected_active], "layer.corrected_active_slice");
 
             let gate_cn = cn_layer(0, "per_layer_input_gate");
             let gate_logits = g.add_tensor("layer.ple_gate_logits",
@@ -1863,7 +1863,7 @@ pub fn build_compiler_graph(
 
             let gate = g.add_tensor("layer.ple_gate",
                 vec![s.clone(), SymDim::Concrete(hpl)], dt);
-            g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![gate_logits], vec![gate], "layer.ple_gelu");
+            g.add_op(Op::Gelu, vec![gate_logits], vec![gate], "layer.ple_gelu");
 
             // gate × ple_input → gated_ple [S, hpl]
             // ple_input is a per-layer tensor stepped by the layer loop (runtime).
@@ -1871,7 +1871,7 @@ pub fn build_compiler_graph(
                 vec![s.clone(), SymDim::Concrete(hpl)], dt);
             let gated_ple = g.add_tensor("layer.gated_ple",
                 vec![s.clone(), SymDim::Concrete(hpl)], dt);
-            g.add_op_with_op(Op::Mul, OpKind::Mul, vec![gate, ple_input], vec![gated_ple], "layer.ple_gated_mul");
+            g.add_op(Op::Mul, vec![gate, ple_input], vec![gated_ple], "layer.ple_gated_mul");
 
             // GEMM(gated_ple, per_layer_proj_w) → projected [S, H]
             let ple_proj_cn = cn_layer(0, "per_layer_proj");
@@ -1891,7 +1891,7 @@ pub fn build_compiler_graph(
             if weight_shapes.contains_key(&ple_norm_cn) {
                 let norm_shape = get_shape(weight_shapes, &ple_norm_cn)?;
                 let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                     vec![projected, norm_w], vec![normalized], "layer.ple_norm");
             } else {
                 normalized = projected;
@@ -1900,7 +1900,7 @@ pub fn build_compiler_graph(
             // AltUpInject: corrected[1:] += normalized → fat_output [S, P*H]
             let fat_out = g.add_tensor("altup.fat_out",
                 vec![s.clone(), SymDim::Concrete(altup_p * hidden)], dt);
-            g.add_op_with_op(Op::AltUpInject { seq_len: s.clone(), num_preds: altup_p, hidden: hidden }, OpKind::AltUpInject { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![corrected, normalized], vec![fat_out], "layer.altup_inject");
+            g.add_op(Op::AltUpInject { seq_len: s.clone(), num_preds: altup_p, hidden: hidden },  vec![corrected, normalized], vec![fat_out], "layer.altup_inject");
 
             layer_output = fat_out;
             fat_output_tid = Some(fat_out);
@@ -1924,13 +1924,13 @@ pub fn build_compiler_graph(
 
             let gate = g.add_tensor("layer.ple_gate",
                 vec![s.clone(), SymDim::Concrete(hpl)], dt);
-            g.add_op_with_op(Op::Gelu, OpKind::Gelu, vec![gate_logits], vec![gate], "layer.ple_gelu");
+            g.add_op(Op::Gelu, vec![gate_logits], vec![gate], "layer.ple_gelu");
 
             let ple_input = g.add_tensor("layer.ple_input",
                 vec![s.clone(), SymDim::Concrete(hpl)], dt);
             let gated_ple = g.add_tensor("layer.gated_ple",
                 vec![s.clone(), SymDim::Concrete(hpl)], dt);
-            g.add_op_with_op(Op::Mul, OpKind::Mul, vec![gate, ple_input], vec![gated_ple], "layer.ple_gated_mul");
+            g.add_op(Op::Mul, vec![gate, ple_input], vec![gated_ple], "layer.ple_gated_mul");
 
             let ple_proj_cn = cn_layer(0, "per_layer_proj");
             let projected = g.add_tensor("layer.ple_projected",
@@ -1948,7 +1948,7 @@ pub fn build_compiler_graph(
             if weight_shapes.contains_key(&ple_norm_cn) {
                 let norm_shape = get_shape(weight_shapes, &ple_norm_cn)?;
                 let norm_w = g.add_tensor_concrete(&ple_norm_cn, &norm_shape, tdt(&ple_norm_cn));
-                g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps }, 
+                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), 
                     vec![projected, norm_w], vec![normalized], "layer.ple_norm");
             } else {
                 normalized = projected;
@@ -1956,7 +1956,7 @@ pub fn build_compiler_graph(
 
             let ple_resid = g.add_tensor("layer.ple_resid",
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add, vec![gated, normalized], vec![ple_resid], "layer.ple_resid");
+            g.add_op(Op::Add, vec![gated, normalized], vec![ple_resid], "layer.ple_resid");
             layer_output = ple_resid;
             fat_output_tid = None;
             tensor_map.insert("hidden_0".to_string(), ple_resid);
@@ -1966,10 +1966,10 @@ pub fn build_compiler_graph(
                 let post_ffn_normed = g.add_tensor("layer.post_ffn_normed",
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
                 if let Some(bias) = post_norm_bias_tid {
-                    g.add_op_with_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::LayerNorm { feature_dim: hidden, eps: eps },  vec![gated, post_norm_w, bias],
+                    g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![gated, post_norm_w, bias],
                         vec![post_ffn_normed], "layer.post_norm");
                 } else {
-                    g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![gated, post_norm_w],
+                    g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![gated, post_norm_w],
                         vec![post_ffn_normed], "layer.post_norm");
                 }
                 layer_output = post_ffn_normed;
@@ -2018,14 +2018,14 @@ pub fn build_compiler_graph(
         // Path 0 (active) — no unembed needed
         let path0 = g.add_tensor("altup.path0",
             vec![s.clone(), SymDim::Concrete(hidden)], dt);
-        g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![fat_final], vec![path0], "altup.path0_slice");
+        g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: 0, slice_dim: hidden },  vec![fat_final], vec![path0], "altup.path0_slice");
 
         // Unembed paths 1..P-1 and accumulate into mean
         let mut path_sum = path0;
         for i in 1..altup_p {
             let path_i = g.add_tensor(&format!("altup.path{}", i),
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: i * hidden, slice_dim: hidden }, OpKind::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: i * hidden, slice_dim: hidden },  vec![fat_final], vec![path_i], &format!("altup.path{}_slice", i));
+            g.add_op(Op::ColumnSlice { seq_len: s.clone(), input_inner: altup_p * hidden, start: i * hidden, slice_dim: hidden },  vec![fat_final], vec![path_i], &format!("altup.path{}_slice", i));
 
             // Unembed projection (optional — only if weight exists)
             let unembed_cn = format!("altup_unembed_projection.{}", i);
@@ -2035,7 +2035,7 @@ pub fn build_compiler_graph(
                 let unembed_w = g.add_tensor_concrete(&unembed_cn, &[un_n, un_k], tdt(&unembed_cn));
                 let unemb = g.add_tensor(&format!("altup.unembedded{}", i),
                     vec![s.clone(), SymDim::Concrete(un_n)], dt);
-                g.add_op_with_op(Op::Gemm(GemmSpec { m: s.clone(), n: un_n, k: un_k, dtype: dt, trans_b: true, has_bias: false }), OpKind::Gemm { m: s.clone(), n: un_n, k: un_k, dtype: dt, trans_b: true },  vec![path_i, unembed_w], vec![unemb], &format!("altup.unembed{}", i));
+                g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: un_n, k: un_k, dtype: dt, trans_b: true, has_bias: false }),  vec![path_i, unembed_w], vec![unemb], &format!("altup.unembed{}", i));
                 unemb
             } else {
                 path_i
@@ -2044,7 +2044,7 @@ pub fn build_compiler_graph(
             // Accumulate: path_sum += unembedded_i
             let new_sum = g.add_tensor(&format!("altup.path_sum{}", i),
                 vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op_with_op(Op::Add, OpKind::Add,
+            g.add_op(Op::Add,
                 vec![path_sum, unembedded_i], vec![new_sum], &format!("altup.accumulate{}", i));
             path_sum = new_sum;
         }
@@ -2059,7 +2059,7 @@ pub fn build_compiler_graph(
     if features.is_post_norm {
         // MeanPool: average over seq dimension → [hidden]
         let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
-        g.add_op_with_op(Op::MeanPool { seq_len: 0, hidden: hidden, cls_mode: false }, OpKind::MeanPool { seq_len: 0, hidden: hidden, cls_mode: false },  vec![final_hidden], vec![pooled], "meanpool");
+        g.add_op(Op::MeanPool { seq_len: 0, hidden: hidden, cls_mode: false },  vec![final_hidden], vec![pooled], "meanpool");
 
         // Classifier head (if present): Dense → tanh → OutProj → output
         if features.has_classifier {
@@ -2080,7 +2080,7 @@ pub fn build_compiler_graph(
 
             // tanh activation
             let cls_act = g.add_tensor("cls_act", vec![SymDim::Concrete(cls_n)], dt);
-            g.add_op_with_op(Op::Tanh, OpKind::Tanh, vec![cls_dense_out], vec![cls_act], "cls_tanh");
+            g.add_op(Op::Tanh, vec![cls_dense_out], vec![cls_act], "cls_tanh");
 
             // OutProj: [cls_n] → [num_labels] (typically 1 for rerankers)
             let cls_out_cn = weight_shapes.keys()
@@ -2105,7 +2105,7 @@ pub fn build_compiler_graph(
                 let bias_tid = g.add_tensor_concrete(&cls_out_bias_cn, &[num_labels], tdt(&cls_out_bias_cn));
                 // Overwrite the last Gemm with GemmBias (reuse same output tensor)
                 let biased = g.add_tensor("cls_result_biased", vec![SymDim::Concrete(num_labels)], dt);
-                g.add_op_with_op(Op::GemmBias(GemmSpec { m: SymDim::Concrete(1), n: num_labels, k: cls_out_k, dtype: dt, trans_b: true, has_bias: true }), OpKind::GemmBias { m: SymDim::Concrete(1), n: num_labels, k: cls_out_k, dtype: dt, trans_b: true }, 
+                g.add_op(Op::GemmBias(GemmSpec { m: SymDim::Concrete(1), n: num_labels, k: cls_out_k, dtype: dt, trans_b: true, has_bias: true }), 
                     vec![cls_act, cls_out_w, bias_tid], vec![biased], "cls_out_proj_biased");
                 g.outputs = vec![biased];
             } else {
@@ -2128,10 +2128,10 @@ pub fn build_compiler_graph(
         let final_norm_w = g.add_tensor_concrete("final_norm", &[hidden], tdt("final_norm"));
         let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
         if use_rms {
-            g.add_op_with_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::RmsNorm { feature_dim: hidden, eps: eps },  vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
+            g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
         } else {
             let bias_tid = g.add_tensor_concrete("final_norm.bias", &[hidden], tdt("final_norm.bias"));
-            g.add_op_with_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }), OpKind::LayerNorm { feature_dim: hidden, eps: eps },  vec![final_hidden, final_norm_w, bias_tid], vec![final_normed], "final_norm");
+            g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![final_hidden, final_norm_w, bias_tid], vec![final_normed], "final_norm");
         }
 
         // ── lm_head → LogitSoftcap → Argmax → StoreToken → CheckStopCondition ──
@@ -2148,7 +2148,7 @@ pub fn build_compiler_graph(
         // cap * tanh(logits / cap) before argmax — prevents extreme logit values.
         if let Some(cap) = config.final_logit_softcapping {
             let softcapped = g.add_tensor("logits_softcapped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-            g.add_op_with_op(Op::LogitSoftcap { cap: cap }, OpKind::LogitSoftcap { cap: cap },  vec![logits], vec![softcapped], "logit_softcap");
+            g.add_op(Op::LogitSoftcap { cap: cap },  vec![logits], vec![softcapped], "logit_softcap");
             logits = softcapped;
         }
 
@@ -2216,9 +2216,9 @@ pub fn build_compiler_graph(
                 vec![SymDim::Concrete(1)],
                 dt,
             );
-            g.add_op_with_op(Op::Argmax { vocab_size: mtp_n }, OpKind::Argmax { vocab_size: mtp_n }, 
+            g.add_op(Op::Argmax { vocab_size: mtp_n }, 
                 vec![mtp_logits], vec![mtp_token], &format!("mtp_argmax_{}", d));
-            g.add_op_with_op(Op::StoreToken, OpKind::StoreToken,
+            g.add_op(Op::StoreToken,
                 vec![mtp_token], vec![], &format!("mtp_store_{}", d));
         }
 
@@ -2226,9 +2226,9 @@ pub fn build_compiler_graph(
         // Always present in non-post-norm graphs.  BUILD strategy prunes
         // these when OutputMode is EncodeToLayer/ClassifyBinary.
         let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
-        g.add_op_with_op(Op::Argmax { vocab_size: vocab_size }, OpKind::Argmax { vocab_size: vocab_size },  vec![logits], vec![token_id], "argmax");
-        g.add_op_with_op(Op::StoreToken, OpKind::StoreToken, vec![token_id], vec![], "store_token");
-        g.add_op_with_op(Op::CheckStopCondition, OpKind::CheckStopCondition, vec![token_id], vec![], "check_stop");
+        g.add_op(Op::Argmax { vocab_size: vocab_size },  vec![logits], vec![token_id], "argmax");
+        g.add_op(Op::StoreToken, vec![token_id], vec![], "store_token");
+        g.add_op(Op::CheckStopCondition, vec![token_id], vec![], "check_stop");
     }
 
     // Set graph inputs: all tensors without a producer (external inputs).
@@ -2424,8 +2424,11 @@ pub fn build_compiler_graph(
     // Register physical byte sizes for all quantized weight tensors.
     let quant_sizes: Vec<(gllm_kernels::compiler::graph::TensorId, usize)> = g.ops.iter()
         .filter_map(|op| {
-            match op.kind {
-                OpKind::QuantGemm { n, k, quant_type, .. } => {
+            match &op.op_v2 {
+                Op::QuantGemm(spec) => {
+                    let n = spec.n;
+                    let k = spec.k;
+                    let quant_type = spec.quant_type;
                     op.inputs.get(1).map(|&weight_tid| {
                         let bs = quant_type.block_size();
                         let bb = quant_type.block_bytes();
@@ -2436,7 +2439,10 @@ pub fn build_compiler_graph(
                         }
                     })
                 }
-                OpKind::QuantGather { quant_type, vocab_size, hidden_dim, .. } => {
+                Op::QuantGather { quant_type, vocab_size, hidden_dim, .. } => {
+                    let quant_type = *quant_type;
+                    let vocab_size = *vocab_size;
+                    let hidden_dim = *hidden_dim;
                     op.inputs.get(1).map(|&weight_tid| {
                         let bs = quant_type.block_size();
                         let bb = quant_type.block_bytes();

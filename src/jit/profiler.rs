@@ -323,7 +323,8 @@ impl LatencyProfiler {
         hidden: usize,
         _profile: &DeviceProfile,
     ) -> Result<MicroKernel, ProbeError> {
-        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+        use gllm_kernels::compiler::{CompilerGraph, Op};
+        use gllm_kernels::compiler::graph::GemmSpec;
         use gllm_kernels::types::DType;
 
         // 构建微型 GEMM 图
@@ -334,15 +335,16 @@ impl LatencyProfiler {
         let b_id = graph.add_tensor_concrete("B", &[hidden, hidden], DType::F32);
         let c_id = graph.add_tensor_concrete("C", &[seq_len, hidden], DType::F32);
 
-        // 添加 GEMM 算子 - OpKind::Gemm 需要提供字段
+        // 添加 GEMM 算子 - Op::Gemm 需要提供字段
         graph.add_op(
-            OpKind::Gemm{
+            Op::Gemm(GemmSpec{
                 m: gllm_kernels::compiler::SymDim::Concrete(seq_len),
                 n: hidden,
                 k: hidden,
                 dtype: DType::F32,
                 trans_b: false,
-            },
+                has_bias: false,
+            }),
             vec![a_id, b_id],
             vec![c_id],
             "micro_gemm",

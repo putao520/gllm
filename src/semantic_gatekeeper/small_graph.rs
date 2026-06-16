@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use gllm_kernels::compiler::{
-    CompiledLayer, CompilerGraph, InferenceCompiler, Op, OpKind,
+    CompiledLayer, CompilerGraph, InferenceCompiler, Op,
     SymDim,
 };
 use gllm_kernels::compiler::graph::{GemmSpec, NormSpec};
@@ -143,15 +143,8 @@ impl EmbedLookupOnlyGraph {
         g.inputs = vec![indices, table];
         g.outputs = vec![output];
 
-        g.add_op_with_op(
+        g.add_op(
             Op::Gather {
-                table_rows: vocab_size,
-                embed_dim: hidden_size,
-                index_dim: sym_seq(max_seq_len),
-                indices_kind: Default::default(),
-                scale: None,
-            },
-            OpKind::Gather {
                 table_rows: vocab_size,
                 embed_dim: hidden_size,
                 index_dim: sym_seq(max_seq_len),
@@ -421,14 +414,13 @@ impl KProjOnlyGraph {
         );
         gn.inputs = vec![norm_in, norm_w];
         gn.outputs = vec![norm_out];
-        gn.add_op_with_op(
+        gn.add_op(
             Op::RmsNorm(NormSpec {
                 feature_dim: hidden_size,
                 eps: rms_eps,
                 dtype,
                 has_weight: true,
             }),
-            OpKind::RmsNorm { feature_dim: hidden_size, eps: rms_eps },
             vec![norm_in, norm_w],
             vec![norm_out],
             "sg_rmsnorm",
@@ -467,7 +459,7 @@ impl KProjOnlyGraph {
         );
         gg.inputs = vec![gemm_in, k_w];
         gg.outputs = vec![k_out];
-        gg.add_op_with_op(
+        gg.add_op(
             Op::Gemm(GemmSpec {
                 m: sym_seq(max_seq_len),
                 n: kv_dim,
@@ -476,13 +468,6 @@ impl KProjOnlyGraph {
                 trans_b: false,
                 has_bias: false,
             }),
-            OpKind::Gemm{
-                m: sym_seq(max_seq_len),
-                n: kv_dim,
-                k: hidden_size,
-                dtype,
-                trans_b: false,
-            },
             vec![gemm_in, k_w],
             vec![k_out],
             "sg_gemm",

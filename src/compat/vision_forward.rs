@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use gllm_kernels::compiler::{
-    CompilerGraph, InferenceCompiler, OpKind,
+    CompilerGraph, InferenceCompiler,
     ShapeBinding, SymDim, TensorId,
 };
 use gllm_kernels::compiler::graph::{
@@ -395,14 +395,8 @@ fn build_vision_encoder_graph(
 
     // 1. PatchEmbed: image → patches [num_patches, hidden]
     let patches = g.add_tensor_concrete("patches", &[num_patches, hidden], dt);
-    g.add_op_with_op(
+    g.add_op(
         Op::PatchEmbed {
-            patch_size,
-            embed_dim: hidden,
-            in_channels,
-            image_size,
-        },
-        OpKind::PatchEmbed {
             patch_size,
             embed_dim: hidden,
             in_channels,
@@ -415,12 +409,8 @@ fn build_vision_encoder_graph(
 
     // 2. LearnedPos2D: patches + pos_table → hidden_0
     let hidden_init = g.add_tensor_concrete("hidden_0", &[num_patches, hidden], dt);
-    g.add_op_with_op(
+    g.add_op(
         Op::LearnedPos2D {
-            num_patches,
-            embed_dim: hidden,
-        },
-        OpKind::LearnedPos2D {
             num_patches,
             embed_dim: hidden,
         },
@@ -438,12 +428,8 @@ fn build_vision_encoder_graph(
             &[num_patches, hidden],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::LayerNorm(NormSpec { feature_dim: hidden, eps: VISION_LAYERNORM_EPS, dtype: dt, has_weight: true }),
-            OpKind::LayerNorm {
-                feature_dim: hidden,
-                eps: VISION_LAYERNORM_EPS,
-            },
             vec![current_hidden, layer.ln1_weight, layer.ln1_bias],
             vec![normed1],
             &format!("layer_{li}_ln1"),
@@ -456,15 +442,8 @@ fn build_vision_encoder_graph(
             &[num_patches, q_dim],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(num_patches), n: q_dim, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{
-                m: SymDim::Concrete(num_patches),
-                n: q_dim,
-                k: hidden,
-                dtype: dt,
-                trans_b: false,
-            },
             vec![normed1, layer.w_q],
             vec![q],
             &format!("layer_{li}_q_proj"),
@@ -474,15 +453,8 @@ fn build_vision_encoder_graph(
             &[num_patches, q_dim],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(num_patches), n: q_dim, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{
-                m: SymDim::Concrete(num_patches),
-                n: q_dim,
-                k: hidden,
-                dtype: dt,
-                trans_b: false,
-            },
             vec![normed1, layer.w_k],
             vec![k],
             &format!("layer_{li}_k_proj"),
@@ -492,15 +464,8 @@ fn build_vision_encoder_graph(
             &[num_patches, q_dim],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(num_patches), n: q_dim, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{
-                m: SymDim::Concrete(num_patches),
-                n: q_dim,
-                k: hidden,
-                dtype: dt,
-                trans_b: false,
-            },
             vec![normed1, layer.w_v],
             vec![v],
             &format!("layer_{li}_v_proj"),
@@ -512,7 +477,7 @@ fn build_vision_encoder_graph(
             &[num_patches, q_dim],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::MultiHeadAttention(AttentionSpec {
                 geometry: AttentionGeometry {
                     num_q_heads: num_heads,
@@ -525,15 +490,6 @@ fn build_vision_encoder_graph(
                 seq_len: SymDim::Concrete(num_patches),
                 dtype: DType::F32,
             }),
-            OpKind::MultiHeadAttention {
-                seq_len: SymDim::Concrete(num_patches),
-                num_heads,
-                num_kv_heads: num_heads,
-                head_dim,
-                causal: false,
-                attention_sinks: false,
-                kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
-            },
             vec![q, k, v],
             vec![attn],
             &format!("layer_{li}_mha"),
@@ -545,15 +501,8 @@ fn build_vision_encoder_graph(
             &[num_patches, hidden],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(num_patches), n: hidden, k: q_dim, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{
-                m: SymDim::Concrete(num_patches),
-                n: hidden,
-                k: q_dim,
-                dtype: dt,
-                trans_b: false,
-            },
             vec![attn, layer.w_o],
             vec![o_proj],
             &format!("layer_{li}_o"),
@@ -565,9 +514,8 @@ fn build_vision_encoder_graph(
             &[num_patches, hidden],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Residual,
-            OpKind::Residual,
             vec![current_hidden, o_proj],
             vec![after_attn],
             &format!("layer_{li}_attn_residual"),
@@ -579,12 +527,8 @@ fn build_vision_encoder_graph(
             &[num_patches, hidden],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::LayerNorm(NormSpec { feature_dim: hidden, eps: VISION_LAYERNORM_EPS, dtype: dt, has_weight: true }),
-            OpKind::LayerNorm {
-                feature_dim: hidden,
-                eps: VISION_LAYERNORM_EPS,
-            },
             vec![after_attn, layer.ln2_weight, layer.ln2_bias],
             vec![normed2],
             &format!("layer_{li}_ln2"),
@@ -596,15 +540,8 @@ fn build_vision_encoder_graph(
             &[num_patches, inter],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(num_patches), n: inter, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{
-                m: SymDim::Concrete(num_patches),
-                n: inter,
-                k: hidden,
-                dtype: dt,
-                trans_b: false,
-            },
             vec![normed2, layer.w_fc1],
             vec![fc1],
             &format!("layer_{li}_fc1"),
@@ -616,9 +553,8 @@ fn build_vision_encoder_graph(
             &[num_patches, inter],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gelu,
-            OpKind::Gelu,
             vec![fc1],
             vec![gelu_out],
             &format!("layer_{li}_gelu"),
@@ -630,15 +566,8 @@ fn build_vision_encoder_graph(
             &[num_patches, hidden],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(num_patches), n: hidden, k: inter, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{
-                m: SymDim::Concrete(num_patches),
-                n: hidden,
-                k: inter,
-                dtype: dt,
-                trans_b: false,
-            },
             vec![gelu_out, layer.w_fc2],
             vec![fc2],
             &format!("layer_{li}_fc2_proj"),
@@ -650,9 +579,8 @@ fn build_vision_encoder_graph(
             &[num_patches, hidden],
             dt,
         );
-        g.add_op_with_op(
+        g.add_op(
             Op::Residual,
-            OpKind::Residual,
             vec![after_attn, fc2],
             vec![after_ffn],
             &format!("layer_{li}_ffn_residual"),
@@ -667,12 +595,8 @@ fn build_vision_encoder_graph(
         &[num_patches, hidden],
         dt,
     );
-    g.add_op_with_op(
+    g.add_op(
         Op::LayerNorm(NormSpec { feature_dim: hidden, eps: VISION_LAYERNORM_EPS, dtype: dt, has_weight: true }),
-        OpKind::LayerNorm {
-            feature_dim: hidden,
-            eps: VISION_LAYERNORM_EPS,
-        },
         vec![
             current_hidden,
             inputs.final_norm_weight,
@@ -1231,7 +1155,7 @@ mod tests {
         // Build a minimal PatchEmbed + LearnedPos2D graph with no layers,
         // bypassing the full builder. If this executes while the full
         // encoder SIGSEGVs, the issue is isolated to attention / ffn path.
-        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+        use gllm_kernels::compiler::CompilerGraph;
         use gllm_kernels::compiler::graph::Op;
         use gllm_kernels::types::DType;
 
@@ -1248,17 +1172,15 @@ mod tests {
         g.inputs = vec![image, kernel, pos];
 
         let patches = g.add_tensor_concrete("patches", &[num_patches, embed_dim], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::PatchEmbed { patch_size, embed_dim, in_channels, image_size },
-            OpKind::PatchEmbed { patch_size, embed_dim, in_channels, image_size },
             vec![image, kernel],
             vec![patches],
             "patch_embed",
         );
         let out = g.add_tensor_concrete("out", &[num_patches, embed_dim], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::LearnedPos2D { num_patches, embed_dim },
-            OpKind::LearnedPos2D { num_patches, embed_dim },
             vec![patches, pos],
             vec![out],
             "pos_embed",
@@ -1310,7 +1232,7 @@ mod tests {
     #[test]
     fn single_layernorm_executes() {
         // Minimal test: just a LayerNorm to prove the JIT isn't broken by other issues.
-        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+        use gllm_kernels::compiler::CompilerGraph;
         use gllm_kernels::compiler::graph::{NormSpec, Op};
         use gllm_kernels::types::DType;
 
@@ -1323,9 +1245,8 @@ mod tests {
         let ln_b = g.add_tensor_concrete("ln_b", &[h], dt);
         g.inputs = vec![input, ln_w, ln_b];
         let out = g.add_tensor_concrete("out", &[seq, h], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::LayerNorm(NormSpec { feature_dim: h, eps: 1e-6, dtype: dt, has_weight: true }),
-            OpKind::LayerNorm { feature_dim: h, eps: 1e-6 },
             vec![input, ln_w, ln_b], vec![out], "ln");
         g.outputs = vec![out];
 
@@ -1357,7 +1278,7 @@ mod tests {
 
     #[test]
     fn single_residual_executes() {
-        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+        use gllm_kernels::compiler::CompilerGraph;
         use gllm_kernels::compiler::graph::Op;
         use gllm_kernels::types::DType;
 
@@ -1369,7 +1290,7 @@ mod tests {
         let b = g.add_tensor_concrete("b", &[m, h], dt);
         g.inputs = vec![a, b];
         let out = g.add_tensor_concrete("out", &[m, h], dt);
-        g.add_op_with_op(Op::Residual, OpKind::Residual, vec![a, b], vec![out], "res");
+        g.add_op(Op::Residual, vec![a, b], vec![out], "res");
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
@@ -1393,7 +1314,7 @@ mod tests {
 
     #[test]
     fn layernorm_then_gemm_executes() {
-        use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
+        use gllm_kernels::compiler::{CompilerGraph, SymDim};
         use gllm_kernels::compiler::graph::{GemmSpec, NormSpec, Op};
         use gllm_kernels::types::DType;
 
@@ -1409,15 +1330,13 @@ mod tests {
         g.inputs = vec![input, ln_w, ln_b, w];
 
         let normed = g.add_tensor_concrete("normed", &[m, k], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::LayerNorm(NormSpec { feature_dim: k, eps: 1e-6, dtype: dt, has_weight: true }),
-            OpKind::LayerNorm { feature_dim: k, eps: 1e-6 },
             vec![input, ln_w, ln_b], vec![normed], "ln");
 
         let out = g.add_tensor_concrete("out", &[m, n], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(m), n, k, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{ m: SymDim::Concrete(m), n, k, dtype: dt, trans_b: false, },
             vec![normed, w], vec![out], "gemm",
         );
         g.outputs = vec![out];
@@ -1451,7 +1370,7 @@ mod tests {
 
     #[test]
     fn single_gemm_executes() {
-        use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
+        use gllm_kernels::compiler::{CompilerGraph, SymDim};
         use gllm_kernels::compiler::graph::{GemmSpec, Op};
         use gllm_kernels::types::DType;
 
@@ -1464,9 +1383,8 @@ mod tests {
         let w = g.add_tensor_concrete("w", &[k, n], dt);
         g.inputs = vec![input, w];
         let out = g.add_tensor_concrete("out", &[m, n], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(m), n, k, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{ m: SymDim::Concrete(m), n, k, dtype: dt, trans_b: false, },
             vec![input, w],
             vec![out],
             "gemm",
@@ -1499,7 +1417,7 @@ mod tests {
     #[test]
     fn single_gemm_layernorm_executes() {
         // Minimal encoder stub: only LayerNorm + Gemm + Residual (no MHA).
-        use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
+        use gllm_kernels::compiler::{CompilerGraph, SymDim};
         use gllm_kernels::compiler::graph::{GemmSpec, NormSpec, Op};
         use gllm_kernels::types::DType;
 
@@ -1514,23 +1432,21 @@ mod tests {
         g.inputs = vec![input, ln_w, ln_b, w_q];
 
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::LayerNorm(NormSpec { feature_dim: h, eps: 1e-6, dtype: dt, has_weight: true }),
-            OpKind::LayerNorm { feature_dim: h, eps: 1e-6 },
             vec![input, ln_w, ln_b],
             vec![normed],
             "ln",
         );
         let q = g.add_tensor_concrete("q", &[seq, h], dt);
-        g.add_op_with_op(
+        g.add_op(
             Op::Gemm(GemmSpec { m: SymDim::Concrete(seq), n: h, k: h, dtype: dt, trans_b: false, has_bias: false }),
-            OpKind::Gemm{ m: SymDim::Concrete(seq), n: h, k: h, dtype: dt, trans_b: false, },
             vec![normed, w_q],
             vec![q],
             "gemm_q",
         );
         let out = g.add_tensor_concrete("out", &[seq, h], dt);
-        g.add_op_with_op(Op::Residual, OpKind::Residual, vec![input, q], vec![out], "resid");
+        g.add_op(Op::Residual, vec![input, q], vec![out], "resid");
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();

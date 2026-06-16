@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use gllm_kernels::compiler::graph::{CompilerGraph, GemmSpec, NormSpec, Op, OpKind, SymDim};
+use gllm_kernels::compiler::graph::{CompilerGraph, GemmSpec, NormSpec, Op, SymDim};
 use gllm_kernels::compiler::mega_kernel_abi::BusinessConfig;
 use gllm_kernels::types::DType;
 
@@ -133,21 +133,21 @@ impl<'a> ConvertContext<'a> {
         match op_type.as_str() {
             "MatMul" => self.convert_matmul(node)?,
             "Gemm" => self.convert_gemm(node)?,
-            "Add" => self.convert_binary(node, Op::Add, OpKind::Add)?,
-            "Sub" => self.convert_binary(node, Op::Add, OpKind::Add)?,
-            "Mul" => self.convert_binary(node, Op::Mul, OpKind::Mul)?,
-            "Div" => self.convert_binary(node, Op::Mul, OpKind::Mul)?,
-            "Silu" => self.convert_unary(node, Op::Silu, OpKind::Silu)?,
-            "Gelu" => self.convert_unary(node, Op::Gelu, OpKind::Gelu)?,
-            "Tanh" => self.convert_unary(node, Op::Tanh, OpKind::Tanh)?,
-            "Softmax" => self.convert_unary(node, Op::Softmax, OpKind::Softmax)?,
+            "Add" => self.convert_binary(node, Op::Add)?,
+            "Sub" => self.convert_binary(node, Op::Add)?,
+            "Mul" => self.convert_binary(node, Op::Mul)?,
+            "Div" => self.convert_binary(node, Op::Mul)?,
+            "Silu" => self.convert_unary(node, Op::Silu)?,
+            "Gelu" => self.convert_unary(node, Op::Gelu)?,
+            "Tanh" => self.convert_unary(node, Op::Tanh)?,
+            "Softmax" => self.convert_unary(node, Op::Softmax)?,
             "LayerNormalization" => self.convert_layer_norm(node)?,
             "SimplifiedLayerNormalization" => self.convert_rms_norm(node)?,
             "Reshape" => self.convert_reshape(node)?,
             "Transpose" => self.convert_transpose(node)?,
             "Gather" => self.convert_gather(node)?,
             "ReduceMean" => self.convert_reduce_mean(node)?,
-            "Pow" | "Sqrt" => self.convert_binary(node, Op::Mul, OpKind::Mul)?,
+            "Pow" | "Sqrt" => self.convert_binary(node, Op::Mul)?,
             "Relu" | "Sigmoid" | "Where" | "Clip" => self.convert_passthrough(node)?,
             _ => {
                 return Err(ConvertError::UnsupportedOp {
@@ -206,7 +206,7 @@ impl<'a> ConvertContext<'a> {
             self.dtype,
         );
 
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::Gemm(GemmSpec {
                 m: self.seq_dim.clone(),
                 n,
@@ -215,13 +215,6 @@ impl<'a> ConvertContext<'a> {
                 trans_b: false,
                 has_bias: false,
             }),
-            OpKind::Gemm {
-                m: self.seq_dim.clone(),
-                n,
-                k,
-                dtype: self.dtype,
-                trans_b: false,
-            },
             vec![a_tid, w_tid],
             vec![out_tid],
             &node.name,
@@ -291,7 +284,7 @@ impl<'a> ConvertContext<'a> {
                     node_name: node.name.clone(),
                 }
             })?;
-            self.graph.add_op_with_op(
+            self.graph.add_op(
                 Op::GemmBias(GemmSpec {
                     m: self.seq_dim.clone(),
                     n,
@@ -300,19 +293,12 @@ impl<'a> ConvertContext<'a> {
                     trans_b: false,
                     has_bias: true,
                 }),
-                OpKind::GemmBias {
-                    m: self.seq_dim.clone(),
-                    n,
-                    k,
-                    dtype: self.dtype,
-                    trans_b: false,
-                },
                 vec![a_tid, w_tid, b_tid],
                 vec![out_tid],
                 &node.name,
             );
         } else {
-            self.graph.add_op_with_op(
+            self.graph.add_op(
                 Op::Gemm(GemmSpec {
                     m: self.seq_dim.clone(),
                     n,
@@ -321,13 +307,6 @@ impl<'a> ConvertContext<'a> {
                     trans_b: false,
                     has_bias: false,
                 }),
-                OpKind::Gemm {
-                    m: self.seq_dim.clone(),
-                    n,
-                    k,
-                    dtype: self.dtype,
-                    trans_b: false,
-                },
                 vec![a_tid, w_tid],
                 vec![out_tid],
                 &node.name,
@@ -338,7 +317,7 @@ impl<'a> ConvertContext<'a> {
         Ok(())
     }
 
-    fn convert_binary(&mut self, node: &OnnxNode, op: Op, kind_fallback: OpKind) -> Result<(), ConvertError> {
+    fn convert_binary(&mut self, node: &OnnxNode, op: Op) -> Result<(), ConvertError> {
         let a_name = node.inputs.first().map(|s| s.as_str()).unwrap_or("");
         let b_name = node.inputs.get(1).map(|s| s.as_str()).unwrap_or("");
 
@@ -349,12 +328,12 @@ impl<'a> ConvertContext<'a> {
         let out_shape = self.infer_output_shape_binary(a_name, b_name);
         let out_tid = self.graph.add_tensor(&output_name, out_shape, self.dtype);
 
-        self.graph.add_op_with_op(op, kind_fallback, vec![a_tid, b_tid], vec![out_tid], &node.name);
+        self.graph.add_op(op, vec![a_tid, b_tid], vec![out_tid], &node.name);
         self.tensor_map.insert(output_name, out_tid);
         Ok(())
     }
 
-    fn convert_unary(&mut self, node: &OnnxNode, op: Op, kind_fallback: OpKind) -> Result<(), ConvertError> {
+    fn convert_unary(&mut self, node: &OnnxNode, op: Op) -> Result<(), ConvertError> {
         let input_name = node.inputs.first().map(|s| s.as_str()).unwrap_or("");
         let in_tid = self.get_or_create_activation(input_name);
 
@@ -362,7 +341,7 @@ impl<'a> ConvertContext<'a> {
         let in_shape = self.get_tensor_shape(input_name);
         let out_tid = self.graph.add_tensor(&output_name, in_shape, self.dtype);
 
-        self.graph.add_op_with_op(op, kind_fallback, vec![in_tid], vec![out_tid], &node.name);
+        self.graph.add_op(op, vec![in_tid], vec![out_tid], &node.name);
         self.tensor_map.insert(output_name, out_tid);
         Ok(())
     }
@@ -416,14 +395,13 @@ impl<'a> ConvertContext<'a> {
                 reason: "LayerNorm requires concrete last dimension for feature_dim".to_string(),
             })?;
 
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::LayerNorm(NormSpec {
                 feature_dim,
                 eps,
                 dtype: self.dtype,
                 has_weight: true,
             }),
-            OpKind::LayerNorm { feature_dim, eps },
             vec![in_tid, scale_tid, bias_tid],
             vec![out_tid],
             &node.name,
@@ -464,14 +442,13 @@ impl<'a> ConvertContext<'a> {
                 reason: "RmsNorm requires concrete last dimension for feature_dim".to_string(),
             })?;
 
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::RmsNorm(NormSpec {
                 feature_dim,
                 eps,
                 dtype: self.dtype,
                 has_weight: true,
             }),
-            OpKind::RmsNorm { feature_dim, eps },
             vec![in_tid, scale_tid],
             vec![out_tid],
             &node.name,
@@ -488,9 +465,8 @@ impl<'a> ConvertContext<'a> {
         let in_shape = self.get_tensor_shape(input_name);
         let out_tid = self.graph.add_tensor(&output_name, in_shape, self.dtype);
 
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::Reshape { target_shape: vec![] },
-            OpKind::Reshape { target_shape: vec![] },
             vec![in_tid],
             vec![out_tid],
             &node.name,
@@ -514,9 +490,8 @@ impl<'a> ConvertContext<'a> {
         let in_shape = self.get_tensor_shape(input_name);
         let out_tid = self.graph.add_tensor(&output_name, in_shape, self.dtype);
 
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::Transpose { perm: perm.clone() },
-            OpKind::Transpose { perm },
             vec![in_tid],
             vec![out_tid],
             &node.name,
@@ -547,15 +522,8 @@ impl<'a> ConvertContext<'a> {
             self.dtype,
         );
 
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::Gather {
-                table_rows,
-                embed_dim,
-                index_dim: self.seq_dim.clone(),
-                indices_kind: Default::default(),
-                scale: None,
-            },
-            OpKind::Gather {
                 table_rows,
                 embed_dim,
                 index_dim: self.seq_dim.clone(),
@@ -580,9 +548,8 @@ impl<'a> ConvertContext<'a> {
         // ReduceMean reduces over seq dimension: output shape is [hidden], not [seq, hidden]
         let out_shape = vec![SymDim::Concrete(hidden)];
         let out_tid = self.graph.add_tensor(&output_name, out_shape, self.dtype);
-        self.graph.add_op_with_op(
+        self.graph.add_op(
             Op::MeanPool { seq_len: 0, hidden, cls_mode: false },
-            OpKind::MeanPool { seq_len: 0, hidden, cls_mode: false },
             vec![in_tid],
             vec![out_tid],
             &node.name,
