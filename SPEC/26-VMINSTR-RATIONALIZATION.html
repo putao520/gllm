@@ -1,0 +1,2594 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="26-VMINSTR-RATIONALIZATION" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"26-VMINSTR-RATIONALIZATION", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>26-VMINSTR-RATIONALIZATION.md</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>26-VMINSTR-RATIONALIZATION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s26" data-section="26">
+      <h2>26-VMINSTR-RATIONALIZATION.md</h2>
+      <strong>VmInstr 去类型化合并 + 缺失指令补全</strong>
+      <p>&gt; <strong>SSOT</strong>: 本文档是 VmInstr 指令集去类型化合并、缺失指令补全、TraceOp→VmInstr 映射完整性、ISA Lowering 重构的<strong>唯一权威源</strong>。</p>
+      <p>&gt; <strong>关联 SPEC</strong>: <a href="http://01-JIT-PIPELINE.md">01-JIT-PIPELINE.md</a> (ARCH-AUTO-INSTR-SELECT), <a href="http://23-QUANT-CODEGEN-ALGO.md">23-QUANT-CODEGEN-ALGO.md</a>, <a href="http://24-QUANT-PIPELINE-JIT.md">24-QUANT-PIPELINE-JIT.md</a>, <a href="http://25-JIT-LIFECYCLE-INFRASTRUCTURE.md">25-JIT-LIFECYCLE-INFRASTRUCTURE.md</a></p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 设计动机</h3>
+    </section>
+    <section id="s-问题诊断" data-section="null">
+      <h4>问题诊断</h4>
+      <p>VmInstr 枚举当前 142 个变体，存在三类系统性问题：</p>
+      <table>
+        <tr>
+          <th>问题类别</th>
+        </tr>
+        <tr>
+          <td>症状</td>
+        </tr>
+        <tr>
+          <td>量化影响</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>dtype 硬编码在名称中</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Bf16Dot</td>
+          <td>/</td>
+          <td>Fp16Dot</td>
+          <td>/</td>
+          <td>Int8Dot</td>
+          <td> 是同一条指令的 3 个 dtype 特化</td>
+        </tr>
+        <tr>
+          <td>每新增一个 dtype = 新增 N 个变体</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>功能域重复</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>QuantVecBitAnd</td>
+          <td> ≡ </td>
+          <td>VecBinOp::And</td>
+          <td>, </td>
+          <td>QuantFma</td>
+          <td> ≡ </td>
+          <td>Fma</td>
+          <td>, </td>
+          <td>QuantScalarLoad</td>
+          <td> ≡ </td>
+          <td>ScalarLoad</td>
+        </tr>
+        <tr>
+          <td>18 个 Quant* 变体中 10 个与通用指令语义完全重复</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>语义缺口</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TraceOp::Permute</td>
+          <td> 用 identity copy 绕过（无 VecShuffle）、无 GPR 逻辑运算、无向量 lane 提取/插入</td>
+        </tr>
+        <tr>
+          <td>GPU codegen 和高级融合被迫 work around</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-arch-vminstr-type-erased" data-section="null">
+      <h4>ARCH-VMINSTR-TYPE-ERASED</h4>
+      <strong>设计原则（参照 Triton TTIR）</strong>：dtype 在类型签名中，不在指令名中。Triton 用 ~20 个 type-erased op（<code>tt.load</code>/<code>tt.store</code>/<code>arith.addf</code>）覆盖所有 dtype，gllm 应同等参数化。
+      <strong>对照表</strong>：
+      <table>
+        <tr>
+          <th>系统</th>
+        </tr>
+        <tr>
+          <td>指令数</td>
+        </tr>
+        <tr>
+          <td>dtype 策略</td>
+        </tr>
+        <tr>
+          <td>gllm 对标</td>
+        </tr>
+        <tr>
+          <td>Triton TTIR</td>
+        </tr>
+        <tr>
+          <td>~20</td>
+        </tr>
+        <tr>
+          <td>类型签名 (</td>
+          <td>!tt.ptr&lt;f32&gt;</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>VecLoad { dtype } ✅ 已实现</td>
+        </tr>
+        <tr>
+          <td>LLVM SelectionDAG</td>
+        </tr>
+        <tr>
+          <td>~60</td>
+        </tr>
+        <tr>
+          <td>EVT (Value Type)</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op, dtype } ✅ 已实现</td>
+        </tr>
+        <tr>
+          <td>gllm VmInstr (当前)</td>
+        </tr>
+        <tr>
+          <td>142</td>
+        </tr>
+        <tr>
+          <td>混合（部分参数化，部分硬编码）</td>
+        </tr>
+        <tr>
+          <td>需统一</td>
+        </tr>
+        <tr>
+          <td>gllm VmInstr (目标)</td>
+        </tr>
+        <tr>
+          <td>~97</td>
+        </tr>
+        <tr>
+          <td>全参数化 + 补全</td>
+        </tr>
+        <tr>
+          <td>本 SPEC</td>
+        </tr>
+      </table>
+    </section>
+    <section id="req-vr-001" data-req="REQ-VR-001" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§1 去类型化合并 (REQ-VR-001~004)
+      <p>将 VmInstr 中 dtype 硬编码在指令名中的变体（GGUF 加载 11 个、DotProduct 5 个、GPR 操作 11 个、Quant* 解码 18 个）合并为参数化指令，参照 Triton TTIR 设计原则使 dtype 存在于类型签名中而非指令名中，将总变体数从 142 精简至约 97 个。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-001" data-test="TEST-VR-001" data-req-ref="REQ-VR-012" data-test-categories="unit" <h3="">TEST-VR-001: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-015" data-req="REQ-VR-015" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.1" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.1 GGUF 量化块加载合并 (REQ-VR-015)
+      <p>将 11 个 GgufXxxLoad 变体合并为 2 个参数化指令（QuantBlockLoad + QuantBiPlaneLoad），通过 BlockUnpackMode/BiPlaneMode 枚举描述解包策略，消除每新增一个 GGUF 量化格式就新增一个 VmInstr 变体的膨胀问题。</p>
+      <strong>当前</strong>：11 个 GgufXxxLoad 变体，全部是 <code>load bytes → unpack → dequant → compute_dtype</code>，仅解包算法不同。compute_dtype 由 TensorMeta.dtype × DeviceProfile 推导，量化路径计算精度从权重 dtype 推导(多精度混合支持 F32/BF16/F16)，原生浮点路径保持原始精度。
+      <strong>目标</strong>：2 个参数化变体 + 保留 2 个 scale 加载。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-015" data-test="TEST-VR-015" data-req-ref="REQ-VR-016" data-test-categories="unit" <h3="">TEST-VR-015: VmInstr去类型化合并测试<p>验证REQ-VR-015相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s1.1.1" data-section="1.1.1">
+      <h5>§1.1.1 QuantBlockLoad — 单平面量化块加载</h5>
+      <p>```</p>
+      <p>QuantBlockLoad:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId            — 目标 Vec 寄存器 (compute_dtype, 由 TensorMeta.dtype × DeviceProfile 推导)</p>
+      <p>    base: VRegId           — 基地址 GPR</p>
+      <p>    offset: OffsetExpr     — 字节偏移</p>
+      <p>    unpack: BlockUnpackMode — 解包模式（完整描述 byte→i32→compute_dtype 策略）</p>
+      <p>    width: SimdWidth       — SIMD 宽度</p>
+      <p>    dtype: QuantPrecision  — 输出计算精度 (从 op_input_dtype 传播, 非 F32 硬编码)</p>
+      <p>BlockUnpackMode:           — 替代 7 个 GgufXxxLoad 变体</p>
+      <p>  | Int8                   — i8 → compute_dtype 直转 (原 GgufInt8Load)</p>
+      <p>  | F16Broadcast           — f16 → compute_dtype + broadcast (原 GgufF16ScaleLoad)</p>
+      <p>  | SignedNibbleLow        — &amp; 0x0F, sub 8.0 (原 GgufInt4Load)</p>
+      <p>  | UnsignedNibbleLow      — &amp; 0x0F, no bias (原 GgufUInt4Load)</p>
+      <p>  | SignedNibbleHigh       — &gt;&gt; 4, sub 8.0 (原 GgufInt4HighLoad)</p>
+      <p>  | UnsignedNibbleHigh     — &gt;&gt; 4, no bias (原 GgufUInt4HighLoad)</p>
+      <p>  | Bitpack2               — 2-bit ×4 per byte, sub bias (原 GgufInt2Load)</p>
+      <p>```</p>
+      <strong>删除的变体</strong>：GgufInt8Load, GgufF16ScaleLoad, GgufInt4Load, GgufUInt4Load, GgufInt4HighLoad, GgufUInt4HighLoad, GgufInt2Load
+      <strong>x86_lower 分发</strong>：按 <code>unpack</code> 值 match，内部逻辑不变（只是从 7 个 VmInstr match arm 变为 1 个 + 内部 match on BlockUnpackMode）。
+    </section>
+    <section id="s1.1.2" data-section="1.1.2">
+      <h5>§1.1.2 QuantBiPlaneLoad — 多平面位合并加载</h5>
+      <p>```</p>
+      <p>QuantBiPlaneLoad:          — 替代 3 个多平面 GgufXxxLoad 变体</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId            — 目标 Vec 寄存器 (compute_dtype, 同 QuantBlockLoad)</p>
+      <p>    qs_base: VRegId        — 低 bit 平面基地址</p>
+      <p>    extra_base: VRegId     — 高 bit 平面基地址 (qh / hmask)</p>
+      <p>    bias: f32              — 解码后减去的偏置 (恒为 f32, 量化偏置参数)</p>
+      <p>    mode: BiPlaneMode      — 合并策略</p>
+      <p>    width: SimdWidth</p>
+      <p>    dtype: QuantPrecision  — 输出计算精度 (同 QuantBlockLoad.dtype)</p>
+      <p>BiPlaneMode:</p>
+      <p>  | Low5                   — qs(4-bit) | (qh(1-bit) &lt;&lt; 4) (原 GgufInt5Load)</p>
+      <p>  | Low6                   — qs(4-bit) | (qh(2-bit) &lt;&lt; 4) (原 GgufInt6Load)</p>
+      <p>  | Q3Merge                — qs(2-bit) | (hmask(1-bit) &lt;&lt; 2) (原 GgufInt3Load)</p>
+      <p>```</p>
+      <strong>删除的变体</strong>：GgufInt5Load, GgufInt6Load, GgufInt3Load
+    </section>
+    <section id="s1.1.3" data-section="1.1.3">
+      <h5>§1.1.3 保留不变的 Scale 加载</h5>
+      <p>```</p>
+      <p>GgufSubScaleLoad           — 保留，语义独特（sub-block i8 scale 广播）</p>
+      <p>GgufKQuantScaleLoad        — 保留，语义独特（K-Quant 6-bit packed scale 解码）</p>
+      <p>```</p>
+      <strong>变更汇总</strong>：11 → 4（-7）
+    </section>
+    <section id="req-vr-012" data-req="REQ-VR-012" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.2" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.2 Dot-Product 合并 (REQ-VR-12)
+      <strong>当前</strong>：5 个 DotProduct 变体（Bf16Dot/Fp16Dot/Int8Dot/Int4x8Dot/Fp4Dot），差异仅在输入 dtype。
+      <strong>目标</strong>：1 个参数化变体。
+      <p>```</p>
+      <p>DotProduct:                — 替代 5 个 dtype-specific Dot 变体</p>
+      <p>  输入:</p>
+      <p>    acc: VRegId            — 累加器 (in/out)</p>
+      <p>    a: VRegId              — 输入 A</p>
+      <p>    b: VRegId              — 输入 B</p>
+      <p>    input_dtype: DotDtype  — 输入数据类型</p>
+      <p>    width: SimdWidth</p>
+      <p>DotDtype:</p>
+      <p>  | Bf16                   — fp32 acc += bf16·bf16 (原 Bf16Dot)</p>
+      <p>  | Fp16                   — fp32 acc += fp16·fp16 (原 Fp16Dot)</p>
+      <p>  | Int8                   — int32 acc += int8·int8 (原 Int8Dot)</p>
+      <p>  | Int4x8                 — int32 acc += int4·int8 (原 Int4x8Dot)</p>
+      <p>  | Fp4                    — fp32 acc += e2m1·e2m1 (原 Fp4Dot)</p>
+      <p>```</p>
+      <strong>ScaleApplyInt</strong> 保留不变 — 它是累加器缩放（不是 dot-product）。
+      <strong>变更汇总</strong>：5 → 1（+ 保留 ScaleApplyInt = 2，-3）
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-12" data-test="TEST-VR-12" data-req-ref="REQ-VR-012" data-test-categories="unit" <h3="">TEST-VR-12: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-002" data-req="REQ-VR-002" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.3" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.3 GPR 整数操作合并 (REQ-VR-002)
+      <p>将 11 个 Gpr* 变体合并为 3 个参数化指令（GprBinOp/GprLoadImm/GprCondAction），新增 GPR 位逻辑运算（And/Or/Xor）和除法能力，消除 Quant* 专用的整数操作变体。</p>
+      <strong>当前</strong>：11 个 Gpr* 变体，大部分是标量整数算术。
+      <strong>目标</strong>：3 个参数化变体。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-002" data-test="TEST-VR-002" data-req-ref="REQ-VR-002" data-test-categories="unit" <h3="">TEST-VR-002: VmInstr去类型化合并测试<p>验证REQ-VR-002相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s1.3.1" data-section="1.3.1">
+      <h5>§1.3.1 GprBinOp — 通用 GPR 二元操作</h5>
+      <p>```</p>
+      <p>GprBinOp:                  — 替代 GprAdd/GprSub/GprMulConst/GprSubConst/GprShl/GprShr/GprBitTest</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId</p>
+      <p>    a: VRegId</p>
+      <p>    b: GprOperand          — VReg 或 立即数</p>
+      <p>    op: GprOp              — 操作类型</p>
+      <p>GprOperand:</p>
+      <p>  | VReg(VRegId)</p>
+      <p>  | Imm(i64)</p>
+      <p>GprOp:</p>
+      <p>  | Add                    — dst = a + b</p>
+      <p>  | Sub                    — dst = a - b</p>
+      <p>  | Mul                    — dst = a * b</p>
+      <p>  | Div                    — dst = a / b (截断)</p>
+      <p>  | Shl                    — dst = a &lt;&lt; b</p>
+      <p>  | Shr                    — dst = a &gt;&gt; b (算术右移)</p>
+      <p>  | And                    — dst = a &amp; b</p>
+      <p>  | Or                     — dst = a | b</p>
+      <p>  | Xor                    — dst = a ^ b</p>
+      <p>  | BitTest                — dst = (a &gt;&gt; b) &amp; 1 (零标志位设置)</p>
+      <p>```</p>
+      <strong>删除的变体</strong>：GprAdd, GprSub, GprMulConst, GprSubConst, GprShl, GprShr, GprBitTest, QuantIntDivConst, QuantIntMul
+      <strong>新增能力</strong>：GprAnd/GprOr/Xor（当前缺失，GPR 无法做位与/位或/异或）、Div（当前仅 QuantIntDivConst 有除法）。
+    </section>
+    <section id="s1.3.2" data-section="1.3.2">
+      <h5>§1.3.2 GprLoadImm — 保留不变</h5>
+      <p>```</p>
+      <p>GprLoadImm { dst, value: u64 }  — 无二元形式，保留</p>
+      <p>```</p>
+    </section>
+    <section id="s1.3.3" data-section="1.3.3">
+      <h5>§1.3.3 GprCondAction — GPR 条件操作合并</h5>
+      <p>```</p>
+      <p>GprCondAction:             — 替代 GprSkipIfNull + GprCmpExit + GprStoreToFrame</p>
+      <p>  输入:</p>
+      <p>    cond: GprCondition     — 条件判断</p>
+      <p>    action: GprBranchAction — 条件为真时的行为</p>
+      <p>GprCondition:</p>
+      <p>  | IsNull(gpr)            — gpr == 0</p>
+      <p>  | IsNonNull(gpr)         — gpr != 0</p>
+      <p>  | CmpLt(a, b)            — a &lt; b</p>
+      <p>  | CmpEq(a, imm)          — a == imm</p>
+      <p>  | CmpGte(a, b)           — a &gt;= b</p>
+      <p>GprBranchAction:</p>
+      <p>  | Skip(usize)            — 跳过后续 N 条指令</p>
+      <p>  | Exit(LabelId)          — 跳转到 label</p>
+      <p>  | StoreFrame { src, rbp_offset }  — 存储到栈帧</p>
+      <p>```</p>
+      <strong>变更汇总</strong>：11 → 3（+ 吸收 QuantIntDivConst/QuantIntMul = -9 净减）
+    </section>
+    <section id="req-vr-004" data-req="REQ-VR-004" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.4" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.4 Quant* 解码指令去重 (REQ-VR-004)
+      <p>删除 18 个 Quant* 变体中与通用指令语义完全重复的 10 个（QuantVecBitAnd/Or、QuantBroadcast、QuantFma、QuantScalarLoad 等），合并 QuantLoadF16toF32+QuantLoadI8toF32 为 QuantScalarCvtLoad，仅保留 7 个语义独特的量化指令。</p>
+      <strong>当前</strong>：18 个 Quant* 变体。其中 10 个与通用指令语义完全重复。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-004" data-test="TEST-VR-004" data-req-ref="REQ-VR-013" data-test-categories="unit" <h3="">TEST-VR-004: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s1.4.1" data-section="1.4.1">
+      <h5>§1.4.1 删除 — 复用已有通用指令</h5>
+      <table>
+        <tr>
+          <th>删除的 Quant* 变体</th>
+        </tr>
+        <tr>
+          <td>复用目标</td>
+        </tr>
+        <tr>
+          <td>映射</td>
+        </tr>
+        <tr>
+          <td>QuantVecBitAnd</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: And, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>位操作 = 整数二元操作</td>
+        </tr>
+        <tr>
+          <td>QuantVecBitOr</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: Or, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>同上</td>
+        </tr>
+        <tr>
+          <td>QuantBroadcast</td>
+        </tr>
+        <tr>
+          <td>Broadcast { dtype: F32 }</td>
+        </tr>
+        <tr>
+          <td>完全相同语义</td>
+        </tr>
+        <tr>
+          <td>QuantFma</td>
+        </tr>
+        <tr>
+          <td>Fma</td>
+        </tr>
+        <tr>
+          <td>完全相同语义</td>
+        </tr>
+        <tr>
+          <td>QuantScalarLoad</td>
+        </tr>
+        <tr>
+          <td>ScalarLoad</td>
+        </tr>
+        <tr>
+          <td>完全相同语义</td>
+        </tr>
+        <tr>
+          <td>QuantIntDivConst</td>
+        </tr>
+        <tr>
+          <td>GprBinOp { op: Div, b: Imm(divisor) }</td>
+        </tr>
+        <tr>
+          <td>整数除法</td>
+        </tr>
+        <tr>
+          <td>QuantIntMul</td>
+        </tr>
+        <tr>
+          <td>GprBinOp { op: Mul, b: Imm(factor) }</td>
+        </tr>
+        <tr>
+          <td>整数乘法</td>
+        </tr>
+        <tr>
+          <td>QuantVecShiftLeft</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: Shl, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>整数向量左移</td>
+        </tr>
+        <tr>
+          <td>QuantVecShiftRight</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: Shr, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>整数向量右移</td>
+        </tr>
+        <tr>
+          <td>QuantLoadF16toF32</td>
+        </tr>
+        <tr>
+          <td>QuantLoadI8toF32 扩展为 QuantScalarCvtLoad</td>
+        </tr>
+        <tr>
+          <td>见 §1.4.2</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.4.2" data-section="1.4.2">
+      <h5>§1.4.2 合并 — QuantLoadF16toF32 + QuantLoadI8toF32 → QuantScalarCvtLoad</h5>
+      <p>```</p>
+      <p>QuantScalarCvtLoad:        — 替代 QuantLoadF16toF32 + QuantLoadI8toF32</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId</p>
+      <p>    base: VRegId</p>
+      <p>    offset: i64</p>
+      <p>    src_dtype: ScalarCvtSource  — 源数据类型</p>
+      <p>    width: SimdWidth</p>
+      <p>ScalarCvtSource:</p>
+      <p>  | F16                    — f16 → f32 + broadcast</p>
+      <p>  | I8                     — i8 → f32 + broadcast</p>
+      <p>  | U8                     — u8 → f32 + broadcast (新增)</p>
+      <p>```</p>
+    </section>
+    <section id="s1.4.3" data-section="1.4.3">
+      <h5>§1.4.3 保留 — 语义独特</h5>
+      <p>```</p>
+      <p>QuantBroadcastInt          — 整数常量广播，无 ScalarExpr 对应</p>
+      <p>QuantLoadBytesVec          — 多字节零扩展向量加载，无通用对应</p>
+      <p>QuantCodebookLookup        — SqueezeLLM 查表，独特语义</p>
+      <p>QuantExtractBits           — 位域提取，独特语义</p>
+      <p>QuantDequantFma            — 融合反量化+FMA，核心优化指令</p>
+      <p>QuantInterleave            — nibble 交叉合并，无通用对应</p>
+      <p>```</p>
+      <strong>变更汇总</strong>：18 → 7（-11）
+    </section>
+    <section id="req-vr-017" data-req="REQ-VR-017" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.5" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.5 VecBinOp 扩展 (REQ-VR-017 续)
+      <p>为吸收 QuantVecShiftLeft/Right 和 GPR 位操作，扩展 VecOp：</p>
+      <p>```</p>
+      <p>VecOp (扩展):</p>
+      <p>  | Add | Sub | Mul | Div | Max | Min   — 浮点（已有）</p>
+      <p>  | And | Or | Xor | AndNot              — 整数位操作（已有）</p>
+      <p>  | Shl                                  — 整数左移（新增，替代 QuantVecShiftLeft）</p>
+      <p>  | Shr                                  — 整数右移（新增，替代 QuantVecShiftRight）</p>
+      <p>  | Not                                  — 整数取反（新增，dst = ~src，一元但用 VecBinOp dst=src 模式）</p>
+      <p>```</p>
+      <strong>注意</strong>：Shl/Shr 的 <code>b</code> 参数是立即数（shift amount），通过 VecBinOp 的 <code>b</code> VReg 传入 — auto_select 在 TraceOp::QuantShiftLeft/Right 映射时用 QuantBroadcastInt 先广播 shift amount 到向量。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-017" data-test="TEST-VR-017" data-req-ref="REQ-VR-017" data-test-categories="unit" <h3="">TEST-VR-017: VmInstr去类型化合并测试<p>验证REQ-VR-017相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-011" data-req="REQ-VR-011" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.6" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§1.6 分布式通信 VmInstr 扩展 (REQ-VR-011, feature = "nccl")
+      <p>&gt; <strong>关联 SPEC</strong>: gllm-nccl SPEC/02-ARCHITECTURE.md §5.3, gllm-nccl SPEC/07-PTX-INTRINSICS.md</p>
+      <p>&gt; <strong>feature gate</strong>: <code>#[cfg(feature = "nccl")]</code> — 未启用时这些变体不存在于枚举中</p>
+      <p>&gt; <strong>设计原则</strong>: JIT codegen 生成调用桩（call stub），链接到 gllm-nccl 提供的运行时函数。不内联通信实现（通信是跨设备操作，不能 JIT 内联）。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-011" data-test="TEST-VR-011" data-req-ref="REQ-VR-011" data-test-categories="unit" <h3="">TEST-VR-011: VmInstr去类型化合并测试<p>验证REQ-VR-011相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s1.6.1" data-section="1.6.1">
+      <h4>§1.6.1 AllReduceChunk — chunk 级 AllReduce</h4>
+      <p>```</p>
+      <p>AllReduceChunk:</p>
+      <p>  输入:</p>
+      <p>    sendbuf: VRegId       — GPU HBM 发送缓冲区指针</p>
+      <p>    recvbuf: VRegId       — GPU HBM 接收缓冲区指针</p>
+      <p>    count: VRegId         — 元素数量</p>
+      <p>    dtype: CommDType      — 数据类型</p>
+      <p>    op: ReduceOp          — 归约操作</p>
+      <p>    rank: VRegId          — 当前 rank ID</p>
+      <p>    world_size: VRegId    — 总 rank 数</p>
+      <p>    chunk_idx: VRegId     — chunk 索引（用于 Ring 算法定位）</p>
+      <p>CommDType:</p>
+      <p>  | Fp32</p>
+      <p>  | Fp16</p>
+      <p>  | Bf16</p>
+      <p>  | Fp8</p>
+      <p>  | Int8</p>
+      <p>ReduceOp:</p>
+      <p>  | Sum</p>
+      <p>  | Max</p>
+      <p>  | Min</p>
+      <p>  | Product</p>
+      <p>```</p>
+      <strong>用途</strong>: Pipeline AllReduce 中 chunk 级归约，实现计算/通信重叠。
+      <strong>x86_lower/aarch64_lower</strong>: 生成 <code>call [gllm_nccl_all_reduce_chunk_stub]</code> 桩调用，参数通过系统 ABI 寄存器传递。
+      <strong>gpu_lower</strong>: 生成 PTX <code>call {all_reduce_chunk, ...}</code> 或 HIP 等价调用。跨设备操作不能内联进单 SM 的 kernel。
+    </section>
+    <section id="s1.6.2" data-section="1.6.2">
+      <h4>§1.6.2 CommBarrier — 通信同步屏障</h4>
+      <p>```</p>
+      <p>CommBarrier:</p>
+      <p>  输入:</p>
+      <p>    barrier_id: u8        — 屏障标识（PTX named barrier: 0-15）</p>
+      <p>    thread_count: VRegId  — 参与同步的线程数</p>
+      <p>  GPU 语义:</p>
+      <p>    PTX: bar.sync barrier_id, thread_count</p>
+      <p>    HIP: __syncthreads() 或 warp-aggregated barrier</p>
+      <p>  CPU 语义:</p>
+      <p>    pthread_barrier_wait() 或 std::sync::Barrier FFI</p>
+      <p>```</p>
+      <strong>用途</strong>: 通信 thread block 与计算 thread block 之间的同步（见 gllm-nccl SPEC/07 §4.4）。
+    </section>
+    <section id="s1.6.3" data-section="1.6.3">
+      <h4>§1.6.3 NvlinkAsyncCopy — NVLink 异步块拷贝</h4>
+      <p>```</p>
+      <p>NvlinkAsyncCopy:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId           — 目标地址（GPU HBM，本端或远端 rank 映射地址）</p>
+      <p>    src: VRegId           — 源地址（GPU HBM）</p>
+      <p>    len: VRegId           — 拷贝字节数（必须 16-byte 对齐，16 的倍数）</p>
+      <p>    lane: u8              — NVLink lane（0-17，H100 最多 18 lanes）</p>
+      <p>  GPU 语义 (PTX):</p>
+      <p>    cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes</p>
+      <p>      [dst], [src], len, [barrier_addr]</p>
+      <p>  CPU 语义:</p>
+      <p>    无意义 — CPU 端为 NOP（通信由 GPU 驱动执行）</p>
+      <p>```</p>
+      <strong>约束</strong>:
+      <li><code>dst</code>/<code>src</code> 必须 16-byte 对齐</li>
+      <li><code>len</code> 必须是 16 的倍数</li>
+      <li>需要 <code>topology.is_nvlink_fully_connected() == true</code>（gllm-nccl 运行时校验）</li>
+    </section>
+    <section id="s1.6.4" data-section="1.6.4">
+      <h4>§1.6.4 变更汇总</h4>
+      <strong>总 VmInstr 变体</strong>: ~97 (基础) + 5 (nccl) = ~102
+      <table>
+        <tr>
+          <th>新增变体</th>
+        </tr>
+        <tr>
+          <td>数量</td>
+        </tr>
+        <tr>
+          <td>feature gate</td>
+        </tr>
+        <tr>
+          <td>AllReduceChunk</td>
+        </tr>
+        <tr>
+          <td>+1</td>
+        </tr>
+        <tr>
+          <td>nccl</td>
+        </tr>
+        <tr>
+          <td>CommBarrier</td>
+        </tr>
+        <tr>
+          <td>+1</td>
+        </tr>
+        <tr>
+          <td>nccl</td>
+        </tr>
+        <tr>
+          <td>NvlinkAsyncCopy</td>
+        </tr>
+        <tr>
+          <td>+1</td>
+        </tr>
+        <tr>
+          <td>nccl</td>
+        </tr>
+        <tr>
+          <td>CommDType 枚举 (5 variants)</td>
+        </tr>
+        <tr>
+          <td>+1</td>
+        </tr>
+        <tr>
+          <td>nccl</td>
+        </tr>
+        <tr>
+          <td>ReduceOp 枚举 (4 variants)</td>
+        </tr>
+        <tr>
+          <td>+1</td>
+        </tr>
+        <tr>
+          <td>nccl</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>通信域小计</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+5</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>nccl</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.6.5" data-section="1.6.5">
+      <h4>§1.6.5 TraceOp→VmInstr 映射 (nccl)</h4>
+      <p>未启用 nccl feature 时，<code>auto_select.rs</code> 中这三个 TraceOp match arm 由 <code>#[cfg(feature = "nccl")]</code> 门控，编译时不存在。</p>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>VmInstr</td>
+        </tr>
+        <tr>
+          <td>条件</td>
+        </tr>
+        <tr>
+          <td>CommAllReduceChunk</td>
+        </tr>
+        <tr>
+          <td>AllReduceChunk { ... }</td>
+        </tr>
+        <tr>
+          <td>cfg(nccl)</td>
+        </tr>
+        <tr>
+          <td>CommBarrier</td>
+        </tr>
+        <tr>
+          <td>CommBarrier { ... }</td>
+        </tr>
+        <tr>
+          <td>cfg(nccl)</td>
+        </tr>
+        <tr>
+          <td>CommNvlinkCopy</td>
+        </tr>
+        <tr>
+          <td>NvlinkAsyncCopy { ... }</td>
+        </tr>
+        <tr>
+          <td>cfg(nccl)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.7" data-section="1.7">
+      <h4>§1.7 SM 分区同步 VmInstr (SPEC 32 联动)</h4>
+      <p>SPEC 32 §2 SM 分区 Ping-Pong 使用硬件同步原语实现 decode∥prefill 并行。这些原语<strong>不在 VmInstr 层定义</strong>，而是在 GPU ISA lowering 层直接 emit。</p>
+      <strong>设计决策</strong>: SM 分区同步（cluster.sync / mbarrier / grid_sync）是物理 CTA 级操作，不经过 VmInstr 虚拟机。原因：
+      <p>1. 同步粒度是 CTA/warp 级，不是指令级——VmInstr 是指令级抽象</p>
+      <p>2. 同步原语高度硬件特化（SM90 cluster.sync vs SM80 grid_sync vs SM70 ring barrier），无法用统一 VmInstr 表达</p>
+      <p>3. SPEC 32 的 SM 分区在 <code>mega_kernel_emit.rs</code> 的 CTA 编排层实现，不在算子 lowering 层</p>
+      <strong>与现有 VmInstr 的关系</strong>:
+      <li><code>CommBarrier</code>（§1.6）是分布式通信同步（跨节点），保留为 VmInstr</li>
+      <li>SM 分区同步是单 GPU 内同步，在 JIT codegen 的 CTA 编排模板中直接 emit PTX/HIP 指令</li>
+      <li>CPU 路径使用 <code>std::sync::Barrier</code>（Rust std），不需要 VmInstr</li>
+      <p>&gt; <strong>注</strong>: 如果未来需要 JIT 内部更灵活的同步控制（如动态 barrier），可以扩展 VmInstr。当前设计中 SM 分区同步是编译时确定的 CTA 编排，不需要运行时 VmInstr。</p>
+    </section>
+    <section id="req-vr-005" data-req="REQ-VR-005" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§2 缺失指令补全 (REQ-VR-005~010)
+      <p>补全 VmInstr 指令集中缺失的关键能力：向量 Shuffle/Permute、向量 Lane 提取/插入、向量常量加载、原子 CAS、GPR 一元操作（Popcount/CLZ/ByteSwap），以及 Mxfp4/Nvfp4 合并到 QuantBlockLoad，使 TraceOp 到 VmInstr 映射完整覆盖所有算子需求。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-005" data-test="TEST-VR-005" data-req-ref="REQ-VR-014" data-test-categories="unit" <h3="">TEST-VR-005: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-018" data-req="REQ-VR-018" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.1" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.1 向量 Shuffle/Permute (REQ-VR-018)
+      <strong>问题</strong>：<code>TraceOp::Permute</code> 当前用 identity copy 绕过，无法生成 <code>vpshufb</code>/<code>vpermd</code>/<code>TBL</code>。
+      <p>```</p>
+      <p>VecShuffle:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId</p>
+      <p>    src: VRegId</p>
+      <p>    mask: VecShuffleMask    — lane 重排描述</p>
+      <p>    width: SimdWidth</p>
+      <p>VecShuffleMask:</p>
+      <p>  | Const(Vec&lt;u8&gt;)          — 编译时已知 shuffle 掩码</p>
+      <p>  | Dynamic { ctrl: VRegId } — 运行时掩码寄存器</p>
+      <p>```</p>
+      <strong>x86_lower</strong>：Const → <code>vpshufb</code> (AVX2) / <code>vpermq</code> (AVX-512)；Dynamic → <code>vpermd</code>
+      <strong>aarch64_lower</strong>：Const → <code>TBL</code>；Dynamic → <code>TBL</code>
+      <strong>gpu_lower</strong>：<code>PRMT</code> (PTX) / <code>ds_permute</code> (AMD)
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-018" data-test="TEST-VR-018" data-req-ref="REQ-VR-018" data-test-categories="unit" <h3="">TEST-VR-018: VmInstr去类型化合并测试<p>验证REQ-VR-018相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-003" data-req="REQ-VR-003" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.2" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.2 向量 Lane 提取/插入 (REQ-VR-003)
+      <strong>问题</strong>：当前无法从 Vec 寄存器提取单个 lane 到 Scalar，也无法将 Scalar 插入 Vec 的指定 lane。这对于 Top-K 采样、batch argmax 等场景必需。
+      <p>```</p>
+      <p>VecExtractLane:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId            — 目标 Scalar 寄存器</p>
+      <p>    src: VRegId            — 源 Vec 寄存器</p>
+      <p>    lane: u8               — lane 索引</p>
+      <p>    dtype: QuantPrecision  — 元素数据类型</p>
+      <p>VecInsertLane:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId            — 目标 Vec 寄存器</p>
+      <p>    src_vec: VRegId        — 源 Vec 寄存器</p>
+      <p>    src_scalar: VRegId     — 源 Scalar 寄存器</p>
+      <p>    lane: u8               — 目标 lane 索引</p>
+      <p>    dtype: QuantPrecision</p>
+      <p>```</p>
+      <strong>x86_lower</strong>：VecExtractLane → <code>vextractf128</code> + <code>vmovss</code>；VecInsertLane → <code>vinsertf128</code> + <code>vmovss</code>
+      <strong>aarch64_lower</strong>：VecExtractLane → <code>INS</code> / <code>DUP</code>；VecInsertLane → <code>INS</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-003" data-test="TEST-VR-003" data-req-ref="REQ-VR-003" data-test-categories="unit" <h3="">TEST-VR-003: VmInstr去类型化合并测试<p>验证REQ-VR-003相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-013" data-req="REQ-VR-013" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.3" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.3 GPR 位逻辑运算 (REQ-VR-13)
+      <p>通过 §1.3 GprBinOp 的 GprOp 枚举新增 And/Or/Xor 三种位逻辑操作，补全 GPR 无法做位与/位或/异或的能力缺口，使权重加载中的位操作（如 K-Quant scale 解码）不再绕道 Quant* 变体。</p>
+      <strong>问题</strong>：当前 GPR 无法做 AND/OR/XOR/NOT。权重加载中的位操作（如 K-Quant scale 解码）被迫绕道 Quant* 变体。
+      <strong>已在 §1.3 GprBinOp 中覆盖</strong>：GprOp 新增 And/Or/Xor 三种操作。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-13" data-test="TEST-VR-13" data-req-ref="REQ-VR-013" data-test-categories="unit" <h3="">TEST-VR-13: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-014" data-req="REQ-VR-014" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.4" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.4 向量常量加载 (REQ-VR-14)
+      <strong>问题</strong>：当前加载向量常量需要 Broadcast(ScalarExpr::Const) + 可能的 VecBinOp。对于整数常量掩码（如 0x0F broadcast），需要 QuantBroadcastInt。缺少通用的向量常量加载。
+      <p>```</p>
+      <p>VecLoadConst:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId</p>
+      <p>    values: Vec&lt;u32&gt;       — 每个 lane 的常量值（编译时已知）</p>
+      <p>    dtype: QuantPrecision  — 值的解释类型</p>
+      <p>    width: SimdWidth</p>
+      <p>```</p>
+      <strong>x86_lower</strong>：values.len() == lanes 且全部相同 → <code>vbroadcastss</code>；否则 → <code>vmovdqu</code> from stack slot（prologue 预存）
+      <strong>aarch64_lower</strong>：<code>DUP</code> 或 <code>LD1</code> from literal pool
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-14" data-test="TEST-VR-14" data-req-ref="REQ-VR-014" data-test-categories="unit" <h3="">TEST-VR-14: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-006" data-req="REQ-VR-006" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.5" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.5 原子 CAS (REQ-VR-006)
+      <strong>问题</strong>：当前只有 AtomicAddU32/AtomicAddU64。缺少 Compare-And-Swap，这对于无锁数据结构（batch 并发、KV cache 页表更新）必需。
+      <p>```</p>
+      <p>AtomicCAS:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId            — 旧值 (成功=expected，失败=当前内存值)</p>
+      <p>    ptr: VRegId            — 目标地址 GPR</p>
+      <p>    expected: VRegId       — 期望值 GPR</p>
+      <p>    desired: VRegId        — 新值 GPR</p>
+      <p>    elem_width: usize      — 4 (u32) 或 8 (u64)</p>
+      <p>    success_order: MemOrdering</p>
+      <p>    failure_order: MemOrdering</p>
+      <p>MemOrdering:</p>
+      <p>  | Relaxed</p>
+      <p>  | Acquire</p>
+      <p>  | Release</p>
+      <p>  | AcqRel</p>
+      <p>  | SeqCst</p>
+      <p>```</p>
+      <strong>x86_lower</strong>：<code>lock cmpxchg</code>（4/8 字节）
+      <strong>aarch64_lower</strong>：<code>LDAXR</code> + <code>STLXR</code> 循环
+      <strong>gpu_lower</strong>：<code>atom.cas</code> (PTX)
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-006" data-test="TEST-VR-006" data-req-ref="REQ-VR-006" data-test-categories="unit" <h3="">TEST-VR-006: VmInstr去类型化合并测试<p>验证REQ-VR-006相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-007" data-req="REQ-VR-007" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.6" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.6 Popcount / CLZ / ByteSwap (REQ-VR-007)
+      <strong>问题</strong>：当前只有 BitwiseGemm（内部用 popcnt）但无独立的位计数指令。CLZ 对于快速 log2 计算、ByteSwap 对于端序转换必需。
+      <p>```</p>
+      <p>GprUnaryOp:</p>
+      <p>  输入:</p>
+      <p>    dst: VRegId</p>
+      <p>    src: VRegId</p>
+      <p>    op: GprUnaryOpKind</p>
+      <p>GprUnaryOpKind:</p>
+      <p>  | Not                    — dst = ~src (位取反)</p>
+      <p>  | Popcount               — dst = popcount(src) (人口计数)</p>
+      <p>  | Clz                    — dst = count_leading_zeros(src)</p>
+      <p>  | Bswap                  — dst = byte_swap(src) (端序转换)</p>
+      <p>  | Neg                    — dst = -src (算术取反)</p>
+      <p>```</p>
+      <strong>x86_lower</strong>：Not → <code>not</code>；Popcount → <code>popcnt</code> (SSE4.2+)；Clz → <code>lzcnt</code> (ABM)；Bswap → <code>bswap</code>
+      <strong>aarch64_lower</strong>：Not → <code>MVN</code>；Popcount → <code>CNT</code> + <code>ADDV</code>；Clz → <code>CLZ</code>；Bswap → <code>REV</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-007" data-test="TEST-VR-007" data-req-ref="REQ-VR-007" data-test-categories="unit" <h3="">TEST-VR-007: VmInstr去类型化合并测试<p>验证REQ-VR-007相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="req-vr-016" data-req="REQ-VR-016" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.7" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.7 Mxfp4/Nvfp4 合并到 QuantBlockLoad (REQ-VR-16 扩展)
+      <strong>问题</strong>：Mxfp4VecDequant 和 Nvfp4SubBlockDequant 是 E2M1 4-bit 反量化的两个变体（差异仅缩放格式：E8M0 vs UE4M3），应合并到 QuantBlockLoad 的 BlockUnpackMode。
+      <p>```</p>
+      <p>BlockUnpackMode (扩展):</p>
+      <p>  | ...（§1.1.1 已列出的 7 种）</p>
+      <p>  | Mxfp4                  — E2M1 + E8M0 scale (原 Mxfp4VecDequant)</p>
+      <p>  | Nvfp4                  — E2M1 + UE4M3 scale (原 Nvfp4SubBlockDequant)</p>
+      <p>```</p>
+      <strong>注意</strong>：Mxfp4/Nvfp4 需要 scale_byte_src 参数。BlockUnpackMode 为这两种模式时，QuantBlockLoad 需要额外的 scale 寄存器。方案：在 QuantBlockLoad 中新增可选字段 <code>scale_src: Option&lt;VRegId&gt;</code>（Mxfp4/Nvfp4 为 Some，其他为 None）。
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 变更总览</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 删除的变体（-41）</h4>
+      <table data-req-index="">
+        <tr>
+          <th>REQ</th>
+        </tr>
+        <tr>
+          <td>删除的变体</td>
+        </tr>
+        <tr>
+          <td>替代方案</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>GgufInt8Load, GgufF16ScaleLoad, GgufInt4Load, GgufUInt4Load, GgufInt4HighLoad, GgufUInt4HighLoad, GgufInt2Load</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>GgufInt5Load, GgufInt6Load, GgufInt3Load</td>
+        </tr>
+        <tr>
+          <td>QuantBiPlaneLoad</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>Mxfp4VecDequant, Nvfp4SubBlockDequant</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad (Mxfp4/Nvfp4 mode)</td>
+        </tr>
+        <tr>
+          <td>VR-002</td>
+        </tr>
+        <tr>
+          <td>Bf16Dot, Fp16Dot, Int8Dot, Int4x8Dot, Fp4Dot</td>
+        </tr>
+        <tr>
+          <td>DotProduct</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprAdd, GprSub, GprMulConst, GprSubConst, GprShl, GprShr, GprBitTest</td>
+        </tr>
+        <tr>
+          <td>GprBinOp</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprSkipIfNull, GprCmpExit, GprStoreToFrame</td>
+        </tr>
+        <tr>
+          <td>GprCondAction</td>
+        </tr>
+        <tr>
+          <td>VR-004</td>
+        </tr>
+        <tr>
+          <td>QuantVecBitAnd, QuantVecBitOr, QuantBroadcast, QuantFma, QuantScalarLoad</td>
+        </tr>
+        <tr>
+          <td>复用 VecBinOp/Broadcast/Fma/ScalarLoad</td>
+        </tr>
+        <tr>
+          <td>VR-004</td>
+        </tr>
+        <tr>
+          <td>QuantIntDivConst, QuantIntMul, QuantVecShiftLeft, QuantVecShiftRight</td>
+        </tr>
+        <tr>
+          <td>GprBinOp / VecBinOp</td>
+        </tr>
+        <tr>
+          <td>VR-004</td>
+        </tr>
+        <tr>
+          <td>QuantLoadF16toF32, QuantLoadI8toF32</td>
+        </tr>
+        <tr>
+          <td>QuantScalarCvtLoad</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 新增的变体（+18，含 nccl feature +5）</h4>
+      <table data-req-index="">
+        <tr>
+          <th>REQ</th>
+        </tr>
+        <tr>
+          <td>新增变体</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { ..., unpack, scale_src }</td>
+        </tr>
+        <tr>
+          <td>参数化量化块加载</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>QuantBiPlaneLoad { ..., mode }</td>
+        </tr>
+        <tr>
+          <td>多平面位合并加载</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>BlockUnpackMode 枚举 (9 variants)</td>
+        </tr>
+        <tr>
+          <td>解包策略描述符</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>BiPlaneMode 枚举 (3 variants)</td>
+        </tr>
+        <tr>
+          <td>双平面合并策略</td>
+        </tr>
+        <tr>
+          <td>VR-002</td>
+        </tr>
+        <tr>
+          <td>DotProduct { ..., input_dtype }</td>
+        </tr>
+        <tr>
+          <td>去类型化点积</td>
+        </tr>
+        <tr>
+          <td>VR-002</td>
+        </tr>
+        <tr>
+          <td>DotDtype 枚举 (5 variants)</td>
+        </tr>
+        <tr>
+          <td>点积输入类型</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprBinOp { ..., op, b }</td>
+        </tr>
+        <tr>
+          <td>参数化 GPR 二元操作</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprOperand 枚举</td>
+        </tr>
+        <tr>
+          <td>VReg/立即数</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprOp 枚举 (10 variants)</td>
+        </tr>
+        <tr>
+          <td>GPR 操作类型</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprCondAction { cond, action }</td>
+        </tr>
+        <tr>
+          <td>参数化 GPR 条件操作</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprCondition 枚举 / GprBranchAction 枚举</td>
+        </tr>
+        <tr>
+          <td>条件/行为描述</td>
+        </tr>
+        <tr>
+          <td>VR-004</td>
+        </tr>
+        <tr>
+          <td>QuantScalarCvtLoad { ..., src_dtype }</td>
+        </tr>
+        <tr>
+          <td>合并 F16/I8 标量转换加载</td>
+        </tr>
+        <tr>
+          <td>VR-004</td>
+        </tr>
+        <tr>
+          <td>ScalarCvtSource 枚举 (3 variants)</td>
+        </tr>
+        <tr>
+          <td>标量转换源类型</td>
+        </tr>
+        <tr>
+          <td>VR-005</td>
+        </tr>
+        <tr>
+          <td>VecShuffle { ..., mask }</td>
+        </tr>
+        <tr>
+          <td>向量 lane 重排</td>
+        </tr>
+        <tr>
+          <td>VR-006</td>
+        </tr>
+        <tr>
+          <td>VecExtractLane { ..., lane }</td>
+        </tr>
+        <tr>
+          <td>向量 lane 提取</td>
+        </tr>
+        <tr>
+          <td>VR-006</td>
+        </tr>
+        <tr>
+          <td>VecInsertLane { ..., lane }</td>
+        </tr>
+        <tr>
+          <td>向量 lane 插入</td>
+        </tr>
+        <tr>
+          <td>VR-008</td>
+        </tr>
+        <tr>
+          <td>VecLoadConst { ..., values }</td>
+        </tr>
+        <tr>
+          <td>向量常量加载</td>
+        </tr>
+        <tr>
+          <td>VR-009</td>
+        </tr>
+        <tr>
+          <td>AtomicCAS { ... }</td>
+        </tr>
+        <tr>
+          <td>原子比较并交换</td>
+        </tr>
+        <tr>
+          <td>VR-010</td>
+        </tr>
+        <tr>
+          <td>GprUnaryOp { ..., op }</td>
+        </tr>
+        <tr>
+          <td>GPR 一元操作</td>
+        </tr>
+        <tr>
+          <td>VR-010</td>
+        </tr>
+        <tr>
+          <td>GprUnaryOpKind 枚举 (5 variants)</td>
+        </tr>
+        <tr>
+          <td>GPR 一元操作类型</td>
+        </tr>
+        <tr>
+          <td>VR-014</td>
+        </tr>
+        <tr>
+          <td>AllReduceChunk { ..., dtype, op }</td>
+        </tr>
+        <tr>
+          <td>chunk 级 AllReduce（nccl feature）</td>
+        </tr>
+        <tr>
+          <td>VR-014</td>
+        </tr>
+        <tr>
+          <td>CommBarrier { barrier_id, thread_count }</td>
+        </tr>
+        <tr>
+          <td>通信/计算同步屏障（nccl feature）</td>
+        </tr>
+        <tr>
+          <td>VR-014</td>
+        </tr>
+        <tr>
+          <td>NvlinkAsyncCopy { dst, src, len, lane }</td>
+        </tr>
+        <tr>
+          <td>NVLink 异步块拷贝（nccl feature）</td>
+        </tr>
+        <tr>
+          <td>VR-014</td>
+        </tr>
+        <tr>
+          <td>CommDType 枚举 (5 variants)</td>
+        </tr>
+        <tr>
+          <td>通信数据类型（nccl feature）</td>
+        </tr>
+        <tr>
+          <td>VR-014</td>
+        </tr>
+        <tr>
+          <td>ReduceOp 枚举 (4 variants)</td>
+        </tr>
+        <tr>
+          <td>通信归约操作（nccl feature）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 VecOp 枚举扩展</h4>
+      <p>```</p>
+      <p>VecOp (扩展后):</p>
+      <p>  Add | Sub | Mul | Div | Max | Min    — 浮点（已有）</p>
+      <p>  And | Or | Xor | AndNot              — 整数位操作（已有）</p>
+      <p>  Shl | Shr                            — 整数移位（新增）</p>
+      <p>```</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 数量汇总</h4>
+      <table>
+        <tr>
+          <th>域</th>
+        </tr>
+        <tr>
+          <td>当前</td>
+        </tr>
+        <tr>
+          <td>删除</td>
+        </tr>
+        <tr>
+          <td>新增</td>
+        </tr>
+        <tr>
+          <td>合并后</td>
+        </tr>
+        <tr>
+          <td>变化</td>
+        </tr>
+        <tr>
+          <td>通用内存</td>
+        </tr>
+        <tr>
+          <td>11</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>11</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>GGUF 加载</td>
+        </tr>
+        <tr>
+          <td>11</td>
+        </tr>
+        <tr>
+          <td>-11</td>
+        </tr>
+        <tr>
+          <td>+2 (QuantBlockLoad + QuantBiPlaneLoad)</td>
+        </tr>
+        <tr>
+          <td>2 (+2 scale 保留 = 4)</td>
+        </tr>
+        <tr>
+          <td>-7</td>
+        </tr>
+        <tr>
+          <td>Mxfp4/Nvfp4</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>-2</td>
+        </tr>
+        <tr>
+          <td>0 (合并到 QuantBlockLoad)</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>-2</td>
+        </tr>
+        <tr>
+          <td>Dot-Product</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>-5</td>
+        </tr>
+        <tr>
+          <td>+1 (DotProduct)</td>
+        </tr>
+        <tr>
+          <td>1 (+1 ScaleApplyInt = 2)</td>
+        </tr>
+        <tr>
+          <td>-3</td>
+        </tr>
+        <tr>
+          <td>GPR 操作</td>
+        </tr>
+        <tr>
+          <td>11</td>
+        </tr>
+        <tr>
+          <td>-11</td>
+        </tr>
+        <tr>
+          <td>+3 (GprBinOp + GprLoadImm + GprCondAction)</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>-8</td>
+        </tr>
+        <tr>
+          <td>Quant* 解码</td>
+        </tr>
+        <tr>
+          <td>18</td>
+        </tr>
+        <tr>
+          <td>-11</td>
+        </tr>
+        <tr>
+          <td>+1 (QuantScalarCvtLoad)</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>-10</td>
+        </tr>
+        <tr>
+          <td>通用算术</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>控制流</td>
+        </tr>
+        <tr>
+          <td>14</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>14</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>GPU/Shared</td>
+        </tr>
+        <tr>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>采样</td>
+        </tr>
+        <tr>
+          <td>9</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>9</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>Batch</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>杂项</td>
+        </tr>
+        <tr>
+          <td>19</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>19</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>调试</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>缺失补全</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>+6 (VecShuffle/VecExtractLane/VecInsertLane/VecLoadConst/AtomicCAS/GprUnaryOp)</td>
+        </tr>
+        <tr>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>+6</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>通信 (nccl)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>+5 (AllReduceChunk/CommBarrier/NvlinkAsyncCopy/CommDType/ReduceOp)</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>+5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>总计</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>142</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-41</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+18</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>~102</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-39 (-27%)</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="req-vr-008" data-req="REQ-VR-008" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="4" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§4 TraceOp→VmInstr 映射更新 (REQ-VR-008)
+      <p>auto_select.rs 中所有被删除 VmInstr 的映射必须更新为新变体。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-008" data-test="TEST-VR-008" data-req-ref="REQ-VR-008" data-test-categories="unit" <h3="">TEST-VR-008: VmInstr去类型化合并测试<p>验证REQ-VR-008相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 映射变更表</h4>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>当前 VmInstr</td>
+        </tr>
+        <tr>
+          <td>新 VmInstr</td>
+        </tr>
+        <tr>
+          <td>QuantBitAnd</td>
+        </tr>
+        <tr>
+          <td>QuantVecBitAnd</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: And, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>QuantBitOr</td>
+        </tr>
+        <tr>
+          <td>QuantVecBitOr</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: Or, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>QuantBroadcast</td>
+        </tr>
+        <tr>
+          <td>QuantBroadcast</td>
+        </tr>
+        <tr>
+          <td>Broadcast</td>
+        </tr>
+        <tr>
+          <td>QuantFma</td>
+        </tr>
+        <tr>
+          <td>QuantFma</td>
+        </tr>
+        <tr>
+          <td>Fma</td>
+        </tr>
+        <tr>
+          <td>QuantScalarLoad</td>
+        </tr>
+        <tr>
+          <td>QuantScalarLoad</td>
+        </tr>
+        <tr>
+          <td>ScalarLoad</td>
+        </tr>
+        <tr>
+          <td>QuantIntDivConst</td>
+        </tr>
+        <tr>
+          <td>QuantIntDivConst</td>
+        </tr>
+        <tr>
+          <td>GprBinOp { op: Div, b: Imm(divisor) }</td>
+        </tr>
+        <tr>
+          <td>QuantIntMul</td>
+        </tr>
+        <tr>
+          <td>QuantIntMul</td>
+        </tr>
+        <tr>
+          <td>GprBinOp { op: Mul, b: Imm(factor) }</td>
+        </tr>
+        <tr>
+          <td>QuantShiftLeft</td>
+        </tr>
+        <tr>
+          <td>QuantVecShiftLeft</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: Shl, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>QuantShiftRight</td>
+        </tr>
+        <tr>
+          <td>QuantVecShiftRight</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op: Shr, dtype: I32 }</td>
+        </tr>
+        <tr>
+          <td>QuantLoadF16toF32</td>
+        </tr>
+        <tr>
+          <td>QuantLoadF16toF32</td>
+        </tr>
+        <tr>
+          <td>QuantScalarCvtLoad { src_dtype: F16 }</td>
+        </tr>
+        <tr>
+          <td>QuantLoadI8toF32</td>
+        </tr>
+        <tr>
+          <td>QuantLoadI8toF32</td>
+        </tr>
+        <tr>
+          <td>QuantScalarCvtLoad { src_dtype: I8 }</td>
+        </tr>
+        <tr>
+          <td>QuantE2m1LutDecode (nvfp4=false)</td>
+        </tr>
+        <tr>
+          <td>Mxfp4VecDequant</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: Mxfp4 }</td>
+        </tr>
+        <tr>
+          <td>QuantE2m1LutDecode (nvfp4=true)</td>
+        </tr>
+        <tr>
+          <td>Nvfp4SubBlockDequant</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: Nvfp4 }</td>
+        </tr>
+        <tr>
+          <td>Permute</td>
+        </tr>
+        <tr>
+          <td>identity copy</td>
+        </tr>
+        <tr>
+          <td>VecShuffle</td>
+        </tr>
+        <tr>
+          <td>QuantDataLoad (SignedPackedInt4/Low)</td>
+        </tr>
+        <tr>
+          <td>GgufInt4Load</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: SignedNibbleLow }</td>
+        </tr>
+        <tr>
+          <td>QuantDataLoad (SignedPackedInt4/High)</td>
+        </tr>
+        <tr>
+          <td>GgufInt4HighLoad</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: SignedNibbleHigh }</td>
+        </tr>
+        <tr>
+          <td>QuantDataLoad (PackedInt4/Low)</td>
+        </tr>
+        <tr>
+          <td>GgufUInt4Load</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: UnsignedNibbleLow }</td>
+        </tr>
+        <tr>
+          <td>QuantDataLoad (PackedInt4/High)</td>
+        </tr>
+        <tr>
+          <td>GgufUInt4HighLoad</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: UnsignedNibbleHigh }</td>
+        </tr>
+        <tr>
+          <td>QuantDataLoad (Int8)</td>
+        </tr>
+        <tr>
+          <td>GgufInt8Load</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: Int8 }</td>
+        </tr>
+        <tr>
+          <td>QuantDataLoad (Bitpack2)</td>
+        </tr>
+        <tr>
+          <td>GgufInt2Load</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: Bitpack2 }</td>
+        </tr>
+        <tr>
+          <td>QuantScaleLoad</td>
+        </tr>
+        <tr>
+          <td>GgufF16ScaleLoad</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad { unpack: F16Broadcast }</td>
+        </tr>
+        <tr>
+          <td>QuantHighBitsLoad (Low5)</td>
+        </tr>
+        <tr>
+          <td>GgufInt5Load</td>
+        </tr>
+        <tr>
+          <td>QuantBiPlaneLoad { mode: Low5 }</td>
+        </tr>
+        <tr>
+          <td>QuantHighBitsLoad (Low6)</td>
+        </tr>
+        <tr>
+          <td>GgufInt6Load</td>
+        </tr>
+        <tr>
+          <td>QuantBiPlaneLoad { mode: Low6 }</td>
+        </tr>
+        <tr>
+          <td>QuantHighBitsLoad (Q3Merge)</td>
+        </tr>
+        <tr>
+          <td>GgufInt3Load</td>
+        </tr>
+        <tr>
+          <td>QuantBiPlaneLoad { mode: Q3Merge }</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.1.1" data-section="4.1.1">
+      <h4>§4.1.1 MLA TraceOp→VmInstr 映射 (SPEC 33 联动)</h4>
+      <p>&gt; <strong>注</strong>: MLA VmInstr 复用已有 VecMatMul/VecDotProd/VecBinOp/Softmax 等通用指令，不引入 MLA 专用 VmInstr。MLA 的特殊性体现在 TraceOp 语义（MlaAttnScore 定义了 absorbed attention 的计算步骤）和 CompilerGraph 构建阶段（权重布局、维度推导），不在 VmInstr 层。</p>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>VmInstr 组合</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>MlaKvCompress</td>
+        </tr>
+        <tr>
+          <td>VecMatMul { dtype } + VecStore</td>
+        </tr>
+        <tr>
+          <td>hidden_state × W_DKV^T → c_KV (d_c 维)</td>
+        </tr>
+        <tr>
+          <td>MlaQAbsorb</td>
+        </tr>
+        <tr>
+          <td>VecMatMul { dtype } + VecStore</td>
+        </tr>
+        <tr>
+          <td>q × W_UK^T → q_absorbed (n_h × d_c 维)</td>
+        </tr>
+        <tr>
+          <td>MlaVRestore</td>
+        </tr>
+        <tr>
+          <td>VecMatMul { dtype } + VecStore</td>
+        </tr>
+        <tr>
+          <td>score × UV_W → v_restored (n_h × d 维)</td>
+        </tr>
+        <tr>
+          <td>MlaAttnScore</td>
+        </tr>
+        <tr>
+          <td>VecDotProd { dtype } + VecBinOp { ScaleAdd }</td>
+        </tr>
+        <tr>
+          <td>q_absorbed · c_KV → attention scores</td>
+        </tr>
+        <tr>
+          <td>MlaRopeMerge</td>
+        </tr>
+        <tr>
+          <td>VecExtractLane + VecInsertLane</td>
+        </tr>
+        <tr>
+          <td>替换 c_KV 后 d_rope 维为 k_pe</td>
+        </tr>
+        <tr>
+          <td>MlaAttention</td>
+        </tr>
+        <tr>
+          <td>MlaAttnScore + Softmax + MlaVRestore + VecMatMul</td>
+        </tr>
+        <tr>
+          <td>完整 MLA attention 流水线</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.1.2" data-section="4.1.2">
+      <h4>§4.1.2 MTP TraceOp→VmInstr 映射 (SPEC 34 联动)</h4>
+      <p>&gt; <strong>注</strong>: MTP 复用 VecMatMul (GEMV) + Argmax 通用指令。MTP 的特殊性在 MegaKernelBusinessConfig.mtp_config 控制的 MTP 融合组（per-depth 投影 + argmax 循环），不在 VmInstr 层。</p>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>VmInstr 组合</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>MtpDraft</td>
+        </tr>
+        <tr>
+          <td>GprBinOp { Add } + QuantBlockLoad { F16Broadcast } + VecMatMul + Argmax</td>
+        </tr>
+        <tr>
+          <td>per-depth: hidden + weight_offset → GEMV → argmax</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 plan_lower.rs 中的 GgufXxxLoad 直接调用</h4>
+      <p>plan_lower.rs 中任何直接 <code>prog.emit(VmInstr::GgufXxxLoad {...})</code> 的调用都必须替换为新的 QuantBlockLoad/QuantBiPlaneLoad。通过 grep 审计确认。</p>
+    </section>
+    <section id="req-vr-009" data-req="REQ-VR-009" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="5" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§5 ISA Lowering 重构 (REQ-VR-009)
+      <p>重构 x86_lower/aarch64_lower/gpu_lower 中因合并和新增 VmInstr 变体而需要更新的 lowering 逻辑，确保每个新变体（QuantBlockLoad/QuantBiPlaneLoad/DotProduct/GprBinOp/GprCondAction/VecShuffle/VecExtractLane/VecInsertLane/VecLoadConst/AtomicCAS/GprUnaryOp）在三个 ISA 后端生成正确的机器指令。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-009" data-test="TEST-VR-009" data-req-ref="REQ-VR-009" data-test-categories="unit" <h3="">TEST-VR-009: VmInstr去类型化合并测试<p>验证REQ-VR-009相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 x86_lower.rs</h4>
+      <li>删除 7 个 GgufXxxLoad match arm → 替换为 1 个 QuantBlockLoad arm（内部 match on BlockUnpackMode）+ 1 个 QuantBiPlaneLoad arm</li>
+      <li>删除 5 个 DotProduct match arm → 替换为 1 个 DotProduct arm（内部 match on DotDtype）</li>
+      <li>删除 7 个 Gpr* match arm → 替换为 GprBinOp + GprCondAction 两个 arm</li>
+      <li>删除 10 个 Quant* 重复 arm → 复用 VecBinOp/Broadcast/Fma/ScalarLoad arm</li>
+      <li>新增 VecShuffle/VecExtractLane/VecInsertLane/VecLoadConst/AtomicCAS/GprUnaryOp arm</li>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 aarch64_lower.rs</h4>
+      <li>同 x86_lower.rs 结构，ISA 映射替换为 NEON/SVE 指令</li>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>§5.3 gpu_lower.rs</h4>
+      <li>同 x86_lower.rs 结构，ISA 映射替换为 PTX/HIP/MSL 指令</li>
+    </section>
+    <section id="req-vr-010" data-req="REQ-VR-010" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="6" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§6 验证策略 (REQ-VR-010)
+      <p>定义 VmInstr 变更的端到端验证策略：每个新增/合并变体必须有 cargo check 编译通过、auto_select.rs 对应 match arm、三个 ISA 后端 lowering 正确、以及 VmInstr round-trip 单元测试，确保去类型化合并和指令补全不引入功能退化。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
+      
+      
+      </a></div>
+    </section>
+    <section id="test-vr-010" data-test="TEST-VR-010" data-req-ref="REQ-VR-010" data-test-categories="unit" <h3="">TEST-VR-010: VmInstr去类型化合并测试<p>验证REQ-VR-010相关功能正确性</p>
+      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
+      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      
+    </section>
+
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 编译验证</h4>
+      <p>```</p>
+      <p>cd ../gllm-kernels &amp;&amp; cargo check</p>
+      <p>cd ../gllm &amp;&amp; cargo check</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 auto_select 映射完整性</h4>
+      <p>每个 TraceOp 变体必须有且仅有一个 VmInstr 映射。通过 <code>dispatch_trace_op</code> 的 exhaustive match 保证。</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>§6.3 数值对齐</h4>
+      <p>Q4_0/Q8_0 E2E 测试输出与重构前对比，误差 ≤ 1e-6。</p>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>§6.4 数量审计</h4>
+      <p>```</p>
+      <p>grep -c "GgufInt8Load|GgufF16ScaleLoad|GgufInt4Load|..." <a href="http://instr.rs">instr.rs</a>  → 0</p>
+      <p>grep -c "QuantBlockLoad|DotProduct|GprBinOp|..." <a href="http://instr.rs">instr.rs</a>  &gt; 0</p>
+      <p>grep -c "^\s*[A-Z][a-zA-Z0-9_]<em>\s</em>{" <a href="http://instr.rs">instr.rs</a>  → ~97</p>
+      <p>```</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 实施顺序</h3>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>REQ</td>
+        </tr>
+        <tr>
+          <td>内容</td>
+        </tr>
+        <tr>
+          <td>风险</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>VR-003</td>
+        </tr>
+        <tr>
+          <td>GprBinOp + GprCondAction 合并</td>
+        </tr>
+        <tr>
+          <td>🟢 安全 — 纯参数化</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>VR-002</td>
+        </tr>
+        <tr>
+          <td>DotProduct 合并</td>
+        </tr>
+        <tr>
+          <td>🟢 安全 — dtype 参数化</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>VR-004</td>
+        </tr>
+        <tr>
+          <td>Quant* 去重（删除复用已有指令的 10 个）</td>
+        </tr>
+        <tr>
+          <td>🟢 安全 — 语义等价</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>QuantBlockLoad + QuantBiPlaneLoad 合并</td>
+        </tr>
+        <tr>
+          <td>🟡 中 — x86_lower 需重构</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>VR-005~010</td>
+        </tr>
+        <tr>
+          <td>缺失指令补全</td>
+        </tr>
+        <tr>
+          <td>🟢 安全 — 纯新增</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>VR-011</td>
+        </tr>
+        <tr>
+          <td>auto_select 映射更新</td>
+        </tr>
+        <tr>
+          <td>🟡 中 — 必须 exhaustive</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>7</td>
+        </tr>
+        <tr>
+          <td>VR-012</td>
+        </tr>
+        <tr>
+          <td>ISA Lowering 重构</td>
+        </tr>
+        <tr>
+          <td>🟡 中 — 三后端同步</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>VR-013</td>
+        </tr>
+        <tr>
+          <td>验证</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>✅ 完成</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 修改文件总表</h3>
+      <table>
+        <tr>
+          <th>文件</th>
+        </tr>
+        <tr>
+          <td>REQ</td>
+        </tr>
+        <tr>
+          <td>改动</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/instr.rs</td>
+        </tr>
+        <tr>
+          <td>VR-001~010</td>
+        </tr>
+        <tr>
+          <td>删除 41 变体 + 新增 13 变体 + 新增枚举类型</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/auto_select.rs</td>
+        </tr>
+        <tr>
+          <td>VR-011</td>
+        </tr>
+        <tr>
+          <td>更新所有 TraceOp→VmInstr 映射</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/x86_lower.rs</td>
+        </tr>
+        <tr>
+          <td>VR-012</td>
+        </tr>
+        <tr>
+          <td>删除旧 arm + 新增合并 arm + 新增缺失 arm</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/aarch64_lower.rs</td>
+        </tr>
+        <tr>
+          <td>VR-012</td>
+        </tr>
+        <tr>
+          <td>同上</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/gpu_lower.rs</td>
+        </tr>
+        <tr>
+          <td>VR-012</td>
+        </tr>
+        <tr>
+          <td>同上</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/plan_lower.rs</td>
+        </tr>
+        <tr>
+          <td>VR-011</td>
+        </tr>
+        <tr>
+          <td>替换直接 emit GgufXxxLoad 为 QuantBlockLoad</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/opt_pass.rs</td>
+        </tr>
+        <tr>
+          <td>VR-001~004</td>
+        </tr>
+        <tr>
+          <td>更新引用已删除变体的 pass</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/verify.rs</td>
+        </tr>
+        <tr>
+          <td>VR-001~004</td>
+        </tr>
+        <tr>
+          <td>更新 def-before-use 规则中的变体名</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/reg_alloc.rs</td>
+        </tr>
+        <tr>
+          <td>VR-001~004</td>
+        </tr>
+        <tr>
+          <td>更新 referenced_vregs match arm</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/vm_state.rs</td>
+        </tr>
+        <tr>
+          <td>VR-001~004</td>
+        </tr>
+        <tr>
+          <td>更新 VM interpreter（如有引用）</td>
+        </tr>
+        <tr>
+          <td>codegen/vm/structural_builder.rs</td>
+        </tr>
+        <tr>
+          <td>VR-001</td>
+        </tr>
+        <tr>
+          <td>更新结构型算子构建中的 GgufXxxLoad 引用</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-OP-KIND" id="ent-op-kind">
+        <h4>ENT-OP-KIND</h4>
+        <p>OpKind — 算子种类枚举</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>OpKind enum</td><td>算子变体名 (Gemm/RmsNorm/RoPE/Attention/Gather/MoEGate/etc.)</td></tr><tr data-field="input_count" data-type="number" data-required="true" <td="">input_count<td>number</td><td>是</td><td>≥1</td><td>输入 tensor 数量</td></tr>
+<tr data-field="output_count" data-type="number" data-required="true" <td="">output_count<td>number</td><td>是</td><td>≥1</td><td>输出 tensor 数量</td></tr><tr data-field="dtype" data-type="string" data-required="false" <td="">dtype<td>string</td><td>否</td><td>QuantPrecision</td><td>操作数据精度</td></tr><tr data-field="head_dim" data-type="number" data-required="false" <td="">head_dim<td>number</td><td>否</td><td>仅 Attention/RoPE/QkNorm</td><td>注意力头维度</td></tr>
+<tr data-field="eps" data-type="number" data-required="false" <td="">eps<td>number</td><td>否</td><td>仅 RmsNorm/LayerNorm/ValueNorm</td><td>归一化 epsilon</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-QUANT-PRECISION" id="ent-quant-precision"><h4>ENT-QUANT-PRECISION</h4><p>QuantPrecision — dtype精度枚举</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="kind" data-type="string" data-required="true" <td="">kind<td>string</td><td>是</td><td>F32/F16/BF16/TF32/FP8E4M3/FP8E5M2/FP6E2M3/FP6E3M2/FP4E2M1/INT8/INT4/INT2/INT1</td><td>DTypeKind 基础精度类型</td></tr>
+<tr data-field="packing" data-type="string" data-required="true" <td="">packing<td>string</td><td>是</td><td>Plain/MXBlock/GGML/GPTQ/AWQ/Bitnet</td><td>PackingFormat 存储打包方式</td></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>0=不适用</td><td>量化块大小</td></tr><tr data-field="group_size" data-type="number" data-required="true" <td="">group_size<td>number</td><td>是</td><td>0=不适用</td><td>分组量化的组大小</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-TRACE-OP" id="ent-trace-op"><h4>ENT-TRACE-OP</h4><p>TraceOp — SSA中间表示算子（enum TraceOp in gllm-kernels/src/compiler/trace.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Input|Const|Add|Sub|Mul|Div|Fma|Neg|Abs|Exp|Sqrt|Rsqrt|Tanh|Recip|Log|Sigmoid|Max|Min|ConditionalBranch|QuantFma|BlockScale|Cast|HReduce|Prefetch|NonTemporalStore|BitExtract|Permute</td><td>枚举变体名</td></tr><tr data-field="input_index" data-type="number" data-required="false" <td="">input_index<td>number</td><td>否</td><td>u32, 仅 Input 变体</td><td>加载第 i 个输入元素</td></tr><tr data-field="const_value" data-type="number" data-required="false" <td="">const_value<td>number</td><td>否</td><td>
+f64, 仅 Const 变体</td><td>浮点常量值</td></tr><tr data-field="left_operand" data-type="number" data-required="false" <td="">left_operand<td>number</td><td>否</td><td>ValueId, 二元运算左操作数</td><td>Add/Sub/Mul/Div/Max/Min 的左操作数</td></tr><tr data-field="right_operand" data-type="number" data-required="false" <td="">right_operand<td>number</td><td>否</td><td>ValueId, 二元运算右操作数</td><td>Add/Sub/Mul/Div/Max/Min 的右操作数</td></tr><tr data-field="fma_third_operand" data-type="number" data-required="false" <td="">
+fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(a,b,c) = a*b+c 的 c</td></tr><tr data-field="reduce_kind" data-type="string" data-required="false" <td="">reduce_kind<td>string</td><td>否</td><td>Sum|Max|Min, 仅 HReduce 变体</td><td>水平归约操作类型</td></tr><tr data-field="quant_precision" data-type="string" data-required="false" <td="">quant_precision<td>string</td><td>否</td><td>QuantPrecision, 仅 QuantFma/Cast 变体</td><td>混合精度 dtype</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-VM-INSTR" id="ent-vm-instr">
+        <h4>ENT-VM-INSTR</h4>
+        <p>VmInstr — 虚拟指令集 (102+指令)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>VecLoad|VecStore|Fma|LoopBegin|...</td><td>指令变体名 (102+种)</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>QuantPrecision</td><td>数据精度类型</td></tr>
+<tr data-field="width" data-type="string" data-required="true" <td="">width<td>string</td><td>是</td><td>SimdWidth</td><td>SIMD宽度 (128/256/512/SVE)</td></tr><tr data-field="dst" data-type="string" data-required="false" <td="">dst<td>string</td><td>否</td><td>VRegId</td><td>目标寄存器</td></tr><tr data-field="src" data-type="string" data-required="false" <td="">src<td>string</td><td>否</td><td>VRegId</td><td>源寄存器</td></tr><tr data-field="offset" data-type="string" data-required="false" <td="">offset
+<td>string</td><td>否</td><td>OffsetExpr</td><td>内存偏移表达式</td></tr><tr data-field="base" data-type="string" data-required="false" <td="">base<td>string</td><td>否</td><td>VRegId</td><td>基址寄存器</td></tr><tr data-field="step" data-type="number" data-required="false" <td="">step<td>number</td><td>否</td><td>usize</td><td>循环步长 (LoopBegin专用)</td></tr></table>
+      </section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section data-api="POST /internal/vminstr/dispatch" id="post-/internal/vminstr/dispatch" data-api-type="internal" data-api-name="API-VMINSTR"><h4>POST /internal/vminstr/dispatch — VmInstr instruction set dispatch</h4><p>VmInstr 指令集调度接口，去类型化合并后的统一指令集。auto_lower_trace() 查表法自动选择，ComputePattern 驱动分发，禁止手写 per-OpKind match arm。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：26-VMINSTR-RATIONALIZATION.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2></section>
+<section id="gpu-batch-vminstr-extensions">
+  <h3>§X GPU 并行指令族 + §Y Batch 推理指令族（变体数扩展）</h3>
+
+  <p><strong>变体数更新</strong>：原 §1.6.4 目标 "~97 基础 + 5 nccl = ~102" 已过时。实际系统扩展到约 150 变体（含 GPU 并行 + Batch 推理指令族）。</p>
+
+  <h4>§X.1 GPU 并行指令族（22 变体）</h4>
+  <p>GPU 独有 VmInstr 变体，仅 GPU Dialect Lowering 路径使用（详见 gllm/SPEC/39B §X GPU Dialect）。</p>
+  <table>
+    <tr><th>变体名</th><th>用途</th></tr>
+    <tr><td>WarpSync</td><td>warp 同步屏障</td></tr>
+    <tr><td>AsyncCopy</td><td>异步内存拷贝（CP.Async）</td></tr>
+    <tr><td>AsyncWait</td><td>等待异步操作完成</td></tr>
+    <tr><td>SharedMemAlloc</td><td>共享内存分配</td></tr>
+    <tr><td>SharedMemStore</td><td>共享内存写入</td></tr>
+    <tr><td>SharedMemLoad</td><td>共享内存读取</td></tr>
+    <tr><td>SharedMemAsyncStore</td><td>共享内存异步写入</td></tr>
+    <tr><td>SharedMemAsyncWaitGroup</td><td>等待异步组完成</td></tr>
+    <tr><td>WeightPrefetchAsync</td><td>权重异步预取</td></tr>
+    <tr><td>WeightPrefetchWait</td><td>等待权重预取</td></tr>
+    <tr><td>WarpRoleDeclare</td><td>warp 角色声明</td></tr>
+    <tr><td>WarpBarrierArrive</td><td>warp barrier 到达</td></tr>
+    <tr><td>WarpBarrierWait</td><td>等待 warp barrier</td></tr>
+    <tr><td>TmaDescriptorInit</td><td>TMA 描述符初始化（SM 9.0+）</td></tr>
+    <tr><td>Tma2DCopy</td><td>TMA 2D 拷贝（SM 9.0+）</td></tr>
+    <tr><td>BarrierInit</td><td>barrier 初始化</td></tr>
+    <tr><td>BlockSync</td><td>block 级同步</td></tr>
+    <tr><td>WarpReduce</td><td>warp 级规约</td></tr>
+    <tr><td>TileConfig</td><td>Tile 配置（SM 8.0+）</td></tr>
+    <tr><td>TileMma</td><td>Tensor Core Tile MMA</td></tr>
+    <tr><td>TileRelease</td><td>Tile 资源释放</td></tr>
+    <tr><td>Vp2Intersect</td><td>VP2 相交检测</td></tr>
+  </table>
+
+  <h4>§Y.1 Batch 推理指令族（3 变体）</h4>
+  <p>多序列批量执行专用指令。</p>
+  <table>
+    <tr><th>变体名</th><th>用途</th></tr>
+    <tr><td>BatchSeqIdLookup</td><td>批量序列 ID 查找</td></tr>
+    <tr><td>BatchPerSeqArgmax</td><td>每序列独立 argmax</td></tr>
+    <tr><td>BatchPerSeqStopCheck</td><td>每序列停止条件检查</td></tr>
+  </table>
+
+  <h4>§1.6.4 目标变体数更新</h4>
+  <p><strong>新目标</strong>：~125 基础（含 GPU 22 + Batch 3）+ 5 nccl = ~130（不含基础 VmInstr 的 ~100）。实际系统约 150 变体（含 target-specific 子变体）。</p>
+
+  <p><strong>REQ-VR-001~004 落地状态</strong>：去类型化合并已完成（VmInstr 字段统一），新变体遵循相同模式（dtype 参数化 + target 标记）。</p>
+</section>
+
+</body>
+</html>
