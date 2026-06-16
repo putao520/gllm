@@ -217,7 +217,47 @@
         </section>
 
         <section id="s13-2-1" data-section="13-2-1">
-          <h3>§13.2.1 结构差异（Family 驱动 BUILD 侧裁剪）</h3>
+          
+        <h3 id="s3-x-build-fusion-catalog">§3.X BUILD Fusion Catalog（图构建层融合目录）</h3>
+        <p><strong>定位</strong>：BUILD 阶段（图构建层）的算子融合目录。gllm 在 <code>build_compiler_graph</code> 阶段对 CompilerGraph 执行 7 种模式融合，将多个原子 OpKind 合并为单个融合 OpKind，改变图拓扑（不同于 COMPILE 阶段的 FusionMode）。</p>
+
+        <h4>1. FlashAttention</h4>
+        <p><strong>触发条件</strong>：QKV 矩阵乘 + ScaledDotProduct + Softmax + V 矩阵乘 序列。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::MultiHeadAttention</code>（attention_type=Flash）。</p>
+        <p><strong>参数保留</strong>：num_heads / head_dim / mask_type / kv_source 完整保留到 OpSpec。</p>
+        <p><strong>与 COMPILE 融合交互</strong>：COMPILE 层 FusionMode 不再拆分此 op，ISA Lowering 根据 DeviceProfile 选择 FlashAttention tile 策略或 naive attention 代码生成。</p>
+
+        <h4>2. GQA (Grouped Query Attention)</h4>
+        <p><strong>触发条件</strong>：KV 头数 &lt; Q 头数，K/V 广播到多个 Q 头。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::CachedGqa</code>。</p>
+        <p><strong>参数保留</strong>：num_q_heads / num_kv_heads / head_dim。</p>
+
+        <h4>3. FusedQkvRope</h4>
+        <p><strong>触发条件</strong>：3 个独立 Linear（Q/K/V projection）+ RoPE 应用。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::FusedQkvRope</code>（单 op 表达 3 个 GEMM + 2 个 RoPE）。</p>
+        <p><strong>参数保留</strong>：qkv_weight_offset / rope_theta / rope_partial。</p>
+
+        <h4>4. SwiGLU</h4>
+        <p><strong>触发条件</strong>：Gate Linear + Up Linear + SiLU + Multiply 序列（FFN 中间层）。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::SwiGlu</code>（单 op 表达 Gate·SiLU·Up）。</p>
+
+        <h4>5. MoERouting</h4>
+        <p><strong>触发条件</strong>：Router Linear + TopK + Softmax + Expert Dispatch 序列（MoE 层）。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::MoeGate</code> + <code>OpKind::MoEDispatchPacked</code>。</p>
+        <p><strong>参数保留</strong>：num_experts / top_k / router_weight_offset。</p>
+
+        <h4>6. FusedRMSLinear</h4>
+        <p><strong>触发条件</strong>：RMSNorm + Linear 序列（pre-attention norm + QKV projection）。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::FusedRmsNormGemm</code>（NormGemm 融合，EpilogueInjection 模式）。</p>
+
+        <h4>7. FusedQkvNormRope (Gemma 4 六算子融合)</h4>
+        <p><strong>触发条件</strong>：Q/K/V projection + QkNorm + ValueNorm + DualRoPE（sliding + global 双路 RoPE）。</p>
+        <p><strong>产出 OpKind</strong>：<code>OpKind::FusedQkvNormRope</code>（Gemma 4 专属，单 op 表达 6 个原子 op）。</p>
+        <p><strong>参数保留</strong>：sliding_rope_theta=10K + sliding_partial=1.0；global_rope_theta=1M + global_partial=0.25；qknorm_eps；valuenorm_eps。</p>
+
+        <p><strong>与 COMPILE 层 FusionMode 的交互</strong>：BUILD 融合改变图拓扑（多 op → 单 op），COMPILE FusionMode（EpilogueInjection / LoopFusion / TileLevelFusion / ComputeRoot / QkvSharedInput / NormIntoGemm）在已融合 op 内部进一步优化指令选择。两层正交，互不干扰。</p>
+
+        <h3>§13.2.1 结构差异（Family 驱动 BUILD 侧裁剪）</h3>
           <p>图构建器（build_graph.inc.rs）<strong>不按 OutputMode 物理裁剪 ops</strong>。图始终构建完整的模型结构。裁剪通过两种机制实现：</p>
           <p><strong>结构差异（Family 驱动）</strong>：Encoder（post-norm）和 Decoder（pre-norm）的图结构本身不同，这是 <code>ArchitectureFeatures.family</code> 驱动的，不是 OutputMode 驱动的：</p>
           <table>
@@ -733,7 +773,48 @@ let outer_loop_bound = if has_argmax &amp;&amp; has_store_token &amp;&amp; has_c
         </section>
 
         <section id="s8" data-section="8">
-          <h3>§8 推理执行层</h3>
+          
+        <h4 id="s7-2-r1-kernel-context-abi">§7.2 R1 KernelContext ABI（单指针调用约定）</h4>
+        <p><strong>定位</strong>：R1 ABI 是 gllm 运行时调用 JIT 编译产物的实际接口。gllm 不直接以 L0 22-param 调用 <code>MegaKernelFn</code>，而是构造 <code>KernelContext</code> 结构体并通过单指针传入。JIT 机器码内部按固定偏移读取每个参数。</p>
+
+        <section data-entity-model-type="relational" data-entity="KernelContext" id="data-kernelcontext">
+          <h3>Entity: KernelContext</h3>
+          <p><code>#[repr(C)]</code> flat struct，27 字段（含 padding），总大小 0xB8（184 字节）。gllm 运行时单指针 ABI 数据结构（R1 ABI）。</p>
+          <table data-entity-table="">
+            <tr><th>字段</th><th>类型</th><th>偏移</th><th>必填</th><th>说明</th></tr>
+            <tr data-field="weight_blob_ptr" data-type="*const u8" data-required="true"><td>weight_blob_ptr</td><td>*const u8</td><td>0x00</td><td>是</td><td>权重 blob 基址</td></tr>
+            <tr data-field="kv_cache_ptr" data-type="*mut u8" data-required="true"><td>kv_cache_ptr</td><td>*mut u8</td><td>0x08</td><td>是</td><td>KV cache 基址</td></tr>
+            <tr data-field="output_buffer_ptr" data-type="*mut u8" data-required="true"><td>output_buffer_ptr</td><td>*mut u8</td><td>0x10</td><td>是</td><td>输出缓冲区</td></tr>
+            <tr data-field="hook_ctx_ptr" data-type="*mut u8" data-required="false"><td>hook_ctx_ptr</td><td>*mut u8</td><td>0x18</td><td>否</td><td>Hook 上下文（NULL=无 hook）</td></tr>
+            <tr data-field="seq_len_ptr" data-type="*const usize" data-required="true"><td>seq_len_ptr</td><td>*const usize</td><td>0x20</td><td>是</td><td>序列长度指针（SymDim 运行时绑定）</td></tr>
+            <tr data-field="rope_freqs_ptr" data-type="*const f32" data-required="true"><td>rope_freqs_ptr</td><td>*const f32</td><td>0x28</td><td>是</td><td>RoPE 频率表</td></tr>
+            <tr data-field="kv_page_table_ptr" data-type="*const u32" data-required="true"><td>kv_page_table_ptr</td><td>*const u32</td><td>0x30</td><td>是</td><td>KV page table（PagedAttention）</td></tr>
+            <tr data-field="batch_meta_ptr" data-type="*const u8" data-required="false"><td>batch_meta_ptr</td><td>*const u8</td><td>0x38</td><td>否</td><td>Batch 元数据</td></tr>
+            <tr data-field="kv_page_size" data-type="u32" data-required="true"><td>kv_page_size</td><td>u32</td><td>0x40</td><td>是</td><td>KV page 大小</td></tr>
+            <tr data-field="kv_num_layers" data-type="u32" data-required="true"><td>kv_num_layers</td><td>u32</td><td>0x44</td><td>是</td><td>KV 层数</td></tr>
+            <tr data-field="kv_num_heads" data-type="u32" data-required="true"><td>kv_num_heads</td><td>u32</td><td>0x48</td><td>是</td><td>KV 头数</td></tr>
+            <tr data-field="kv_head_dim" data-type="u32" data-required="true"><td>kv_head_dim</td><td>u32</td><td>0x4C</td><td>是</td><td>KV 头维度</td></tr>
+            <tr data-field="telemetry_ptr" data-type="*mut u8" data-required="false"><td>telemetry_ptr</td><td>*mut u8</td><td>0x50</td><td>否</td><td>遥测缓冲区</td></tr>
+            <tr data-field="telemetry_flags" data-type="u32" data-required="false"><td>telemetry_flags</td><td>u32</td><td>0x58</td><td>否</td><td>遥测开关位</td></tr>
+            <tr data-field="business_config_ptr" data-type="*const u8" data-required="true"><td>business_config_ptr</td><td>*const u8</td><td>0x60</td><td>是</td><td>BusinessConfig 指针</td></tr>
+            <tr data-field="weight_offsets_ptr" data-type="*const usize" data-required="true"><td>weight_offsets_ptr</td><td>*const usize</td><td>0x68</td><td>是</td><td>权重偏移表</td></tr>
+            <tr data-field="weight_offsets_len" data-type="usize" data-required="true"><td>weight_offsets_len</td><td>usize</td><td>0x70</td><td>是</td><td>权重偏移表长度</td></tr>
+            <tr data-field="callback_table_ptr" data-type="*const u64" data-required="false"><td>callback_table_ptr</td><td>*const u64</td><td>0x78</td><td>否</td><td>回调表（EarlyExit/RAG/MoE 等）</td></tr>
+            <tr data-field="scratch_buffer_ptr" data-type="*mut u8" data-required="true"><td>scratch_buffer_ptr</td><td>*mut u8</td><td>0x80</td><td>是</td><td>scratch buffer</td></tr>
+            <tr data-field="batch_ctx_ptr" data-type="*const u8" data-required="false"><td>batch_ctx_ptr</td><td>*const u8</td><td>0x88</td><td>否</td><td>Batch context</td></tr>
+            <tr data-field="weight_page_table_ptr" data-type="*const u8" data-required="false"><td>weight_page_table_ptr</td><td>*const u8</td><td>0x90</td><td>否</td><td>权重页表（REQ-WP-008）</td></tr>
+            <tr data-field="weight_page_fault_cb_ptr" data-type="*const u64" data-required="false"><td>weight_page_fault_cb_ptr</td><td>*const u64</td><td>0x98</td><td>否</td><td>权重页错误回调（REQ-WP-008）</td></tr>
+            <tr data-field="weight_page_inject_flags" data-type="u32" data-required="false"><td>weight_page_inject_flags</td><td>u32</td><td>0xA0</td><td>否</td><td>权重页注入开关（bit 0=enabled，REQ-WP-008）</td></tr>
+            <tr data-field="kv_page_header_ptr" data-type="*const u8" data-required="false"><td>kv_page_header_ptr</td><td>*const u8</td><td>0xA8</td><td>否</td><td>KV page header 数组（REQ-COMP11）</td></tr>
+            <tr data-field="decompress_inject_flags" data-type="u32" data-required="false"><td>decompress_inject_flags</td><td>u32</td><td>0xB0</td><td>否</td><td>解压注入开关（bit 0=enabled，REQ-COMP11）</td></tr>
+          </table>
+        </section>
+
+        <p><strong>扩展规则</strong>：新字段只追加到 struct 尾部，禁止插入中间字段（会破坏所有现有 JIT 机器码的偏移读取）。Padding 字段（<code>_pad0/_pad1/_pad2</code>）保留用于对齐，不可复用。</p>
+
+        <p><strong>与 L0 22-param ABI 关系</strong>：R1 <code>KernelContext</code> 是 gllm 调用方构造的"参数打包层"，内部持有 L0 <code>MegaKernelFn</code> 函数指针。调用流程：<code>KernelContext::build(...)</code> 填充字段 → <code>entry_fn(ctx_ptr)</code> 单指针调用 → JIT prologue 内部 unpack <code>KernelContext</code> 字段 → 转换为 L0 22-param 形式 → 内部 CALL L0 <code>MegaKernelFn</code>。返回值映射：L0 <code>usize</code> → R1 <code>u32</code>（截断语义，token count 不会超过 u32 范围）。</p>
+
+        <h3>§8 推理执行层</h3>
 
           <h4>§8.1 generate_single_sequence()</h4>
           <p>推理执行入口（executor_core.inc.rs:533）：</p>
