@@ -63,6 +63,7 @@ impl MegaKernelExecutor {
             max_seq_len,
             debug_jit: business_config.debug_jit,
             hetero: hetero_config.clone(),
+            target: gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Cpu,
         };
 
         let hetero_layout = hetero_config.as_ref().map(|hc| {
@@ -145,8 +146,9 @@ impl MegaKernelExecutor {
         let has_gemma_norm_residual = graph.embedding_scale.is_some() && !topology.has_qk_norm;
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler
-            .compile_mega_kernel_from_graph(graph, &config, hetero_layout)
+            .compile(graph, &config, hetero_layout)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
+        let output = output.expect_cpu();
 
         let exec_code = output.layer_code;
         let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
@@ -162,8 +164,9 @@ impl MegaKernelExecutor {
         // Will re-enable after RegAllocator optimization.
         let kivi4_exec = if !raw_floats.is_empty() {
             compiler
-                .compile_mega_kernel_from_graph(graph_kivi4, &config, hetero_layout_for_kivi4)
+                .compile(graph_kivi4, &config, hetero_layout_for_kivi4)
                 .ok()
+                .map(|o| o.expect_cpu())
         } else {
             None
         };
@@ -352,18 +355,26 @@ impl MegaKernelExecutor {
         // Compile GPU PTX/HIP code if sm_version provided and GPU JIT backend available.
         #[cfg(any(feature = "cuda", feature = "hip"))]
         let gpu_code = match (graph_for_gpu, gpu_sm_version) {
-            (Some(g), Some(sm)) => match compiler.compile_mega_kernel_to_gpu(g, &config, sm) {
-                Ok(gpu_output) => {
-                    log::info!(
-                        "[mega] GPU PTX compiled: {} bytes, {} layers",
-                        gpu_output.gpu_code.len(),
-                        gpu_output.num_layers,
-                    );
-                    Some(gpu_output.gpu_code)
-                }
-                Err(e) => {
-                    log::warn!("[mega] GPU compilation failed (GPU path unavailable): {e}");
-                    None
+            (Some(g), Some(sm)) => {
+                let gpu_config = gllm_kernels::compiler::mega_kernel_abi::CompileConfig {
+                    max_seq_len: config.max_seq_len,
+                    debug_jit: config.debug_jit,
+                    hetero: config.hetero.clone(),
+                    target: gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Gpu { sm_version: sm },
+                };
+                match compiler.compile(g, &gpu_config, None) {
+                    Ok(gpu_output) => {
+                        log::info!(
+                            "[mega] GPU PTX compiled: {} bytes, {} layers",
+                            gpu_output.gpu_code.len(),
+                            gpu_output.num_layers,
+                        );
+                        Some(gpu_output.gpu_code)
+                    }
+                    Err(e) => {
+                        log::warn!("[mega] GPU compilation failed (GPU path unavailable): {e}");
+                        None
+                    }
                 }
             },
             _ => None,

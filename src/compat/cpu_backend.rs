@@ -902,18 +902,6 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         Ok(data.to_vec())
     }
 
-    fn upload_weights_f32_owned(&self, data: Vec<f32>) -> Result<Self::Tensor, BE> {
-        // Multi-dtype path: reuse upload_weights_owned by reinterpreting
-        // the f32 buffer as raw little-endian bytes.
-        // Safety: f32 is always 4-byte aligned, little-endian on supported targets,
-        // and length is a whole multiple of 4.
-        let byte_len = data.len() * core::mem::size_of::<f32>();
-        let bytes: Vec<u8> = unsafe {
-            let mut v = std::mem::ManuallyDrop::new(data);
-            Vec::from_raw_parts(v.as_mut_ptr() as *mut u8, byte_len, byte_len)
-        };
-        self.upload_weights_owned(bytes, gllm_kernels::types::DType::F32)
-    }
 
     fn upload_weights_owned(
         &self,
@@ -965,7 +953,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         data: Vec<f32>,
         _placement: backend_trait::WeightPlacement,
     ) -> Result<(Self::Tensor, backend_trait::WeightPlacement), BE> {
-        let tensor = self.upload_weights_f32_owned(data)?;
+        let tensor = { let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect(); self.upload_weights_owned(bytes, gllm_kernels::types::DType::F32)? };
         Ok((tensor, backend_trait::WeightPlacement::HostLocal))
     }
 
@@ -1833,19 +1821,19 @@ mod tests {
         assert_eq!(slice, [4.0, 5.0, 6.0]);
     }
 
-    // ── CpuBackend: upload_weights_f32_owned ──
+    // ── CpuBackend: upload_weights_owned ──
 
     #[test]
     fn cpu_backend_upload_f32_owned() {
         let b: CpuBackend<f32> = CpuBackend::new();
-        let t = b.upload_weights_f32_owned(vec![10.0, 20.0, 30.0]).unwrap();
+        let t = { let data = vec![10.0f32, 20.0, 30.0]; let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect(); b.upload_weights_owned(bytes, gllm_kernels::types::DType::F32).unwrap() };
         assert_eq!(t.as_ref(), [10.0, 20.0, 30.0]);
     }
 
     #[test]
     fn cpu_backend_upload_f32_owned_empty() {
         let b: CpuBackend<f32> = CpuBackend::new();
-        assert!(b.upload_weights_f32_owned(vec![]).unwrap().is_empty());
+        assert!(b.upload_weights_owned(vec![], gllm_kernels::types::DType::F32).unwrap().is_empty());
     }
 
     // ── CpuBackend: upload_weights_with_placement ──
@@ -3018,13 +3006,13 @@ mod tests {
         assert_eq!(map[4], Some(3));
     }
 
-    // ── CpuBackend: upload_weights_f32_owned preserves length ──
+    // ── CpuBackend: upload_weights_owned preserves length ──
 
     #[test]
     fn cpu_backend_upload_f32_owned_large() {
         let b: CpuBackend<f32> = CpuBackend::new();
         let data: Vec<f32> = (0..1000).map(|i| i as f32).collect();
-        let t = b.upload_weights_f32_owned(data.clone()).unwrap();
+        let t = { let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect(); b.upload_weights_owned(bytes, gllm_kernels::types::DType::F32).unwrap() };
         assert_eq!(t.len(), 1000);
         let slice: &[f32] = t.as_ref();
         assert_eq!(slice[0], 0.0);
@@ -3431,7 +3419,7 @@ mod tests {
     #[test]
     fn cpu_backend_upload_weights_f32_single() {
         let b: CpuBackend<f32> = CpuBackend::new();
-        let t = b.upload_weights_f32_owned(vec![42.0]).unwrap();
+        let t = { let data = vec![42.0f32]; let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect(); b.upload_weights_owned(bytes, gllm_kernels::types::DType::F32).unwrap() };
         assert_eq!(t.len(), 1);
         let slice: &[f32] = t.as_ref();
         assert_eq!(slice[0], 42.0);
@@ -4675,7 +4663,7 @@ mod tests {
         assert_eq!(head0, head99);
     }
 
-    // ── CpuBackend: upload_weights_f32_owned roundtrip for many elements ──
+    // ── CpuBackend: upload_weights_owned roundtrip for many elements ──
 
     // @trace TEST-CPU-BE-048 [level:unit]
     #[test]
@@ -4684,7 +4672,8 @@ mod tests {
         let b: CpuBackend<f32> = CpuBackend::new();
         let original: Vec<f32> = (0..256).map(|i| (i as f32) * 0.5 - 64.0).collect();
         // Act
-        let tensor = b.upload_weights_f32_owned(original.clone()).unwrap();
+        let bytes: Vec<u8> = original.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let tensor = b.upload_weights_owned(bytes, gllm_kernels::types::DType::F32).unwrap();
         let slice: &[f32] = tensor.as_ref();
         // Assert: every element matches
         assert_eq!(slice.len(), 256);

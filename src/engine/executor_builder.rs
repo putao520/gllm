@@ -2521,11 +2521,9 @@ mod tests {
     #[test]
     fn batch_order_policy_variants_distinct() {
         use crate::scheduler::types::BatchOrderPolicy;
-        #[allow(deprecated)]
         let variants = [
             BatchOrderPolicy::StrictRequestIdOrder,
             BatchOrderPolicy::FifoOrder,
-            BatchOrderPolicy::ThroughputFirst,
         ];
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {

@@ -18,7 +18,7 @@ use gllm_kernels::compiler::{
     CompilerGraph, InferenceCompiler, OpKind,
     ShapeBinding, SymDim, TensorId,
 };
-use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
+use gllm_kernels::compiler::mega_kernel_abi::{CompileConfig, CompileTarget};
 use gllm_kernels::types::DType;
 
 use crate::compat::multimodal::{
@@ -755,15 +755,17 @@ pub fn vision_encode(
         max_seq_len: num_patches,
         debug_jit: false,
         hetero: None,
+        target: CompileTarget::Cpu,
     };
     let mut compiler = InferenceCompiler::new();
     let compiled = compiler
-        .compile_mega_kernel_from_graph(graph, &mk_config, None)
+        .compile(graph, &mk_config, None)
         .map_err(|e| {
             BackendError::Other(format!(
-                "vision_encode: compile_mega_kernel_from_graph failed: {e}"
+                "vision_encode: compile failed: {e}"
             ))
         })?
+        .expect_cpu()
         .layer_code;
 
     let mut output = vec![0.0f32; num_patches * hidden];
@@ -1063,10 +1065,12 @@ mod tests {
             max_seq_len,
             debug_jit: false,
             hetero: None,
+        target: CompileTarget::Cpu,
         };
         compiler
-            .compile_mega_kernel_from_graph(graph, &config, None)
+            .compile(graph, &config, None)
             .expect("compile_simple_graph")
+            .expect_cpu()
             .layer_code
     }
 
@@ -1178,9 +1182,10 @@ mod tests {
             max_seq_len: config.num_patches(),
             debug_jit: false,
             hetero: None,
+        target: CompileTarget::Cpu,
         };
         let _compiled = compiler
-            .compile_mega_kernel_from_graph(graph, &mk_config, None)
+            .compile(graph, &mk_config, None)
             .expect("SigLIP encoder graph must compile through JIT pipeline");
     }
 
@@ -1514,8 +1519,9 @@ mod tests {
             max_seq_len: config.num_patches(),
             debug_jit: false,
             hetero: None,
+        target: CompileTarget::Cpu,
         };
-        let compiled = compiler.compile_mega_kernel_from_graph(graph, &mk_config, None).expect("compile").layer_code;
+        let compiled = compiler.compile(graph, &mk_config, None).expect("compile").expect_cpu().layer_code;
         eprintln!(
             "SigLIP compile: code_size={}B scratchpad={}B, weights={} (specs={})",
             compiled.code_size(),
@@ -5312,8 +5318,9 @@ mod tests {
             max_seq_len: config.num_patches(),
             debug_jit: false,
             hetero: None,
+        target: CompileTarget::Cpu,
         };
-        let compiled = compiler.compile_mega_kernel_from_graph(graph, &mk_config, None).expect("multi-head graph must compile").layer_code;
+        let compiled = compiler.compile(graph, &mk_config, None).expect("multi-head graph must compile").expect_cpu().layer_code;
         assert!(compiled.code_size() > 0);
     }
 

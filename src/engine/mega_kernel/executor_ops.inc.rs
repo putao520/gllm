@@ -21,9 +21,11 @@ impl MegaKernelExecutor {
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1)];
 
         // Pre-fill RoPE cache
+        // PERF: RoPE cos/sin table 用 F32 精度(三角函数标准精度),非统一精度假设
+        // (具体 compute dtype 由 JIT codegen 按 op inputs 推导,RoPE table 是独立预处理)
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = (prompt_len + 1) * rc.head_dim;
-            let rope_bytes = rope_elems * 4;
+            let rope_bytes = rope_elems * 4; // F32 elem_bytes = 4
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -115,7 +117,7 @@ impl MegaKernelExecutor {
 
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = (prompt_len + 1) * rc.head_dim;
-            let rope_bytes = rope_elems * 4;
+            let rope_bytes = rope_elems * 4; // F32 elem_bytes = 4 (RoPE 数学精度)
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(

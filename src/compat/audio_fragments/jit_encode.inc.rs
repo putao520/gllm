@@ -461,10 +461,12 @@ pub fn audio_encode(
         max_seq_len: num_frames,
         debug_jit: false,
         hetero: None,
+        target: CompileTarget::Cpu,
     };
     let proj_compiled = compiler
-        .compile_mega_kernel_from_graph(proj_graph, &proj_config, None)
+        .compile(proj_graph, &proj_config, None)
         .map_err(|e| BackendError::Other(format!("audio_encode: mel projection compile: {e}")))?
+        .expect_cpu()
         .layer_code;
 
     // ── Execute: Mel projection ──
@@ -508,10 +510,12 @@ pub fn audio_encode(
         max_seq_len: num_frames,
         debug_jit: false,
         hetero: None,
+        target: CompileTarget::Cpu,
     };
     let block_compiled = compiler
-        .compile_mega_kernel_from_graph(block_graph, &block_config, None)
+        .compile(block_graph, &block_config, None)
         .map_err(|e| BackendError::Other(format!("audio_encode: conformer block compile: {e}")))?
+        .expect_cpu()
         .layer_code;
 
     let mut scratch_block = vec![0u8; block_compiled.scratchpad_bytes.max(65536)];
@@ -549,10 +553,12 @@ pub fn audio_encode(
         max_seq_len: num_frames,
         debug_jit: false,
         hetero: None,
+        target: CompileTarget::Cpu,
     };
     let final_compiled = compiler
-        .compile_mega_kernel_from_graph(final_graph, &final_config, None)
+        .compile(final_graph, &final_config, None)
         .map_err(|e| BackendError::Other(format!("audio_encode: final norm compile: {e}")))?
+        .expect_cpu()
         .layer_code;
 
     let final_w = weights

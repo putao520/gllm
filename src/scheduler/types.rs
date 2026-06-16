@@ -64,9 +64,6 @@ pub enum BatchOrderPolicy {
     StrictRequestIdOrder,
     /// 按入队时间排序（确定性，FIFO）
     FifoOrder,
-    /// 允许 vLLM 风格重排（性能优先，不推荐）
-    #[deprecated = "Breaks determinism, use StrictRequestIdOrder instead"]
-    ThroughputFirst,
 }
 
 /// KV Cache 管线类型 (ARCH-SCHED-PIPELINE)
@@ -928,23 +925,13 @@ mod tests {
         assert!(!page.is_on_device());
     }
 
-    // ── BatchOrderPolicy deprecated variant accessible with allow ──
+    // ── BatchOrderPolicy: 2 variants supported (StrictRequestIdOrder + FifoOrder) ──
 
     #[test]
-    #[allow(deprecated)]
-    fn batch_order_policy_throughput_first_exists() {
-        let policy = BatchOrderPolicy::ThroughputFirst;
-        assert_ne!(policy, BatchOrderPolicy::StrictRequestIdOrder);
-        assert_ne!(policy, BatchOrderPolicy::FifoOrder);
-    }
-
-    #[test]
-    #[allow(deprecated)]
     fn batch_order_policy_all_variants_distinct() {
         let variants = [
             BatchOrderPolicy::StrictRequestIdOrder,
             BatchOrderPolicy::FifoOrder,
-            BatchOrderPolicy::ThroughputFirst,
         ];
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {

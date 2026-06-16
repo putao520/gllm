@@ -4066,11 +4066,9 @@ mod tests {
     fn dispatch_coordinator_batch_order_policy_variants_and_default() {
         // Arrange: verify all BatchOrderPolicy variants and Default
         use crate::scheduler::types::BatchOrderPolicy;
-        #[allow(deprecated)]
         let variants = [
             BatchOrderPolicy::StrictRequestIdOrder,
             BatchOrderPolicy::FifoOrder,
-            BatchOrderPolicy::ThroughputFirst,
         ];
 
         // Assert: all variants are pairwise distinct

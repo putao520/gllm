@@ -19,7 +19,7 @@ use gllm_kernels::compiler::{
     CompiledLayer, CompilerGraph, InferenceCompiler, OpKind,
     SymDim,
 };
-use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
+use gllm_kernels::compiler::mega_kernel_abi::{CompileConfig, CompileTarget};
 use gllm_kernels::types::DType;
 
 use super::SemanticGatekeeperError;
@@ -159,11 +159,13 @@ impl EmbedLookupOnlyGraph {
             max_seq_len,
             debug_jit: false,
             hetero: None,
+            target: CompileTarget::Cpu,
         };
         let mut compiler = InferenceCompiler::new();
         let output = compiler
-            .compile_mega_kernel_from_graph(g, &config, None)
-            .map_err(|e| SemanticGatekeeperError::SmallGraph(format!("Gather compile failed: {e}")))?;
+            .compile(g, &config, None)
+            .map_err(|e| SemanticGatekeeperError::SmallGraph(format!("Gather compile failed: {e}")))?
+            .expect_cpu();
         compiler.print_resource_report();
         let compiled = output.layer_code;
 
@@ -422,15 +424,17 @@ impl KProjOnlyGraph {
             max_seq_len,
             debug_jit: false,
             hetero: None,
+            target: CompileTarget::Cpu,
         };
         let mut compiler = InferenceCompiler::new();
         let norm_compiled = compiler
-            .compile_mega_kernel_from_graph(gn, &norm_config, None)
+            .compile(gn, &norm_config, None)
             .map_err(|e| {
                 SemanticGatekeeperError::SmallGraph(format!(
                     "RmsNorm compile failed for layer {layer_idx}: {e}"
                 ))
             })?
+            .expect_cpu()
             .layer_code;
         compiler.print_resource_report();
 
@@ -466,14 +470,16 @@ impl KProjOnlyGraph {
             max_seq_len,
             debug_jit: false,
             hetero: None,
+            target: CompileTarget::Cpu,
         };
         let gemm_compiled = compiler
-            .compile_mega_kernel_from_graph(gg, &gemm_config, None)
+            .compile(gg, &gemm_config, None)
             .map_err(|e| {
                 SemanticGatekeeperError::SmallGraph(format!(
                     "Gemm compile failed for layer {layer_idx}: {e}"
                 ))
             })?
+            .expect_cpu()
             .layer_code;
 
         Ok(Self {

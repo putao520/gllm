@@ -30,7 +30,7 @@ use std::f32::consts::PI;
 use gllm_kernels::compiler::{
     CompilerGraph, InferenceCompiler, OpKind, SymDim,
 };
-use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
+use gllm_kernels::compiler::mega_kernel_abi::{CompileConfig, CompileTarget};
 use gllm_kernels::types::DType;
 
 use crate::compat::multimodal::{MediaKind, MultimodalEncoded, MultimodalEncoder, EncoderMedia};

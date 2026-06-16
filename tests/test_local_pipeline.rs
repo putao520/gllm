@@ -11,7 +11,7 @@ use gllm::Client;
 fn test_local_gguf_pipeline() {
     let client = Client::new_embedding("test_models/gguf").expect("load gguf model");
     let response = client
-        .embeddings(["hello world"])
+        .embed(["hello world"])
         .expect("gguf embedding");
     assert!(!response.embeddings.is_empty());
 }
@@ -25,7 +25,7 @@ fn test_local_gguf_pipeline() {
 fn test_local_safetensors_pipeline() {
     let client = Client::new_embedding("test_models/safetensors").expect("load safetensors model");
     let response = client
-        .embeddings(["hello world"])
+        .embed(["hello world"])
         .expect("safetensors embedding");
     assert!(!response.embeddings.is_empty());
 }
@@ -39,7 +39,7 @@ fn test_local_safetensors_pipeline() {
 fn test_local_onnx_pipeline() {
     let client = Client::new_embedding("test_models/onnx").expect("load onnx model");
     let response = client
-        .embeddings(["hello world"])
+        .embed(["hello world"])
         .expect("onnx embedding");
     assert!(!response.embeddings.is_empty());
 }
@@ -53,7 +53,7 @@ fn test_local_onnx_pipeline() {
 fn test_local_pytorch_pipeline() {
     let client = Client::new_embedding("test_models/pytorch").expect("load pytorch model");
     let response = client
-        .embeddings(["hello world"])
+        .embed(["hello world"])
         .expect("pytorch embedding");
     assert!(!response.embeddings.is_empty());
 }
@@ -112,7 +112,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 fn test_output_sanity_safetensors() {
     let client = Client::new_embedding("test_models/safetensors").expect("load");
     let r = client
-        .embeddings(["hello world", "goodbye moon"])
+        .embed(["hello world", "goodbye moon"])
         .expect("embed");
 
     let emb1 = &r.embeddings[0].embedding;
@@ -139,7 +139,7 @@ fn test_output_sanity_safetensors() {
 fn test_output_sanity_onnx() {
     let client = Client::new_embedding("test_models/onnx").expect("load");
     let r = client
-        .embeddings(["hello world", "goodbye moon"])
+        .embed(["hello world", "goodbye moon"])
         .expect("embed");
 
     let emb1 = &r.embeddings[0].embedding;
@@ -165,7 +165,7 @@ fn test_output_sanity_onnx() {
 fn test_output_sanity_gguf() {
     let client = Client::new_embedding("test_models/gguf").expect("load");
     let r = client
-        .embeddings(["hello world", "goodbye moon"])
+        .embed(["hello world", "goodbye moon"])
         .expect("embed");
 
     let emb1 = &r.embeddings[0].embedding;
@@ -193,10 +193,10 @@ fn test_cross_format_consistency_onnx_vs_safetensors() {
     let onnx_client = Client::new_embedding("test_models/onnx").expect("load onnx");
 
     let st_r = st_client
-        .embeddings(["hello world"])
+        .embed(["hello world"])
         .expect("st embed");
     let onnx_r = onnx_client
-        .embeddings(["hello world"])
+        .embed(["hello world"])
         .expect("onnx embed");
 
     let st_emb = &st_r.embeddings[0].embedding;
@@ -232,10 +232,10 @@ fn test_deterministic_output() {
     let client = Client::new_embedding("test_models/safetensors").expect("load");
 
     let r1 = client
-        .embeddings(["determinism test"])
+        .embed(["determinism test"])
         .expect("run 1");
     let r2 = client
-        .embeddings(["determinism test"])
+        .embed(["determinism test"])
         .expect("run 2");
 
     let emb1 = &r1.embeddings[0].embedding;

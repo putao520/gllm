@@ -519,7 +519,7 @@ macro_rules! impl_gpu_backend {
                         }
                     }
                     backend_trait::WeightPlacement::HostLocal => {
-                        let tensor = self.upload_weights_f32_owned(data)?;
+                        let tensor = { let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect(); self.upload_weights_owned(bytes, gllm_kernels::types::DType::F32)? };
                         Ok((tensor, backend_trait::WeightPlacement::HostLocal))
                     }
                 }

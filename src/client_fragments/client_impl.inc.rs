@@ -337,16 +337,6 @@ impl Client {
         self.execute_embeddings(inputs)
     }
 
-    /// Generate embeddings for texts (alias for backward compatibility).
-    #[deprecated(since = "0.12.0", note = "Use embed() instead")]
-    pub fn embeddings<I, S>(&self, inputs: I) -> Result<EmbeddingsResponse, ClientError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.embed(inputs)
-    }
-
     /// Create an embeddings builder with pipeline support (embed + rerank + RAG).
     ///
     /// # Example

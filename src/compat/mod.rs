@@ -212,9 +212,6 @@ pub mod backend_trait {
 
         /// Upload weights from a pre-converted f32 Vec, avoiding an extra copy.
         /// Only called when E == f32. CPU backend overrides to take ownership directly.
-        fn upload_weights_f32_owned(&self, _data: Vec<f32>) -> Result<Self::Tensor, BackendError> {
-            Err(BackendError::Unimplemented("upload_weights_f32_owned: backend does not support zero-copy f32 upload"))
-        }
 
         /// Upload weights from raw bytes with an explicit element dtype.
         ///
@@ -273,7 +270,7 @@ pub mod backend_trait {
             placement: WeightPlacement,
         ) -> Result<(Self::Tensor, WeightPlacement), BackendError> {
             let _ = placement;
-            let tensor = self.upload_weights_f32_owned(data)?;
+            let tensor = { let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect(); self.upload_weights_owned(bytes, gllm_kernels::types::DType::F32)? };
             Ok((tensor, WeightPlacement::HostLocal))
         }
 

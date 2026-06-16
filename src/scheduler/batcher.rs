@@ -478,7 +478,6 @@ impl ContinuousBatcher {
         }
     }
 
-    #[allow(deprecated)]
     fn ordered_running_ids(&self, policy: BatchOrderPolicy) -> Vec<RequestId> {
         let mut ordered_ids: Vec<RequestId> = self.running.keys().copied().collect();
         match policy {
@@ -491,15 +490,6 @@ impl ContinuousBatcher {
                         .get(request_id)
                         .map(|sequence| (sequence.enqueue_order, *request_id))
                         .unwrap_or((u64::MAX, *request_id)) // LEGAL: 不存在的 request 排在最后
-                });
-            }
-            BatchOrderPolicy::ThroughputFirst => {
-                // Prefer longer contexts first to approximate throughput-oriented batching.
-                ordered_ids.sort_by_key(|request_id| {
-                    self.running
-                        .get(request_id)
-                        .map(|sequence| (usize::MAX - sequence.context_len(), *request_id))
-                        .unwrap_or((usize::MAX, *request_id)) // LEGAL: 不存在的 request 排在最后
                 });
             }
         }
@@ -3381,11 +3371,7 @@ mod tests {
     fn batch_order_policy_all_variants_copy() {
         let a = BatchOrderPolicy::StrictRequestIdOrder;
         let b = BatchOrderPolicy::FifoOrder;
-        #[allow(deprecated)]
-        let c = BatchOrderPolicy::ThroughputFirst;
         assert_ne!(a, b);
-        assert_ne!(a, c);
-        assert_ne!(b, c);
         let a_copy = a;
         assert_eq!(a, a_copy);
     }
@@ -4149,24 +4135,6 @@ mod tests {
         assert_eq!(b.running_len(), 2);
         // Mean = (6 + 10) / 2 = 8
         assert_eq!(b.mean_context_len(), 8);
-    }
-
-    // ── ContinuousBatcher: build_batch with ThroughputFirst policy ──
-
-    #[test]
-    #[allow(deprecated)]
-    fn continuous_batcher_build_batch_throughput_first_policy() {
-        let mut b = ContinuousBatcher::new();
-        let mut scheduler = PagedScheduler::new(32, 4, HGALConfig::default());
-        b.enqueue(make_sequence(1, 2));
-        b.enqueue(make_sequence(2, 10));
-        // ThroughputFirst sorts by longer context first
-        let batch = b.build_batch(&mut scheduler, usize::MAX, true, BatchOrderPolicy::ThroughputFirst);
-        // Both sequences should be admitted
-        assert_eq!(batch.requests.len(), 2);
-        // ThroughputFirst: longer context (seq 2, prompt=10) should come first
-        assert_eq!(batch.requests[0], 2, "longer context should be first under ThroughputFirst");
-        assert_eq!(batch.requests[1], 1);
     }
 
     // ── BatchResult: complete with custom telemetry propagates all fields ──

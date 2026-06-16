@@ -20,10 +20,12 @@ mod tests {
             max_seq_len,
             debug_jit: false,
             hetero: None,
+            target: gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Cpu,
         };
         compiler
-            .compile_mega_kernel_from_graph(graph, &config, None)
+            .compile(graph, &config, None)
             .expect("compile_test_graph")
+            .expect_cpu()
             .layer_code
     }
 
