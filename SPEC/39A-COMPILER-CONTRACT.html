@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="">
+  <head>
+    <meta charset="UTF-8">
+    <meta content="39A-COMPILER-CONTRACT" name="spec-file">
+    <meta content="architecture" name="spec-category">
+
+    <script type="application/ld+json">
+    { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"39A-COMPILER-CONTRACT", "dependencies":["40-END-TO-END-DATA-FLOW","ARCH-DATA-FLOW-CONTRACT"], "children":["39B-COMPILER-INTERNALS"] }
+    </script>
+  </head>
+  <body>
+    <header data-spec-header="">
+      <h1>统一编译器架构 - 接口契约 (39A)</h1>
+      <nav data-spec-breadcrumb="">
+        <a href="./00-INDEX.html">SPEC</a> &gt; <a href="./39-UNIFIED-MEGA-KERNEL.html">39-UNIFIED-MEGA-KERNEL</a> &gt; <span>39A-COMPILER-CONTRACT</span>
+      </nav>
+    </header>
+    <main data-spec-content="">
+      <section id="s-接口契约" data-section="null">
+        <h2>接口契约（外部接口，读者=gllm 开发者）</h2>
+        <p>&gt; <strong>核心定位</strong>: 本文档定义 gllm-kernels 编译器的外部接口契约，包括 compile 入口签名、输入类型（CompilerGraph）、输出类型（MegaKernelFn）、不变量和禁止规则。gllm 开发者需要遵守这些约束才能正确调用编译器。</p>
+        <p>&gt; <strong>与 39B 的关系</strong>: 39B-COMPILER-INTERNALS 定义编译器内部实现细节（GroupMarker、ForwardPhaseDispatch、LoweringContext、并行化策略等），读者是 gllm-kernels 开发者。</p>
+        <p>&gt; <strong>拆分说明</strong>: 原 SPEC 39-UNIFIED-MEGA-KERNEL 混合了外部接口与内部实现细节，本次修复按受众拆分为 39A（接口）和 39B（内部）。</p>
+      </section>
+
+      <section id="s1" data-section="1">
+        <h3>§1 REQ-UMK 接口契约</h3>
+<section id="req-umk-001" data-req="REQ-UMK-001" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-COMPILE" data-section="1.1" data-entity-ref="ENT-INFERENCE-COMPILER ENT-COMPILE-CONFIG ENT-COMPILED-LAYER" <h4="">§1.1 唯一编译入口 (REQ-UMK-001)
+      <p>确立 <code>InferenceCompiler::compile()</code> 为编译器唯一公开方法，接受任意拓扑的 <code>CompilerGraph</code> 并产出 <code>CompileOutput</code>。消除所有独立编译路径（<code>compile_graph</code>、<code>compile_mega_kernel_from_graph</code>、<code>compile_forward</code>），1 个 Gather op 的 SG 小图、RmsNorm+Gemm 的 K 投影图、完整 35 层 decoder 图全部走同一入口。编译器零图结构假设，模型形态差异 100% 由图拓扑编码。</p>
+      <pre><code class="language-rust">impl InferenceCompiler {
+    pub fn compile(
+        &amp;mut self,
+        graph: CompilerGraph,
+        config: &amp;CompileConfig,
+    ) -&gt; Result&lt;CompileOutput, InferenceError&gt;;
+}</code></pre>
+      <ul>
+        <li><strong>一个函数</strong>。不存在 <code>compile_graph</code>、<code>compile_mega_kernel_from_graph</code>、<code>compile_forward</code> 等独立路径</li>
+        <li><strong>任意 CompilerGraph</strong>：1 个 Gather op 的 SG 小图、RmsNorm+Gemm 的 K 投影图、完整 35 层 decoder 图——全部走这个入口</li>
+        <li><code>CompileConfig</code> 携带编译器需要的<strong>非图推导</strong>参数（max_seq_len、SG/hook 配置等），但<strong>不携带任何图结构假设</strong>。OutputMode 是 BUILD 阶段策略参数，不传给编译器</li>
+      </ul>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+          <li id="1" data-criterion="1"><code>compile()</code> 是 <code>InferenceCompiler</code> 的唯一公开编译方法</li>
+          <li id="2" data-criterion="2"><code>grep -rn "compile_graph|compile_forward|compile_mega_kernel_from_graph" src/compiler/</code> 无结果（除 <code>compile()</code> 实现内部）</li>
+          <li id="3" data-criterion="3">任意 CompilerGraph（1-op 小图 / encoder / decoder）均通过 <code>compile()</code> 编译成功</li>
+        
+          <li id="4" data-criterion="4">无 <code>is_simple</code> 双路径分攧——1-op 小图和 35 层 decoder 图走完全相同的 emit 逻辑</li>
+          <li id="5" data-criterion="5"><code>compile_simple_graph_internal</code> 函数不存在</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+<section id="req-umk-002" data-req="REQ-UMK-002" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="POST /ffi/mega_kernel_fn" data-section="2.1" data-entity-ref="ENT-MEGA-KERNEL-FN ENT-COMPILED-LAYER" <h4="">§2.1 唯一函数签名：MegaKernelFn (REQ-UMK-002)
+      <p>所有编译产物（1-op 小图、encoder、decoder、vision、audio）使用 <code>MegaKernelFn</code> ABI：</p>
+      <pre><code class="language-rust">pub type MegaKernelFn = unsafe extern "C" fn(
+    *const u32,   // arg 0:  input_ids_ptr
+    *const u8,    // arg 1:  weight_blob_ptr
+    *mut u8,      // arg 2:  kv_cache_ptr
+    *const u32,   // arg 3:  positions_ptr
+    *const u8,    // arg 4:  aux_ptr
+    usize,        // arg 5:  batch_size
+    usize,        // arg 6:  prompt_len
+    *mut u8,      // arg 7:  scratchpad_ptr
+    *mut u32,     // arg 8:  output_tokens_ptr
+    usize,        // arg 9:  temperature_u32
+    usize,        // arg 10: top_k
+    usize,        // arg 11: top_p_u32
+    usize,        // arg 12: max_new_tokens
+    usize,        // arg 13: eos_token_id
+    *const u8,    // arg 14: hook_ctx_ptr
+    *mut u8,      // arg 15: telemetry_ptr
+    usize,        // arg 16: session_position
+    *const u8,    // arg 17: fused_hidden_ptr
+    usize,        // arg 18: num_mm_tokens
+    *const u8,    // arg 19: callback_table_ptr
+    *const u32,   // arg 20: page_table_ptr
+    *const u8,    // arg 21: batch_ctx_ptr
+) -&gt; usize;</code></pre>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+          <li id="1" data-criterion="1"><code>entry_fn()</code> 类型统一为 <code>MegaKernelFn</code></li>
+          <li id="2" data-criterion="2">不存在 <code>CompiledLayerFn</code> 引用</li>
+          <li id="3" data-criterion="3">所有编译产物使用 22-param ABI</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+<section id="req-umk-003" data-req="REQ-UMK-003" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-GRAPH-TOPOLOGY" data-section="1.3" data-entity-ref="ENT-FUSION-GROUP ENT-GROUP-MARKER" <h4="">§1.3 Phase 3 必须图结构无关 -- 详细重构规范 (REQ-UMK-003)
+      <strong>当前（违反设计）</strong>：<code>compile_mega_kernel_vm()</code> 硬编码 Phase 0-8：
+      <pre><code>Phase 0: prologue + weight_ptr + scratchpad
+Phase 1: embed (Gather op)
+Phase 2-3: prefill (N 层循环)
+Phase 4-5: decode (N 层循环 + 采样)
+Phase 6: Argmax + StoreToken
+Phase 7: CheckStopCondition + 循环回边
+Phase 8: epilogue + ret</code></pre>
+      <p>编译器<strong>假设</strong>图一定有 embed→layers→lm_head→sampling→token_store→EOS_check 结构。</p>
+      <p>encoder/SG 小图不符合此假设 → 需要第二条路径 <code>compile_graph()</code>。</p>
+      <strong>目标（正确设计）</strong>：编译器不假设图结构，从 <code>plan.groups</code> 迭代发射：
+      <pre><code>Phase 0: prologue（栈帧、weight_ptr、scratchpad_ptr、output_ptr）
+Phase 0.5: ForwardPhaseDispatch（仅多步生成图存在）
+for group in plan.groups:
+    emit_group(group)  &lt;-- 图有什么算子就发射什么
+Phase N: epilogue + ret</code></pre>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+          <li id="1" data-criterion="1"><code>compile_mega_kernel_vm</code> 无硬编码 Phase 编号注释——Phase 编号替换为描述性名称（如"ABI prologue"/"outer loop setup"/"采样管线"等）</li>
+          <li id="2" data-criterion="2">无 <code>is_encoder</code> 参数——所有图结构属性从 <code>GraphTopologyAnalysis</code> 推导</li>
+          <li id="3" data-criterion="3">无 <code>lm_head</code> label 搜索逻辑——<code>grep -rn 'lm_head' src/compiler/codegen/vm/mega_kernel_emit.rs</code> 无结果（注释除外）</li>
+          <li id="4" data-criterion="4">无 embed→layers→lm_head 权重布局假设——权重通过 <code>named_offsets</code> 映射表寻址</li>
+          <li id="5" data-criterion="5">无 <code>vocab_size</code> 作为 <code>compile_mega_kernel_vm</code> 参数——从 <code>topology.vocab_size</code> 获取</li>
+          <li id="6" data-criterion="6">logits 重定向通过 <code>topology.logits_producer_op_idx</code> 驱动，非 label 约定</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+<section id="req-umk-004" data-req="REQ-UMK-004" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-COMPILE" data-section="1.5" data-entity-ref="ENT-COMPILED-LAYER ENT-INFERENCE-COMPILER" <h4="">§1.5 辅助小图（SG Level Keys 预计算、Vision/Audio 编码）(REQ-UMK-004)
+      <p>SG 的 <code>EmbedLookupOnlyGraph</code>（Gather-only）、<code>KProjOnlyGraph</code>（RmsNorm+Gemm）等辅助图也通过同一个 <code>compile()</code> 入口编译，使用同一个 MegaKernelFn ABI。</p>
+      <p>调用时：</p>
+      <ul>
+        <li><code>input_ids_ptr</code> → 指向索引数据（u32 token IDs 或 u32 编码的索引）</li>
+        <li><code>weight_blob_ptr</code> → 指向小图独立的权重 blob</li>
+        <li><code>kv_cache_ptr</code> → NULL</li>
+        <li><code>max_new_tokens</code> → 0</li>
+        <li>其余采样/KV/session 参数 → NULL/0</li>
+      </ul>
+      <p>小图编译产物与完整模型编译产物拥有相同的 ABI 签名、相同的 prologue/epilogue 结构、相同的 <code>CompiledLayer</code> 存储。区别仅在于图里的 ops 不同 → JIT 机器码不同。</p>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+          <li id="1" data-criterion="1"><code>grep -rn "compile_graph|InferenceCompiler::new.*compile_graph" src/semantic_gatekeeper/ src/compat/</code> 无结果</li>
+          <li id="2" data-criterion="2">SG 小图与完整模型走同一 <code>compile()</code> 入口</li>
+          <li id="3" data-criterion="3">小图编译产物使用 MegaKernelFn ABI</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+<section id="req-umk-006" data-req="REQ-UMK-006" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-GRAPH-TOPOLOGY" data-section="4.1" data-entity-ref="ENT-COMPILED-LAYER" <h4="">§4.1 图输出 → scratchpad output region (REQ-UMK-006)
+      <p>编译器将 <code>CompilerGraph.outputs[0]</code> 重定向到 <code>scratchpad + logits_scratch_offset</code>（紧接在所有中间 tensor 和 RoPE cache 之后）。调用方从该区域读取结果。</p>
+      <ul>
+        <li>Decoder：lm_head 输出 logits → scratchpad 中间区域（prefill）或直接采样</li>
+        <li>Encoder：MeanPool/Classify/Rerank 输出 → scratchpad 输出区域，调用方读取</li>
+        <li>SG 小图：Gather/Gemm 输出 → scratchpad 输出区域，调用方读取</li>
+      </ul>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+          <li id="1" data-criterion="1"><code>grep -rn "logits_scratch_offset|output_tensor" src/engine/mega_kernel/</code> 有结果</li>
+          <li id="2" data-criterion="2">encoder 调用后从 <code>scratchpad + logits_scratch_offset</code> 读取结果</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+<section id="req-umk-011" data-req="REQ-UMK-011" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-COMPILE" data-section="1.1.1" data-entity-ref="ENT-COMPILE-CONFIG" <h4="">REQ-UMK-011 CompileConfig 定义 (REQ-UMK-011)<p data-req-description="">
+定义 CompileConfig 结构体，仅携带编译器所需的非图推导参数。BusinessConfig 已彻底分离——编译器不持有 BusinessConfig 引用，结构上保证编译器无法访问 output_modes 等业务字段。debug_jit 是编译器唯一直接读取的非图推导参数，因为它影响全局 codegen 行为（INT3 插入、source map 生成），无法通过 OpKind 表达。</p>
+      <p>定义 <code>CompileConfig</code> 结构体，仅携带编译器所需的非图推导参数（内存上界、权重偏移映射、采样配置、设备能力等）。禁止包含任何图结构假设字段（<code>is_encoder</code>/<code>inference_mode</code>/<code>vocab_size</code>/<code>num_layers</code>/<code>hidden</code>），这些信息全部由 <code>CompilerGraph</code> 拓扑自动推导。字段来源严格遵循 ARCH-DATA-FLOW-CONTRACT，每个字段都有唯一合法来源。</p>
+      <pre><code class="language-rust">/// 编译配置 -- 携带编译器需要的非图推导参数。
+///
+/// 设计原则：CompileConfig 不携带任何图结构假设。
+/// 编译器从 CompilerGraph 推导一切结构信息。
+/// CompileConfig 只提供"图本身无法推导的外部输入"。
+///
+/// BusinessConfig 已彻底分离：编译器不持有 BusinessConfig 引用，
+/// 结构上保证编译器无法访问 output_modes 等业务字段。
+/// BusinessConfig 仅在 BUILD 阶段（图构建）使用，不传入编译器。
+pub struct CompileConfig {
+    // -- 内存上界 --
+    /// Buffer 分配上界（替代 SYMDIM_MAX_SEQ_LEN 硬编码）。
+    /// 来自模型配置 max_position_embeddings，不是编译器硬编码。
+    /// 仅用于 scratchpad/KV buffer 分配大小，不影响循环 bound。
+    pub max_seq_len: usize,
+    // -- 调试 --
+    /// 启用 JIT 调试输出（INT3 breakpoints + source map）。
+    /// 这是编译器唯一直接读取的非图推导参数——debug_jit 影响全局
+    /// codegen 行为（INT3 插入、source map 生成），无法通过 OpKind 表达。
+    pub debug_jit: bool,
+    // -- 异构层配置 --
+    /// 异构层布局（Gemma 4 E2B 等）。None = 均匀层。
+    /// 编译器通过 GprCondAction 在 JIT 内条件分支，不由 CompileConfig 驱动。
+    pub hetero: Option&lt;HeteroLayerConfig&gt;,
+}</code></pre>
+      <strong>字段来源规则</strong>（ARCH-DATA-FLOW-CONTRACT 兼容）：
+      <table>
+        <tr><th>字段</th><th>来源</th><th>禁止</th></tr>
+        <tr><td><code>max_seq_len</code></td><td>模型配置 <code>max_position_embeddings</code></td><td>编译器硬编码 2048</td></tr>
+        <tr><td><code>debug_jit</code></td><td>BusinessConfig.debug_jit 提取到顶层</td><td>总是 true/false；BusinessConfig 嵌套在 CompileConfig</td></tr>
+        <tr><td><code>hetero</code></td><td>模型配置层结构分析</td><td>编译器假设层类型</td></tr>
+      </table>
+      <strong>已分离的字段</strong>：
+      <table>
+        <tr><th>字段</th><th>原位置</th><th>新位置</th><th>原因</th></tr>
+        <tr><td><code>business_config</code></td><td><code>CompileConfig.business_config</code></td><td>独立 <code>BusinessConfig</code>（仅 BUILD 阶段）</td><td>编译器不读 output_modes/SG/Guardrail 等业务字段，结构分离保证编译器无法访问</td></tr>
+        <tr><td><code>debug_jit</code></td><td><code>BusinessConfig.debug_jit</code></td><td><code>CompileConfig.debug_jit</code></td><td>编译器唯一直接读取的非图推导参数，无法通过 OpKind 表达</td></tr>
+      </table>
+      <strong>不存在的字段</strong>：
+      <ul>
+        <li>X <code>is_encoder: bool</code> -- 编译器不区分模型形态，图拓扑自动推导</li>
+        <li>X <code>is_decoder: bool</code> -- 同上</li>
+        <li>X <code>inference_mode: InferenceMode</code> -- 同上</li>
+        <li>X <code>vocab_size: usize</code> -- 从图的 Argmax OpKind 推导（<code>OpKind::Argmax { vocab_size }</code>）</li>
+        <li>X <code>num_layers: usize</code> -- 从图的层循环结构推导</li>
+        <li>X <code>hidden: usize</code> -- 从图的 tensor shape 推导</li>
+        <li>X <code>num_eos_tokens: usize</code> -- 从 <code>OpKind::CheckStopCondition</code> 推导（图中 CheckStopCondition 算子携带 EOS token 数量信息）</li>
+      </ul>
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+          
+          
+          
+          
+          
+          
+          
+          
+          
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    <div id="compileconfig-结构体定义中无-is-encoder/inference-mode/vocab-size/num-layers/hidden-字段" data-criterion="CompileConfig 结构体定义中无 is_encoder/inference_mode/vocab_size/num_layers/hidden 字段">CompileConfig 结构体定义中无 is_encoder/inference_mode/vocab_size/num_layers/hidden 字段</div><div id="vocab-size-从-opkind::argmax-{-vocab-size-}-推导，不作为-compileconfig-字段" data-criterion="vocab_size 从 OpKind::Argmax { vocab_size } 推导，不作为 CompileConfig 字段">
+vocab_size 从 OpKind::Argmax { vocab_size } 推导，不作为 CompileConfig 字段</div><div id="num-layers-从图拓扑推导，不作为-compileconfig-字段" data-criterion="num_layers 从图拓扑推导，不作为 CompileConfig 字段">num_layers 从图拓扑推导，不作为 CompileConfig 字段</div><div id="num-eos-tokens-从-opkind::checkstopcondition-推导，不作为-compileconfig-字段" data-criterion="num_eos_tokens 从 OpKind::CheckStopCondition 推导，不作为 CompileConfig 字段">num_eos_tokens 从 OpKind::CheckStopCondition 推导，不作为 CompileConfig 字段</div>
+<div id="无-lm-head-offset/lm-head-bytes-字段——权重偏移通过-named-offsets-映射表统一寻址" data-criterion="无 lm_head_offset/lm_head_bytes 字段——权重偏移通过 named_offsets 映射表统一寻址">无 lm_head_offset/lm_head_bytes 字段——权重偏移通过 named_offsets 映射表统一寻址</div><div id="结构体命名为-compileconfig（非-megakernelconfig）" data-criterion="结构体命名为 CompileConfig（非 MegaKernelConfig）">结构体命名为 CompileConfig（非 MegaKernelConfig）</div><div id="grep--rn-&quot;megakernelconfig&quot;-src/-无结果" data-criterion="grep -rn &quot;MegaKernelConfig&quot; src/ 无结果">
+grep -rn "MegaKernelConfig" src/ 无结果</div><div id="compileconfig-结构体中无-business-config-字段——businessconfig-已彻底分离，仅-build-阶段使用" data-criterion="CompileConfig 结构体中无 business_config 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用">CompileConfig 结构体中无 business_config 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</div><div id="debug-jit-为-compileconfig-顶层字段（从-businessconfig-提升），编译器唯一直接读取的非图推导参数" data-criterion="debug_jit 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数">
+debug_jit 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</div></section>
+
+    </main>
+  </body>
+</html>
