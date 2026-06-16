@@ -88,30 +88,34 @@ fn build_conformer_block_graph(
     // graph 层显式提供。当前 lower 把 [norm_w, norm_b] 合并进 norm pattern,
     // 已对齐 BERT encoder 用法(见 compiler/codegen/vm/lower.rs lower_layernorm)。
     let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: hidden, eps, dtype: ft, has_weight: true }),
         OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![input, ff1_norm_w, ff1_norm_b],
         vec![ff1_normed],
         "ff1_layernorm",
     );
     let ff1_inter = g.add_tensor_concrete("ff1_inter", &[seq_len, inter], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: inter, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: inter, k: hidden, dtype: dt, trans_b: false, },
         vec![ff1_normed, ff1_in_w],
         vec![ff1_inter],
         "ff1_gemm_in",
     );
     let ff1_act = g.add_tensor_concrete("ff1_act", &[seq_len, inter], ft);
-    g.add_op(OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
     let ff1_proj = g.add_tensor_concrete("ff1_proj", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: inter, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: inter, dtype: dt, trans_b: false, },
         vec![ff1_act, ff1_out_w],
         vec![ff1_proj],
         "ff1_gemm_out",
     );
     let after_ff1 = g.add_tensor_concrete("after_ff1", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Add,
         OpKind::Add,
         vec![input, ff1_proj],
         vec![after_ff1],
@@ -120,35 +124,51 @@ fn build_conformer_block_graph(
 
     // ── Self-Attention (full, non-causal) ──
     let attn_normed = g.add_tensor_concrete("attn_normed", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: hidden, eps, dtype: ft, has_weight: true }),
         OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_ff1, attn_norm_w, attn_norm_b],
         vec![attn_normed],
         "attn_layernorm",
     );
     let q = g.add_tensor_concrete("q", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_normed, w_q],
         vec![q],
         "attn_q",
     );
     let k = g.add_tensor_concrete("k", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_normed, w_k],
         vec![k],
         "attn_k",
     );
     let v = g.add_tensor_concrete("v", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_normed, w_v],
         vec![v],
         "attn_v",
     );
     let attn_out = g.add_tensor_concrete("attn_out", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::MultiHeadAttention(AttentionSpec {
+            geometry: AttentionGeometry {
+                num_q_heads: num_heads,
+                num_kv_heads: num_heads,
+                head_dim,
+            },
+            mask: AttentionMask::Full,
+            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
+            sinks: SinksSpec::None,
+            seq_len: s_dim.clone(),
+            dtype: DType::F32,
+        }),
         OpKind::MultiHeadAttention {
             seq_len: s_dim.clone(),
             num_heads,
@@ -163,14 +183,16 @@ fn build_conformer_block_graph(
         "attn_mha",
     );
     let attn_proj = g.add_tensor_concrete("attn_proj", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_out, w_o],
         vec![attn_proj],
         "attn_o",
     );
     let after_attn = g.add_tensor_concrete("after_attn", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Add,
         OpKind::Add,
         vec![after_ff1, attn_proj],
         vec![after_attn],
@@ -181,23 +203,30 @@ fn build_conformer_block_graph(
     // LayerNorm → PointwiseConv1 → SiLU (GLU proxy) → DepthwiseConv1D →
     // LayerNorm → SiLU → PointwiseConv2 → Residual
     let conv_normed = g.add_tensor_concrete("conv_normed", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: hidden, eps, dtype: ft, has_weight: true }),
         OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_attn, conv_norm_w, conv_norm_b],
         vec![conv_normed],
         "conv_layernorm",
     );
     let conv_pw1_out = g.add_tensor_concrete("conv_pw1", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![conv_normed, conv_pw1_w],
         vec![conv_pw1_out],
         "conv_pw1_gemm",
     );
     let conv_glu = g.add_tensor_concrete("conv_glu", &[seq_len, hidden], ft);
-    g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "conv_silu_gate");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "conv_silu_gate");
     let conv_dw = g.add_tensor_concrete("conv_dw", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::DepthwiseConv1D {
+            channels: hidden,
+            kernel_size: kernel,
+            causal: false,
+        },
         OpKind::DepthwiseConv1D {
             channels: hidden,
             kernel_size: kernel,
@@ -208,23 +237,26 @@ fn build_conformer_block_graph(
         "conv_depthwise",
     );
     let conv_bn_out = g.add_tensor_concrete("conv_bn", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: hidden, eps, dtype: ft, has_weight: true }),
         OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![conv_dw, conv_bn_w, conv_bn_b],
         vec![conv_bn_out],
         "conv_bn_layernorm",
     );
     let conv_act = g.add_tensor_concrete("conv_act", &[seq_len, hidden], ft);
-    g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "conv_silu_post");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![conv_bn_out], vec![conv_act], "conv_silu_post");
     let conv_pw2_out = g.add_tensor_concrete("conv_pw2", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![conv_act, conv_pw2_w],
         vec![conv_pw2_out],
         "conv_pw2_gemm",
     );
     let after_conv = g.add_tensor_concrete("after_conv", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Add,
         OpKind::Add,
         vec![after_attn, conv_pw2_out],
         vec![after_conv],
@@ -233,30 +265,34 @@ fn build_conformer_block_graph(
 
     // ── FF2 half-step ──
     let ff2_normed = g.add_tensor_concrete("ff2_normed", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: hidden, eps, dtype: ft, has_weight: true }),
         OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_conv, ff2_norm_w, ff2_norm_b],
         vec![ff2_normed],
         "ff2_layernorm",
     );
     let ff2_inter = g.add_tensor_concrete("ff2_inter", &[seq_len, inter], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: inter, k: hidden, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: inter, k: hidden, dtype: dt, trans_b: false, },
         vec![ff2_normed, ff2_in_w],
         vec![ff2_inter],
         "ff2_gemm_in",
     );
     let ff2_act = g.add_tensor_concrete("ff2_act", &[seq_len, inter], ft);
-    g.add_op(OpKind::Silu, vec![ff2_inter], vec![ff2_act], "ff2_silu");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![ff2_inter], vec![ff2_act], "ff2_silu");
     let ff2_proj = g.add_tensor_concrete("ff2_proj", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec { m: s_dim.clone(), n: hidden, k: inter, dtype: dt, trans_b: false, has_bias: false }),
         OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: inter, dtype: dt, trans_b: false, },
         vec![ff2_act, ff2_out_w],
         vec![ff2_proj],
         "ff2_gemm_out",
     );
     let after_ff2 = g.add_tensor_concrete("after_ff2", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Add,
         OpKind::Add,
         vec![after_conv, ff2_proj],
         vec![after_ff2],
@@ -265,7 +301,8 @@ fn build_conformer_block_graph(
 
     // ── Block-end LayerNorm ──
     let out = g.add_tensor_concrete("output", &[seq_len, hidden], ft);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: hidden, eps, dtype: ft, has_weight: true }),
         OpKind::LayerNorm { feature_dim: hidden, eps },
         vec![after_ff2, final_norm_w, final_norm_b],
         vec![out],
@@ -358,7 +395,15 @@ fn build_mel_projection_graph(num_frames: usize, config: &AudioConfig) -> Compil
     );
     g.inputs = vec![mel, proj_w];
     let out = g.add_tensor_concrete("hidden_0", &[num_frames, config.hidden_size], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gemm(GemmSpec {
+            m: s_dim.clone(),
+            n: config.hidden_size,
+            k: config.num_mel_bins,
+            dtype: dt,
+            trans_b: false,
+            has_bias: false,
+        }),
         OpKind::Gemm{
             m: s_dim,
             n: config.hidden_size,
@@ -391,7 +436,13 @@ fn build_final_norm_graph(num_frames: usize, config: &AudioConfig) -> CompilerGr
     );
     g.inputs = vec![input, w, b];
     let out = g.add_tensor_concrete("output", &[num_frames, config.hidden_size], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec {
+            feature_dim: config.hidden_size,
+            eps: config.layer_norm_eps,
+            dtype: dt,
+            has_weight: true,
+        }),
         OpKind::LayerNorm {
             feature_dim: config.hidden_size,
             eps: config.layer_norm_eps,

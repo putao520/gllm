@@ -28,7 +28,10 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use gllm_kernels::compiler::{
-    CompilerGraph, InferenceCompiler, OpKind, SymDim,
+    CompilerGraph, InferenceCompiler, Op, OpKind, SymDim,
+};
+use gllm_kernels::compiler::graph::{
+    AttentionGeometry, AttentionMask, AttentionSpec, GemmSpec, NormSpec, SinksSpec,
 };
 use gllm_kernels::compiler::mega_kernel_abi::{CompileConfig, CompileTarget};
 use gllm_kernels::types::DType;
