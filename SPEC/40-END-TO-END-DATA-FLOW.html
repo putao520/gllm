@@ -712,7 +712,24 @@ let outer_loop_bound = if has_argmax &amp;&amp; has_store_token &amp;&amp; has_c
         </section>
 
         <section id="s7" data-section="7">
-          <h3>§7 编译产出（运行时 ABI 调用）</h3>
+          
+        <h3 id="s7-0-abi-two-layer-overview">§7.0 ABI 两层架构概述（L0 + R1）</h3>
+        <p><strong>端到端数据流经过两层 ABI</strong>：</p>
+        <ul>
+          <li><strong>L0 ABI（gllm-kernels 编译产出，22-param）</strong>：JIT 编译器 <code>InferenceCompiler::compile()</code> 产出的 <code>MegaKernelFn</code> 函数签名。详见 §7.1。</li>
+          <li><strong>R1 ABI（gllm 运行时调用约定，单指针）</strong>：gllm 调用方实际使用的接口。通过 <code>KernelContext</code> 单指针传入所有运行时参数。详见 §7.2。</li>
+        </ul>
+        <p><strong>调用流程</strong>：</p>
+        <ol>
+          <li>gllm 运行时构造 <code>KernelContext</code> 结构体（填充 27 字段）</li>
+          <li>gllm 通过单指针调用 <code>entry_fn(ctx_ptr: *const u8) -> u32</code>（R1 ABI）</li>
+          <li>JIT 机器码 prologue 内部 unpack <code>KernelContext</code> 字段</li>
+          <li>JIT 内部转换为 L0 22-param 形式并 CALL L0 <code>MegaKernelFn</code></li>
+          <li>L0 返回 <code>usize</code>（token count），R1 截断为 <code>u32</code> 返回给 gllm</li>
+        </ol>
+        <p><strong>设计理由</strong>：单指针 R1 ABI 简化 FFI 调用（gllm 不需构造 22 个独立参数），同时保持 L0 22-param 的明确字段语义（编译器产出的函数签名清晰）。两层正交，可独立演进。</p>
+
+        <h3>§7 编译产出（运行时 ABI 调用）</h3>
 
           <h4>§7.1 MegaKernelFn ABI 22 参数签名</h4>
           <p>JIT 编译产物的入口函数签名（mega_kernel_abi.rs:159）：</p>
