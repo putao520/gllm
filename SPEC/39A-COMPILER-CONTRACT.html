@@ -270,5 +270,38 @@ grep -rn "MegaKernelConfig" src/ 无结果</div><div id="compileconfig-结构体
 debug_jit 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</div></section>
 
     </main>
-  </body>
+  
+<section id="compile-input-set-details">
+  <h3>§X CompileConfig 输入集详细描述（REQ-UMK-001 扩展）</h3>
+
+  <h4>外部接口（gllm 调用方使用）</h4>
+  <p><code>InferenceCompiler::compile(graph: &CompilerGraph, config: &CompileConfig) -> Result<CompileOutput, CompilerError></code></p>
+  <p>外部接口仅 2 个参数：<code>graph</code>（要编译的算子图）+ <code>config</code>（编译配置）。其余 13 个依赖由 <code>compile</code> 内部自动构造。</p>
+
+  <h4>内部 lowering 入口（gllm-kernels 内部使用）</h4>
+  <p><code>compile_mega_kernel_vm(plan, graph, alloc, registry, profile, hook, buffer_layout, bottleneck_map, virtual_activation, virtual_tensor_map, layout, debug_jit, _mtp_config_removed, resource_plan, topology) -> Result<MegaKernelCompileOutput, CompilerError></code></p>
+  <p>16 参数（含 plan 输出参数）。由 <code>compile</code> 外部接口自动构造传入，gllm 调用方不直接使用。</p>
+
+  <h4>13 个额外输入来源</h4>
+  <table>
+    <tr><th>参数</th><th>来源</th><th>构造时机</th></tr>
+    <tr><td>plan</td><td>compile 内部 new</td><td>compile 入口</td></tr>
+    <tr><td>alloc</td><td>compile 内部 new（VReg allocator）</td><td>compile 入口</td></tr>
+    <tr><td>registry: &ScalarOpRegistry</td><td>gllm-kernels static global</td><td>静态构造</td></tr>
+    <tr><td>profile: &IsaProfile</td><td>DeviceProfile::detect() 推导</td><td>compile 入口</td></tr>
+    <tr><td>hook: Option<&dyn IsaHook></td><td>config.hook 或 None</td><td>config 字段</td></tr>
+    <tr><td>buffer_layout</td><td>BufferLayout::plan(graph) 推导</td><td>compile 内部 pass</td></tr>
+    <tr><td>bottleneck_map</td><td>analyze_bottlenecks(graph) 推导</td><td>compile 内部 pass</td></tr>
+    <tr><td>virtual_activation</td><td>VirtualActivationMap::build(graph) 推导</td><td>compile 内部 pass</td></tr>
+    <tr><td>virtual_tensor_map</td><td>VirtualTensorMap::build(graph) 推导</td><td>compile 内部 pass</td></tr>
+    <tr><td>layout</td><td>LayoutAssignment::build(graph) 推导</td><td>compile 内部 pass</td></tr>
+    <tr><td>debug_jit</td><td>config.debug_jit</td><td>config 字段</td></tr>
+    <tr><td>resource_plan</td><td>ResourcePlanner::plan(graph) 推导</td><td>compile 内部 pass</td></tr>
+    <tr><td>topology</td><td>GraphTopologyAnalysis::analyze(graph) 推导</td><td>compile 内部 pass</td></tr>
+  </table>
+
+  <p><strong>设计原则</strong>：外部接口保持简单（2 参数），内部 lowering 接受完整状态（16 参数）。两层正交，gllm 调用方无需关心 13 个内部依赖。</p>
+</section>
+
+</body>
 </html>
