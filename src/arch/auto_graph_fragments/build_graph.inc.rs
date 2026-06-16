@@ -67,9 +67,11 @@ pub fn build_compiler_graph(
                               outputs: Vec<TensorId>,
                               label: &str| {
         if let Some(&qt) = weight_quant_types.get(weight_name) {
-            g.add_op(OpKind::QuantGemm { m, n, k, quant_type: qt }, inputs, outputs, label);
+            let spec = QuantGemmSpec { m: m.clone(), n, k, quant_type: qt };
+            g.add_op_with_op(Op::QuantGemm(spec), OpKind::QuantGemm { m, n, k, quant_type: qt }, inputs, outputs, label);
         } else {
-            g.add_op(OpKind::Gemm { m, n, k, dtype: dt, trans_b: true },
+            let spec = GemmSpec { m: m.clone(), n, k, dtype: dt, trans_b: true, has_bias: false };
+            g.add_op_with_op(Op::Gemm(spec), OpKind::Gemm { m, n, k, dtype: dt, trans_b: true },
                 inputs, outputs, label);
         }
     };
