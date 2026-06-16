@@ -163,5 +163,49 @@ FusionPlan 的 groups 形成生产-消费 DAG，同一拓扑层级的 groups 之
 REQ-UMK-019 自调优并行（第三层）<p>每个 GEMM 算子的 FMA 策略选择可以并行评估多种候选方案。select_fma_best 收集 select_fma_candidates 的候选列表，使用 rayon into_par_iter 并行 evaluate_cost，选择 estimated_cmp 最优的策略。当 rayon 不可用时回退到串行评估。这是三层并行化中实现优先级最低（第三层）但已完成的层级。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ResourceBudget 结构体定义：l1_bytes/l2_bytes/avail_regs 3 字段</li><li>FmaCandidate 结构体定义：strategy + estimated_cost</li><li>select_fma_best 使用 rayon into_par_iter 并行 evaluate_cost</li><li>
 select_fma_candidates 返回候选列表，evaluate_cost 计算 estimated_cmp</li><li>rayon 不可用时回退到串行评估（into_iter 替代 into_par_iter）</li><li>成本评估维度：计算吞吐 + 寄存器压力 + Cache 友好性</li><li>此层级已在代码中实现（isa_hook.rs 中 select_fma_best）</li><li>cargo test --lib 无 select_fma_best 相关测试失败</li></ol></div></section><
     </main>
-  </body>
+  
+<section id="gpu-dialect-lowering">
+  <h3>§X GPU Dialect Lowering（GPU ISA 间接分层）</h3>
+
+  <p><strong>定位</strong>：CPU 和 GPU 在 ISA Lowering 阶段架构不同。CPU 直接 emit 原生机器码，GPU 通过 trait 间接层生成 ISA 文本。</p>
+
+  <h4>架构对比</h4>
+  <table>
+    <tr><th>路径</th><th>流程</th><th>产出</th></tr>
+    <tr><td>CPU 直接 Lowering</td><td>VmInstr → x86_lower / aarch64_lower → mmap 机器码</td><td>Raw machine code bytes</td></tr>
+    <tr><td>GPU Dialect Lowering</td><td>VmInstr → GpuLower → GpuDialect trait → ISA 文本 → 驱动编译</td><td>Compiled GPU kernel</td></tr>
+  </table>
+
+  <section data-entity-model-type="relational" data-entity="GpuDialect" id="data-gpudialect">
+    <h3>Entity: GpuDialect</h3>
+    <p>Trait 接口定义 GPU vendor 语义差异。三个独立 impl 覆盖主流 GPU 厂商。</p>
+    <table data-entity-table="">
+      <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+      <tr data-field="emit_loop_begin" data-type="trait method" data-required="true"><td>emit_loop_begin</td><td>trait method</td><td>是</td><td></td><td>发射循环开始指令（PTX: @%p label / HIP: s_branch / Metal: label:）</td></tr>
+      <tr data-field="emit_loop_end" data-type="trait method" data-required="true"><td>emit_loop_end</td><td>trait method</td><td>是</td><td></td><td>发射循环结束指令</td></tr>
+      <tr data-field="emit_barrier" data-type="trait method" data-required="true"><td>emit_barrier</td><td>trait method</td><td>是</td><td></td><td>发射屏障（PTX: bar.sync / HIP: s_barrier / Metal: threadgroup_barrier）</td></tr>
+      <tr data-field="emit_shared_mem_alloc" data-type="trait method" data-required="true"><td>emit_shared_mem_alloc</td><td>trait method</td><td>是</td><td></td><td>分配共享内存（.shared / .lds / threadgroup）</td></tr>
+      <tr data-field="emit_shared_mem_store" data-type="trait method" data-required="true"><td>emit_shared_mem_store</td><td>trait method</td><td>是</td><td></td><td>共享内存写入</td></tr>
+      <tr data-field="emit_shared_mem_load" data-type="trait method" data-required="true"><td>emit_shared_mem_load</td><td>trait method</td><td>是</td><td></td><td>共享内存读取</td></tr>
+      <tr data-field="emit_warp_reduce" data-type="trait method" data-required="true"><td>emit_warp_reduce</td><td>trait method</td><td>是</td><td></td><td>warp 级规约（PTX: shfl.sync / HIP: ds_wrhs / Metal: simd_reduce）</td></tr>
+      <tr data-field="emit_tma_descriptor_init" data-type="trait method" data-required="false"><td>emit_tmadescriptor_init</td><td>trait method</td><td>否</td><td>SM 9.0+</td><td>TMA 描述符初始化（仅 PTX/Hopper+）</td></tr>
+      <tr data-field="emit_tma2d_copy" data-type="trait method" data-required="false"><td>emit_tma2d_copy</td><td>trait method</td><td>否</td><td>SM 9.0+</td><td>TMA 2D 拷贝（仅 PTX/Hopper+）</td></tr>
+      <tr data-field="emit_tile_mma" data-type="trait method" data-required="false"><td>emit_tile_mma</td><td>trait method</td><td>否</td><td>SM 8.0+</td><td>Tensor Core tile MMA（PTX: mma.async / HIP: mfma / Metal: simd_matrix）</td></tr>
+    </table>
+  </section>
+
+  <h4>三个 impl 实现</h4>
+  <table>
+    <tr><th>Impl</th><th>目标硬件</th><th>SM 版本</th><th>ISA 文本格式</th></tr>
+    <tr><td>PtxDialect</td><td>NVIDIA GPU</td><td>SM 6.1 - 12.0</td><td>NVIDIA PTX（汇编文本）</td></tr>
+    <tr><td>HipDialect</td><td>AMD GPU</td><td>RDNA 1-4 / CDNA</td><td>AMD GCN ISA（汇编文本）</td></tr>
+    <tr><td>MetalDialect</td><td>Apple GPU</td><td>Apple GPU family 1-9</td><td>Metal AIR（中间表示）</td></tr>
+  </table>
+
+  <p><strong>PtxKernelRegistry</strong>：按 SM 版本选择最优 PTX kernel。禁止 Fallback（CLAUDE.md GPU GEMM 全 JIT 铁律）。SM 6.1 / 8.0 / 9.0 / 10.0 / 12.0 各有独立 PTX kernel 集。</p>
+
+  <p><strong>设计原则</strong>：CPU 直出机器码（性能最优，无中间文本开销），GPU 通过 ISA 文本+驱动编译（GPU 硬件要求 ISA 通过驱动加载，无法直接 mmap）。两种路径共享 VmInstr IR，差异仅在 Phase 3 ISA Lowering。</p>
+</section>
+
+</body>
 </html>
