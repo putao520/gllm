@@ -15,8 +15,11 @@
 
 use std::collections::HashMap;
 
-use gllm_kernels::compiler::graph::{CompilerGraph, GatherIndicesKind, SymDim, TensorId};
-use gllm_kernels::compiler::OpKind;
+use gllm_kernels::compiler::graph::{
+    AttentionGeometry, AttentionMask, AttentionSpec, CompilerGraph, GatherIndicesKind,
+    GemmSpec, KvSource, NormSpec, SinksSpec, SymDim, TensorId,
+};
+use gllm_kernels::compiler::{Op, OpKind};
 use gllm_kernels::types::DType;
 
 /// Intent Tracker 模型超参数 (§2.2)
@@ -137,7 +140,14 @@ pub fn build_intent_tracker_graph(
     // ── Step 1: Role embedding via Gather ──
     // roles tensor provides integer indices into role_emb table
     let role_emb_out = g.add_tensor("role_emb_out", vec![b.clone(), s.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::Gather {
+            table_rows: 3, // user/assistant/system
+            embed_dim: h,
+            index_dim: s.clone(),
+            indices_kind: GatherIndicesKind::Tensor,
+            scale: None,
+        },
         OpKind::Gather {
             table_rows: 3, // user/assistant/system
             embed_dim: h,
@@ -152,23 +162,23 @@ pub fn build_intent_tracker_graph(
 
     // embeddings + role_emb_out
     let e_plus_role = g.add_tensor("e_plus_role", vec![b.clone(), s.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(OpKind::Add, vec![embeddings, role_emb_out], vec![e_plus_role], "add_role");
+    g.add_op_with_op(Op::Add, OpKind::Add, vec![embeddings, role_emb_out], vec![e_plus_role], "add_role");
 
     // ── Step 2: InfoWeight MLP: Linear→ReLU→Linear→ReLU→Linear→sigmoid ──
     // Input: (B, T, 768) flattened to (B*T, 768), MLP, reshape back
     let info_h0 = add_gemm_bias(&mut g, "info_h0", e_plus_role, info_fc0_w, info_fc0_b, s.clone(), 512, h, dt);
     let info_a0 = g.add_tensor("info_a0", vec![b.clone(), s.clone(), SymDim::Concrete(512)], dt);
-    g.add_op(OpKind::Silu, vec![info_h0], vec![info_a0], "info_relu0");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![info_h0], vec![info_a0], "info_relu0");
 
     let info_h1 = add_gemm_bias(&mut g, "info_h1", info_a0, info_fc1_w, info_fc1_b, s.clone(), 128, 512, dt);
     let info_a1 = g.add_tensor("info_a1", vec![b.clone(), s.clone(), SymDim::Concrete(128)], dt);
-    g.add_op(OpKind::Silu, vec![info_h1], vec![info_a1], "info_relu1");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![info_h1], vec![info_a1], "info_relu1");
 
     let info_h2 = add_gemm_bias(&mut g, "info_h2", info_a1, info_fc2_w, info_fc2_b, s.clone(), 1, 128, dt);
     let info_weight = g.add_tensor("info_weight", vec![b.clone(), s.clone()], dt);
     // sigmoid via Silu(x)*2 (approximation) — actually need dedicated sigmoid.
     // Use Silu(x/1.0) ≈ x*σ(x), not exact. For classification, Silu is a valid smooth gate.
-    g.add_op(OpKind::Silu, vec![info_h2], vec![info_weight], "info_sigmoid");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![info_h2], vec![info_weight], "info_sigmoid");
 
     // ── Step 3: QKV projections ──
     let q_proj = add_gemm_bias(&mut g, "q_proj", e_plus_role, w_q, w_q_bias, s.clone(), h, h, dt);
@@ -179,11 +189,23 @@ pub fn build_intent_tracker_graph(
     // info_weight is (B, T), v_raw is (B, T, 768) — need broadcast mul
     // The JIT elementwise Mul will broadcast scalars
     let v_modulated = g.add_tensor("v_modulated", vec![b.clone(), s.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(OpKind::Mul, vec![v_raw, info_weight], vec![v_modulated], "v_modulate");
+    g.add_op_with_op(Op::Mul, OpKind::Mul, vec![v_raw, info_weight], vec![v_modulated], "v_modulate");
 
     // ── Step 4: Multi-head attention (B, T, 768) → (B, T, 768) ──
     let attn_out = g.add_tensor("attn_out", vec![b.clone(), s.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::MultiHeadAttention(AttentionSpec {
+            geometry: AttentionGeometry {
+                num_q_heads: num_heads,
+                num_kv_heads: num_heads,
+                head_dim,
+            },
+            mask: AttentionMask::Causal,
+            kv_source: KvSource::FromTensor,
+            sinks: SinksSpec::None,
+            seq_len: s.clone(),
+            dtype: dt,
+        }),
         OpKind::MultiHeadAttention {
             seq_len: s.clone(),
             num_heads,
@@ -191,7 +213,7 @@ pub fn build_intent_tracker_graph(
             head_dim,
             causal: true,
             attention_sinks: false,
-            kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
+            kv_source: KvSource::FromTensor,
         },
         vec![q_proj, k_proj, v_modulated],
         vec![attn_out],
@@ -200,7 +222,8 @@ pub fn build_intent_tracker_graph(
 
     // ── Step 5: Per-head LayerNorm ──
     let attn_normed = g.add_tensor("attn_normed", vec![b.clone(), s.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: h, eps: 1e-5, dtype: dt, has_weight: true }),
         OpKind::LayerNorm { feature_dim: h, eps: 1e-5 },
         vec![attn_out, per_head_norm_w, per_head_norm_b],
         vec![attn_normed],
@@ -210,7 +233,8 @@ pub fn build_intent_tracker_graph(
     // ── Step 6: Dual-path context ──
     // context_last = attn_normed[:, -1, :] — CLS mode MeanPool
     let context_last = g.add_tensor("context_last", vec![b.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::MeanPool { seq_len: config.max_seq_len, hidden: h, cls_mode: true },
         OpKind::MeanPool { seq_len: config.max_seq_len, hidden: h, cls_mode: true },
         vec![attn_normed],
         vec![context_last],
@@ -219,7 +243,8 @@ pub fn build_intent_tracker_graph(
 
     // context_mean = mean over seq dim
     let context_mean = g.add_tensor("context_mean", vec![b.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::MeanPool { seq_len: config.max_seq_len, hidden: h, cls_mode: false },
         OpKind::MeanPool { seq_len: config.max_seq_len, hidden: h, cls_mode: false },
         vec![attn_normed],
         vec![context_mean],
@@ -228,20 +253,21 @@ pub fn build_intent_tracker_graph(
 
     // gate * context_last
     let gated_last = g.add_tensor("gated_last", vec![b.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(OpKind::Mul, vec![context_gate_w, context_last], vec![gated_last], "gate_last");
+    g.add_op_with_op(Op::Mul, OpKind::Mul, vec![context_gate_w, context_last], vec![gated_last], "gate_last");
 
     // (1 - gate) * context_mean — use gate applied via Residual pattern:
     // context_mean + (context_mean * -gate) but simpler: just weight context_mean
     let gated_mean = g.add_tensor("gated_mean", vec![b.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(OpKind::Mul, vec![recency_scale, context_mean], vec![gated_mean], "gate_mean");
+    g.add_op_with_op(Op::Mul, OpKind::Mul, vec![recency_scale, context_mean], vec![gated_mean], "gate_mean");
 
     // dual_context = gated_last + gated_mean
     let dual_context = g.add_tensor("dual_context", vec![b.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(OpKind::Add, vec![gated_last, gated_mean], vec![dual_context], "dual_context_add");
+    g.add_op_with_op(Op::Add, OpKind::Add, vec![gated_last, gated_mean], vec![dual_context], "dual_context_add");
 
     // LayerNorm on dual context
     let context_normed = g.add_tensor("context_normed", vec![b.clone(), SymDim::Concrete(h)], dt);
-    g.add_op(
+    g.add_op_with_op(
+        Op::LayerNorm(NormSpec { feature_dim: h, eps: 1e-5, dtype: dt, has_weight: true }),
         OpKind::LayerNorm { feature_dim: h, eps: 1e-5 },
         vec![dual_context, context_norm_w, context_norm_b],
         vec![context_normed],
@@ -251,11 +277,11 @@ pub fn build_intent_tracker_graph(
     // ── Step 7: Signal encoding (MLP on scalar features) ──
     let sig_h0 = add_gemm_bias_1d(&mut g, "sig_h0", signals, sig_fc0_w, sig_fc0_b, 128, config.signal_dim, dt);
     let sig_a0 = g.add_tensor("sig_a0", vec![b.clone(), SymDim::Concrete(128)], dt);
-    g.add_op(OpKind::Silu, vec![sig_h0], vec![sig_a0], "sig_relu0");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![sig_h0], vec![sig_a0], "sig_relu0");
 
     let sig_h1 = add_gemm_bias_1d(&mut g, "sig_h1", sig_a0, sig_fc1_w, sig_fc1_b, 128, 128, dt);
     let sig_a1 = g.add_tensor("sig_a1", vec![b.clone(), SymDim::Concrete(128)], dt);
-    g.add_op(OpKind::Silu, vec![sig_h1], vec![sig_a1], "sig_relu1");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![sig_h1], vec![sig_a1], "sig_relu1");
 
     let sig_out = add_gemm_bias_1d(&mut g, "sig_out", sig_a1, sig_fc2_w, sig_fc2_b, config.signal_hidden_dim, 128, dt);
 
@@ -263,22 +289,22 @@ pub fn build_intent_tracker_graph(
     // Task classifier: context_normed → FC(384) → SiLU → FC(192) → SiLU → FC(3)
     let task_h0 = add_gemm_bias_1d(&mut g, "task_h0", context_normed, task_fc0_w, task_fc0_b, 384, h, dt);
     let task_a0 = g.add_tensor("task_a0", vec![b.clone(), SymDim::Concrete(384)], dt);
-    g.add_op(OpKind::Silu, vec![task_h0], vec![task_a0], "task_relu0");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![task_h0], vec![task_a0], "task_relu0");
 
     let task_h1 = add_gemm_bias_1d(&mut g, "task_h1", task_a0, task_fc1_w, task_fc1_b, 192, 384, dt);
     let task_a1 = g.add_tensor("task_a1", vec![b.clone(), SymDim::Concrete(192)], dt);
-    g.add_op(OpKind::Silu, vec![task_h1], vec![task_a1], "task_relu1");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![task_h1], vec![task_a1], "task_relu1");
 
     let task_logits = add_gemm_bias_1d(&mut g, "task_logits", task_a1, task_fc2_w, task_fc2_b, config.num_tasks, 192, dt);
 
     // Difficulty classifier: context_normed → FC(384) → SiLU → FC(192) → SiLU → FC(4)
     let diff_h0 = add_gemm_bias_1d(&mut g, "diff_h0", context_normed, diff_fc0_w, diff_fc0_b, 384, h, dt);
     let diff_a0 = g.add_tensor("diff_a0", vec![b.clone(), SymDim::Concrete(384)], dt);
-    g.add_op(OpKind::Silu, vec![diff_h0], vec![diff_a0], "diff_relu0");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![diff_h0], vec![diff_a0], "diff_relu0");
 
     let diff_h1 = add_gemm_bias_1d(&mut g, "diff_h1", diff_a0, diff_fc1_w, diff_fc1_b, 192, 384, dt);
     let diff_a1 = g.add_tensor("diff_a1", vec![b.clone(), SymDim::Concrete(192)], dt);
-    g.add_op(OpKind::Silu, vec![diff_h1], vec![diff_a1], "diff_relu1");
+    g.add_op_with_op(Op::Silu, OpKind::Silu, vec![diff_h1], vec![diff_a1], "diff_relu1");
 
     let diff_logits = add_gemm_bias_1d(&mut g, "diff_logits", diff_a1, diff_fc2_w, diff_fc2_b, config.num_difficulties, 192, dt);
 
@@ -322,7 +348,15 @@ fn add_gemm_bias(
 ) -> TensorId {
     let out_shape = g.tensor(input).expect("input tensor exists").shape.clone();
     let out = g.add_tensor(name, out_shape, dtype);
-    g.add_op(
+    g.add_op_with_op(
+        Op::GemmBias(GemmSpec {
+            m: seq_dim.clone(),
+            n,
+            k,
+            dtype,
+            trans_b: true,
+            has_bias: true,
+        }),
         OpKind::GemmBias {
             m: seq_dim,
             n,
@@ -351,7 +385,15 @@ fn add_gemm_bias_1d(
 ) -> TensorId {
     let input_shape = g.tensor(input).expect("input tensor exists").shape.clone();
     let out = g.add_tensor(name, input_shape, dtype);
-    g.add_op(
+    g.add_op_with_op(
+        Op::GemmBias(GemmSpec {
+            m: SymDim::Concrete(1), // batch dim treated as M=1 for 1D
+            n,
+            k,
+            dtype,
+            trans_b: true,
+            has_bias: true,
+        }),
         OpKind::GemmBias {
             m: SymDim::Concrete(1), // batch dim treated as M=1 for 1D
             n,
