@@ -1,0 +1,1467 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta content="22-PAGE-COMPRESSION" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"22-PAGE-COMPRESSION", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>页级压缩与冷热换入换出 (PAGE-COMPRESSION-SWAPPING)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>22-PAGE-COMPRESSION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-页级压缩与冷热换入换出-page-compression-swapping" data-section="null">
+      <h2>页级压缩与冷热换入换出 (PAGE-COMPRESSION-SWAPPING)</h2>
+      <p>&gt; <strong>实现状态</strong>: ✅ REQ-COMP-001~016 全部完成 (KvPageHeader 56B + CompressionCodec 5 变体 + StorageTier 三级 + PageMigrationActor 异步迁移 + EvictionWorker/SwapInWorker + Lz4/BitPackRle/ZstdDict CPU 压缩 + LZ4 JIT 解压 x86/AArch64/GPU 三后端 + BitPackRle JIT 解压三后端 + Mega-Kernel KV 页解压注入 + 权重页压缩 + NVMe Swap File + 评分驱动迁出 + 数值正确性测试)</p>
+      <p>&gt; <strong>SSOT</strong>: 本文件定义 KV cache 与权重页的压缩属性、GPU 友好压缩算法、冷页换出 / 热页评分驱动迁出 / 压缩换入解压机制。与 §19 KV Cache 优化 (PrecisionTier) 和 §21 Weight Paging (WeightTierManager) 协同 — §19 管"在原物理页内的精度等级"，§21 管"权重页的 Tier (HBM/DRAM/NVMe)"，本文件管"页内字节流的可逆压缩 + 跨设备换入换出"。</p>
+      <p>&gt; 压缩是<strong>在 PrecisionTier 之上的正交维度</strong>。PrecisionTier 决定语义信息密度（FP16/FP8/KIVI4/...），压缩决定字节流可逆密度（已 quantize 的 bit stream 进一步用 GPU-friendly entropy coder 压缩）。</p>
+      <p>&gt; 不与 §19 KIVI 量化 / §21 WeightTierManager 重复 — 这两者是上层调度，本文件是底层字节流。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 设计原则</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 三层正交存储维度（扩展 §19 §1.1）</h4>
+      <p>```</p>
+      <p>信息密度 (PrecisionTier, §19)</p>
+      <p>    ↓</p>
+      <p>比特流密度 (CompressionCodec, 本文件 §3)</p>
+      <p>    ↓</p>
+      <p>存储位置 (StorageTier, 本文件 §4)</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>决定</td>
+        </tr>
+        <tr>
+          <td>谁写入</td>
+        </tr>
+        <tr>
+          <td>谁读取</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>PrecisionTier</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>bits per element</td>
+        </tr>
+        <tr>
+          <td>Epilogue 量化 (§19 §3)</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel attention/QuantGemm</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CompressionCodec</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>bytes per quantized block</td>
+        </tr>
+        <tr>
+          <td>Eviction Worker (CPU)</td>
+        </tr>
+        <tr>
+          <td>Swap-In Worker (GPU/CPU)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>StorageTier</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>物理位置</td>
+        </tr>
+        <tr>
+          <td>HGAL 调度器</td>
+        </tr>
+        <tr>
+          <td>缺页处理器</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 压缩与解压的不对称性</h4>
+      <li><strong>压缩</strong>：可以离线/异步执行（页变冷后才压缩），允许重计算</li>
+      <li><strong>解压</strong>：必须在 hot path（页被换入命中后立即可用），硬延迟 &lt; 1ms</li>
+      <li><strong>设计选择</strong>：压缩端可用 "高比率 + 慢算法"（zstd），解压端必须 "GPU-native + 流式" — 见 §3.2 算法选型</li>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 与 PrecisionTier 的协同</h4>
+      <table>
+        <tr>
+          <th>PrecisionTier</th>
+        </tr>
+        <tr>
+          <td>是否再压缩</td>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>FP16</td>
+          <td> (sink/全精度)</td>
+        </tr>
+        <tr>
+          <td>✅ LZ4</td>
+        </tr>
+        <tr>
+          <td>浮点冗余高，LZ4 ~30% 压缩率</td>
+        </tr>
+        <tr>
+          <td>FP8</td>
+        </tr>
+        <tr>
+          <td>✅ LZ4</td>
+        </tr>
+        <tr>
+          <td>同 FP16</td>
+        </tr>
+        <tr>
+          <td>KIVI4</td>
+          <td> / </td>
+          <td>KIVI2</td>
+        </tr>
+        <tr>
+          <td>✅ Bit-pack + RLE</td>
+        </tr>
+        <tr>
+          <td>量化已极限，但 nibble stream 中 0/sink 重复</td>
+        </tr>
+        <tr>
+          <td>Sparse</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>bitmap 已是稀疏编码，再压缩 ROI 低</td>
+        </tr>
+        <tr>
+          <td>Dictionary</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>dict_id 已是熵编码</td>
+        </tr>
+        <tr>
+          <td>Evicted</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>直接释放</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.4" data-section="1.4">
+      <h4>§1.4 禁止规则</h4>
+      <li>❌ 禁止 Rust 端解压 — 解压必须在 GPU kernel 内完成（或 SIMD JIT 解码）</li>
+      <li>❌ 禁止 CPU 解压后 memcpy 到 GPU — 必须 "压缩字节流 → cudaMemcpy → kernel 内解压"</li>
+      <li>❌ 禁止以"解压复杂"为由 fallback 到 PrecisionTier 升级（这是绕过压缩，不是压缩）</li>
+      <li>❌ 禁止压缩破坏页对齐（解压后必须保持原 PrecisionTier 的 page layout）</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 PageHeader 压缩区域语义</h3>
+      <p>&gt; <strong>📌 物理布局 SSOT</strong>: <code>KvPageHeader (56B)</code> 完整物理布局定义在 <code>03-DATA-STRUCTURE §8.0</code>。</p>
+      <p>&gt; 本节仅描述压缩区域 (offset 44..52, 8B) 的<strong>语义</strong>。</p>
+      <p>压缩区域 (offset 44..52, 8B):</p>
+      <li><code>codec</code>: CompressionCodec 枚举 (见 §3.1)</li>
+      <li><code>compressed_size</code>: 压缩后字节数（0 = 未压缩）</li>
+      <li><code>checksum</code>: CRC16 校验（防腐）</li>
+      <li><code>storage_tier</code>: StorageTier 枚举 (见 §4.1)</li>
+      <p>WeightPage 同样扩展（详见 §6 与 §21 §3.1 的协同）。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 CompressionCodec — GPU 友好压缩算法</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 Codec 枚举</h4>
+      <p>```rust</p>
+      <p>#[repr(u8)]</p>
+      <p>pub enum CompressionCodec {</p>
+      <p>    /// 未压缩 — 默认（hot page）</p>
+      <p>    None = 0,</p>
+      <p>    /// LZ4-frame — 对 FP16/FP8 有效，GPU 解压成熟（nvCOMP / 自研 SIMD）</p>
+      <p>    /// 压缩端: CPU LZ4_compress_HC (~500 MB/s, 30-40% 比率)</p>
+      <p>    /// 解压端: GPU LZ4 stream decoder (kernel 内解压)</p>
+      <p>    Lz4 = 1,</p>
+      <p>    /// Bit-pack RLE — 对 KIVI4/KIVI2 nibble stream 有效</p>
+      <p>    /// 压缩端: 扫描连续 0/sink token → run-length encoding</p>
+      <p>    /// 解压端: SIMD/GPU 流式展开（无分支）</p>
+      <p>    BitPackRle = 2,</p>
+      <p>    /// nvCOMP ANS / Bitcomp — GPU 原生熵编码（仅 NVIDIA）</p>
+      <p>    /// 比率 50-60%, 解压 100+ GB/s on H100</p>
+      <p>    NvcompAns = 3,</p>
+      <p>    /// Zstd 字典模式 — 离线训练字典 (跨 page 共享)</p>
+      <p>    /// 仅 cold-tier (DRAM/NVMe)，不直接送回 GPU 解压</p>
+      <p>    ZstdDict = 4,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 算法选型矩阵</h4>
+      <p>&gt; <strong>量化格式的天然压缩</strong>: 量化 KV page（如 Q4_0、KIVI4）本身已是极限紧凑表示（Q4_0 存储 32 元素仅需 18 字节，天然压缩率 ~55%）。对这些格式再应用 BitPackRle 或 Lz4 的 ROI 为负（解压 CPU 开销 &gt; 传输带宽节省）。压缩选择策略应跳过已经高度压缩的量化格式，仅在 NVMe tier 考虑 ZstdDict 追加压缩。</p>
+      <table>
+        <tr>
+          <th>Codec</th>
+        </tr>
+        <tr>
+          <td>压缩比</td>
+        </tr>
+        <tr>
+          <td>压缩速度</td>
+        </tr>
+        <tr>
+          <td>解压速度</td>
+        </tr>
+        <tr>
+          <td>GPU 解压</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+        </tr>
+        <tr>
+          <td>None</td>
+        </tr>
+        <tr>
+          <td>1.00</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>hot page</td>
+        </tr>
+        <tr>
+          <td>Lz4</td>
+        </tr>
+        <tr>
+          <td>0.30-0.40</td>
+        </tr>
+        <tr>
+          <td>500 MB/s (CPU)</td>
+        </tr>
+        <tr>
+          <td>5 GB/s (CPU) / 80 GB/s (GPU)</td>
+        </tr>
+        <tr>
+          <td>✅ JIT decoder</td>
+        </tr>
+        <tr>
+          <td>warm FP16/FP8</td>
+        </tr>
+        <tr>
+          <td>BitPackRle</td>
+        </tr>
+        <tr>
+          <td>0.20-0.30</td>
+        </tr>
+        <tr>
+          <td>1 GB/s (CPU SIMD)</td>
+        </tr>
+        <tr>
+          <td>10 GB/s (SIMD) / 200 GB/s (GPU)</td>
+        </tr>
+        <tr>
+          <td>✅ JIT decoder</td>
+        </tr>
+        <tr>
+          <td>KIVI4/KIVI2 nibble</td>
+        </tr>
+        <tr>
+          <td>NvcompAns</td>
+        </tr>
+        <tr>
+          <td>0.50-0.60</td>
+        </tr>
+        <tr>
+          <td>200 MB/s (GPU encoder)</td>
+        </tr>
+        <tr>
+          <td>100 GB/s (H100)</td>
+        </tr>
+        <tr>
+          <td>✅ nvCOMP runtime</td>
+        </tr>
+        <tr>
+          <td>NVIDIA only, cold-tier</td>
+        </tr>
+        <tr>
+          <td>ZstdDict</td>
+        </tr>
+        <tr>
+          <td>0.10-0.20</td>
+        </tr>
+        <tr>
+          <td>100 MB/s</td>
+        </tr>
+        <tr>
+          <td>1 GB/s (CPU)</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>NVMe → DRAM 阶段，必须先 CPU 解压再上 GPU</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 GPU 解压实现路径</h4>
+    </section>
+    <section id="s3.3.1" data-section="3.3.1">
+      <h5>§3.3.1 LZ4 解压（自研 PTX/HIP/MSL）</h5>
+      <p>```</p>
+      <p>LZ4 stream format: [token: u8][literal_len][match_offset: u16][match_len]</p>
+      <p>GPU kernel:</p>
+      <li>1 thread / token (warp-level cooperation for match copy)</li>
+      <li>shared memory 4KB sliding window</li>
+      <li>输出 stream 直接写入 page 物理位置</li>
+      <p>JIT 入口: VmInstr::Lz4Decode { src_compressed_ptr, dst_page_ptr, compressed_size }</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3.2" data-section="3.3.2">
+      <h5>§3.3.2 BitPackRle 解压（SIMD/GPU）</h5>
+      <p>```</p>
+      <p>Format: [run_value: u4][run_len: u4] 一个 byte 一个 run, run_len=15 → escape</p>
+      <p>GPU kernel:</p>
+      <li>1 thread / run（warp prefix-sum 计算 dst offset）</li>
+      <li>全 lane 并行展开</li>
+      <p>JIT 入口: VmInstr::BitPackRleDecode { src, dst, format: PrecisionTier }</p>
+      <p>```</p>
+      <code>PrecisionTier</code> 参数让 decoder 知道 nibble 的语义（KIVI4 → 4-bit-per-element + scale, KIVI2 → 2-bit + scale）。
+    </section>
+    <section id="s3.3.3" data-section="3.3.3">
+      <h5>§3.3.3 nvCOMP 集成</h5>
+      <p>NVIDIA 平台优先使用 nvCOMP。编译期通过 <code>feature = "nvcomp"</code> 启用，runtime 检测 cuTensorMap + nvCOMP 库。无 nvCOMP → fallback 到自研 LZ4。</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 算法选择算法</h4>
+      <p>```rust</p>
+      <p>fn select_codec(</p>
+      <p>    tier: PrecisionTier,</p>
+      <p>    hw: &amp;DeviceProfile,</p>
+      <p>    page_kind: PageKind,</p>
+      <p>) -&gt; CompressionCodec {</p>
+      <p>    match page_kind {</p>
+      <p>        PageKind::Weight =&gt; {</p>
+      <p>            // 权重页: 量化即压缩 (SPEC 23 QuantFormatDescriptor)，页级不再额外压缩</p>
+      <p>            // 量化权重页以量化格式存储 (AWQ4/GPTQ4/NVFP4 等)，GEMM 前由 JIT 解量化 prologue 处理</p>
+      <p>            CompressionCodec::None</p>
+      <p>        }</p>
+      <p>        PageKind::KvCache =&gt; {</p>
+      <p>            // KV 页: 动态压缩，根据精度等级选择最优 codec</p>
+      <p>            match tier {</p>
+      <p>                PrecisionTier::FP16 | PrecisionTier::FP8 =&gt; {</p>
+      <p>                    if hw.has_nvcomp() { CompressionCodec::NvcompAns }</p>
+      <p>                    else { CompressionCodec::Lz4 }</p>
+      <p>                }</p>
+      <p>                PrecisionTier::KIVI4 | PrecisionTier::KIVI2 =&gt; CompressionCodec::BitPackRle,</p>
+      <p>                PrecisionTier::Sparse | PrecisionTier::Dictionary =&gt; CompressionCodec::None,</p>
+      <p>                PrecisionTier::Evicted =&gt; CompressionCodec::None,</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <p>cold-tier (DRAM → NVMe) 强制使用 ZstdDict，因为该 tier 不会回 GPU。</p>
+      <p>权重页不使用页级压缩（量化格式本身即是压缩，见 SPEC 23 QuantFormatDescriptor）。解量化由 GEMM 的 JIT prologue 完成（SPEC 24 QuantGather）。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 StorageTier — 三级存储层级</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 Tier 定义</h4>
+      <p>&gt; <strong>跨 SPEC Tier 映射</strong>: <code>StorageTier</code> 与 06-RUNTIME <code>Tier</code>、21-WEIGHT-PAGING <code>WeightTier</code> 是同一物理层级的三套领域视图：</p>
+      <p>&gt; <code>StorageTier</code> 用于 KV/权重页的压缩换入换出路由；<code>Tier</code> 用于 <code>GlobalMemoryManager</code> 全局容量管理；<code>WeightTier</code> 用于加载时权重放置决策。三方值 1:1 对应，实现时需 <code>From/TryFrom</code> 转换。</p>
+      <p>```rust</p>
+      <p>#[repr(u8)]</p>
+      <p>pub enum StorageTier {</p>
+      <p>    /// GPU HBM — hot, 微秒级延迟</p>
+      <p>    GpuHbm = 0,</p>
+      <p>    /// CPU DRAM — warm, 通过 PCIe 换入换出 ~10ms</p>
+      <p>    CpuDram = 1,</p>
+      <p>    /// NVMe — cold, 通过文件系统 ~100ms</p>
+      <p>    Nvme = 2,</p>
+      <p>}</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>本 SPEC </th>
+          <th>StorageTier</th>
+        </tr>
+        <tr>
+          <td>06-RUNTIME </td>
+          <td>Tier</td>
+        </tr>
+        <tr>
+          <td>21-WEIGHT-PAGING </td>
+          <td>WeightTier</td>
+        </tr>
+        <tr>
+          <td>物理位置</td>
+        </tr>
+        <tr>
+          <td>GpuHbm</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>DeviceLocal</td>
+        </tr>
+        <tr>
+          <td>GPU HBM（微秒级延迟）</td>
+        </tr>
+        <tr>
+          <td>CpuDram</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>HostLocal</td>
+        </tr>
+        <tr>
+          <td>CPU DRAM（~10ms PCIe 换入换出）</td>
+        </tr>
+        <tr>
+          <td>Nvme</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>DiskMmap</td>
+        </tr>
+        <tr>
+          <td>NVMe 磁盘（~100ms 文件 I/O）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 Tier 迁移路径</h4>
+      <p>```</p>
+      <p>       ┌─────────────────┐</p>
+      <p>       │  GpuHbm (hot)   │ ← 计算路径直接读取</p>
+      <p>       │  None / lz4-jit │</p>
+      <p>       └────┬───────▲────┘</p>
+      <p>   evict    │       │  swap-in</p>
+      <p>            ▼       │</p>
+      <p>       ┌─────────────────┐</p>
+      <p>       │  CpuDram (warm) │ ← 压缩存储, GPU 通过 cuMemcpyAsync 拉取后 kernel 解压</p>
+      <p>       │  lz4 / bit-pack │</p>
+      <p>       └────┬───────▲────┘</p>
+      <p>   evict    │       │  swap-in</p>
+      <p>            ▼       │</p>
+      <p>       ┌─────────────────┐</p>
+      <p>       │  Nvme (cold)    │ ← zstd-dict 高比率压缩，必须先 CPU 解压再上 DRAM</p>
+      <p>       │  zstd-dict      │</p>
+      <p>       └─────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>§4.3 迁移触发条件</h4>
+      <p>```</p>
+      <p>GpuHbm → CpuDram (evict 触发):</p>
+      <li>HBM 占用 &gt; 90%</li>
+      <li>importance_score &lt; 100 (§19) AND tier_age &gt; 50 ticks</li>
+      <li>选择 score 最低的 N 个 page 批量 evict</li>
+      <p>CpuDram → Nvme (evict 触发):</p>
+      <li>DRAM 用于 page 部分占用 &gt; 80%</li>
+      <li>tier_age &gt; 500 ticks (warm 也老化)</li>
+      <p>CpuDram → GpuHbm (swap-in 触发):</p>
+      <li>prefetch 命中（调度器预测下个 wave 需要）</li>
+      <li>decode 时 page fault（importance score 反弹）</li>
+      <p>Nvme → CpuDram (swap-in 触发):</p>
+      <li>长上下文回滚（user re-engages session）</li>
+      <li>仅触发批量 prefetch，不在 hot path</li>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 KV Page 压缩生命周期</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 状态机</h4>
+      <p>```</p>
+      <p>[Computing] ──compute done──▶ [Hot, GpuHbm, None]</p>
+      <p>                                    │</p>
+      <p>                                    │ score 降低</p>
+      <p>                                    ▼</p>
+      <p>                           [Warm-Candidate, GpuHbm, None]</p>
+      <p>                                    │</p>
+      <p>                                    │ codec 选择 + GPU encode (异步)</p>
+      <p>                                    ▼</p>
+      <p>                           [Compressed, GpuHbm, Lz4/BitPackRle]</p>
+      <p>                                    │</p>
+      <p>                                    │ HBM 紧张 → evict to DRAM</p>
+      <p>                                    ▼</p>
+      <p>                           [Compressed, CpuDram, Lz4/BitPackRle]</p>
+      <p>                                    │</p>
+      <p>                                    │ score 反弹 / prefetch hit</p>
+      <p>                                    ▼</p>
+      <p>                           [Swap-In, GpuHbm, Lz4/BitPackRle]</p>
+      <p>                                    │</p>
+      <p>                                    │ 第一次 attention read 触发 JIT 解压</p>
+      <p>                                    ▼</p>
+      <p>                           [Hot, GpuHbm, None]</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 Eviction Worker（异步线程）</h4>
+      <p>```rust</p>
+      <p>fn eviction_worker(scheduler: &amp;Scheduler, hw: &amp;DeviceProfile) {</p>
+      <p>    loop {</p>
+      <p>        let pressure = scheduler.gpu_hbm_pressure();</p>
+      <p>        if pressure &lt; 0.85 { yield; continue; }</p>
+      <p>        // 1. 取 importance_score 最低的 N 个 page</p>
+      <p>        let evict_set = scheduler.lru_by_score(N);</p>
+      <p>        // 2. 异步压缩（compress kernel）</p>
+      <p>        for page in evict_set {</p>
+      <p>            let codec = select_codec(page.tier, hw);</p>
+      <p>            scheduler.enqueue_compress(<a href="http://page.id">page.id</a>, codec);</p>
+      <p>        }</p>
+      <p>        // 3. 等待压缩完成 → memcpy 到 DRAM → 释放 HBM</p>
+      <p>        scheduler.wait_compress_complete();</p>
+      <p>        scheduler.batch_dma_to_dram(evict_set);</p>
+      <p>        scheduler.release_gpu_pages(evict_set);</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>§5.3 Swap-In Worker（hot-path 友好）</h4>
+      <p>```rust</p>
+      <p>fn swap_in_worker(scheduler: &amp;Scheduler, page_id: PageId) -&gt; Result&lt;()&gt; {</p>
+      <p>    let header = scheduler.page_header(page_id);</p>
+      <p>    if header.storage_tier != StorageTier::CpuDram {</p>
+      <p>        return Err("not in DRAM");</p>
+      <p>    }</p>
+      <p>    // 1. 在 GPU 上申请 hbm 页（可能触发反向 evict）</p>
+      <p>    let gpu_slot = scheduler.allocate_gpu_page()?;</p>
+      <p>    // 2. cudaMemcpyAsync DRAM → HBM (压缩字节流)</p>
+      <p>    scheduler.dma_to_hbm(page_id, gpu_slot, header.compressed_size);</p>
+      <p>    // 3. 标记为 Swap-In，下一次 kernel 读取时 JIT 解压（lazy）</p>
+      <p>    scheduler.mark_swap_in(page_id, gpu_slot);</p>
+      <p>    Ok(())</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.4" data-section="5.4">
+      <h4>§5.4 JIT 解压注入 (Mega-Kernel epilogue)</h4>
+      <p>Mega-Kernel attention kernel 在读取 page 第一行前查 <code>header.codec</code>：</p>
+      <p>```</p>
+      <p>Mega-Kernel 入口:</p>
+      <p>  for each page in batch:</p>
+      <p>    if page.codec != None:</p>
+      <p>      jit_emit_decode_kernel(page.codec, page.compressed_ptr, page.dst_buffer)</p>
+      <p>      barrier()</p>
+      <p>      page.codec = None  // 解压完成后改 header</p>
+      <p>    standard_attention_read(page)</p>
+      <p>```</p>
+      <p>JIT VmInstr 扩展（§3.3.1 / §3.3.2）：</p>
+      <li><code>Lz4Decode { src, dst, size }</code></li>
+      <li><code>BitPackRleDecode { src, dst, tier }</code></li>
+      <li><code>NvcompDecode { src, dst, manager_handle }</code> — 调用 nvCOMP runtime</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 Weight Page 压缩</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 与 §21 §2 WeightTierManager 协同</h4>
+      <p>§21 已有 <code>WeightTier::{HBM, DRAM, NVMe}</code> 三层放置策略。本文件<strong>仅扩展字节流压缩</strong>，不改变 §21 的 placement 决策。</p>
+      <p>```rust</p>
+      <p>struct UnifiedVirtualPage {</p>
+      <p>    /// §21 已有字段</p>
+      <p>    payload: PagePayloadKind,</p>
+      <p>    tier: WeightTier,</p>
+      <p>    /// §22 新增字段</p>
+      <p>    codec: CompressionCodec,</p>
+      <p>    compressed_size: u32,</p>
+      <p>    decompressed_size: u32,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 权重页压缩策略</h4>
+      <p>热权重（layer 0/1, frequently activated experts）始终保持 None；冷权重（last-N layers, infrequent experts）默认 BitPackRle。</p>
+      <table>
+        <tr>
+          <th>权重类型</th>
+        </tr>
+        <tr>
+          <td>tier=HBM</td>
+        </tr>
+        <tr>
+          <td>tier=DRAM</td>
+        </tr>
+        <tr>
+          <td>tier=NVMe</td>
+        </tr>
+        <tr>
+          <td>DenseLayerWeight</td>
+          <td> (model size &gt; 70% HBM)</td>
+        </tr>
+        <tr>
+          <td>None / BitPackRle (Q4_0)</td>
+        </tr>
+        <tr>
+          <td>Lz4</td>
+        </tr>
+        <tr>
+          <td>ZstdDict</td>
+        </tr>
+        <tr>
+          <td>ExpertWeight</td>
+          <td> (MoE)</td>
+        </tr>
+        <tr>
+          <td>None</td>
+        </tr>
+        <tr>
+          <td>BitPackRle (Q4)</td>
+        </tr>
+        <tr>
+          <td>ZstdDict</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>§6.3 解压时机</h4>
+      <p>权重解压发生在 ExpertWeightPrefetcher 命中时（§21 §2.2）：</p>
+      <p>```</p>
+      <p>Prefetcher 检测下个 wave 需要 expert E:</p>
+      <p>  if E.codec != None:</p>
+      <p>    enqueue_decompress(E)  // 与下个 wave 计算重叠</p>
+      <p>  schedule_to_hbm(E)</p>
+      <p>```</p>
+      <p>JIT QuantGemm 永远只看到解压后的 page，codec 字段在解压完成后清零。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 数据流契约（与 §19/§21 协同）</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>§7.1 Eviction 数据流</h4>
+      <p>```</p>
+      <p>1. Scheduler.build_batch:</p>
+      <li>收集所有页的 importance_score (来自 §19 §3.1 epilogue)</li>
+      <li>找出 score 最低的 N 个 → eviction_candidates</li>
+      <p>2. Eviction Worker (异步):</p>
+      <li>codec = select_codec(tier, hw)</li>
+      <li>GPU compress kernel: page.data → page.compressed_buffer</li>
+      <li>header.codec, header.compressed_size, header.checksum 写入</li>
+      <li>DMA: compressed_buffer (GPU HBM) → DRAM</li>
+      <li>Scheduler.release_gpu_page(page_id)</li>
+      <p>3. 后续 batch 不会读到这些页 (因为 score 低), 直到:</p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>§7.2 Swap-In 数据流</h4>
+      <p>```</p>
+      <p>1. Scheduler.build_batch:</p>
+      <li>sequence S 需要 page P</li>
+      <li>lookup: P.tier = CpuDram</li>
+      <li>enqueue_swap_in(P)</li>
+      <p>2. Swap-In Worker (与计算重叠):</p>
+      <li>allocate_gpu_page → gpu_slot</li>
+      <li>DMA: P.compressed_buffer (DRAM) → gpu_slot (HBM)</li>
+      <li>mark_swap_in(P, gpu_slot)</li>
+      <p>3. Mega-Kernel:</p>
+      <li>读 P 第一行前检查 P.codec</li>
+      <li>codec != None → JIT emit decode kernel → 解压到 gpu_slot</li>
+      <li>写回 P.codec = None</li>
+      <li>继续 attention read</li>
+      <p>```</p>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>§7.3 与 §19 PrecisionTier 升降级的关系</h4>
+      <strong>正交关系</strong>：
+      <li>§19 决定"该 page 用什么 PrecisionTier"（FP16/KIVI4/KIVI2）</li>
+      <li>§22 决定"该 PrecisionTier 的字节流是否再压缩 + 在哪个 storage tier"</li>
+      <p>升降级与压缩独立触发：</p>
+      <li><code>score &lt; 80</code> → §19 升级到 KIVI2（语义降级，hot path 重量化）</li>
+      <li><code>tier_age &gt; 50</code> AND <code>score &lt; 100</code> → §22 LZ4 压缩 + DRAM eviction（字节流压缩 + storage 迁移）</li>
+      <li>两者可以叠加：KIVI2 + Lz4 + DRAM 是最激进的冷页存储</li>
+    </section>
+    <section id="s7.5" data-section="7.5">
+      <h3>§7.5 物理 Tier 迁移路径（真实 DMA / NVMe I/O）</h3>
+      <p>&gt; <strong>现状</strong>：PageMigrationActor 异步线程已实现 (REQ-COMP-014)，消费 MigrationQueue 执行真实 DMA + NVMe I/O 搬运。EvictionWorker/SwapInWorker 已实现 (REQ-COMP-007/008)。NVMe Swap File 已实现 (REQ-COMP-015)。</p>
+    </section>
+    <section id="s7.5.1" data-section="7.5.1">
+      <h4>§7.5.1 PageMigrationActor</h4>
+      <p>新增 <code>PageMigrationActor</code> 异步线程，消费 <code>MigrationQueue</code>：</p>
+      <p>```rust</p>
+      <p>pub enum MigrationCommand {</p>
+      <p>    /// GpuHbm → CpuDram (compress + DMA)</p>
+      <p>    EvictToDram { page_id: PageId, codec: CompressionCodec },</p>
+      <p>    /// CpuDram → GpuHbm (DMA + lazy decode marker)</p>
+      <p>    PromoteToHbm { page_id: PageId },</p>
+      <p>    /// CpuDram → Nvme (compress harder + file write)</p>
+      <p>    EvictToNvme { page_id: PageId, codec: CompressionCodec },</p>
+      <p>    /// Nvme → CpuDram (file read + decompress)</p>
+      <p>    PromoteToDram { page_id: PageId },</p>
+      <p>}</p>
+      <p>pub struct PageMigrationActor {</p>
+      <p>    cmd_rx: Receiver<migrationcommand>,</migrationcommand></p>
+      <p>    backend: Arc&lt;dyn Backend=""&gt;,         // GPU memcpy</p>
+      <p>    nvme_path: PathBuf,                // NVMe swap dir</p>
+      <p>    completion_tx: Sender<migrationdone>,</migrationdone></p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.5.2" data-section="7.5.2">
+      <h4>§7.5.2 物理搬运实现</h4>
+      <strong>GpuHbm → CpuDram</strong>：
+      <p>```</p>
+      <p>1. backend.cuMemcpyDtoH(gpu_ptr, host_buffer, page_bytes)</p>
+      <p>2. 若 codec != None: 在 CPU 端进一步 lz4/zstd 压缩</p>
+      <p>3. memory_manager.migrate_page(L1, L2, src_id) 更新页表</p>
+      <p>4. 释放 GPU 物理页</p>
+      <p>```</p>
+      <strong>CpuDram → GpuHbm</strong>：
+      <p>```</p>
+      <p>1. memory_manager.allocate_page(L1) → gpu_dst_id（可能触发反向 evict）</p>
+      <p>2. backend.cuMemcpyHtoD(host_buffer, gpu_ptr, compressed_bytes)</p>
+      <p>3. memory_manager.migrate_page(L2, L1) 更新页表</p>
+      <p>4. mark_swap_in(page_id, gpu_slot)，下次 Mega-Kernel 读取时 JIT 解压（§5.4）</p>
+      <p>```</p>
+      <strong>CpuDram → Nvme</strong>：
+      <p>```</p>
+      <p>1. 在 CPU 端 zstd-dict 压缩（高比率）</p>
+      <p>2. write_all_at(nvme_file, offset, compressed_bytes)</p>
+      <p>   nvme 文件按页 ID 划分 slot（page_size 对齐）</p>
+      <p>3. memory_manager.migrate_page(L2, L3) 更新页表</p>
+      <p>4. 释放 CPU host_buffer</p>
+      <p>```</p>
+      <strong>Nvme → CpuDram</strong>：
+      <p>```</p>
+      <p>1. read_at(nvme_file, offset, compressed_bytes)</p>
+      <p>2. CPU zstd 解压（不上 GPU 直接解压）</p>
+      <p>3. memory_manager.allocate_page(L2)</p>
+      <p>4. memory_manager.migrate_page(L3, L2)</p>
+      <p>```</p>
+    </section>
+    <section id="s7.5.3" data-section="7.5.3">
+      <h4>§7.5.3 NVMe Swap File 格式</h4>
+      <p>```</p>
+      <p>~/.gllm/swap/&lt;session_id&gt;.swap</p>
+      <p>布局: [SwapFileHeader(64B)][slot_0][slot_1]...[slot_N]</p>
+      <p>SwapFileHeader: magic + version + page_size + slot_count + checksum</p>
+      <p>每个 slot 固定大小 = max_compressed_page_size，按 page_id 索引</p>
+      <p>写入: pwrite() 在指定 offset</p>
+      <p>读取: pread() 在指定 offset</p>
+      <p>对齐: O_DIRECT + 4096 字节对齐（NVMe 优化）</p>
+      <p>```</p>
+    </section>
+    <section id="s7.5.4" data-section="7.5.4">
+      <h4>§7.5.4 触发协议</h4>
+      <p>调度器层面触发：</p>
+      <p>```</p>
+      <p>PagedScheduler.build_batch:</p>
+      <p>  pressure_l1 = tier_manager.usage(L1).pressure();</p>
+      <p>  if pressure_l1 &gt; 0.85:</p>
+      <p>    victims = memory_manager.select_victims(L1, count=evict_count)</p>
+      <p>    for v in victims:</p>
+      <p>      migration_queue.send(EvictToDram { page_id: v, codec: select_codec(v) })</p>
+      <p>  for req in active_requests:</p>
+      <p>    if req.needs_pages_in_l1():</p>
+      <p>      missing = req.missing_pages()</p>
+      <p>      for p in missing:</p>
+      <p>        match page_table.resolve(p).tier:</p>
+      <p>          L2 =&gt; migration_queue.send(PromoteToHbm { page_id: p })</p>
+      <p>          L3 =&gt; migration_queue.send(PromoteToDram { page_id: p })</p>
+      <p>                后续轮再 PromoteToHbm</p>
+      <p>```</p>
+    </section>
+    <section id="s7.5.5" data-section="7.5.5">
+      <h4>§7.5.5 与 Mega-Kernel 的同步</h4>
+      <p>Mega-Kernel 启动前检查 <code>active_requests</code> 中所有 page 的 <code>storage_tier</code>：</p>
+      <li>全部 L1 → 直接执行</li>
+      <li>有 L2/L3 → 等待对应 <code>MigrationDone</code> 信号（带超时）→ 重检查</li>
+      <li>超时 → 该 request 此 wave 跳过，下个 wave 再试</li>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 REQ 清单</h3>
+      <li>在 §19 §2.1 现有 48B 基础上加 8B：codec(1) + compressed_size(4) + checksum(2) + storage_tier(1)</li>
+      <li>验证：<code>std::mem::size_of::&lt;KvPageHeader&gt;() == 56</code></li>
+    </section>
+    <section id="req-comp-001" data-req="REQ-COMP-001" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="002" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-001: CompressionCodec 枚举与选择算法
+      <p>定义 CompressionCodec 枚举（None/Lz4/BitPackRle/NvcompAns/ZstdDict 五种变体），实现 select_codec(tier, hw, page_kind) 自动选择算法，权重页返回 None、KV 页按精度等级匹配最优 codec。</p>
+      <li>实现 §3.1 的 4 个 codec 变体 (None/Lz4/BitPackRle/NvcompAns/ZstdDict)</li>
+      <li>实现 §3.4 的 <code>select_codec(tier, hw, page_kind) -&gt; CompressionCodec</code></li>
+      <li>权重页返回 None（量化即压缩，见 SPEC 23）</li>
+      <li>验证：单元测试覆盖每种 (PrecisionTier, hw_capability, PageKind) 组合</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-001" data-test="TEST-COMP-001" data-req-ref="REQ-COMP-001" data-test-categories="unit" <h3="">TEST-COMP-001: 页级压缩+三级换入换出测试<p>验证REQ-COMP-001相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-002" data-req="REQ-COMP-002" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="003" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-002: GPU JIT LZ4 解压
+      <p>实现 VmInstr::Lz4Decode 在 PTX/HIP/MSL 三后端的 JIT lowering，使用 shared memory 4KB 滑窗加 warp 协作 match copy，支持 CPU LZ4 编码后 GPU 端字节级 round-trip 解压。</p>
+      <li>实现 <code>VmInstr::Lz4Decode { src, dst, size }</code> 在 PTX/HIP/MSL 三方言的 lowering</li>
+      <li>shared memory 4KB 滑窗 + warp 协作 match copy</li>
+      <li>验证：随机数据 round-trip（CPU LZ4 编码 → GPU 解码 → 字节级相等）</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-002" data-test="TEST-COMP-002" data-req-ref="REQ-COMP-002" data-test-categories="unit" <h3="">TEST-COMP-002: 页级压缩+三级换入换出测试<p>验证REQ-COMP-002相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-003" data-req="REQ-COMP-003" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="004" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-003: SIMD/GPU JIT BitPackRle 解压
+      <p>实现 VmInstr::BitPackRleDecode 在 x86/AArch64/GPU 三平台的 JIT lowering，支持 KIVI4/KIVI2 nibble stream 的流式展开解码，全 lane 并行展开无分支。</p>
+      <li>实现 <code>VmInstr::BitPackRleDecode { src, dst, tier }</code> 在 x86/ARM/GPU 三平台的 lowering</li>
+      <li>KIVI4/KIVI2 nibble stream 流式展开</li>
+      <li>验证：随机 KIVI4 数据 round-trip</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-003" data-test="TEST-COMP-003" data-req-ref="REQ-COMP-003" data-test-categories="unit" <h3="">TEST-COMP-003: 页级压缩+三级换入换出测试<p>验证REQ-COMP-003相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-004" data-req="REQ-COMP-004" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="005" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-004: nvCOMP 集成 (feature-gated)
+      <p>通过 cargo feature "nvcomp" 启用 NVIDIA nvCOMP ANS 熵编码集成，运行时检测 nvCOMP 库存在后走硬件原生解压路径（100+ GB/s），缺失时自动回退到自研 LZ4。</p>
+      <li><code>cargo feature = "nvcomp"</code> 启用</li>
+      <li>runtime 检测 nvCOMP 库存在，否则 fallback 到 LZ4</li>
+      <li>验证：H100 上 ANS encode/decode 性能 &gt; 50 GB/s</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-004" data-test="TEST-COMP-004" data-req-ref="REQ-COMP-004" data-test-categories="unit" <h3="">TEST-COMP-004: 页级压缩+三级换入换出测试<p>验证REQ-COMP-004相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-005" data-req="REQ-COMP-005" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="006" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-005: StorageTier 三级
+      <p>定义 StorageTier 三级存储层级枚举（GpuHbm/CpuDram/Nvme），与 06-RUNTIME Tier 和 21-WEIGHT-PAGING WeightTier 实现 From/TryFrom 双向转换，集成到 UnifiedVirtualPage.tier 字段。</p>
+      <li>实现 <code>StorageTier::{GpuHbm, CpuDram, Nvme}</code></li>
+      <li>集成到 §21 <code>UnifiedVirtualPage.tier</code>（不破坏 §21 的 WeightTier 语义）</li>
+      <li>验证：<code>page_header.storage_tier</code> 与实际指针归属一致</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-005" data-test="TEST-COMP-005" data-req-ref="REQ-COMP-005" data-test-categories="unit" <h3="">TEST-COMP-005: 页级压缩+三级换入换出测试<p>验证REQ-COMP-005相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-006" data-req="REQ-COMP-006" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="007" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-006: Eviction Worker
+      <p>实现异步 Eviction Worker 线程，当 GPU HBM 压力超过 85% 时自动选取 importance_score 最低的页面批量压缩并 DMA 搬运到 CPU DRAM，随后释放 GPU 物理页。</p>
+      <li>异步线程，HBM pressure &gt; 0.85 触发</li>
+      <li>选 score 最低的 N 个 page，并行压缩 + DMA 到 DRAM</li>
+      <li>验证：HBM 占用从 95% → 70% 的 round-trip 测试</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-006" data-test="TEST-COMP-006" data-req-ref="REQ-COMP-006" data-test-categories="unit" <h3="">TEST-COMP-006: 页级压缩+三级换入换出测试<p>验证REQ-COMP-006相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-007" data-req="REQ-COMP-007" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="008" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-007: Swap-In Worker
+      <p>实现 Swap-In Worker，调度器通过 prefetch_swap_in(page_id) 触发，将压缩字节流从 DRAM DMA 传回 HBM 并标记为 lazy decode，下次 Mega-Kernel 读取时 JIT 解压。</p>
+      <li>调度器调用 <code>prefetch_swap_in(page_id)</code></li>
+      <li>DMA 压缩字节流 → HBM, lazy decode</li>
+      <li>验证：长上下文回滚测试，命中率 &gt; 95%</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-007" data-test="TEST-COMP-007" data-req-ref="REQ-COMP-007" data-test-categories="unit" <h3="">TEST-COMP-007: 页级压缩+三级换入换出测试<p>验证REQ-COMP-007相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-008" data-req="REQ-COMP-008" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="009" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-008: Mega-Kernel JIT 解压注入
+      <p>在 Mega-Kernel attention epilogue 中插入 codec 检查逻辑：读取 page header.codec，非 None 时 JIT 调用对应解压 VmInstr（Lz4Decode/BitPackRleDecode/NvcompDecode），解压完成后写回 codec=None。</p>
+      <li>attention kernel epilogue 检查 <code>header.codec</code></li>
+      <li>codec != None → JIT 调用对应解压 VmInstr → 写回 codec=None</li>
+      <li>验证：混合压缩/未压缩 page 的 batch 推理结果与全未压缩一致（数值完全相等）</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-008" data-test="TEST-COMP-008" data-req-ref="REQ-COMP-008" data-test-categories="unit" <h3="">TEST-COMP-008: 页级压缩+三级换入换出测试<p>验证REQ-COMP-008相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-009" data-req="REQ-COMP-009" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="010" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-009: 权重页压缩 (与 §21 协同)
+      <p>扩展 UnifiedVirtualPage 增加 codec/compressed_size/decompressed_size 字段，ExpertWeightPrefetcher 命中冷专家后调用解压，MoE 模型冷专家启用 BitPackRle 实现内存节省。</p>
+      <li>扩展 <code>UnifiedVirtualPage</code> 加 codec/compressed_size/decompressed_size</li>
+      <li>ExpertWeightPrefetcher 命中后调用解压</li>
+      <li>验证：MoE 模型 cold experts 启用 BitPackRle 后内存节省 60%, 推理结果不变</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-009" data-test="TEST-COMP-009" data-req-ref="REQ-COMP-009" data-test-categories="unit" <h3="">TEST-COMP-009: 页级压缩+三级换入换出测试<p>验证REQ-COMP-009相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-010" data-req="REQ-COMP-010" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="011" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-010: 评分驱动迁出
+      <p>基于 §19 importance_score 实现 EvictionScorer，综合 tier_age（新页冷却期保护）和 layer 深度（浅层不积极压缩）多维评分，确保 hot pages 不被错误驱逐。</p>
+      <li>基于 §19 §3.1 importance_score</li>
+      <li>同时考虑 tier_age (新页不立即压缩) 和 layer 深度 (浅层不积极压缩)</li>
+      <li>验证：score 调控曲线下，hot pages 不被错误 evict</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-010" data-test="TEST-COMP-010" data-req-ref="REQ-COMP-010" data-test-categories="unit" <h3="">TEST-COMP-010: 页级压缩+三级换入换出测试<p>验证REQ-COMP-010相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-011" data-req="REQ-COMP-011" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="012" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-011: Cold-Tier ZstdDict
+      <p>NVMe 存储层使用 ZstdDict 字典压缩模式，离线训练每个模型一份共享字典，冷页换入时仅 CPU 端解压不上 GPU，实现 512K 长上下文 KV cache 在 NVMe 低占用存储。</p>
+      <li>NVMe 层使用 ZstdDict</li>
+      <li>离线训练字典（每个模型一份），cold-load 时只 CPU 解压（不上 GPU 直接解压）</li>
+      <li>验证：512K context 的 KV cache 在 NVMe 占用 &lt; 50 MB</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-011" data-test="TEST-COMP-011" data-req-ref="REQ-COMP-011" data-test-categories="unit" <h3="">TEST-COMP-011: 页级压缩+三级换入换出测试<p>验证REQ-COMP-011相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-012" data-req="REQ-COMP-012" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="013" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-012: 数值正确性回归测试
+      <p>验证压缩/解压 round-trip 的数值正确性：全 None 路径 vs Lz4 路径、全 None vs BitPackRle 路径、混合 codec batch 三种场景的输出 token 必须完全一致。</p>
+      <li>TEST-COMP-001: 全 None 路径 vs Lz4 路径输出 token 完全一致</li>
+      <li>TEST-COMP-002: 全 None 路径 vs BitPackRle 路径输出 token 完全一致</li>
+      <li>TEST-COMP-003: 混合 codec batch 输出 token 完全一致</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-012" data-test="TEST-COMP-012" data-req-ref="REQ-COMP-012" data-test-categories="unit" <h3="">TEST-COMP-012: 页级压缩+三级换入换出测试<p>验证REQ-COMP-012相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-013" data-req="REQ-COMP-013" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="014" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-013: PageMigrationActor 物理搬运
+      <p>实现 PageMigrationActor 异步线程消费 MigrationQueue，处理 4 种 MigrationCommand（EvictToDram/PromoteToHbm/EvictToNvme/PromoteToDram），真实调用 backend cuMemcpy 和 NVMe pwrite/pread 完成物理数据搬运。</p>
+      <li>实现 §7.5.1 异步 actor + 4 个 MigrationCommand 处理路径</li>
+      <li>真实调用 backend cuMemcpy / NVMe pwrite/pread（不止更新页表元数据）</li>
+      <li>验证：单元测试 GPU page 字节级 round-trip（HBM → DRAM → HBM 后内容相等）</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-013" data-test="TEST-COMP-013" data-req-ref="REQ-COMP-013" data-test-categories="unit" <h3="">TEST-COMP-013: 页级压缩+三级换入换出测试<p>验证REQ-COMP-013相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-014" data-req="REQ-COMP-014" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="015" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-014: NVMe Swap File
+      <p>实现 NVMe Swap File 二进制格式（64B SwapFileHeader + 固定大小 slot 按 page_id 索引），使用 O_DIRECT + 4096 对齐 I/O 实现高性能 pwrite/pread，存储路径 ~/.gllm/swap/&lt;session_id&gt;.swap。</p>
+      <li>实现 §7.5.3 文件格式：header + 固定大小 slot</li>
+      <li>O_DIRECT + 4096 对齐 I/O</li>
+      <li>文件路径 <code>~/.gllm/swap/&lt;session_id&gt;.swap</code></li>
+      <li>验证：长上下文测试（512K tokens）KV cache 真实落盘 NVMe</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-014" data-test="TEST-COMP-014" data-req-ref="REQ-COMP-014" data-test-categories="unit" <h3="">TEST-COMP-014: 页级压缩+三级换入换出测试<p>验证REQ-COMP-014相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="req-comp-015" data-req="REQ-COMP-015" data-req-status="implemented" data-req-domain="comp" data-req-category="business" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-section="016" data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-req-api="API-PAGE-COMPRESS">REQ-COMP-015: 端到端 Tier 流转
+      <p>实现调度器触发协议（pressure 驱动 evict、缺页驱动 promote）和 Mega-Kernel 同步等待 swap-in 完成机制，验证 HBM 限制下长上下文自动 evict 到 DRAM 并按需回流的端到端 Tier 流转。</p>
+      <li>调度器触发协议（§7.5.4）：pressure 触发 evict、缺页触发 promote</li>
+      <li>Mega-Kernel 同步等待 swap-in 完成（§7.5.5）</li>
+      <li>验证：HBM 限制 1GB + 8GB context 测试，自动 evict 到 DRAM 并按需回流</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="1" data-criterion="1">页级压缩 codec 实现完整</li>
+        <li id="2" data-criterion="2">压缩/解压 JIT codegen 三后端覆盖</li>
+        <li id="3" data-criterion="3">PageMigrationActor DMA + NVMe 传输正确</li>
+        <li id="4" data-criterion="4">Eviction/Swap-In 评分驱动迁出正确</li>
+        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor" ENT-PAGE-MIGRATION-ACTOR<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer" ENT-EVICTION-SCORER<="" a="">
+      
+      
+      
+      </a></a></div>
+    </section>
+    <section id="test-comp-015" data-test="TEST-COMP-015" data-req-ref="REQ-COMP-015" data-test-categories="unit" <h3="">TEST-COMP-015: 页级压缩+三级换入换出测试<p>验证REQ-COMP-015相关功能正确性</p>
+      <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
+      <div id="压缩/解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
+      <div id="pagemigrationactor-dma-+-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
+      <div id="eviction/swap-in-评分驱动迁出正确" data-criterion="Eviction/Swap-In 评分驱动迁出正确">Eviction/Swap-In 评分驱动迁出正确</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s9" data-section="9">
+      <h3>§9 实现顺序</h3>
+      <p>```</p>
+      <p>Phase 1: PageHeader 扩展 (REQ-COMP-001) — 不影响现有逻辑</p>
+      <p>Phase 2: CompressionCodec 枚举 + select_codec (REQ-COMP-002)</p>
+      <p>Phase 3: PageMigrationActor 骨架 + GPU↔CPU 真实 DMA (REQ-COMP-014, REQ-COMP-007/008)</p>
+      <p>Phase 4: NVMe Swap File I/O (REQ-COMP-015, REQ-COMP-006)</p>
+      <p>Phase 5: 端到端 Tier 流转 + 调度器触发 (REQ-COMP-016)</p>
+      <p>Phase 6: BitPackRle JIT 解压 (REQ-COMP-004) — 简单先打通</p>
+      <p>Phase 7: Mega-Kernel JIT 解压注入 (REQ-COMP-009)</p>
+      <p>Phase 8: LZ4 JIT 解压 (REQ-COMP-003)</p>
+      <p>Phase 9: 权重页接入 (REQ-COMP-010)</p>
+      <p>Phase 10: nvCOMP 可选路径 (REQ-COMP-005)</p>
+      <p>Phase 11: ZstdDict cold-tier (REQ-COMP-012)</p>
+      <p>Phase 12: 数值正确性测试 (REQ-COMP-013)</p>
+      <p>```</p>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>§10 与现有 SPEC 的关系</h3>
+      <table>
+        <tr>
+          <th>章节</th>
+        </tr>
+        <tr>
+          <td>关系</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>§19 KV Cache Optimization</td>
+        </tr>
+        <tr>
+          <td>协同</td>
+        </tr>
+        <tr>
+          <td>§19 管语义精度（PrecisionTier），§22 管字节流压缩。两者正交叠加。</td>
+        </tr>
+        <tr>
+          <td>§21 Weight Paging</td>
+        </tr>
+        <tr>
+          <td>协同</td>
+        </tr>
+        <tr>
+          <td>§21 管 placement 决策（HBM/DRAM/NVMe），§22 管该 placement 内的字节流是否压缩。</td>
+        </tr>
+        <tr>
+          <td>§16 Device Fusion</td>
+        </tr>
+        <tr>
+          <td>弱耦合</td>
+        </tr>
+        <tr>
+          <td>§16 融合规则不感知压缩；解压在 attention kernel epilogue，已经是 §16 融合后的产物。</td>
+        </tr>
+        <tr>
+          <td>§01 JIT Pipeline §5.5</td>
+        </tr>
+        <tr>
+          <td>弱耦合</td>
+        </tr>
+        <tr>
+          <td>DequantComputeVariant 处理"权重 dequant"，本文件的 codec decode 是"页字节流 decode"，两者是不同层次。</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section data-entity-model-type="relational" data-entity="ENT-COMPRESSION-CODEC" id="ent-compression-codec"><h4>ENT-COMPRESSION-CODEC</h4><p>CompressionCodec — 压缩编解码器枚举</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>None|Lz4|BitPackRle|NvcompAns|ZstdDict</td><td>Codec variant name</td></tr><tr data-field="discriminant" data-type="number" data-required="true" <td="">
+discriminant<td>number</td><td>是</td><td>u8: 0-4</td><td>u8 discriminant value (0=None, 1=Lz4, 2=BitPackRle, 3=NvcompAns, 4=ZstdDict)</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-EVICTION-SCORER" id="ent-eviction-scorer"><h4>ENT-EVICTION-SCORER</h4><p>EvictionScorer — 驱逐评分器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hbm_pressure_threshold" data-type="number" data-required="true" <td="">hbm_pressure_threshold<td>number</td><td>是</td><td>f32 [0.0, 1.0], default 0.85</td><td>HBM pressure ratio above which eviction triggers</td></tr>
+<tr data-field="dram_pressure_threshold" data-type="number" data-required="true" <td="">dram_pressure_threshold<td>number</td><td>是</td><td>f32 [0.0, 1.0], default 0.9</td><td>DRAM pressure ratio above which NVMe eviction triggers</td></tr><tr data-field="importance_threshold" data-type="number" data-required="true" <td="">importance_threshold<td>number</td><td>是</td><td>i64, default 500</td><td>Importance score threshold for evictability</td></tr>
+<tr data-field="max_evict_per_round" data-type="number" data-required="true" <td="">max_evict_per_round<td>number</td><td>是</td><td>usize, default 16</td><td>Maximum pages evicted per round</td></tr><tr data-field="default_evict_codec" data-type="string" data-required="true" <td="">default_evict_codec<td>string</td><td>是</td><td>CompressionCodec, default Lz4</td><td>Codec to use for GpuHbm to CpuDram eviction</td></tr><tr data-field="page_bytes" data-type="number" data-required="true" <td="">
+page_bytes<td>number</td><td>是</td><td>usize, default 4096</td><td>Uncompressed page size in bytes</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-KV-PAGE-HEADER" id="ent-kv-page-header">
+        <h4>ENT-KV-PAGE-HEADER</h4>
+        <p>KvPageHeader — KV页头 (40B/56B)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_id" data-type="number" data-required="true" <td="">page_id<td>number</td><td>是</td><td>PhysicalId</td><td>物理页标识</td></tr><tr data-field="sequence_id" data-type="number" data-required="true" <td="">sequence_id<td>number</td><td>是</td><td></td><td>所属序列 ID</td></tr><tr data-field="logical_index" data-type="number" data-required="true" <td="">logical_index<td>number</td><td>
+是</td><td></td><td>序列内逻辑页索引</td></tr><tr data-field="ref_count" data-type="number" data-required="true" <td="">ref_count<td>number</td><td>是</td><td></td><td>共享页引用计数</td></tr><tr data-field="codec" data-type="string" data-required="true" <td="">codec<td>string</td><td>是</td><td>None|Lz4|BitPackRle|NvcompAns|ZstdDict</td><td>压缩编解码器</td></tr><tr data-field="storage_tier" data-type="string" data-required="true" <td="">storage_tier<td>string</td><td>是</td><td>GpuHbm|CpuDram|Nvme</td><td>存储层级</td>
+</tr><tr data-field="last_access_seq" data-type="number" data-required="true" <td="">last_access_seq<td>number</td><td>是</td><td></td><td>LRU 驱逐排序</td></tr><tr data-field="importance_score" data-type="number" data-required="true" <td="">importance_score<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="precision_tier" data-type="number" data-required="false" <td="">precision_tier<td>number</td><td>否</td><td>(synced)</td></tr>
+<tr data-field="compressed_size" data-type="number" data-required="false" <td="">compressed_size<td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="pipeline_id" data-type="number" data-required="false" <td="">pipeline_id<td>number</td><td>否</td><td>(synced)</td></tr></table>
+      </section>
+      <section data-entity-model-type="relational" data-entity="ENT-PAGE-MIGRATION-ACTOR" id="ent-page-migration-actor"><h4>ENT-PAGE-MIGRATION-ACTOR</h4>
+        <p>PageMigrationActor — 页迁移执行器 (后台线程消费 migration 命令, DMA+NVMe, REQ-COMP-015)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="cmd_tx" data-type="string" data-required="true" <td="">cmd_tx<td>string</td><td>是</td><td>Sender&lt;MigrationCommand&gt;</td><td>迁移命令发送通道</td></tr><tr data-field="done_rx" data-type="string" data-required="true" <td="">done_rx<td>string</td><td>是</td><td>Receiver&lt;MigrationDone&gt;</td><td>迁移完成接收通道</td></tr><tr data-field="handle" data-type="string" data-required="true" <td="">
+handle<td>string</td><td>是</td><td>Option&lt;JoinHandle&gt;</td><td>后台线程句柄</td></tr></table></section>
+      <section data-entity-model-type="relational" data-entity="ENT-STORAGE-TIER" id="ent-storage-tier"><h4>ENT-STORAGE-TIER</h4><p>StorageTier — 物理存储层级枚举 (GpuHbm=0/CpuDram=1/Nvme=2, 低判别值=高优先级)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>GpuHbm|CpuDram|Nvme</td><td>存储层级变体</td></tr><tr data-field="discriminant" data-type="number" data-required="true" <td="">discriminant<td>
+number</td><td>是</td><td>0|1|2</td><td>判别值: 0=GpuHbm, 1=CpuDram, 2=Nvme</td></tr><tr data-field="latency_class" data-type="string" data-required="true" <td="">latency_class<td>string</td><td>是</td><td></td><td>延迟级别: GpuHbm=微秒, CpuDram=~10ms, Nvme=~100ms</td></tr></table></section>
+    </section>
+
+    <section data-section="apis">
+      <h3>接口契约</h3>
+      
+      
+    </section>
+<section data-api="POST /internal/page/compress" id="post-/internal/page/compress" data-api-type="internal" data-api-name="API-PAGE-COMPRESS"><h4>POST /internal/page/compress — Page-level compress &amp; swap</h4><p>页级压缩与换入换出接口，三级缓存（GPU → CPU → NVMe）页面管理。支持 delta 编码、Run-Length、Zstd 压缩，异步 DMA 换入换出，fault recovery。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：22-PAGE-COMPRESSION.html</address>
+  </footer>
+
+<section id="abi-injection-interface">
+  <h3>§7.2 ABI 注入接口（KernelContext 偏移）</h3>
+  <p>Mega-Kernel JIT 解压注入通过 R1 <code>KernelContext</code>（详见 SPEC 40 §7.2）的 2 个字段传入。JIT 编译时根据这些字段是否非 NULL 决定是否生成 page header 读取代码。</p>
+  <table>
+    <tr><th>字段名</th><th>KernelContext 偏移</th><th>类型</th><th>NULL 语义</th><th>说明</th></tr>
+    <tr><td>kv_page_header_ptr</td><td>0xA8</td><td>*const u8</td><td>禁用解压注入（所有页视为未压缩）</td><td>指向 KvPageHeader 数组</td></tr>
+    <tr><td>decompress_inject_flags</td><td>0xB0</td><td>u32</td><td>0=禁用</td><td>bit 0=enabled, bits 1-31 reserved</td></tr>
+  </table>
+  <p><strong>JIT 行为</strong>：JIT 机器码在每次 KV page 访问前读取 <code>page.codec</code> 和 <code>page.compressed_size</code>，决定是否调用解压回调。</p>
+  <p><strong>交叉引用</strong>：详见 SPEC 40 §7.2 Entity KernelContext。</p>
+</section>
+
+</body>
+</html>
