@@ -731,7 +731,8 @@ let outer_loop_bound = if has_argmax &amp;&amp; has_store_token &amp;&amp; has_c
 
         <h3>§7 编译产出（运行时 ABI 调用）</h3>
 
-          <h4>§7.1 MegaKernelFn ABI 22 参数签名</h4>
+          <h4>§7.1 MegaKernelFn ABI 22 参数签名（L0 内部层）</h4>
+        <p><strong>定位说明</strong>：此 22-param ABI 是 gllm-kernels <code>compile()</code> 产出的<strong>内部格式</strong>，不是 gllm 调用方直接使用的接口。gllm 调用方通过 R1 <code>KernelContext</code> 单指针（§7.2）间接使用此函数，JIT prologue 内部 unpack 后转为 22-param 调用。此章节描述的"系统入口"语义仅对 gllm-kernels 内部成立。</p>
           <p>JIT 编译产物的入口函数签名（mega_kernel_abi.rs:159）：</p>
           <pre><code class="language-rust">pub type MegaKernelFn = unsafe extern "C" fn(
     *const u32,   // arg 0:  input_ids_ptr         → rdi
