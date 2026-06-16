@@ -16,9 +16,10 @@
 use std::sync::Arc;
 
 use gllm_kernels::compiler::{
-    CompiledLayer, CompilerGraph, InferenceCompiler, OpKind,
+    CompiledLayer, CompilerGraph, InferenceCompiler, Op, OpKind,
     SymDim,
 };
+use gllm_kernels::compiler::graph::{GemmSpec, NormSpec};
 use gllm_kernels::compiler::mega_kernel_abi::{CompileConfig, CompileTarget};
 use gllm_kernels::types::DType;
 
@@ -142,7 +143,14 @@ impl EmbedLookupOnlyGraph {
         g.inputs = vec![indices, table];
         g.outputs = vec![output];
 
-        g.add_op(
+        g.add_op_with_op(
+            Op::Gather {
+                table_rows: vocab_size,
+                embed_dim: hidden_size,
+                index_dim: sym_seq(max_seq_len),
+                indices_kind: Default::default(),
+                scale: None,
+            },
             OpKind::Gather {
                 table_rows: vocab_size,
                 embed_dim: hidden_size,
@@ -413,7 +421,13 @@ impl KProjOnlyGraph {
         );
         gn.inputs = vec![norm_in, norm_w];
         gn.outputs = vec![norm_out];
-        gn.add_op(
+        gn.add_op_with_op(
+            Op::RmsNorm(NormSpec {
+                feature_dim: hidden_size,
+                eps: rms_eps,
+                dtype,
+                has_weight: true,
+            }),
             OpKind::RmsNorm { feature_dim: hidden_size, eps: rms_eps },
             vec![norm_in, norm_w],
             vec![norm_out],
@@ -453,7 +467,15 @@ impl KProjOnlyGraph {
         );
         gg.inputs = vec![gemm_in, k_w];
         gg.outputs = vec![k_out];
-        gg.add_op(
+        gg.add_op_with_op(
+            Op::Gemm(GemmSpec {
+                m: sym_seq(max_seq_len),
+                n: kv_dim,
+                k: hidden_size,
+                dtype,
+                trans_b: false,
+                has_bias: false,
+            }),
             OpKind::Gemm{
                 m: sym_seq(max_seq_len),
                 n: kv_dim,
