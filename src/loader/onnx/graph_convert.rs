@@ -788,33 +788,54 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
 
-        assert_eq!(graph.ops.len(), 4, "Expected 4 ops (Gather + 2 MatMul + Add)");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Expected 4 ops (Gather + 2 MatMul + Add)"
+        );
 
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have a Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather_op.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather_op.op_v2
+        {
             assert_eq!(*table_rows, 100, "embed table_rows = 100");
             assert_eq!(*embed_dim, 64, "embed_dim = 64");
         }
 
-        let matmul_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let matmul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
             .collect();
         assert_eq!(matmul_ops.len(), 2, "Should have 2 MatMul ops");
 
         // q_proj: [64, 64] → n=64, k=64
-        if let OpKind::Gemm { n, k, .. } = &matmul_ops[0].kind {
+        if let Op::Gemm(spec) = &matmul_ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "q_proj n = 64");
             assert_eq!(*k, 64, "q_proj k = 64");
         }
 
         // k_proj: [16, 64] → n=16, k=64
-        if let OpKind::Gemm { n, k, .. } = &matmul_ops[1].kind {
+        if let Op::Gemm(spec) = &matmul_ops[1].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 16, "k_proj n = 16");
             assert_eq!(*k, 64, "k_proj k = 64");
         }
 
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add))
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
             .expect("Should have an Add op");
         assert_eq!(add_op.inputs.len(), 2, "Add should have 2 inputs");
     }
@@ -834,7 +855,10 @@ mod tests {
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Convolution3D"), "Error should mention unsupported op");
+        assert!(
+            err.to_string().contains("Convolution3D"),
+            "Error should mention unsupported op"
+        );
     }
 
     #[test]
@@ -855,13 +879,16 @@ mod tests {
             outputs: vec!["normed".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), super::super::attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: super::super::attributes::OnnxAttributeValue::Float(1e-6),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    super::super::attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: super::super::attributes::OnnxAttributeValue::Float(1e-6),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
@@ -869,9 +896,13 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
 
-        let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm_op.kind {
+        if let Op::RmsNorm(spec) = &norm_op.op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1e-6).abs() < 1e-10, "eps should be 1e-6, got {eps}");
         }
     }
@@ -880,28 +911,43 @@ mod tests {
 
     #[test]
     fn map_onnx_dtype_f16() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::F16), DType::F16));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::F16),
+            DType::F16
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_bf16() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::BF16), DType::BF16));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::BF16),
+            DType::BF16
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::F32), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::F32),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_f64_to_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::F64), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::F64),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_unknown_defaults_f32() {
         assert!(matches!(map_onnx_dtype(safetensors::Dtype::U8), DType::F32));
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::I32), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::I32),
+            DType::F32
+        ));
     }
 
     // ── detect_dtype ──────────────────────────────────────────────────
@@ -940,8 +986,14 @@ mod tests {
             node_name: "node_1".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("Conv"), "Display should contain op_type: {msg}");
-        assert!(msg.contains("node_1"), "Display should contain node_name: {msg}");
+        assert!(
+            msg.contains("Conv"),
+            "Display should contain op_type: {msg}"
+        );
+        assert!(
+            msg.contains("node_1"),
+            "Display should contain node_name: {msg}"
+        );
     }
 
     #[test]
@@ -951,8 +1003,14 @@ mod tests {
             node_name: "matmul_0".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("weight_0"), "Display should contain name: {msg}");
-        assert!(msg.contains("matmul_0"), "Display should contain node_name: {msg}");
+        assert!(
+            msg.contains("weight_0"),
+            "Display should contain name: {msg}"
+        );
+        assert!(
+            msg.contains("matmul_0"),
+            "Display should contain node_name: {msg}"
+        );
     }
 
     #[test]
@@ -963,7 +1021,10 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("W"), "Display should contain name: {msg}");
-        assert!(msg.contains("3-D"), "Display should contain dimension: {msg}");
+        assert!(
+            msg.contains("3-D"),
+            "Display should contain dimension: {msg}"
+        );
     }
 
     #[test]
@@ -972,7 +1033,10 @@ mod tests {
             node_name: "mm".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("mm"), "Display should contain node_name: {msg}");
+        assert!(
+            msg.contains("mm"),
+            "Display should contain node_name: {msg}"
+        );
     }
 
     #[test]
@@ -982,8 +1046,14 @@ mod tests {
             reason: "bad value".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("ln"), "Display should contain node_name: {msg}");
-        assert!(msg.contains("bad value"), "Display should contain reason: {msg}");
+        assert!(
+            msg.contains("ln"),
+            "Display should contain node_name: {msg}"
+        );
+        assert!(
+            msg.contains("bad value"),
+            "Display should contain reason: {msg}"
+        );
     }
 
     #[test]
@@ -993,8 +1063,14 @@ mod tests {
             reason: "empty shape".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("output_0"), "Display should contain name: {msg}");
-        assert!(msg.contains("empty shape"), "Display should contain reason: {msg}");
+        assert!(
+            msg.contains("output_0"),
+            "Display should contain name: {msg}"
+        );
+        assert!(
+            msg.contains("empty shape"),
+            "Display should contain reason: {msg}"
+        );
     }
 
     // ── ConvertError Debug ────────────────────────────────────────────
@@ -1006,8 +1082,14 @@ mod tests {
             node_name: "sm_node".to_string(),
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("UnsupportedOp"), "Debug should contain variant name: {debug}");
-        assert!(debug.contains("Softmax"), "Debug should contain op_type: {debug}");
+        assert!(
+            debug.contains("UnsupportedOp"),
+            "Debug should contain variant name: {debug}"
+        );
+        assert!(
+            debug.contains("Softmax"),
+            "Debug should contain op_type: {debug}"
+        );
     }
 
     // ── ConvertError is std::error::Error ─────────────────────────────
@@ -1031,42 +1113,66 @@ mod tests {
 
     #[test]
     fn map_onnx_dtype_i16_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::I16), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::I16),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_u16_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::U16), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::U16),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_u32_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::U32), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::U32),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_i64_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::I64), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::I64),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_u64_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::U64), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::U64),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_bool_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::BOOL), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::BOOL),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_f8_e5m2_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::F8_E5M2), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::F8_E5M2),
+            DType::F32
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_f8_e4m3_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::F8_E4M3), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::F8_E4M3),
+            DType::F32
+        ));
     }
 
     // ── detect_dtype from different initializer dtypes ────────────────
@@ -1247,7 +1353,10 @@ mod tests {
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), ConvertError::InvalidMatMulShape { dims: 3, .. }),
+            matches!(
+                result.unwrap_err(),
+                ConvertError::InvalidMatMulShape { dims: 3, .. }
+            ),
             "Expected InvalidMatMulShape for 3-D weight"
         );
     }
@@ -1295,9 +1404,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have a Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "n should be weight.shape[0]");
             assert_eq!(*k, 16, "k should be weight.shape[1]");
         }
@@ -1347,9 +1461,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op (no bias)");
-        assert_eq!(gemm_op.inputs.len(), 2, "Gemm without bias should have 2 inputs");
+        assert_eq!(
+            gemm_op.inputs.len(),
+            2,
+            "Gemm without bias should have 2 inputs"
+        );
     }
 
     #[test]
@@ -1401,10 +1522,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm_bias_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
-        assert_eq!(gemm_bias_op.inputs.len(), 3, "GemmBias should have 3 inputs (A, W, bias)");
+        assert_eq!(
+            gemm_bias_op.inputs.len(),
+            3,
+            "GemmBias should have 3 inputs (A, W, bias)"
+        );
     }
 
     #[test]
@@ -1430,13 +1557,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -1460,9 +1590,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "transB swaps: n should be shape[1]=64");
             assert_eq!(*k, 32, "transB swaps: k should be shape[0]=32");
         }
@@ -1542,7 +1677,10 @@ mod tests {
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), ConvertError::InvalidMatMulShape { dims: 1, .. }),
+            matches!(
+                result.unwrap_err(),
+                ConvertError::InvalidMatMulShape { dims: 1, .. }
+            ),
             "Expected InvalidMatMulShape for 1-D Gemm weight"
         );
     }
@@ -1562,7 +1700,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let silu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Silu))
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Silu))
             .expect("Should have Silu op");
         assert_eq!(silu.inputs.len(), 1, "Silu should have 1 input");
         assert_eq!(silu.outputs.len(), 1, "Silu should have 1 output");
@@ -1582,7 +1723,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gelu)),
+            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gelu)),
             "Should have Gelu op"
         );
     }
@@ -1601,7 +1742,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.kind, OpKind::Tanh)),
+            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Tanh)),
             "Should have Tanh op"
         );
     }
@@ -1620,7 +1761,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.kind, OpKind::Softmax)),
+            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Softmax)),
             "Should have Softmax op"
         );
     }
@@ -1640,7 +1781,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Mul))
+        let mul = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Mul))
             .expect("Should have Mul op");
         assert_eq!(mul.inputs.len(), 2, "Mul should have 2 inputs");
     }
@@ -1661,7 +1805,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Passthrough does not add a new op; it maps output name to input tensor
-        assert_eq!(graph.ops.len(), 4, "Relu passthrough should not add a new op");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Relu passthrough should not add a new op"
+        );
     }
 
     #[test]
@@ -1677,7 +1825,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert_eq!(graph.ops.len(), 4, "Sigmoid passthrough should not add a new op");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Sigmoid passthrough should not add a new op"
+        );
     }
 
     #[test]
@@ -1693,7 +1845,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert_eq!(graph.ops.len(), 4, "Clip passthrough should not add a new op");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Clip passthrough should not add a new op"
+        );
     }
 
     #[test]
@@ -1709,7 +1865,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert_eq!(graph.ops.len(), 4, "Where passthrough should not add a new op");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Where passthrough should not add a new op"
+        );
     }
 
     // ── Reshape ───────────────────────────────────────────────────────
@@ -1727,12 +1887,18 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
             .expect("Should have Reshape op");
         assert_eq!(reshape.inputs.len(), 1);
         assert_eq!(reshape.outputs.len(), 1);
-        if let OpKind::Reshape { target_shape } = &reshape.kind {
-            assert!(target_shape.is_empty(), "target_shape should be empty placeholder");
+        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+            assert!(
+                target_shape.is_empty(),
+                "target_shape should be empty placeholder"
+            );
         }
     }
 
@@ -1749,21 +1915,27 @@ mod tests {
             outputs: vec!["transposed".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(*perm, vec![1, 0], "perm should be [1, 0]");
         }
     }
@@ -1781,10 +1953,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
-            assert!(perm.is_empty(), "perm should default to empty without attribute");
+        if let Op::Transpose { perm } = &transpose.op_v2 {
+            assert!(
+                perm.is_empty(),
+                "perm should default to empty without attribute"
+            );
         }
     }
 
@@ -1812,28 +1990,46 @@ mod tests {
             name: "layer_norm".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_scale".to_string(), "ln_bias".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_scale".to_string(),
+                "ln_bias".to_string(),
+            ],
             outputs: vec!["ln_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1e-12),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1e-12),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!((eps - 1e-12).abs() < 1e-20, "eps should be 1e-12, got {eps}");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-12).abs() < 1e-20,
+                "eps should be 1e-12, got {eps}"
+            );
         }
-        assert_eq!(ln.inputs.len(), 3, "LayerNorm should have 3 inputs (x, scale, bias)");
+        assert_eq!(
+            ln.inputs.len(),
+            3,
+            "LayerNorm should have 3 inputs (x, scale, bias)"
+        );
     }
 
     #[test]
@@ -1858,16 +2054,27 @@ mod tests {
             name: "ln_default".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_s2".to_string(), "ln_b2".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_s2".to_string(),
+                "ln_b2".to_string(),
+            ],
             outputs: vec!["ln_def_out".to_string()],
             attributes: HashMap::new(),
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!((eps - 1e-5).abs() < 1e-15, "default eps should be 1e-5, got {eps}");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-15,
+                "default eps should be 1e-5, got {eps}"
+            );
         }
     }
 
@@ -1894,12 +2101,23 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 1e-5).abs() < 1e-15, "default eps should be 1e-5, got {eps}");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-15,
+                "default eps should be 1e-5, got {eps}"
+            );
         }
-        assert_eq!(norm.inputs.len(), 2, "RmsNorm should have 2 inputs (x, scale)");
+        assert_eq!(
+            norm.inputs.len(),
+            2,
+            "RmsNorm should have 2 inputs (x, scale)"
+        );
     }
 
     // ── ReduceMean ────────────────────────────────────────────────────
@@ -1917,9 +2135,15 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reduce = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let reduce = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool op from ReduceMean");
-        if let OpKind::MeanPool { hidden, cls_mode, .. } = &reduce.kind {
+        if let Op::MeanPool {
+            hidden, cls_mode, ..
+        } = &reduce.op_v2
+        {
             assert!(!cls_mode, "cls_mode should be false for ReduceMean");
             assert_eq!(*hidden, 64, "hidden should be the last dim of input shape");
         }
@@ -1964,9 +2188,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 0, "table_rows should be 0 without initializer");
             assert_eq!(*embed_dim, 0, "embed_dim should be 0 without initializer");
         }
@@ -2021,10 +2253,7 @@ mod tests {
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape {
-                    dims: vec![
-                        types::OnnxDim::Known(128),
-                        types::OnnxDim::Known(768),
-                    ],
+                    dims: vec![types::OnnxDim::Known(128), types::OnnxDim::Known(768)],
                 },
             })),
             doc_string: String::new(),
@@ -2045,8 +2274,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // The graph input should have been registered as a tensor with Concrete dims
-        assert!(!graph.inputs.is_empty() || graph.tensors.iter().any(|t| t.name == "x"),
-            "Input tensor 'x' should be registered");
+        assert!(
+            !graph.inputs.is_empty() || graph.tensors.iter().any(|t| t.name == "x"),
+            "Input tensor 'x' should be registered"
+        );
     }
 
     #[test]
@@ -2079,14 +2310,20 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("Tensor 'y' should be registered");
         assert_eq!(y_tensor.shape.len(), 2, "Should have 2 dims");
         assert!(
             matches!(&y_tensor.shape[0], SymDim::Symbolic { name, max_value: Some(1024) } if name == "batch_size"),
             "First dim should be Symbolic with max_value=1024"
         );
-        assert!(matches!(y_tensor.shape[1], SymDim::Concrete(256)), "Second dim should be Concrete(256)");
+        assert!(
+            matches!(y_tensor.shape[1], SymDim::Concrete(256)),
+            "Second dim should be Concrete(256)"
+        );
     }
 
     #[test]
@@ -2116,7 +2353,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let z_tensor = graph.tensors.iter().find(|t| t.name == "z")
+        let z_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "z")
             .expect("Tensor 'z' should be registered");
         assert!(
             matches!(&z_tensor.shape[0], SymDim::Symbolic { name, max_value: Some(2048) } if name == "unknown"),
@@ -2146,7 +2386,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let w_tensor = graph.tensors.iter().find(|t| t.name == "w")
+        let w_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "w")
             .expect("Tensor 'w' should be registered");
         // Default shape when no value_type: [Symbolic("seq_len", max_value=2048)]
         assert_eq!(w_tensor.shape.len(), 1, "Default shape should be 1-D");
@@ -2182,7 +2425,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Sub maps to OpKind::Add (2 Add ops: original add_qk + this one)
-        let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
+        let add_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .count();
         assert_eq!(add_count, 2, "Sub should also produce Add op");
     }
 
@@ -2199,7 +2446,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .count();
         assert_eq!(mul_count, 1, "Div should produce Mul op");
     }
 
@@ -2218,7 +2469,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .count();
         assert_eq!(mul_count, 1, "Pow should produce Mul op");
     }
 
@@ -2235,7 +2490,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .count();
         assert_eq!(mul_count, 1, "Sqrt should produce Mul op");
     }
 
@@ -2265,8 +2524,14 @@ mod tests {
         let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Conv"), "Error message must mention 'Conv': {msg}");
-        assert!(msg.contains("my_conv"), "Error message must mention 'my_conv': {msg}");
+        assert!(
+            msg.contains("Conv"),
+            "Error message must mention 'Conv': {msg}"
+        );
+        assert!(
+            msg.contains("my_conv"),
+            "Error message must mention 'my_conv': {msg}"
+        );
     }
 
     // ── Gemm transb zero means no_transpose ───────────────────────────
@@ -2293,13 +2558,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(0),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(0),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -2323,9 +2591,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "n should be shape[0]=64 without transB");
             assert_eq!(*k, 32, "k should be shape[1]=32 without transB");
         }
@@ -2364,7 +2637,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // shared_input should appear exactly once (as initializer, not as separate activation)
-        let count = graph.tensors.iter().filter(|t| t.name == "shared_input").count();
+        let count = graph
+            .tensors
+            .iter()
+            .filter(|t| t.name == "shared_input")
+            .count();
         assert_eq!(count, 1, "shared_input should be registered exactly once");
     }
 
@@ -2377,7 +2654,10 @@ mod tests {
             op_type: "X".to_string(),
             node_name: "Y".to_string(),
         };
-        assert!(std::error::Error::source(&err).is_none(), "Leaf error should have no source");
+        assert!(
+            std::error::Error::source(&err).is_none(),
+            "Leaf error should have no source"
+        );
     }
 
     // ── OnnxNode construction and field access ────────────────────────
@@ -2417,20 +2697,26 @@ mod tests {
     #[test]
     fn onnx_node_with_attributes() {
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Float(1e-6),
-            doc_string: "epsilon value".to_string(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
-        attrs.insert("axis".to_string(), attributes::OnnxAttribute {
-            name: "axis".to_string(),
-            value: attributes::OnnxAttributeValue::Int(-1),
-            doc_string: String::new(),
-            ref_attr_name: Some("ref_axis".to_string()),
-            attr_type: Some(proto::attribute_proto::AttributeType::Int),
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Float(1e-6),
+                doc_string: "epsilon value".to_string(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
+        attrs.insert(
+            "axis".to_string(),
+            attributes::OnnxAttribute {
+                name: "axis".to_string(),
+                value: attributes::OnnxAttributeValue::Int(-1),
+                doc_string: String::new(),
+                ref_attr_name: Some("ref_axis".to_string()),
+                attr_type: Some(proto::attribute_proto::AttributeType::Int),
+            },
+        );
         let node = OnnxNode {
             name: "attr_node".to_string(),
             op_type: "ReduceMean".to_string(),
@@ -2440,11 +2726,19 @@ mod tests {
             attributes: attrs,
         };
         assert_eq!(node.attributes.len(), 2);
-        let eps_attr = node.attributes.get("epsilon").expect("epsilon attr should exist");
-        assert!(matches!(&eps_attr.value, attributes::OnnxAttributeValue::Float(v) if (*v - 1e-6).abs() < 1e-10));
+        let eps_attr = node
+            .attributes
+            .get("epsilon")
+            .expect("epsilon attr should exist");
+        assert!(
+            matches!(&eps_attr.value, attributes::OnnxAttributeValue::Float(v) if (*v - 1e-6).abs() < 1e-10)
+        );
         assert!(eps_attr.ref_attr_name.is_none());
         let axis_attr = node.attributes.get("axis").expect("axis attr should exist");
-        assert!(matches!(&axis_attr.value, attributes::OnnxAttributeValue::Int(-1)));
+        assert!(matches!(
+            &axis_attr.value,
+            attributes::OnnxAttributeValue::Int(-1)
+        ));
         assert_eq!(axis_attr.ref_attr_name.as_deref(), Some("ref_axis"));
     }
 
@@ -2585,14 +2879,14 @@ mod tests {
         // helper falls back to the default [Symbolic("seq_len")]
         let vi = model::OnnxValueInfo {
             name: "seq_input".to_string(),
-            value_type: Some(types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(
-                types::OnnxTensorType {
+            value_type: Some(types::OnnxType::Sequence(Box::new(
+                types::OnnxType::Tensor(types::OnnxTensorType {
                     elem_type: proto::tensor_proto::DataType::Float,
                     shape: types::OnnxTensorShape {
                         dims: vec![types::OnnxDim::Known(10)],
                     },
-                },
-            )))),
+                }),
+            ))),
             doc_string: String::new(),
             metadata_props: HashMap::new(),
         };
@@ -2610,10 +2904,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "seq_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "seq_input")
             .expect("seq_input should be registered");
         // Sequence type is not Tensor, so falls back to default shape
-        assert_eq!(t.shape.len(), 1, "Default shape should be 1-D for non-Tensor type");
+        assert_eq!(
+            t.shape.len(),
+            1,
+            "Default shape should be 1-D for non-Tensor type"
+        );
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(512) } if name == "seq_len"),
             "Non-Tensor type should default to seq_len Symbolic"
@@ -2628,9 +2929,7 @@ mod tests {
             name: "scalar_input".to_string(),
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
-                shape: types::OnnxTensorShape {
-                    dims: vec![],
-                },
+                shape: types::OnnxTensorShape { dims: vec![] },
             })),
             doc_string: String::new(),
             metadata_props: HashMap::new(),
@@ -2649,7 +2948,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "scalar_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "scalar_input")
             .expect("scalar_input should be registered");
         assert!(t.shape.is_empty(), "Empty dims should produce empty shape");
     }
@@ -2737,8 +3039,11 @@ mod tests {
         // make_test_graph nodes: Gather, MatMul(q_proj), MatMul(k_proj), Add
         // Verify order is preserved
         let op_labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
-        assert_eq!(op_labels, &["gather_embed", "q_proj", "k_proj", "add_qk"],
-            "Ops should preserve original node order");
+        assert_eq!(
+            op_labels,
+            &["gather_embed", "q_proj", "k_proj", "add_qk"],
+            "Ops should preserve original node order"
+        );
     }
 
     // ── Producer map: output of one node feeds into next ──────────────
@@ -2749,16 +3054,31 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // q_proj outputs "q", k_proj outputs "k", add_qk takes "q" and "k"
-        let add_op = graph.ops.iter().find(|op| op.label == "add_qk")
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "add_qk")
             .expect("add_qk should exist");
         assert_eq!(add_op.inputs.len(), 2, "add_qk should have 2 inputs");
         // Verify the input tensor IDs point to the outputs of q_proj and k_proj
-        let q_tensor = graph.tensors.iter().find(|t| t.name == "q")
+        let q_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "q")
             .expect("tensor 'q' should exist");
-        let k_tensor = graph.tensors.iter().find(|t| t.name == "k")
+        let k_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "k")
             .expect("tensor 'k' should exist");
-        assert!(add_op.inputs.contains(&q_tensor.id), "add_qk should consume 'q' tensor");
-        assert!(add_op.inputs.contains(&k_tensor.id), "add_qk should consume 'k' tensor");
+        assert!(
+            add_op.inputs.contains(&q_tensor.id),
+            "add_qk should consume 'q' tensor"
+        );
+        assert!(
+            add_op.inputs.contains(&k_tensor.id),
+            "add_qk should consume 'k' tensor"
+        );
     }
 
     // ── OnnxType::Map construction ────────────────────────────────────
@@ -2784,12 +3104,13 @@ mod tests {
 
     #[test]
     fn onnx_type_optional_construction() {
-        let opt_type = types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(
-            types::OnnxTensorType {
+        let opt_type =
+            types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Double,
-                shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(3)] },
-            },
-        )));
+                shape: types::OnnxTensorShape {
+                    dims: vec![types::OnnxDim::Known(3)],
+                },
+            })));
         if let types::OnnxType::Optional(inner) = &opt_type {
             assert!(matches!(&**inner, types::OnnxType::Tensor(_)));
         } else {
@@ -2875,7 +3196,10 @@ mod tests {
         } else {
             panic!("Expected Ints variant");
         }
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Ints));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Ints)
+        );
     }
 
     // ── OnnxAttributeValue::Int with negative value ───────────────────
@@ -2946,9 +3270,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "map_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "map_input")
             .expect("map_input should be registered");
-        assert_eq!(t.shape.len(), 1, "Map type should fall back to default 1-D shape");
+        assert_eq!(
+            t.shape.len(),
+            1,
+            "Map type should fall back to default 1-D shape"
+        );
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(512) } if name == "seq_len"),
             "Map type should default to seq_len Symbolic"
@@ -2961,14 +3292,14 @@ mod tests {
     fn infer_shape_from_optional_type_uses_default() {
         let vi = model::OnnxValueInfo {
             name: "opt_input".to_string(),
-            value_type: Some(types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(
-                types::OnnxTensorType {
+            value_type: Some(types::OnnxType::Optional(Box::new(
+                types::OnnxType::Tensor(types::OnnxTensorType {
                     elem_type: proto::tensor_proto::DataType::Float,
                     shape: types::OnnxTensorShape {
                         dims: vec![types::OnnxDim::Known(32)],
                     },
-                },
-            )))),
+                }),
+            ))),
             doc_string: String::new(),
             metadata_props: HashMap::new(),
         };
@@ -2986,9 +3317,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "opt_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "opt_input")
             .expect("opt_input should be registered");
-        assert_eq!(t.shape.len(), 1, "Optional type should fall back to default 1-D shape");
+        assert_eq!(
+            t.shape.len(),
+            1,
+            "Optional type should fall back to default 1-D shape"
+        );
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(1024) } if name == "seq_len"),
             "Optional type should default to seq_len Symbolic"
@@ -3041,9 +3379,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Empty third input should not trigger GemmBias path
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op (not GemmBias)");
-        assert_eq!(gemm.inputs.len(), 2, "Empty bias input should produce Gemm, not GemmBias");
+        assert_eq!(
+            gemm.inputs.len(),
+            2,
+            "Empty bias input should produce Gemm, not GemmBias"
+        );
     }
 
     // ── Gather with initializer extracts correct dimensions ───────────
@@ -3085,9 +3430,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 5000, "table_rows should be 5000");
             assert_eq!(*embed_dim, 256, "embed_dim should be 256");
         }
@@ -3216,18 +3569,28 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gathers: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gathers: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
             .collect();
         assert_eq!(gathers.len(), 2, "Should have 2 separate Gather ops");
         // Verify they have different dimensions from different initializers
-        let dims: Vec<(usize, usize)> = gathers.iter().map(|op| {
-            if let OpKind::Gather { table_rows, embed_dim, .. } = &op.kind {
-                (*table_rows, *embed_dim)
-            } else {
-                unreachable!()
-            }
-        }).collect();
+        let dims: Vec<(usize, usize)> = gathers
+            .iter()
+            .map(|op| {
+                if let Op::Gather {
+                    table_rows,
+                    embed_dim,
+                    ..
+                } = &op.op_v2
+                {
+                    (*table_rows, *embed_dim)
+                } else {
+                    unreachable!()
+                }
+            })
+            .collect();
         assert!(dims.contains(&(100, 32)), "Should have table_a dimensions");
         assert!(dims.contains(&(200, 64)), "Should have table_b dimensions");
     }
@@ -3261,7 +3624,10 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 0, "No nodes should produce no ops");
         assert_eq!(graph.max_seq_len, 256);
-        let w = graph.tensors.iter().find(|t| t.name == "weight_only")
+        let w = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "weight_only")
             .expect("weight_only should be registered");
         assert_eq!(w.shape.len(), 2);
     }
@@ -3288,21 +3654,28 @@ mod tests {
             attributes: {
                 let mut attrs = HashMap::new();
                 // epsilon is Int instead of Float — should fall back to default 1e-5
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Int(6),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Int(6),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
                 "Non-float epsilon attribute should fall back to default 1e-5, got {eps}"
@@ -3334,26 +3707,37 @@ mod tests {
             name: "ln_bad_eps".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_nfe_s".to_string(), "ln_nfe_b".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_nfe_s".to_string(),
+                "ln_nfe_b".to_string(),
+            ],
             outputs: vec!["ln_nfe_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
                 // epsilon is String instead of Float
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::String("1e-6".to_string()),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::String("1e-6".to_string()),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
                 "Non-float epsilon attribute should fall back to default 1e-5, got {eps}"
@@ -3367,7 +3751,10 @@ mod tests {
     fn onnx_graph_debug_output() {
         let graph = make_test_graph();
         let debug = format!("{graph:?}");
-        assert!(debug.contains("test_graph"), "Debug should contain graph name");
+        assert!(
+            debug.contains("test_graph"),
+            "Debug should contain graph name"
+        );
         assert!(debug.contains("nodes"), "Debug should mention nodes field");
     }
 
@@ -3412,7 +3799,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "my_weight")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "my_weight")
             .expect("my_weight should be registered");
         assert_eq!(t.shape.len(), 2);
         assert!(matches!(&t.shape[0], SymDim::Concrete(128)));
@@ -3448,9 +3838,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 768).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "sparse_in")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "sparse_in")
             .expect("sparse_in should be registered");
-        assert_eq!(t.shape.len(), 1, "SparseTensor type should fall back to default 1-D shape");
+        assert_eq!(
+            t.shape.len(),
+            1,
+            "SparseTensor type should fall back to default 1-D shape"
+        );
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(768) } if name == "seq_len"),
             "SparseTensor type should default to seq_len Symbolic"
@@ -3613,7 +4010,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "mixed_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "mixed_input")
             .expect("mixed_input should be registered");
         assert_eq!(t.shape.len(), 4, "Should have 4 dims");
         assert!(
@@ -3637,7 +4037,10 @@ mod tests {
             node_name: "mm1".to_string(),
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("MissingInitializer"), "Debug should contain variant name: {debug}");
+        assert!(
+            debug.contains("MissingInitializer"),
+            "Debug should contain variant name: {debug}"
+        );
         assert!(debug.contains("w1"), "Debug should contain name: {debug}");
     }
 
@@ -3648,8 +4051,14 @@ mod tests {
             dims: 5,
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("InvalidMatMulShape"), "Debug should contain variant name: {debug}");
-        assert!(debug.contains("bad_w"), "Debug should contain name: {debug}");
+        assert!(
+            debug.contains("InvalidMatMulShape"),
+            "Debug should contain variant name: {debug}"
+        );
+        assert!(
+            debug.contains("bad_w"),
+            "Debug should contain name: {debug}"
+        );
     }
 
     #[test]
@@ -3658,8 +4067,14 @@ mod tests {
             node_name: "pure_mm".to_string(),
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("NoWeightInput"), "Debug should contain variant name: {debug}");
-        assert!(debug.contains("pure_mm"), "Debug should contain node_name: {debug}");
+        assert!(
+            debug.contains("NoWeightInput"),
+            "Debug should contain variant name: {debug}"
+        );
+        assert!(
+            debug.contains("pure_mm"),
+            "Debug should contain node_name: {debug}"
+        );
     }
 
     #[test]
@@ -3669,8 +4084,14 @@ mod tests {
             reason: "missing axis".to_string(),
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("AttributeError"), "Debug should contain variant name: {debug}");
-        assert!(debug.contains("missing axis"), "Debug should contain reason: {debug}");
+        assert!(
+            debug.contains("AttributeError"),
+            "Debug should contain variant name: {debug}"
+        );
+        assert!(
+            debug.contains("missing axis"),
+            "Debug should contain reason: {debug}"
+        );
     }
 
     #[test]
@@ -3680,8 +4101,14 @@ mod tests {
             reason: "dynamic rank".to_string(),
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("ShapeInferenceFailed"), "Debug should contain variant name: {debug}");
-        assert!(debug.contains("out_tensor"), "Debug should contain name: {debug}");
+        assert!(
+            debug.contains("ShapeInferenceFailed"),
+            "Debug should contain variant name: {debug}"
+        );
+        assert!(
+            debug.contains("out_tensor"),
+            "Debug should contain name: {debug}"
+        );
     }
 
     // ── Gemm with transB as non-int attribute uses no_transpose ───────
@@ -3708,13 +4135,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Float(1.0),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Float(1.0),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -3733,11 +4163,22 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
-            assert_eq!(*n, 48, "Non-int transB should default to no-transpose, n=shape[0]");
-            assert_eq!(*k, 24, "Non-int transB should default to no-transpose, k=shape[1]");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(
+                *n, 48,
+                "Non-int transB should default to no-transpose, n=shape[0]"
+            );
+            assert_eq!(
+                *k, 24,
+                "Non-int transB should default to no-transpose, k=shape[1]"
+            );
         }
     }
 
@@ -3780,11 +4221,22 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 100, "1D table rows should be shape[0]");
-            assert_eq!(*embed_dim, 0, "1D table embed_dim should be 0 (no second dim)");
+            assert_eq!(
+                *embed_dim, 0,
+                "1D table embed_dim should be 0 (no second dim)"
+            );
         }
     }
 
@@ -3811,10 +4263,22 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
-        let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .collect();
         assert_eq!(mul_ops.len(), 1, "Should have 1 Mul op");
-        assert_eq!(add_ops.len(), 2, "Should have 2 Add ops (original + chained)");
+        assert_eq!(
+            add_ops.len(),
+            2,
+            "Should have 2 Add ops (original + chained)"
+        );
     }
 
     // ── Unary ops on same input produce independent outputs ───────────
@@ -3840,11 +4304,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let silu = graph.tensors.iter().find(|t| t.name == "silu_hidden")
+        let silu = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "silu_hidden")
             .expect("silu_hidden should exist");
-        let gelu = graph.tensors.iter().find(|t| t.name == "gelu_hidden")
+        let gelu = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "gelu_hidden")
             .expect("gelu_hidden should exist");
-        assert_ne!(silu.id, gelu.id, "Silu and Gelu outputs should be distinct tensors");
+        assert_ne!(
+            silu.id, gelu.id,
+            "Silu and Gelu outputs should be distinct tensors"
+        );
     }
 
     // ── Graph with multiple outputs wired correctly ───────────────────
@@ -3866,7 +4339,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert!(graph.outputs.len() >= 2, "Graph should have at least 2 outputs");
+        assert!(
+            graph.outputs.len() >= 2,
+            "Graph should have at least 2 outputs"
+        );
         let q_out = graph.tensors.iter().find(|t| t.name == "q");
         let k_out = graph.tensors.iter().find(|t| t.name == "k");
         assert!(q_out.is_some(), "q tensor should exist");
@@ -3882,7 +4358,11 @@ mod tests {
             node_name: "n1".to_string(),
         };
         let cloned = err.clone();
-        assert_eq!(err.to_string(), cloned.to_string(), "Cloned error should have same Display output");
+        assert_eq!(
+            err.to_string(),
+            cloned.to_string(),
+            "Cloned error should have same Display output"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3904,7 +4384,11 @@ mod tests {
         let onnx = make_test_graph();
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, usize::MAX).unwrap();
-        assert_eq!(graph.max_seq_len, usize::MAX, "max_seq_len=usize::MAX should propagate");
+        assert_eq!(
+            graph.max_seq_len,
+            usize::MAX,
+            "max_seq_len=usize::MAX should propagate"
+        );
     }
 
     // ── MatMul reusing same weight initializer ────────────────────────
@@ -3956,13 +4440,21 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
             .collect();
-        assert_eq!(gemm_ops.len(), 2, "Should have 2 Gemm ops reusing same weight");
+        assert_eq!(
+            gemm_ops.len(),
+            2,
+            "Should have 2 Gemm ops reusing same weight"
+        );
         // Both should share the same weight tensor ID
-        assert_eq!(gemm_ops[0].inputs[1], gemm_ops[1].inputs[1],
-            "Both Gemm ops should reference the same weight tensor");
+        assert_eq!(
+            gemm_ops[0].inputs[1], gemm_ops[1].inputs[1],
+            "Both Gemm ops should reference the same weight tensor"
+        );
     }
 
     // ── MatMul with 1x1 weight ────────────────────────────────────────
@@ -4004,9 +4496,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 1, "n should be 1 for 1x1 weight");
             assert_eq!(*k, 1, "k should be 1 for 1x1 weight");
         }
@@ -4051,9 +4548,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op even with 0-row weight");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 0, "n should be 0 for weight with 0 rows");
             assert_eq!(*k, 64, "k should be 64");
         }
@@ -4080,7 +4582,11 @@ mod tests {
                 op_type: "Gemm".to_string(),
                 domain: String::new(),
                 // Third input is a non-initializer name
-                inputs: vec!["x".to_string(), "gw_nib".to_string(), "dynamic_bias".to_string()],
+                inputs: vec![
+                    "x".to_string(),
+                    "gw_nib".to_string(),
+                    "dynamic_bias".to_string(),
+                ],
                 outputs: vec!["y".to_string()],
                 attributes: HashMap::new(),
             }],
@@ -4100,9 +4606,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Bias not in initializers → should produce plain Gemm, not GemmBias
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have plain Gemm (not GemmBias)");
-        assert_eq!(gemm.inputs.len(), 2, "Non-initializer bias should produce Gemm with 2 inputs");
+        assert_eq!(
+            gemm.inputs.len(),
+            2,
+            "Non-initializer bias should produce Gemm with 2 inputs"
+        );
     }
 
     // ── Graph output referencing unknown tensor is skipped ────────────
@@ -4120,7 +4633,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Should only have the original valid output, not the nonexistent one
-        assert!(graph.outputs.len() == 1, "Nonexistent output should be skipped");
+        assert!(
+            graph.outputs.len() == 1,
+            "Nonexistent output should be skipped"
+        );
     }
 
     // ── Transpose with 3D perm ────────────────────────────────────────
@@ -4136,22 +4652,27 @@ mod tests {
             outputs: vec!["trans_3d".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let transpose = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Transpose { .. }) && op.label == "transpose_3d")
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }) && op.label == "transpose_3d")
             .expect("Should have Transpose op with 3D perm");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(*perm, vec![2, 0, 1], "perm should be [2, 0, 1]");
         }
     }
@@ -4205,9 +4726,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool op");
-        if let OpKind::MeanPool { hidden, cls_mode, .. } = &pool.kind {
+        if let Op::MeanPool {
+            hidden, cls_mode, ..
+        } = &pool.op_v2
+        {
             assert_eq!(*hidden, 64, "hidden should be 64 (last dim of initializer)");
             assert!(!cls_mode);
         }
@@ -4252,9 +4779,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 50, "3D table_rows should be shape[0]");
             assert_eq!(*embed_dim, 32, "3D embed_dim should be shape[1]");
         }
@@ -4299,9 +4834,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op even with [0,0] table");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 0);
             assert_eq!(*embed_dim, 0);
         }
@@ -4334,9 +4877,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "scalar_val")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "scalar_val")
             .expect("scalar_val should be registered");
-        assert!(t.shape.is_empty(), "Scalar initializer should have empty shape");
+        assert!(
+            t.shape.is_empty(),
+            "Scalar initializer should have empty shape"
+        );
     }
 
     // ── Chain: Gather → RmsNorm → MatMul ──────────────────────────────
@@ -4410,9 +4959,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert_eq!(graph.ops.len(), 3, "Should have 3 ops: Gather + RmsNorm + Gemm");
+        assert_eq!(
+            graph.ops.len(),
+            3,
+            "Should have 3 ops: Gather + RmsNorm + Gemm"
+        );
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
-        assert_eq!(labels, &["gather", "norm", "proj"], "Ops should be in chain order");
+        assert_eq!(
+            labels,
+            &["gather", "norm", "proj"],
+            "Ops should be in chain order"
+        );
     }
 
     // ── OnnxFunction construction and field access ────────────────────
@@ -4525,7 +5082,10 @@ mod tests {
         assert_eq!(d1, d2);
         let mut set = HashSet::new();
         set.insert(d1.clone());
-        assert!(set.contains(&d2), "Equal OnnxDim values should hash the same");
+        assert!(
+            set.contains(&d2),
+            "Equal OnnxDim values should hash the same"
+        );
     }
 
     #[test]
@@ -4551,8 +5111,14 @@ mod tests {
     #[test]
     fn onnx_dim_variants_not_equal() {
         assert_ne!(types::OnnxDim::Known(0), types::OnnxDim::Unknown);
-        assert_ne!(types::OnnxDim::Known(0), types::OnnxDim::Param("0".to_string()));
-        assert_ne!(types::OnnxDim::Unknown, types::OnnxDim::Param("unknown".to_string()));
+        assert_ne!(
+            types::OnnxDim::Known(0),
+            types::OnnxDim::Param("0".to_string())
+        );
+        assert_ne!(
+            types::OnnxDim::Unknown,
+            types::OnnxDim::Param("unknown".to_string())
+        );
     }
 
     // ── OnnxTensorShape PartialEq ────────────────────────────────────
@@ -4560,10 +5126,16 @@ mod tests {
     #[test]
     fn onnx_tensor_shape_partial_eq() {
         let s1 = types::OnnxTensorShape {
-            dims: vec![types::OnnxDim::Known(128), types::OnnxDim::Param("seq".to_string())],
+            dims: vec![
+                types::OnnxDim::Known(128),
+                types::OnnxDim::Param("seq".to_string()),
+            ],
         };
         let s2 = types::OnnxTensorShape {
-            dims: vec![types::OnnxDim::Known(128), types::OnnxDim::Param("seq".to_string())],
+            dims: vec![
+                types::OnnxDim::Known(128),
+                types::OnnxDim::Param("seq".to_string()),
+            ],
         };
         assert_eq!(s1, s2, "Identical shapes should be equal");
     }
@@ -4700,11 +5272,15 @@ mod tests {
     fn onnx_attribute_value_types_variant() {
         let t1 = types::OnnxType::Tensor(types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(10)],
+            },
         });
         let t2 = types::OnnxType::Tensor(types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Int32,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(5)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(5)],
+            },
         });
         let attr = attributes::OnnxAttribute {
             name: "type_list".to_string(),
@@ -4787,8 +5363,12 @@ mod tests {
         ];
         for err in &errors {
             let cloned = err.clone();
-            assert_eq!(err.to_string(), cloned.to_string(),
-                "Cloned error should have identical Display for {:?}", err);
+            assert_eq!(
+                err.to_string(),
+                cloned.to_string(),
+                "Cloned error should have identical Display for {:?}",
+                err
+            );
         }
     }
 
@@ -4880,8 +5460,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Clip is passthrough (no op added), so only MatMul produces an op
-        assert_eq!(graph.ops.len(), 1, "Clip passthrough + MatMul should produce 1 op");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }));
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Clip passthrough + MatMul should produce 1 op"
+        );
+        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
     }
 
     // ── Graph with multiple inputs and outputs ────────────────────────
@@ -4947,14 +5531,12 @@ mod tests {
                     metadata_props: HashMap::new(),
                 },
             ],
-            outputs: vec![
-                model::OnnxValueInfo {
-                    name: "combined".to_string(),
-                    value_type: None,
-                    doc_string: String::new(),
-                    metadata_props: HashMap::new(),
-                },
-            ],
+            outputs: vec![model::OnnxValueInfo {
+                name: "combined".to_string(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -5004,7 +5586,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 0, "No nodes = no ops regardless of annotations");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "No nodes = no ops regardless of annotations"
+        );
     }
 
     // ── Two RmsNorm ops in sequence ───────────────────────────────────
@@ -5012,8 +5598,18 @@ mod tests {
     #[test]
     fn two_rms_norm_ops_in_sequence() {
         use super::super::tensor::OnnxTensor;
-        let scale1 = OnnxTensor::new("s1".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let scale2 = OnnxTensor::new("s2".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale1 = OnnxTensor::new(
+            "s1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let scale2 = OnnxTensor::new(
+            "s2".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("s1".to_string(), scale1);
         onnx.initializers.insert("s2".to_string(), scale2);
@@ -5035,8 +5631,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let rms_norms: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let rms_norms: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .collect();
         assert_eq!(rms_norms.len(), 2, "Should have 2 RmsNorm ops");
         assert_eq!(rms_norms[0].label, "norm1");
@@ -5092,12 +5690,21 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add))
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
             .expect("Should have Add op");
         // The output of Add should be named "biased"
-        let biased = graph.tensors.iter().find(|t| t.name == "biased")
+        let biased = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "biased")
             .expect("biased tensor should exist");
-        assert!(add_op.outputs.contains(&biased.id), "Add should output the biased tensor");
+        assert!(
+            add_op.outputs.contains(&biased.id),
+            "Add should output the biased tensor"
+        );
     }
 
     // ── Reshape followed by Transpose ─────────────────────────────────
@@ -5121,25 +5728,36 @@ mod tests {
             outputs: vec!["final".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reshape = graph.ops.iter().find(|op| op.label == "reshape")
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "reshape")
             .expect("Should have reshape op");
-        let transpose = graph.ops.iter().find(|op| op.label == "transpose_after")
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "transpose_after")
             .expect("Should have transpose op");
         // Transpose should consume the output of Reshape
-        assert!(transpose.inputs.contains(&reshape.outputs[0]),
-            "Transpose should consume Reshape output");
+        assert!(
+            transpose.inputs.contains(&reshape.outputs[0]),
+            "Transpose should consume Reshape output"
+        );
     }
 
     // ── infer_shape from value_info with single Known dim ─────────────
@@ -5171,7 +5789,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "vec_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "vec_input")
             .expect("vec_input should be registered");
         assert_eq!(t.shape.len(), 1);
         assert!(matches!(&t.shape[0], SymDim::Concrete(768)));
@@ -5210,11 +5831,18 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "multi_param")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "multi_param")
             .expect("multi_param should be registered");
         assert_eq!(t.shape.len(), 3);
-        assert!(matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(2048) } if name == "batch"));
-        assert!(matches!(&t.shape[1], SymDim::Symbolic { name, max_value: Some(2048) } if name == "seq_len"));
+        assert!(
+            matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(2048) } if name == "batch")
+        );
+        assert!(
+            matches!(&t.shape[1], SymDim::Symbolic { name, max_value: Some(2048) } if name == "seq_len")
+        );
         assert!(matches!(&t.shape[2], SymDim::Concrete(64)));
     }
 
@@ -5253,9 +5881,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
-        assert!(result.is_err(), "First node being unsupported should fail immediately");
+        assert!(
+            result.is_err(),
+            "First node being unsupported should fail immediately"
+        );
         let err = result.unwrap_err();
-        assert!(matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Conv"));
+        assert!(
+            matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Conv")
+        );
     }
 
     // ── Unsupported op after valid nodes still fails ──────────────────
@@ -5282,9 +5915,15 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
-        assert!(result.is_err(), "Unsupported op after valid nodes should still fail");
+        assert!(
+            result.is_err(),
+            "Unsupported op after valid nodes should still fail"
+        );
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("RandomUniform"), "Error should mention RandomUniform");
+        assert!(
+            err.to_string().contains("RandomUniform"),
+            "Error should mention RandomUniform"
+        );
     }
 
     // ── Where passthrough preserves tensor identity ───────────────────
@@ -5312,12 +5951,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Silu after Where passthrough should use the same tensor ID as qk_sum
-        let silu = graph.ops.iter().find(|op| op.label == "silu_after_where")
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "silu_after_where")
             .expect("Should have silu_after_where");
-        let qk_sum = graph.tensors.iter().find(|t| t.name == "qk_sum")
+        let qk_sum = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
             .expect("qk_sum should exist");
-        assert_eq!(silu.inputs[0], qk_sum.id,
-            "Silu after Where passthrough should receive the original qk_sum tensor");
+        assert_eq!(
+            silu.inputs[0], qk_sum.id,
+            "Silu after Where passthrough should receive the original qk_sum tensor"
+        );
     }
 
     // ── Detect dtype F64 initializer maps to F32 ─────────────────────
@@ -5346,7 +5993,10 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let dtype = detect_dtype(&graph);
-        assert!(matches!(dtype, DType::F32), "F64 initializer should detect as F32");
+        assert!(
+            matches!(dtype, DType::F32),
+            "F64 initializer should detect as F32"
+        );
     }
 
     // ── Graph with value_info (not inputs/outputs) ───────────────────
@@ -5379,7 +6029,10 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // value_info is not processed as inputs, so "intermediate" should NOT be registered
         let found = graph.tensors.iter().any(|t| t.name == "intermediate");
-        assert!(!found, "value_info entries should not be registered as tensors");
+        assert!(
+            !found,
+            "value_info entries should not be registered as tensors"
+        );
     }
 
     // ── OnnxDim Known with i64::MIN ──────────────────────────────────
@@ -5407,8 +6060,14 @@ mod tests {
             attributes: HashMap::new(),
         };
         let debug = format!("{node:?}");
-        assert!(debug.contains("debug_node"), "Debug should contain node name: {debug}");
-        assert!(debug.contains("MatMul"), "Debug should contain op_type: {debug}");
+        assert!(
+            debug.contains("debug_node"),
+            "Debug should contain node name: {debug}"
+        );
+        assert!(
+            debug.contains("MatMul"),
+            "Debug should contain op_type: {debug}"
+        );
     }
 
     // ── OnnxAttribute Debug output ────────────────────────────────────
@@ -5423,7 +6082,10 @@ mod tests {
             attr_type: None,
         };
         let debug = format!("{attr:?}");
-        assert!(debug.contains("test_attr"), "Debug should contain attribute name: {debug}");
+        assert!(
+            debug.contains("test_attr"),
+            "Debug should contain attribute name: {debug}"
+        );
     }
 
     // ── OnnxAttributeValue Debug output for all major variants ────────
@@ -5450,8 +6112,18 @@ mod tests {
     #[test]
     fn layer_norm_with_zero_epsilon() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_zs".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_zb".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_zs".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_zb".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ln_zs".to_string(), scale);
         onnx.initializers.insert("ln_zb".to_string(), bias);
@@ -5459,26 +6131,37 @@ mod tests {
             name: "ln_zero".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_zs".to_string(), "ln_zb".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_zs".to_string(),
+                "ln_zb".to_string(),
+            ],
             outputs: vec!["ln_zout".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(0.0),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(0.0),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert_eq!(eps, 0.0, "eps should be exactly 0.0");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert_eq!(*eps, 0.0, "eps should be exactly 0.0");
         }
     }
 
@@ -5487,7 +6170,12 @@ mod tests {
     #[test]
     fn rms_norm_with_very_small_epsilon() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rn_vs".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rn_vs".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rn_vs".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -5498,22 +6186,32 @@ mod tests {
             outputs: vec!["rn_small_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1e-30),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1e-30),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 1e-30).abs() < 1e-35, "eps should be ~1e-30, got {eps}");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-30).abs() < 1e-35,
+                "eps should be ~1e-30, got {eps}"
+            );
         }
     }
 
@@ -5571,13 +6269,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(-1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(-1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -5596,9 +6297,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "Negative transB should swap: n=shape[1]=32");
             assert_eq!(*k, 16, "Negative transB should swap: k=shape[0]=16");
         }
@@ -5619,12 +6325,27 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .collect();
         assert_eq!(add_ops.len(), 2, "Should have 2 Add ops");
         // They should produce different output tensors
-        let out1 = graph.tensors.iter().find(|t| t.name == "qk_sum").expect("qk_sum should exist");
-        let out2 = graph.tensors.iter().find(|t| t.name == "qk_sum2").expect("qk_sum2 should exist");
-        assert_ne!(out1.id, out2.id, "Different Add ops should produce distinct outputs");
+        let out1 = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
+            .expect("qk_sum should exist");
+        let out2 = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum2")
+            .expect("qk_sum2 should exist");
+        assert_ne!(
+            out1.id, out2.id,
+            "Different Add ops should produce distinct outputs"
+        );
     }
 
     // ── Map dtype detection from only initializer ─────────────────────
@@ -5646,8 +6367,10 @@ mod tests {
             safetensors::Dtype::F8_E4M3,
         ];
         for dt in dtypes {
-            assert!(matches!(map_onnx_dtype(dt), DType::F32),
-                "Dtype {dt:?} should map to F32");
+            assert!(
+                matches!(map_onnx_dtype(dt), DType::F32),
+                "Dtype {dt:?} should map to F32"
+            );
         }
     }
 
@@ -5691,15 +6414,25 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Both "act" and "input_free_w" have no producer, so both are inputs
-        let act_tensor = graph.tensors.iter().find(|t| t.name == "act")
+        let act_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "act")
             .expect("act tensor should exist");
-        assert!(graph.inputs.contains(&act_tensor.id),
-            "act should be a graph input");
+        assert!(
+            graph.inputs.contains(&act_tensor.id),
+            "act should be a graph input"
+        );
         // The output "y" has a producer (mm), so it should NOT be an input
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y tensor should exist");
-        assert!(!graph.inputs.contains(&y_tensor.id),
-            "y should NOT be a graph input (it has a producer)");
+        assert!(
+            !graph.inputs.contains(&y_tensor.id),
+            "y should NOT be a graph input (it has a producer)"
+        );
     }
 
     // ── SymDim from initializer preserves multi-dim shape ─────────────
@@ -5729,7 +6462,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "cube_weight")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "cube_weight")
             .expect("cube_weight should be registered");
         assert_eq!(t.shape.len(), 3);
         assert!(matches!(&t.shape[0], SymDim::Concrete(10)));
@@ -5786,7 +6522,10 @@ mod tests {
         ];
         for err in &errors {
             let msg = err.to_string();
-            assert!(!msg.is_empty(), "Display should produce non-empty string even with empty fields");
+            assert!(
+                !msg.is_empty(),
+                "Display should produce non-empty string even with empty fields"
+            );
         }
     }
 
@@ -5843,7 +6582,10 @@ mod tests {
             vec![],
             prost::bytes::Bytes::new(),
         );
-        assert!(tensor.shape.is_empty(), "Scalar tensor should have empty shape");
+        assert!(
+            tensor.shape.is_empty(),
+            "Scalar tensor should have empty shape"
+        );
     }
 
     #[test]
@@ -5891,15 +6633,21 @@ mod tests {
         ];
         assert_eq!(variants.len(), 3);
         let debug_strs: Vec<String> = variants.iter().map(|v| format!("{:?}", v)).collect();
-        assert_eq!(debug_strs.len(), debug_strs.iter().collect::<std::collections::HashSet<_>>().len(),
-            "All variants should have distinct Debug representations");
+        assert_eq!(
+            debug_strs.len(),
+            debug_strs
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            "All variants should have distinct Debug representations"
+        );
     }
 
     // ── OnnxSparseTensor construction ─────────────────────────────────
 
     #[test]
     fn onnx_sparse_tensor_construction() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat};
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor};
         let sparse = OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
                 "vals".to_string(),
@@ -5941,11 +6689,19 @@ mod tests {
         // Should have 5 ops total (4 original + 1 overwrite)
         assert_eq!(graph.ops.len(), 5);
         // The first producer (add_qk) should own qk_sum
-        let qk_tensor = graph.tensors.iter().find(|t| t.name == "qk_sum")
+        let qk_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
             .expect("qk_sum should exist");
-        let producer_label = qk_tensor.producer.map(|op_idx| graph.ops[op_idx.0 as usize].label.as_str());
-        assert_eq!(producer_label, Some("add_qk"),
-            "First producer should own qk_sum");
+        let producer_label = qk_tensor
+            .producer
+            .map(|op_idx| graph.ops[op_idx.0 as usize].label.as_str());
+        assert_eq!(
+            producer_label,
+            Some("add_qk"),
+            "First producer should own qk_sum"
+        );
     }
 
     // ── Graph with all unary ops ──────────────────────────────────────
@@ -5983,9 +6739,13 @@ mod tests {
         let onnx = make_test_graph();
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { m, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let m = &spec.m;
             assert!(
                 matches!(m, SymDim::Symbolic { name, max_value: Some(2048) } if name == "seq_len"),
                 "Gemm m dimension should be Symbolic(seq_len, 2048)"
@@ -5998,10 +6758,14 @@ mod tests {
         let onnx = make_test_graph();
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gemm = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gemm { .. }) && op.label == "q_proj")
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)) && op.label == "q_proj")
             .expect("Should find q_proj Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "n should be concrete from weight shape");
             assert_eq!(*k, 64, "k should be concrete from weight shape");
         }
@@ -6046,7 +6810,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y tensor should exist");
         assert_eq!(y_tensor.shape.len(), 2, "Gemm output should be 2-D");
         assert!(
@@ -6072,7 +6839,11 @@ mod tests {
                 prost::bytes::Bytes::new(),
             );
             init.insert(w_name, w);
-            let input_name = if i == 0 { "x".to_string() } else { format!("h_{}", i - 1) };
+            let input_name = if i == 0 {
+                "x".to_string()
+            } else {
+                format!("h_{}", i - 1)
+            };
             let output_name = format!("h_{i}");
             nodes.push(OnnxNode {
                 name: format!("layer_{i}"),
@@ -6107,8 +6878,13 @@ mod tests {
         for i in 0..9 {
             let current_output = graph.ops[i].outputs[0];
             let next_input = graph.ops[i + 1].inputs[0];
-            assert_eq!(current_output, next_input,
-                "Layer {} output should feed into layer {} input", i, i + 1);
+            assert_eq!(
+                current_output,
+                next_input,
+                "Layer {} output should feed into layer {} input",
+                i,
+                i + 1
+            );
         }
     }
 
@@ -6117,9 +6893,24 @@ mod tests {
     #[test]
     fn mixed_gemm_and_gemmbias_in_same_graph() {
         use super::super::tensor::OnnxTensor;
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
-        let b2 = OnnxTensor::new("b2".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
+        let b2 = OnnxTensor::new(
+            "b2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w1);
         init.insert("w2".to_string(), w2);
@@ -6160,8 +6951,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. })).count();
-        let gemm_bias_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::GemmBias { .. })).count();
+        let gemm_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .count();
+        let gemm_bias_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .count();
         assert_eq!(gemm_count, 1, "Should have 1 plain Gemm");
         assert_eq!(gemm_bias_count, 1, "Should have 1 GemmBias");
     }
@@ -6181,12 +6980,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let silu = graph.ops.iter().find(|op| op.label == "silu_after_add")
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "silu_after_add")
             .expect("Should find silu_after_add op");
-        let qk_sum = graph.tensors.iter().find(|t| t.name == "qk_sum")
+        let qk_sum = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
             .expect("qk_sum should exist");
-        assert!(silu.inputs.contains(&qk_sum.id),
-            "Silu should consume the Add output tensor");
+        assert!(
+            silu.inputs.contains(&qk_sum.id),
+            "Silu should consume the Add output tensor"
+        );
     }
 
     // ── Gather with large table dimensions ────────────────────────────
@@ -6228,9 +7035,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 100000);
             assert_eq!(*embed_dim, 4096);
         }
@@ -6284,7 +7099,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 0, "Passthrough-only graph should produce no ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Passthrough-only graph should produce no ops"
+        );
         // x is the only real tensor; passthrough ops map output names to its tensor ID
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x");
         assert!(x_tensor.is_some(), "x should exist as a tensor");
@@ -6308,11 +7127,22 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let qk_shape = graph.tensors.iter().find(|t| t.name == "qk_sum")
-            .map(|t| t.shape.clone()).unwrap_or_default();
-        let rs_out_shape = graph.tensors.iter().find(|t| t.name == "rs_out")
-            .map(|t| t.shape.clone()).unwrap_or_default();
-        assert_eq!(qk_shape, rs_out_shape, "Reshape output should copy input shape (placeholder)");
+        let qk_shape = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
+            .map(|t| t.shape.clone())
+            .unwrap_or_default();
+        let rs_out_shape = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "rs_out")
+            .map(|t| t.shape.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            qk_shape, rs_out_shape,
+            "Reshape output should copy input shape (placeholder)"
+        );
     }
 
     // ── Transpose without perm attribute uses empty default ───────────
@@ -6329,21 +7159,27 @@ mod tests {
             attributes: {
                 let mut attrs = HashMap::new();
                 // perm attribute has wrong type (Float instead of Ints)
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1.0),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1.0),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let transpose = graph.ops.iter().find(|op| op.label == "trans_bad_attr")
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "trans_bad_attr")
             .expect("Should find Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert!(perm.is_empty(), "Non-Ints perm should default to empty");
         }
     }
@@ -6353,8 +7189,18 @@ mod tests {
     #[test]
     fn gemmbias_n_k_derived_from_weight() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw".to_string(), safetensors::Dtype::F32, vec![256, 128], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("gb".to_string(), safetensors::Dtype::F32, vec![256], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw".to_string(),
+            safetensors::Dtype::F32,
+            vec![256, 128],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "gb".to_string(),
+            safetensors::Dtype::F32,
+            vec![256],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw".to_string(), weight);
         init.insert("gb".to_string(), bias);
@@ -6384,9 +7230,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gb = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let OpKind::GemmBias { n, k, .. } = &gb.kind {
+        if let Op::GemmBias(spec) = &gb.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 256, "n should be weight.shape[0]");
             assert_eq!(*k, 128, "k should be weight.shape[1]");
         }
@@ -6415,8 +7266,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let pools: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pools: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .collect();
         assert_eq!(pools.len(), 2, "Should have 2 MeanPool ops");
     }
@@ -6454,7 +7307,12 @@ mod tests {
     #[test]
     fn matmul_weight_second_position_preferred() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("W1".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "W1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("W1".to_string(), w);
         let onnx = OnnxGraph {
@@ -6483,9 +7341,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32);
             assert_eq!(*k, 16);
         }
@@ -6496,9 +7359,24 @@ mod tests {
     #[test]
     fn layernorm_then_matmul_chain() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let proj_w = OnnxTensor::new("proj_w".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let proj_w = OnnxTensor::new(
+            "proj_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ln_s".to_string(), scale);
         onnx.initializers.insert("ln_b".to_string(), bias);
@@ -6524,9 +7402,15 @@ mod tests {
         // Should have original 4 ops + LayerNorm + Gemm = 6 ops
         assert_eq!(graph.ops.len(), 6);
         let ln = graph.ops.iter().find(|op| op.label == "ln").expect("ln op");
-        let proj = graph.ops.iter().find(|op| op.label == "proj").expect("proj op");
-        assert_eq!(ln.outputs[0], proj.inputs[0],
-            "MatMul should consume LayerNorm output");
+        let proj = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "proj")
+            .expect("proj op");
+        assert_eq!(
+            ln.outputs[0], proj.inputs[0],
+            "MatMul should consume LayerNorm output"
+        );
     }
 
     // ── Binary op with both inputs being activations ──────────────────
@@ -6544,11 +7428,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let new_a = graph.tensors.iter().find(|t| t.name == "new_a")
+        let new_a = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "new_a")
             .expect("new_a should be auto-created");
-        let new_b = graph.tensors.iter().find(|t| t.name == "new_b")
+        let new_b = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "new_b")
             .expect("new_b should be auto-created");
-        assert_ne!(new_a.id, new_b.id, "Two different activations should have different tensor IDs");
+        assert_ne!(
+            new_a.id, new_b.id,
+            "Two different activations should have different tensor IDs"
+        );
     }
 
     // ── Graph output that is also an initializer is not an input ──────
@@ -6556,7 +7449,12 @@ mod tests {
     #[test]
     fn graph_output_initializer_excluded_from_inputs() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("direct_out".to_string(), safetensors::Dtype::F32, vec![10, 20], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "direct_out".to_string(),
+            safetensors::Dtype::F32,
+            vec![10, 20],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("direct_out".to_string(), w);
         let onnx = OnnxGraph {
@@ -6579,10 +7477,15 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // direct_out is both an initializer and a graph output, so it should NOT be in inputs
-        let direct_out = graph.tensors.iter().find(|t| t.name == "direct_out")
+        let direct_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "direct_out")
             .expect("direct_out should exist");
-        assert!(!graph.inputs.contains(&direct_out.id),
-            "Initializer that is also a graph output should not be in inputs");
+        assert!(
+            !graph.inputs.contains(&direct_out.id),
+            "Initializer that is also a graph output should not be in inputs"
+        );
     }
 
     // ── ConvertError implements Send and Sync ─────────────────────────
@@ -6671,7 +7574,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "tiny")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "tiny")
             .expect("tiny should be registered");
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(1) } if name == "s"),
@@ -6702,13 +7608,16 @@ mod tests {
             outputs: vec!["t1_out".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
@@ -6720,20 +7629,25 @@ mod tests {
             outputs: vec!["t2_out".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![0, 1]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![0, 1]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let transposes: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transposes: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .collect();
         assert_eq!(transposes.len(), 2);
         // t2 should consume t1's output
@@ -6795,7 +7709,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert_eq!(mul_ops.len(), 2, "Pow and Sqrt should each produce Mul");
     }
 
@@ -6804,7 +7722,12 @@ mod tests {
     #[test]
     fn weight_initializer_shape_all_concrete() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w_all_concrete".to_string(), safetensors::Dtype::F32, vec![4, 8, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w_all_concrete".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 8, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w_all_concrete".to_string(), w);
         let onnx = OnnxGraph {
@@ -6821,11 +7744,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "w_all_concrete")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "w_all_concrete")
             .expect("Should exist");
         for (i, dim) in t.shape.iter().enumerate() {
-            assert!(matches!(dim, SymDim::Concrete(_)),
-                "Dim {i} of initializer should be Concrete");
+            assert!(
+                matches!(dim, SymDim::Concrete(_)),
+                "Dim {i} of initializer should be Concrete"
+            );
         }
     }
 
@@ -6834,7 +7762,12 @@ mod tests {
     #[test]
     fn gemm_transb_large_int_is_transpose() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw_li".to_string(), safetensors::Dtype::F32, vec![16, 32], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw_li".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_li".to_string(), weight);
         let onnx = OnnxGraph {
@@ -6848,13 +7781,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(999),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(999),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -6873,9 +7809,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "Large non-zero transB should swap: n=shape[1]=32");
             assert_eq!(*k, 16, "Large non-zero transB should swap: k=shape[0]=16");
         }
@@ -6926,9 +7867,12 @@ mod tests {
         let onnx = make_test_graph();
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let OpKind::Gather { index_dim, .. } = &gather.kind {
+        if let Op::Gather { index_dim, .. } = &gather.op_v2 {
             assert!(
                 matches!(index_dim, SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len"),
                 "Gather index_dim should be Symbolic(seq_len, 4096)"
@@ -6951,9 +7895,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let pooled = graph.tensors.iter().find(|t| t.name == "pooled")
+        let pooled = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "pooled")
             .expect("pooled should exist");
-        assert_eq!(pooled.shape.len(), 1, "ReduceMean output should be 1-D (hidden only)");
+        assert_eq!(
+            pooled.shape.len(),
+            1,
+            "ReduceMean output should be 1-D (hidden only)"
+        );
     }
 
     // ── ConvertError can be used in Result ────────────────────────────
@@ -6974,8 +7925,18 @@ mod tests {
     #[test]
     fn layer_norm_empty_scale_bias_names() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new(String::new(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new(String::new(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            String::new(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            String::new(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         // Insert with specific keys since name is empty
         onnx.initializers.insert("ln_scale".to_string(), scale);
@@ -6984,14 +7945,21 @@ mod tests {
             name: "ln_empty".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_scale".to_string(), "ln_bias".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_scale".to_string(),
+                "ln_bias".to_string(),
+            ],
             outputs: vec!["ln_eout".to_string()],
             attributes: HashMap::new(),
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.kind, OpKind::LayerNorm { .. })),
+            graph
+                .ops
+                .iter()
+                .any(|op| matches!(op.op_v2, Op::LayerNorm(..))),
             "Should have LayerNorm even with non-empty scale/bias keys"
         );
     }
@@ -7056,12 +8024,18 @@ mod tests {
 
     #[test]
     fn map_onnx_dtype_preserves_bf16() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::BF16), DType::BF16));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::BF16),
+            DType::BF16
+        ));
     }
 
     #[test]
     fn map_onnx_dtype_preserves_f16() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::F16), DType::F16));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::F16),
+            DType::F16
+        ));
     }
 
     // ── Graph with single Gather node and no other nodes ──────────────
@@ -7069,7 +8043,12 @@ mod tests {
     #[test]
     fn single_gather_node_graph() {
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("t".to_string(), safetensors::Dtype::F32, vec![50, 100], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "t".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 100],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("t".to_string(), table);
         let onnx = OnnxGraph {
@@ -7112,8 +8091,18 @@ mod tests {
     #[test]
     fn detect_dtype_multiple_initializers_uses_first() {
         use super::super::tensor::OnnxTensor;
-        let t1 = OnnxTensor::new("a".to_string(), safetensors::Dtype::F32, vec![2, 2], prost::bytes::Bytes::new());
-        let t2 = OnnxTensor::new("b".to_string(), safetensors::Dtype::BF16, vec![3, 3], prost::bytes::Bytes::new());
+        let t1 = OnnxTensor::new(
+            "a".to_string(),
+            safetensors::Dtype::F32,
+            vec![2, 2],
+            prost::bytes::Bytes::new(),
+        );
+        let t2 = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::BF16,
+            vec![3, 3],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("a".to_string(), t1);
         init.insert("b".to_string(), t2);
@@ -7133,7 +8122,8 @@ mod tests {
         // HashMap iteration order is non-deterministic, but it should be either F32 or BF16
         assert!(
             matches!(dtype, DType::F32 | DType::BF16),
-            "dtype should be F32 or BF16, got {:?}", dtype
+            "dtype should be F32 or BF16, got {:?}",
+            dtype
         );
     }
 
@@ -7149,7 +8139,10 @@ mod tests {
             prost::bytes::Bytes::new(),
         );
         let debug = format!("{tensor:?}");
-        assert!(debug.contains("debug_t"), "Debug should contain tensor name");
+        assert!(
+            debug.contains("debug_t"),
+            "Debug should contain tensor name"
+        );
     }
 
     // ── ConvertError is 'static ───────────────────────────────────────
@@ -7191,7 +8184,11 @@ mod tests {
             prost::bytes::Bytes::from_static(b"hello"),
         );
         assert!(tensor.is_string, "new_string tensor should be string");
-        assert_eq!(tensor.dtype, safetensors::Dtype::U8, "String tensor dtype should be U8 placeholder");
+        assert_eq!(
+            tensor.dtype,
+            safetensors::Dtype::U8,
+            "String tensor dtype should be U8 placeholder"
+        );
     }
 
     // ── OnnxTensor scalar_f32 with various dtypes ──────────────────────
@@ -7246,7 +8243,10 @@ mod tests {
             vec![3],
             prost::bytes::Bytes::from_static(&[0u8; 12]),
         );
-        assert!(tensor.scalar_f32().is_none(), "Multi-element tensor should return None");
+        assert!(
+            tensor.scalar_f32().is_none(),
+            "Multi-element tensor should return None"
+        );
     }
 
     // ── OnnxTensor scalar_i64 with various dtypes ──────────────────────
@@ -7301,7 +8301,10 @@ mod tests {
             vec![2],
             prost::bytes::Bytes::from_static(&[0u8; 16]),
         );
-        assert!(tensor.scalar_i64().is_none(), "Multi-element should return None for scalar_i64");
+        assert!(
+            tensor.scalar_i64().is_none(),
+            "Multi-element should return None for scalar_i64"
+        );
     }
 
     // ── OnnxTensor scalar_f32 from I64 ─────────────────────────────────
@@ -7324,13 +8327,19 @@ mod tests {
 
     #[test]
     fn onnx_sparse_tensor_clone() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat};
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor};
         let sparse = OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
-                "v".to_string(), safetensors::Dtype::F32, vec![3], prost::bytes::Bytes::new(),
+                "v".to_string(),
+                safetensors::Dtype::F32,
+                vec![3],
+                prost::bytes::Bytes::new(),
             ),
             indices: super::super::tensor::OnnxTensor::new(
-                "i".to_string(), safetensors::Dtype::I64, vec![3], prost::bytes::Bytes::new(),
+                "i".to_string(),
+                safetensors::Dtype::I64,
+                vec![3],
+                prost::bytes::Bytes::new(),
             ),
             dims: vec![10],
             format: OnnxSparseFormat::Csr,
@@ -7346,19 +8355,28 @@ mod tests {
 
     #[test]
     fn onnx_sparse_tensor_debug() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat};
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor};
         let sparse = OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
-                "vals".to_string(), safetensors::Dtype::F32, vec![1], prost::bytes::Bytes::new(),
+                "vals".to_string(),
+                safetensors::Dtype::F32,
+                vec![1],
+                prost::bytes::Bytes::new(),
             ),
             indices: super::super::tensor::OnnxTensor::new(
-                "idx".to_string(), safetensors::Dtype::I64, vec![1], prost::bytes::Bytes::new(),
+                "idx".to_string(),
+                safetensors::Dtype::I64,
+                vec![1],
+                prost::bytes::Bytes::new(),
             ),
             dims: vec![5],
             format: OnnxSparseFormat::Csc,
         };
         let debug = format!("{sparse:?}");
-        assert!(debug.contains("vals"), "Debug should contain values tensor name");
+        assert!(
+            debug.contains("vals"),
+            "Debug should contain values tensor name"
+        );
     }
 
     // ── OnnxTensor scalar_f32 from U16 ─────────────────────────────────
@@ -7468,7 +8486,10 @@ mod tests {
             vec![0],
             prost::bytes::Bytes::new(),
         );
-        assert!(tensor.scalar_f32().is_none(), "Empty tensor should return None for scalar_f32");
+        assert!(
+            tensor.scalar_f32().is_none(),
+            "Empty tensor should return None for scalar_f32"
+        );
     }
 
     #[test]
@@ -7480,7 +8501,10 @@ mod tests {
             vec![0],
             prost::bytes::Bytes::new(),
         );
-        assert!(tensor.scalar_i64().is_none(), "Empty tensor should return None for scalar_i64");
+        assert!(
+            tensor.scalar_i64().is_none(),
+            "Empty tensor should return None for scalar_i64"
+        );
     }
 
     // ── OnnxTensor with I8 dtype ───────────────────────────────────────
@@ -7559,7 +8583,10 @@ mod tests {
             vec![2],
             prost::bytes::Bytes::from_static(&[1u8, 2u8]),
         );
-        assert!(tensor2.scalar_f32().is_none(), "Multi-element should be None");
+        assert!(
+            tensor2.scalar_f32().is_none(),
+            "Multi-element should be None"
+        );
         // Single U8 scalar IS supported
         let val = tensor.scalar_f32().expect("U8 scalar should work");
         assert_eq!(val, 0.0f32);
@@ -7577,7 +8604,11 @@ mod tests {
             vec![1],
             prost::bytes::Bytes::from(data.clone()),
         );
-        assert_eq!(tensor.raw_data(), data.as_slice(), "raw_data should return original bytes");
+        assert_eq!(
+            tensor.raw_data(),
+            data.as_slice(),
+            "raw_data should return original bytes"
+        );
     }
 
     // ── OnnxTensor clone preserves all fields ───────────────────────────
@@ -7610,7 +8641,10 @@ mod tests {
             vec![1],
             prost::bytes::Bytes::from(data.to_vec()),
         );
-        assert!(tensor.scalar_f32().is_none(), "F64 dtype scalar_f32 should return None (unsupported)");
+        assert!(
+            tensor.scalar_f32().is_none(),
+            "F64 dtype scalar_f32 should return None (unsupported)"
+        );
     }
 
     // ── OnnxGraph doc_string field ─────────────────────────────────────
@@ -7639,10 +8673,17 @@ mod tests {
         let onnx = make_test_graph();
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let OpKind::Gather { indices_kind, .. } = &gather.kind {
-            assert_eq!(*indices_kind, Default::default(), "indices_kind should be Default::default()");
+        if let Op::Gather { indices_kind, .. } = &gather.op_v2 {
+            assert_eq!(
+                *indices_kind,
+                Default::default(),
+                "indices_kind should be Default::default()"
+            );
         }
     }
 
@@ -7659,10 +8700,16 @@ mod tests {
         };
         let cloned = attr.clone();
         assert_eq!(cloned.name, "test");
-        assert!(matches!(cloned.value, attributes::OnnxAttributeValue::Int(42)));
+        assert!(matches!(
+            cloned.value,
+            attributes::OnnxAttributeValue::Int(42)
+        ));
         assert_eq!(cloned.doc_string, "doc");
         assert_eq!(cloned.ref_attr_name, Some("ref".to_string()));
-        assert_eq!(cloned.attr_type, Some(proto::attribute_proto::AttributeType::Int));
+        assert_eq!(
+            cloned.attr_type,
+            Some(proto::attribute_proto::AttributeType::Int)
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -7714,7 +8761,10 @@ mod tests {
         // Assert: 5-D weight should produce InvalidMatMulShape with dims=5
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), ConvertError::InvalidMatMulShape { dims: 5, .. }),
+            matches!(
+                result.unwrap_err(),
+                ConvertError::InvalidMatMulShape { dims: 5, .. }
+            ),
             "5-D weight should produce InvalidMatMulShape with dims=5"
         );
     }
@@ -7760,11 +8810,19 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
         // When both inputs are initializers, input_b (wb) is preferred as weight
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
-            assert_eq!(*n, 16, "n should be wb.shape[0]=16 (second input preferred)");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(
+                *n, 16,
+                "n should be wb.shape[0]=16 (second input preferred)"
+            );
             assert_eq!(*k, 8, "k should be wb.shape[1]=8");
         }
     }
@@ -7817,11 +8875,22 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 0, "Triple passthrough should produce zero ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Triple passthrough should produce zero ops"
+        );
         // All three output names should alias to the same input tensor
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x")
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
             .expect("x tensor should exist");
-        assert_eq!(graph.tensors.len(), 1, "Only x should exist as a real tensor");
+        assert_eq!(
+            graph.tensors.len(),
+            1,
+            "Only x should exist as a real tensor"
+        );
         let _ = x_tensor;
     }
 
@@ -7856,13 +8925,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -7881,13 +8953,22 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gb = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
-        if let OpKind::GemmBias { n, k, .. } = &gb.kind {
+        if let Op::GemmBias(spec) = &gb.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "transB swaps: n should be shape[1]=64");
             assert_eq!(*k, 32, "transB swaps: k should be shape[0]=32");
         }
-        assert_eq!(gb.inputs.len(), 3, "GemmBias should have 3 inputs (A, W, bias)");
+        assert_eq!(
+            gb.inputs.len(),
+            3,
+            "GemmBias should have 3 inputs (A, W, bias)"
+        );
     }
 
     // ── Node with single input and empty output ───────────────────────
@@ -7962,9 +9043,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 65536);
             assert_eq!(*k, 32768);
         }
@@ -7975,8 +9061,18 @@ mod tests {
     #[test]
     fn multiple_layernorm_shared_scale_bias() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("shared_s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("shared_b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "shared_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "shared_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("shared_s".to_string(), scale);
         onnx.initializers.insert("shared_b".to_string(), bias);
@@ -7984,7 +9080,11 @@ mod tests {
             name: "ln1".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "shared_s".to_string(), "shared_b".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "shared_s".to_string(),
+                "shared_b".to_string(),
+            ],
             outputs: vec!["ln1_out".to_string()],
             attributes: HashMap::new(),
         });
@@ -7992,21 +9092,31 @@ mod tests {
             name: "ln2".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["ln1_out".to_string(), "shared_s".to_string(), "shared_b".to_string()],
+            inputs: vec![
+                "ln1_out".to_string(),
+                "shared_s".to_string(),
+                "shared_b".to_string(),
+            ],
             outputs: vec!["ln2_out".to_string()],
             attributes: HashMap::new(),
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .collect();
         assert_eq!(ln_ops.len(), 2, "Should have 2 LayerNorm ops");
         // Both should reference the same scale and bias tensor IDs
-        assert_eq!(ln_ops[0].inputs[1], ln_ops[1].inputs[1],
-            "Both LayerNorm ops should share the same scale tensor");
-        assert_eq!(ln_ops[0].inputs[2], ln_ops[1].inputs[2],
-            "Both LayerNorm ops should share the same bias tensor");
+        assert_eq!(
+            ln_ops[0].inputs[1], ln_ops[1].inputs[1],
+            "Both LayerNorm ops should share the same scale tensor"
+        );
+        assert_eq!(
+            ln_ops[0].inputs[2], ln_ops[1].inputs[2],
+            "Both LayerNorm ops should share the same bias tensor"
+        );
     }
 
     // ── Graph with only Gather and ReduceMean (encoder pool pattern) ───
@@ -8064,9 +9174,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 2, "Should have Gather + MeanPool");
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
             assert_eq!(*hidden, 768, "hidden should be 768 from embed dim");
         }
         assert_eq!(graph.outputs.len(), 1, "Should have 1 output (pooled)");
@@ -8131,10 +9244,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let biased = graph.tensors.iter().find(|t| t.name == "biased")
+        let biased = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "biased")
             .expect("biased tensor should exist");
         // Output shape should be [seq_len, 64] (from the 2-D input h)
-        assert_eq!(biased.shape.len(), 2, "Broadcasting should pick the 2-D shape");
+        assert_eq!(
+            biased.shape.len(),
+            2,
+            "Broadcasting should pick the 2-D shape"
+        );
     }
 
     // ── Gemm with asymmetric weight (rectangular, non-square) ──────────
@@ -8176,16 +9296,26 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 1024, "n should be 1024 (asymmetric)");
             assert_eq!(*k, 256, "k should be 256 (asymmetric)");
         }
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y should exist");
-        assert!(matches!(&y_tensor.shape[1], SymDim::Concrete(1024)),
-            "Output second dim should be Concrete(1024)");
+        assert!(
+            matches!(&y_tensor.shape[1], SymDim::Concrete(1024)),
+            "Output second dim should be Concrete(1024)"
+        );
     }
 
     // ── Reshape followed by Gather uses correct gather output shape ────
@@ -8238,12 +9368,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Reshape output should have same shape as input (placeholder)
-        let h_tensor = graph.tensors.iter().find(|t| t.name == "h")
+        let h_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "h")
             .expect("h should exist");
-        let flat_tensor = graph.tensors.iter().find(|t| t.name == "flat")
+        let flat_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "flat")
             .expect("flat should exist");
-        assert_eq!(h_tensor.shape, flat_tensor.shape,
-            "Reshape output should copy input shape (placeholder behavior)");
+        assert_eq!(
+            h_tensor.shape, flat_tensor.shape,
+            "Reshape output should copy input shape (placeholder behavior)"
+        );
     }
 
     // ── MatMul with zero-column weight (edge case) ────────────────────
@@ -8285,9 +9423,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "n should be 64");
             assert_eq!(*k, 0, "k should be 0 for zero-column weight");
         }
@@ -8349,12 +9492,20 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
             .expect("hidden should exist");
-        let normed = graph.tensors.iter().find(|t| t.name == "normed")
+        let normed = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "normed")
             .expect("normed should exist");
-        assert_eq!(hidden.shape, normed.shape,
-            "RmsNorm output shape should match input shape");
+        assert_eq!(
+            hidden.shape, normed.shape,
+            "RmsNorm output shape should match input shape"
+        );
     }
 
     // ── Silu followed by Mul (gating pattern) ──────────────────────────
@@ -8381,15 +9532,27 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let silu = graph.ops.iter().find(|op| op.label == "gate")
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "gate")
             .expect("Should find gate Silu");
-        let mul = graph.ops.iter().find(|op| op.label == "mul_gate")
+        let mul = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mul_gate")
             .expect("Should find mul_gate Mul");
         // Mul should consume hidden and silu_hidden
         assert_eq!(mul.inputs.len(), 2);
-        let hidden_tensor = graph.tensors.iter().find(|t| t.name == "hidden")
+        let hidden_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
             .expect("hidden should exist");
-        let silu_tensor = graph.tensors.iter().find(|t| t.name == "silu_hidden")
+        let silu_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "silu_hidden")
             .expect("silu_hidden should exist");
         assert!(mul.inputs.contains(&hidden_tensor.id));
         assert!(mul.inputs.contains(&silu_tensor.id));
@@ -8437,8 +9600,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 1);
-        assert_eq!(graph.ops[0].label, "layer/0/self_attn/Q肯V-proj",
-            "Node name with special characters should be preserved as label");
+        assert_eq!(
+            graph.ops[0].label, "layer/0/self_attn/Q肯V-proj",
+            "Node name with special characters should be preserved as label"
+        );
     }
 
     // ── OnnxAttributeValue::Int with zero ───────────────────────────────
@@ -8552,21 +9717,26 @@ mod tests {
             dims: vec![types::OnnxDim::Unknown, types::OnnxDim::Unknown],
         };
         assert_eq!(shape.dims.len(), 2);
-        assert!(shape.dims.iter().all(|d| matches!(d, types::OnnxDim::Unknown)));
+        assert!(shape
+            .dims
+            .iter()
+            .all(|d| matches!(d, types::OnnxDim::Unknown)));
     }
 
     // ── OnnxType Sequence equality ──────────────────────────────────────
 
     #[test]
     fn onnx_type_sequence_equality() {
-        let s1 = types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
-            elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![] },
-        })));
-        let s2 = types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
-            elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![] },
-        })));
+        let s1 =
+            types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: types::OnnxTensorShape { dims: vec![] },
+            })));
+        let s2 =
+            types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: types::OnnxTensorShape { dims: vec![] },
+            })));
         assert_eq!(s1, s2, "Identical Sequence types should be equal");
     }
 
@@ -8664,13 +9834,16 @@ mod tests {
     #[test]
     fn onnx_function_with_attribute_protos() {
         let mut protos = HashMap::new();
-        protos.insert("alpha".to_string(), attributes::OnnxAttribute {
-            name: "alpha".to_string(),
-            value: attributes::OnnxAttributeValue::Float(0.5),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        protos.insert(
+            "alpha".to_string(),
+            attributes::OnnxAttribute {
+                name: "alpha".to_string(),
+                value: attributes::OnnxAttributeValue::Float(0.5),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let func = model::OnnxFunction {
             name: "ScaledAdd".to_string(),
             domain: "custom".to_string(),
@@ -8686,8 +9859,13 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         assert_eq!(func.attribute_protos.len(), 1);
-        let alpha = func.attribute_protos.get("alpha").expect("alpha should exist");
-        assert!(matches!(&alpha.value, attributes::OnnxAttributeValue::Float(v) if (*v - 0.5).abs() < f32::EPSILON));
+        let alpha = func
+            .attribute_protos
+            .get("alpha")
+            .expect("alpha should exist");
+        assert!(
+            matches!(&alpha.value, attributes::OnnxAttributeValue::Float(v) if (*v - 0.5).abs() < f32::EPSILON)
+        );
     }
 
     // ── OnnxFunction clone ──────────────────────────────────────────────
@@ -8726,7 +9904,10 @@ mod tests {
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape {
-                    dims: vec![types::OnnxDim::Known(10), types::OnnxDim::Param("seq".to_string())],
+                    dims: vec![
+                        types::OnnxDim::Known(10),
+                        types::OnnxDim::Param("seq".to_string()),
+                    ],
                 },
             })),
             doc_string: String::new(),
@@ -8755,10 +9936,13 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { seq_len, .. } = pool.kind {
-            assert_eq!(seq_len, 0, "MeanPool seq_len from ReduceMean should be 0");
+        if let Op::MeanPool { seq_len, .. } = &pool.op_v2 {
+            assert_eq!(*seq_len, 0, "MeanPool seq_len from ReduceMean should be 0");
         }
     }
 
@@ -8767,8 +9951,18 @@ mod tests {
     #[test]
     fn gemmbias_with_transb_swaps_n_k() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw_tb".to_string(), safetensors::Dtype::F32, vec![16, 32], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("gb_tb".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw_tb".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "gb_tb".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_tb".to_string(), weight);
         init.insert("gb_tb".to_string(), bias);
@@ -8783,13 +9977,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -8808,9 +10005,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gb = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let OpKind::GemmBias { n, k, .. } = &gb.kind {
+        if let Op::GemmBias(spec) = &gb.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "transB should swap n to shape[1]=32");
             assert_eq!(*k, 16, "transB should swap k to shape[0]=16");
         }
@@ -8831,10 +10033,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let rs = graph.ops.iter().find(|op| op.label == "rs_empty")
+        let rs = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "rs_empty")
             .expect("Should have Reshape");
-        if let OpKind::Reshape { target_shape } = &rs.kind {
-            assert!(target_shape.is_empty(), "target_shape should always be empty placeholder");
+        if let Op::Reshape { target_shape } = &rs.op_v2 {
+            assert!(
+                target_shape.is_empty(),
+                "target_shape should always be empty placeholder"
+            );
         }
     }
 
@@ -8843,7 +10051,12 @@ mod tests {
     #[test]
     fn gemm_4d_weight_returns_error() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w4d".to_string(), safetensors::Dtype::F32, vec![2, 3, 4, 5], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w4d".to_string(),
+            safetensors::Dtype::F32,
+            vec![2, 3, 4, 5],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w4d".to_string(), weight);
         let onnx = OnnxGraph {
@@ -8874,7 +10087,10 @@ mod tests {
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), ConvertError::InvalidMatMulShape { dims: 4, .. }),
+            matches!(
+                result.unwrap_err(),
+                ConvertError::InvalidMatMulShape { dims: 4, .. }
+            ),
             "Expected InvalidMatMulShape for 4-D Gemm weight"
         );
     }
@@ -8884,7 +10100,12 @@ mod tests {
     #[test]
     fn matmul_with_0x0_weight() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("zero_w".to_string(), safetensors::Dtype::F32, vec![0, 0], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "zero_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![0, 0],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("zero_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -8913,9 +10134,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm even with 0x0 weight");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 0);
             assert_eq!(*k, 0);
         }
@@ -8960,7 +10186,11 @@ mod tests {
         // value_info entries should not be registered as tensors
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.tensors.len(), 0, "value_info should not produce tensors");
+        assert_eq!(
+            graph.tensors.len(),
+            0,
+            "value_info should not produce tensors"
+        );
     }
 
     // ── OnnxTensor F8 dtypes ────────────────────────────────────────────
@@ -8994,7 +10224,12 @@ mod tests {
     #[test]
     fn detect_dtype_single_f16_initializer_detected() {
         use super::super::tensor::OnnxTensor;
-        let tensor = OnnxTensor::new("w".to_string(), safetensors::Dtype::F16, vec![1], prost::bytes::Bytes::new());
+        let tensor = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F16,
+            vec![1],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), tensor);
         let graph = OnnxGraph {
@@ -9010,7 +10245,10 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let dtype = detect_dtype(&graph);
-        assert!(matches!(dtype, DType::F16), "Single F16 initializer should detect as F16");
+        assert!(
+            matches!(dtype, DType::F16),
+            "Single F16 initializer should detect as F16"
+        );
     }
 
     // ── OnnxAttribute with attr_type field ──────────────────────────────
@@ -9024,7 +10262,10 @@ mod tests {
             ref_attr_name: None,
             attr_type: Some(proto::attribute_proto::AttributeType::Float),
         };
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Float));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Float)
+        );
     }
 
     #[test]
@@ -9036,7 +10277,10 @@ mod tests {
             ref_attr_name: None,
             attr_type: Some(proto::attribute_proto::AttributeType::Ints),
         };
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Ints));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Ints)
+        );
     }
 
     // ── OnnxGraph with metadata_props preserved ─────────────────────────
@@ -9075,7 +10319,10 @@ mod tests {
         };
         let debug = format!("{vi:?}");
         assert!(debug.contains("my_input"), "Debug should contain name");
-        assert!(debug.contains("input data"), "Debug should contain doc_string");
+        assert!(
+            debug.contains("input data"),
+            "Debug should contain doc_string"
+        );
     }
 
     // ── ConvertError Display for all variants with unicode ──────────────
@@ -9087,8 +10334,14 @@ mod tests {
             node_name: "nödë_中文".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("Convölu­tion"), "Display should preserve unicode op_type");
-        assert!(msg.contains("nödë_中文"), "Display should preserve unicode node_name");
+        assert!(
+            msg.contains("Convölu­tion"),
+            "Display should preserve unicode op_type"
+        );
+        assert!(
+            msg.contains("nödë_中文"),
+            "Display should preserve unicode node_name"
+        );
     }
 
     // ── OnnxDim::Param with special characters ──────────────────────────
@@ -9259,15 +10512,20 @@ mod tests {
 
     #[test]
     fn onnx_type_optional_different_inner_not_equal() {
-        let o1 = types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
-            elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![] },
-        })));
-        let o2 = types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
-            elem_type: proto::tensor_proto::DataType::Double,
-            shape: types::OnnxTensorShape { dims: vec![] },
-        })));
-        assert_ne!(o1, o2, "Optional with different inner types should not be equal");
+        let o1 =
+            types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: types::OnnxTensorShape { dims: vec![] },
+            })));
+        let o2 =
+            types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Double,
+                shape: types::OnnxTensorShape { dims: vec![] },
+            })));
+        assert_ne!(
+            o1, o2,
+            "Optional with different inner types should not be equal"
+        );
     }
 
     // ── Attribute parsing boundary: epsilon with NaN ────────────────────
@@ -9275,7 +10533,12 @@ mod tests {
     #[test]
     fn rms_norm_with_nan_epsilon_attribute() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rn_nan".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rn_nan".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rn_nan".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -9286,21 +10549,28 @@ mod tests {
             outputs: vec!["nan_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(f32::NAN),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(f32::NAN),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
             assert!(eps.is_nan(), "NaN epsilon should be preserved as NaN");
         }
     }
@@ -9310,8 +10580,18 @@ mod tests {
     #[test]
     fn layer_norm_with_inf_epsilon_attribute() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_inf_s".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_inf_b".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_inf_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_inf_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ln_inf_s".to_string(), scale);
         onnx.initializers.insert("ln_inf_b".to_string(), bias);
@@ -9319,26 +10599,40 @@ mod tests {
             name: "norm_inf".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_inf_s".to_string(), "ln_inf_b".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_inf_s".to_string(),
+                "ln_inf_b".to_string(),
+            ],
             outputs: vec!["inf_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(f32::INFINITY),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(f32::INFINITY),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!(eps.is_infinite() && eps.is_sign_positive(), "Inf epsilon should be preserved");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                eps.is_infinite() && eps.is_sign_positive(),
+                "Inf epsilon should be preserved"
+            );
         }
     }
 
@@ -9347,7 +10641,12 @@ mod tests {
     #[test]
     fn rms_norm_with_neg_inf_epsilon() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rn_ninf".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rn_ninf".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rn_ninf".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -9358,22 +10657,32 @@ mod tests {
             outputs: vec!["ninf_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(f32::NEG_INFINITY),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(f32::NEG_INFINITY),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!(eps.is_infinite() && eps.is_sign_negative(), "NegInf epsilon should be preserved");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                eps.is_infinite() && eps.is_sign_negative(),
+                "NegInf epsilon should be preserved"
+            );
         }
     }
 
@@ -9526,9 +10835,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "zero_dim")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "zero_dim")
             .expect("zero_dim should be registered");
-        assert!(matches!(&t.shape[0], SymDim::Concrete(0)), "Known(0) should map to Concrete(0)");
+        assert!(
+            matches!(&t.shape[0], SymDim::Concrete(0)),
+            "Known(0) should map to Concrete(0)"
+        );
     }
 
     // ── Shape inference: 5D tensor shape ────────────────────────────────
@@ -9566,7 +10881,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "five_d")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "five_d")
             .expect("five_d should be registered");
         assert_eq!(t.shape.len(), 5);
         assert!(matches!(&t.shape[0], SymDim::Concrete(2)));
@@ -9596,8 +10914,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let silu_labels: Vec<&str> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Silu))
+        let silu_labels: Vec<&str> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Silu))
             .map(|op| op.label.as_str())
             .collect();
         assert_eq!(silu_labels, &["extra_silu_1", "extra_silu_2"]);
@@ -9608,7 +10928,12 @@ mod tests {
     #[test]
     fn gemm_transb_with_ref_attr_name_ignored() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw_ref".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw_ref".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_ref".to_string(), weight);
         let onnx = OnnxGraph {
@@ -9622,13 +10947,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: Some("some_ref".to_string()),
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: Some("some_ref".to_string()),
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -9647,9 +10975,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 16, "transB=1 should swap: n=shape[1]=16");
             assert_eq!(*k, 32, "transB=1 should swap: k=shape[0]=32");
         }
@@ -9669,8 +11002,12 @@ mod tests {
         for dt in dtypes {
             let r1 = map_onnx_dtype(dt);
             let r2 = map_onnx_dtype(dt);
-            assert_eq!(std::mem::discriminant(&r1), std::mem::discriminant(&r2),
-                "map_onnx_dtype should be idempotent for {:?}", dt);
+            assert_eq!(
+                std::mem::discriminant(&r1),
+                std::mem::discriminant(&r2),
+                "map_onnx_dtype should be idempotent for {:?}",
+                dt
+            );
         }
     }
 
@@ -9809,7 +11146,12 @@ mod tests {
     #[test]
     fn onnx_graph_clone_preserves_initializers() {
         use super::super::tensor::OnnxTensor;
-        let tensor = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![4, 4], prost::bytes::Bytes::new());
+        let tensor = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), tensor);
         let onnx = OnnxGraph {
@@ -9834,12 +11176,29 @@ mod tests {
 
     #[test]
     fn convert_error_pattern_match_all_variants() {
-        let e1 = ConvertError::UnsupportedOp { op_type: "A".to_string(), node_name: "B".to_string() };
-        let e2 = ConvertError::MissingInitializer { name: "C".to_string(), node_name: "D".to_string() };
-        let e3 = ConvertError::InvalidMatMulShape { name: "E".to_string(), dims: 3 };
-        let e4 = ConvertError::NoWeightInput { node_name: "F".to_string() };
-        let e5 = ConvertError::AttributeError { node_name: "G".to_string(), reason: "H".to_string() };
-        let e6 = ConvertError::ShapeInferenceFailed { name: "I".to_string(), reason: "J".to_string() };
+        let e1 = ConvertError::UnsupportedOp {
+            op_type: "A".to_string(),
+            node_name: "B".to_string(),
+        };
+        let e2 = ConvertError::MissingInitializer {
+            name: "C".to_string(),
+            node_name: "D".to_string(),
+        };
+        let e3 = ConvertError::InvalidMatMulShape {
+            name: "E".to_string(),
+            dims: 3,
+        };
+        let e4 = ConvertError::NoWeightInput {
+            node_name: "F".to_string(),
+        };
+        let e5 = ConvertError::AttributeError {
+            node_name: "G".to_string(),
+            reason: "H".to_string(),
+        };
+        let e6 = ConvertError::ShapeInferenceFailed {
+            name: "I".to_string(),
+            reason: "J".to_string(),
+        };
 
         assert!(matches!(e1, ConvertError::UnsupportedOp { .. }));
         assert!(matches!(e2, ConvertError::MissingInitializer { .. }));
@@ -9853,13 +11212,19 @@ mod tests {
 
     #[test]
     fn onnx_sparse_tensor_empty_dims() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat};
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor};
         let sparse = OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
-                "v".to_string(), safetensors::Dtype::F32, vec![0], prost::bytes::Bytes::new(),
+                "v".to_string(),
+                safetensors::Dtype::F32,
+                vec![0],
+                prost::bytes::Bytes::new(),
             ),
             indices: super::super::tensor::OnnxTensor::new(
-                "i".to_string(), safetensors::Dtype::I64, vec![0], prost::bytes::Bytes::new(),
+                "i".to_string(),
+                safetensors::Dtype::I64,
+                vec![0],
+                prost::bytes::Bytes::new(),
             ),
             dims: vec![],
             format: OnnxSparseFormat::Coo,
@@ -9871,13 +11236,19 @@ mod tests {
 
     #[test]
     fn onnx_sparse_tensor_multiple_dims() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat};
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor};
         let sparse = OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
-                "v".to_string(), safetensors::Dtype::F32, vec![10], prost::bytes::Bytes::new(),
+                "v".to_string(),
+                safetensors::Dtype::F32,
+                vec![10],
+                prost::bytes::Bytes::new(),
             ),
             indices: super::super::tensor::OnnxTensor::new(
-                "i".to_string(), safetensors::Dtype::I64, vec![10], prost::bytes::Bytes::new(),
+                "i".to_string(),
+                safetensors::Dtype::I64,
+                vec![10],
+                prost::bytes::Bytes::new(),
             ),
             dims: vec![100, 200, 300],
             format: OnnxSparseFormat::Csr,
@@ -9967,7 +11338,10 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let debug = format!("{func:?}");
-        assert!(debug.contains("DebugFunc"), "Debug should contain function name");
+        assert!(
+            debug.contains("DebugFunc"),
+            "Debug should contain function name"
+        );
     }
 
     // ── OnnxModelMetadata with large ir_version ─────────────────────────
@@ -10006,7 +11380,12 @@ mod tests {
     #[test]
     fn matmul_non_square_weight_dimensions() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("rect_w".to_string(), safetensors::Dtype::F32, vec![768, 256], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "rect_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![768, 256],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("rect_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -10035,9 +11414,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 768);
             assert_eq!(*k, 256);
         }
@@ -10048,10 +11432,30 @@ mod tests {
     #[test]
     fn chain_gather_layernorm_gemm() {
         use super::super::tensor::OnnxTensor;
-        let embed = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
-        let scale = OnnxTensor::new("sc".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bi".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let proj = OnnxTensor::new("proj".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let scale = OnnxTensor::new(
+            "sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bi".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let proj = OnnxTensor::new(
+            "proj".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), embed);
         init.insert("sc".to_string(), scale);
@@ -10129,12 +11533,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let gelu = graph.ops.iter().find(|op| op.label == "gelu_after")
+        let gelu = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "gelu_after")
             .expect("Should find gelu_after");
-        let qk_sum = graph.tensors.iter().find(|t| t.name == "qk_sum")
+        let qk_sum = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
             .expect("qk_sum should exist");
-        assert_eq!(gelu.inputs[0], qk_sum.id,
-            "Gelu after Relu passthrough should consume qk_sum");
+        assert_eq!(
+            gelu.inputs[0], qk_sum.id,
+            "Gelu after Relu passthrough should consume qk_sum"
+        );
     }
 
     // ── Graph with multiple unsupported ops: first one fails ────────────
@@ -10172,8 +11584,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
-        assert!(err.to_string().contains("Conv"), "First unsupported op should be in error");
-        assert!(!err.to_string().contains("Pool"), "Second unsupported op should not be reached");
+        assert!(
+            err.to_string().contains("Conv"),
+            "First unsupported op should be in error"
+        );
+        assert!(
+            !err.to_string().contains("Pool"),
+            "Second unsupported op should not be reached"
+        );
     }
 
     // ── OnnxAttribute with attr_type String ─────────────────────────────
@@ -10187,7 +11605,10 @@ mod tests {
             ref_attr_name: None,
             attr_type: Some(proto::attribute_proto::AttributeType::String),
         };
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::String));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::String)
+        );
     }
 
     // ── OnnxAttribute with attr_type None ───────────────────────────────
@@ -10255,7 +11676,12 @@ mod tests {
     #[test]
     fn matmul_very_large_weight_dimensions() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("huge_w".to_string(), safetensors::Dtype::F32, vec![65536, 49152], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "huge_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![65536, 49152],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("huge_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -10284,9 +11710,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 65536);
             assert_eq!(*k, 49152);
         }
@@ -10307,10 +11738,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add = graph.ops.iter().find(|op| op.label == "self_add")
+        let add = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "self_add")
             .expect("Should find self_add op");
         assert_eq!(add.inputs.len(), 2);
-        assert_eq!(add.inputs[0], add.inputs[1], "Both inputs should be the same tensor");
+        assert_eq!(
+            add.inputs[0], add.inputs[1],
+            "Both inputs should be the same tensor"
+        );
     }
 
     // ── OnnxGraph name with special characters ──────────────────────────
@@ -10344,7 +11781,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("my_tensor"), "Should contain tensor name");
         assert!(msg.contains("rank mismatch"), "Should contain reason");
-        assert!(msg.contains("shape inference"), "Should mention shape inference");
+        assert!(
+            msg.contains("shape inference"),
+            "Should mention shape inference"
+        );
     }
 
     // ── ReduceMean with input from Gather ───────────────────────────────
@@ -10352,7 +11792,12 @@ mod tests {
     #[test]
     fn reduce_mean_after_gather() {
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tab".to_string(), safetensors::Dtype::F32, vec![100, 128], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tab".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tab".to_string(), table);
         let onnx = OnnxGraph {
@@ -10391,9 +11836,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { hidden, cls_mode, .. } = &pool.kind {
+        if let Op::MeanPool {
+            hidden, cls_mode, ..
+        } = &pool.op_v2
+        {
             assert_eq!(*hidden, 128, "hidden should be embed_dim from Gather table");
             assert!(!cls_mode);
         }
@@ -10404,7 +11855,12 @@ mod tests {
     #[test]
     fn rms_norm_with_large_epsilon() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rn_big".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rn_big".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rn_big".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -10415,22 +11871,32 @@ mod tests {
             outputs: vec!["big_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(100.0),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(100.0),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 100.0).abs() < 0.01, "Large epsilon should be preserved");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 100.0).abs() < 0.01,
+                "Large epsilon should be preserved"
+            );
         }
     }
 
@@ -10503,8 +11969,18 @@ mod tests {
     #[test]
     fn gemmbias_output_shape_correct() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw_os".to_string(), safetensors::Dtype::F32, vec![128, 64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("gb_os".to_string(), safetensors::Dtype::F32, vec![128], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw_os".to_string(),
+            safetensors::Dtype::F32,
+            vec![128, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "gb_os".to_string(),
+            safetensors::Dtype::F32,
+            vec![128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_os".to_string(), weight);
         init.insert("gb_os".to_string(), bias);
@@ -10534,10 +12010,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let y = graph.tensors.iter().find(|t| t.name == "y")
+        let y = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y should exist");
         assert_eq!(y.shape.len(), 2);
-        assert!(matches!(&y.shape[0], SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len"));
+        assert!(
+            matches!(&y.shape[0], SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len")
+        );
         assert!(matches!(&y.shape[1], SymDim::Concrete(128)));
     }
 
@@ -10556,11 +12037,22 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let q_shape = graph.tensors.iter().find(|t| t.name == "q")
-            .map(|t| t.shape.clone()).unwrap_or_default();
-        let t_out_shape = graph.tensors.iter().find(|t| t.name == "t_out")
-            .map(|t| t.shape.clone()).unwrap_or_default();
-        assert_eq!(q_shape, t_out_shape, "Transpose output should copy input shape");
+        let q_shape = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "q")
+            .map(|t| t.shape.clone())
+            .unwrap_or_default();
+        let t_out_shape = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "t_out")
+            .map(|t| t.shape.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            q_shape, t_out_shape,
+            "Transpose output should copy input shape"
+        );
     }
 
     // ── Detect dtype from F64 initializer ───────────────────────────────
@@ -10568,7 +12060,12 @@ mod tests {
     #[test]
     fn detect_dtype_from_f64_initializer_maps_to_f32() {
         use super::super::tensor::OnnxTensor;
-        let tensor = OnnxTensor::new("f64_w".to_string(), safetensors::Dtype::F64, vec![2], prost::bytes::Bytes::new());
+        let tensor = OnnxTensor::new(
+            "f64_w".to_string(),
+            safetensors::Dtype::F64,
+            vec![2],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("f64_w".to_string(), tensor);
         let graph = OnnxGraph {
@@ -10764,8 +12261,14 @@ mod tests {
             attribute_protos: HashMap::new(),
             nodes: vec![],
             opset_import: vec![
-                model::OnnxOperatorSet { domain: "ai.onnx".to_string(), version: 17 },
-                model::OnnxOperatorSet { domain: "custom".to_string(), version: 1 },
+                model::OnnxOperatorSet {
+                    domain: "ai.onnx".to_string(),
+                    version: 17,
+                },
+                model::OnnxOperatorSet {
+                    domain: "custom".to_string(),
+                    version: 1,
+                },
             ],
             value_info: vec![],
             doc_string: String::new(),
@@ -10913,13 +12416,16 @@ mod tests {
     fn onnx_node_many_attributes() {
         let mut attrs = HashMap::new();
         for i in 0..50 {
-            attrs.insert(format!("attr_{i}"), attributes::OnnxAttribute {
-                name: format!("attr_{i}"),
-                value: attributes::OnnxAttributeValue::Int(i as i64),
-                doc_string: String::new(),
-                ref_attr_name: None,
-                attr_type: None,
-            });
+            attrs.insert(
+                format!("attr_{i}"),
+                attributes::OnnxAttribute {
+                    name: format!("attr_{i}"),
+                    value: attributes::OnnxAttributeValue::Int(i as i64),
+                    doc_string: String::new(),
+                    ref_attr_name: None,
+                    attr_type: None,
+                },
+            );
         }
         let node = OnnxNode {
             name: "heavy_node".to_string(),
@@ -11032,7 +12538,10 @@ mod tests {
             node_name: String::new(),
         };
         let msg = err.to_string();
-        assert!(!msg.is_empty(), "Even with empty fields, Display should produce text");
+        assert!(
+            !msg.is_empty(),
+            "Even with empty fields, Display should produce text"
+        );
     }
 
     #[test]
@@ -11117,8 +12626,18 @@ mod tests {
     #[test]
     fn gather_different_tables_different_dimensions() {
         use super::super::tensor::OnnxTensor;
-        let table1 = OnnxTensor::new("t1".to_string(), safetensors::Dtype::F32, vec![50, 32], prost::bytes::Bytes::new());
-        let table2 = OnnxTensor::new("t2".to_string(), safetensors::Dtype::F32, vec![200, 128], prost::bytes::Bytes::new());
+        let table1 = OnnxTensor::new(
+            "t1".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let table2 = OnnxTensor::new(
+            "t2".to_string(),
+            safetensors::Dtype::F32,
+            vec![200, 128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("t1".to_string(), table1);
         init.insert("t2".to_string(), table2);
@@ -11166,15 +12685,27 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gathers: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gathers: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
             .collect();
         assert_eq!(gathers.len(), 2);
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gathers[0].kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gathers[0].op_v2
+        {
             assert_eq!(*table_rows, 50);
             assert_eq!(*embed_dim, 32);
         }
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gathers[1].kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gathers[1].op_v2
+        {
             assert_eq!(*table_rows, 200);
             assert_eq!(*embed_dim, 128);
         }
@@ -11185,7 +12716,12 @@ mod tests {
     #[test]
     fn infer_shape_all_known_dims() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![4, 4], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -11219,7 +12755,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x should exist");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x should exist");
         assert_eq!(x_tensor.shape.len(), 2);
         assert!(matches!(&x_tensor.shape[0], SymDim::Concrete(8)));
         assert!(matches!(&x_tensor.shape[1], SymDim::Concrete(4)));
@@ -11269,7 +12809,11 @@ mod tests {
     #[test]
     fn onnx_tensor_new_string_dtype_is_u8() {
         use super::super::tensor::OnnxTensor;
-        let t = OnnxTensor::new_string("str_tensor".to_string(), vec![3], prost::bytes::Bytes::new());
+        let t = OnnxTensor::new_string(
+            "str_tensor".to_string(),
+            vec![3],
+            prost::bytes::Bytes::new(),
+        );
         assert_eq!(t.dtype, safetensors::Dtype::U8);
         assert!(t.is_string);
         assert_eq!(t.shape, vec![3]);
@@ -11287,9 +12831,19 @@ mod tests {
 
     #[test]
     fn onnx_sparse_tensor_csc_format() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat, OnnxTensor};
-        let vals = OnnxTensor::new("csc_val".to_string(), safetensors::Dtype::F32, vec![5], prost::bytes::Bytes::new());
-        let idx = OnnxTensor::new("csc_idx".to_string(), safetensors::Dtype::I64, vec![5], prost::bytes::Bytes::new());
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor, OnnxTensor};
+        let vals = OnnxTensor::new(
+            "csc_val".to_string(),
+            safetensors::Dtype::F32,
+            vec![5],
+            prost::bytes::Bytes::new(),
+        );
+        let idx = OnnxTensor::new(
+            "csc_idx".to_string(),
+            safetensors::Dtype::I64,
+            vec![5],
+            prost::bytes::Bytes::new(),
+        );
         let sp = OnnxSparseTensor {
             values: vals,
             indices: idx,
@@ -11325,14 +12879,21 @@ mod tests {
             attr_type: Some(proto::attribute_proto::AttributeType::Float),
         };
         assert!(attr.ref_attr_name.is_none());
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Float));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Float)
+        );
     }
 
     // ── OnnxAttributeValue Floats with boundary f32 values ─────────────
 
     #[test]
     fn onnx_attribute_value_floats_with_nan() {
-        let vals = attributes::OnnxAttributeValue::Floats(vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY]);
+        let vals = attributes::OnnxAttributeValue::Floats(vec![
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ]);
         if let attributes::OnnxAttributeValue::Floats(v) = &vals {
             assert!(v[0].is_nan());
             assert!(v[1].is_infinite() && v[1].is_sign_positive());
@@ -11396,7 +12957,12 @@ mod tests {
     #[test]
     fn convert_single_initializer_no_nodes() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -11422,7 +12988,12 @@ mod tests {
     #[test]
     fn gemm_no_transb_attribute_defaults_false() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw_def".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw_def".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_def".to_string(), weight);
         let onnx = OnnxGraph {
@@ -11451,9 +13022,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64);
             assert_eq!(*k, 32);
         }
@@ -11514,11 +13090,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
             .expect("Should have Reshape");
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        assert_eq!(reshape.outputs[0], pool.inputs[0], "Reshape output should feed ReduceMean");
+        assert_eq!(
+            reshape.outputs[0], pool.inputs[0],
+            "Reshape output should feed ReduceMean"
+        );
     }
 
     // ── OnnxType equality: same tensor types are equal ─────────────────
@@ -11527,11 +13112,15 @@ mod tests {
     fn onnx_tensor_type_same_equality() {
         let tt1 = types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(10)],
+            },
         };
         let tt2 = types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(10)],
+            },
         };
         assert_eq!(tt1, tt2);
     }
@@ -11573,14 +13162,35 @@ mod tests {
     #[test]
     fn convert_error_all_variants_matchable() {
         let errors = vec![
-            ConvertError::UnsupportedOp { op_type: "A".to_string(), node_name: "N".to_string() },
-            ConvertError::MissingInitializer { name: "W".to_string(), node_name: "N".to_string() },
-            ConvertError::InvalidMatMulShape { name: "W".to_string(), dims: 3 },
-            ConvertError::NoWeightInput { node_name: "N".to_string() },
-            ConvertError::AttributeError { node_name: "N".to_string(), reason: "R".to_string() },
-            ConvertError::ShapeInferenceFailed { name: "T".to_string(), reason: "R".to_string() },
+            ConvertError::UnsupportedOp {
+                op_type: "A".to_string(),
+                node_name: "N".to_string(),
+            },
+            ConvertError::MissingInitializer {
+                name: "W".to_string(),
+                node_name: "N".to_string(),
+            },
+            ConvertError::InvalidMatMulShape {
+                name: "W".to_string(),
+                dims: 3,
+            },
+            ConvertError::NoWeightInput {
+                node_name: "N".to_string(),
+            },
+            ConvertError::AttributeError {
+                node_name: "N".to_string(),
+                reason: "R".to_string(),
+            },
+            ConvertError::ShapeInferenceFailed {
+                name: "T".to_string(),
+                reason: "R".to_string(),
+            },
         ];
-        assert_eq!(errors.len(), 6, "All 6 ConvertError variants should be covered");
+        assert_eq!(
+            errors.len(),
+            6,
+            "All 6 ConvertError variants should be covered"
+        );
     }
 
     // ── LayerNorm with explicit default epsilon attribute ──────────────
@@ -11589,32 +13199,56 @@ mod tests {
     fn layer_norm_with_int_epsilon_uses_default() {
         let mut onnx = make_test_graph();
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_sc".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_bi".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_bi".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         onnx.initializers.insert("ln_sc".to_string(), scale);
         onnx.initializers.insert("ln_bi".to_string(), bias);
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Int(0),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Int(0),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         onnx.nodes.push(OnnxNode {
             name: "ln_int_eps".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_sc".to_string(), "ln_bi".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_sc".to_string(),
+                "ln_bi".to_string(),
+            ],
             outputs: vec!["ln_out2".to_string()],
             attributes: attrs,
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!((eps - 1e-5).abs() < 1e-10, "Non-float epsilon should use default 1e-5, got {eps}");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-10,
+                "Non-float epsilon should use default 1e-5, got {eps}"
+            );
         }
     }
 
@@ -11668,7 +13302,12 @@ mod tests {
     #[test]
     fn convert_bf16_initializer_preserves_dtype() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("bf16_w".to_string(), safetensors::Dtype::BF16, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "bf16_w".to_string(),
+            safetensors::Dtype::BF16,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("bf16_w".to_string(), w);
         let onnx = OnnxGraph {
@@ -11697,9 +13336,13 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { dtype, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let dtype = &spec.dtype;
             assert!(matches!(dtype, DType::BF16));
         }
     }
@@ -11709,13 +13352,16 @@ mod tests {
     #[test]
     fn onnx_function_attribute_protos_preserved() {
         let mut attr_protos = HashMap::new();
-        attr_protos.insert("alpha".to_string(), attributes::OnnxAttribute {
-            name: "alpha".to_string(),
-            value: attributes::OnnxAttributeValue::Float(0.1),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attr_protos.insert(
+            "alpha".to_string(),
+            attributes::OnnxAttribute {
+                name: "alpha".to_string(),
+                value: attributes::OnnxAttributeValue::Float(0.1),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let func = model::OnnxFunction {
             name: "F".to_string(),
             domain: String::new(),
@@ -11732,17 +13378,30 @@ mod tests {
         };
         assert_eq!(func.attribute_protos.len(), 1);
         let attr = &func.attribute_protos["alpha"];
-        assert!(matches!(attr.value, attributes::OnnxAttributeValue::Float(0.1)));
+        assert!(matches!(
+            attr.value,
+            attributes::OnnxAttributeValue::Float(0.1)
+        ));
     }
 
     // ── OnnxGraph with sparse_initializers ─────────────────────────────
 
     #[test]
     fn onnx_graph_sparse_initializers_count() {
-        use super::super::tensor::{OnnxSparseTensor, OnnxSparseFormat, OnnxTensor};
+        use super::super::tensor::{OnnxSparseFormat, OnnxSparseTensor, OnnxTensor};
         let sp = OnnxSparseTensor {
-            values: OnnxTensor::new("v".to_string(), safetensors::Dtype::F32, vec![3], prost::bytes::Bytes::new()),
-            indices: OnnxTensor::new("i".to_string(), safetensors::Dtype::I64, vec![3], prost::bytes::Bytes::new()),
+            values: OnnxTensor::new(
+                "v".to_string(),
+                safetensors::Dtype::F32,
+                vec![3],
+                prost::bytes::Bytes::new(),
+            ),
+            indices: OnnxTensor::new(
+                "i".to_string(),
+                safetensors::Dtype::I64,
+                vec![3],
+                prost::bytes::Bytes::new(),
+            ),
             dims: vec![4, 4],
             format: OnnxSparseFormat::Coo,
         };
@@ -11768,13 +13427,16 @@ mod tests {
     fn transpose_with_2_element_perm() {
         let mut onnx = make_test_graph();
         let mut attrs = HashMap::new();
-        attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-            name: "perm".to_string(),
-            value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "perm".to_string(),
+            attributes::OnnxAttribute {
+                name: "perm".to_string(),
+                value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         onnx.nodes.push(OnnxNode {
             name: "t2_perm".to_string(),
             op_type: "Transpose".to_string(),
@@ -11785,9 +13447,12 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let t = graph.ops.iter().find(|op| op.label == "t2_perm")
+        let t = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "t2_perm")
             .expect("Should have transpose");
-        if let OpKind::Transpose { perm } = &t.kind {
+        if let Op::Transpose { perm } = &t.op_v2 {
             assert_eq!(*perm, vec![1, 0]);
         }
     }
@@ -11796,7 +13461,10 @@ mod tests {
 
     #[test]
     fn map_onnx_dtype_i32_defaults_f32() {
-        assert!(matches!(map_onnx_dtype(safetensors::Dtype::I32), DType::F32));
+        assert!(matches!(
+            map_onnx_dtype(safetensors::Dtype::I32),
+            DType::F32
+        ));
     }
 
     #[test]
@@ -11845,7 +13513,12 @@ mod tests {
     #[test]
     fn detect_dtype_i32_initializer_maps_f32() {
         use super::super::tensor::OnnxTensor;
-        let t = OnnxTensor::new("i32_w".to_string(), safetensors::Dtype::I32, vec![4], prost::bytes::Bytes::new());
+        let t = OnnxTensor::new(
+            "i32_w".to_string(),
+            safetensors::Dtype::I32,
+            vec![4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("i32_w".to_string(), t);
         let graph = OnnxGraph {
@@ -11872,9 +13545,18 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let names: Vec<&str> = graph.tensors.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"embed.weight"), "embed.weight should be preserved");
-        assert!(names.contains(&"q_proj.weight"), "q_proj.weight should be preserved");
-        assert!(names.contains(&"k_proj.weight"), "k_proj.weight should be preserved");
+        assert!(
+            names.contains(&"embed.weight"),
+            "embed.weight should be preserved"
+        );
+        assert!(
+            names.contains(&"q_proj.weight"),
+            "q_proj.weight should be preserved"
+        );
+        assert!(
+            names.contains(&"k_proj.weight"),
+            "k_proj.weight should be preserved"
+        );
     }
 
     // ── OnnxModel with empty functions list ────────────────────────────
@@ -11915,8 +13597,18 @@ mod tests {
     fn two_layernorm_ops_in_sequence() {
         use super::super::tensor::OnnxTensor;
         let mut onnx = make_test_graph();
-        let sc1 = OnnxTensor::new("sc1".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bi1 = OnnxTensor::new("bi1".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let sc1 = OnnxTensor::new(
+            "sc1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bi1 = OnnxTensor::new(
+            "bi1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         onnx.initializers.insert("sc1".to_string(), sc1);
         onnx.initializers.insert("bi1".to_string(), bi1);
         onnx.nodes.push(OnnxNode {
@@ -11937,8 +13629,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let lns: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let lns: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .collect();
         assert_eq!(lns.len(), 2);
     }
@@ -11963,17 +13657,25 @@ mod tests {
     #[test]
     fn gemm_transb_positive_even_is_transpose() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("gw_pe".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "gw_pe".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_pe".to_string(), weight);
         let mut attrs = HashMap::new();
-        attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-            name: "transB".to_string(),
-            value: attributes::OnnxAttributeValue::Int(2),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "transB".to_string(),
+            attributes::OnnxAttribute {
+                name: "transB".to_string(),
+                value: attributes::OnnxAttributeValue::Int(2),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "gemm_pe".to_string(),
             doc_string: String::new(),
@@ -12000,9 +13702,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "transB swaps: n should be weight.shape[1]=64");
             assert_eq!(*k, 32, "transB swaps: k should be weight.shape[0]=32");
         }
@@ -12026,7 +13733,12 @@ mod tests {
     #[test]
     fn onnx_tensor_shape_single_dimension() {
         use super::super::tensor::OnnxTensor;
-        let t = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![768], prost::bytes::Bytes::new());
+        let t = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![768],
+            prost::bytes::Bytes::new(),
+        );
         assert_eq!(t.shape, vec![768]);
         assert_eq!(t.shape.len(), 1);
     }
@@ -12123,8 +13835,14 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: n=128, k=64
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .unwrap();
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 128);
             assert_eq!(*k, 64);
         }
@@ -12134,20 +13852,33 @@ mod tests {
     fn gemm_with_transb_and_bias_combined() {
         // Arrange: Gemm with transB=1 and a bias initializer
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         init.insert("b".to_string(), bias);
 
         let mut attrs = HashMap::new();
-        attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-            name: "transB".to_string(),
-            value: attributes::OnnxAttributeValue::Int(1),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "transB".to_string(),
+            attributes::OnnxAttribute {
+                name: "transB".to_string(),
+                value: attributes::OnnxAttributeValue::Int(1),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
 
         let onnx = OnnxGraph {
             name: "test".to_string(),
@@ -12178,9 +13909,14 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: should produce GemmBias with transB-swapped n/k
-        let gemm_bias = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let OpKind::GemmBias { n, k, .. } = &gemm_bias.kind {
+        if let Op::GemmBias(spec) = &gemm_bias.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "transB: n = weight.shape[1]");
             assert_eq!(*k, 32, "transB: k = weight.shape[0]");
         }
@@ -12190,9 +13926,24 @@ mod tests {
     fn gather_followed_by_two_matmul_branches() {
         // Arrange: Gather → hidden, then hidden feeds into two separate MatMul ops
         use super::super::tensor::OnnxTensor;
-        let embed = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![200, 96], prost::bytes::Bytes::new());
-        let wq = OnnxTensor::new("wq".to_string(), safetensors::Dtype::F32, vec![96, 96], prost::bytes::Bytes::new());
-        let wk = OnnxTensor::new("wk".to_string(), safetensors::Dtype::F32, vec![96, 16], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![200, 96],
+            prost::bytes::Bytes::new(),
+        );
+        let wq = OnnxTensor::new(
+            "wq".to_string(),
+            safetensors::Dtype::F32,
+            vec![96, 96],
+            prost::bytes::Bytes::new(),
+        );
+        let wk = OnnxTensor::new(
+            "wk".to_string(),
+            safetensors::Dtype::F32,
+            vec![96, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), embed);
         init.insert("wq".to_string(), wq);
@@ -12225,9 +13976,17 @@ mod tests {
 
         // Assert: 3 ops total
         assert_eq!(graph.ops.len(), 3);
-        let gathers: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gather { .. })).collect();
+        let gathers: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .collect();
         assert_eq!(gathers.len(), 1);
-        let gemms: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. })).collect();
+        let gemms: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .collect();
         assert_eq!(gemms.len(), 2);
     }
 
@@ -12235,8 +13994,18 @@ mod tests {
     fn add_followed_by_mul_preserves_shape() {
         // Arrange: Add(hidden, bias_tensor) → Mul(result, scale_tensor)
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         init.insert("bias".to_string(), bias);
@@ -12249,17 +14018,20 @@ mod tests {
                 make_node("add", "Add", vec!["hidden", "bias"], vec!["biased"]),
                 make_node("mul", "Mul", vec!["biased", "scale"], vec!["scaled"]),
             ],
-            inputs: vec![model::OnnxValueInfo {
-                name: "x".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "scale".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            inputs: vec![
+                model::OnnxValueInfo {
+                    name: "x".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "scale".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -12273,9 +14045,9 @@ mod tests {
 
         // Assert: 3 ops: Gemm, Add, Mul
         assert_eq!(graph.ops.len(), 3);
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gemm { .. })));
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Add)));
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Mul)));
+        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gemm(..))));
+        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Add)));
+        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Mul)));
     }
 
     #[test]
@@ -12289,22 +14061,26 @@ mod tests {
                 make_node("sub", "Sub", vec!["h", "bias"], vec!["sub_result"]),
                 make_node("div", "Div", vec!["sub_result", "divisor"], vec!["out"]),
             ],
-            vec![model::OnnxValueInfo {
-                name: "x".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "bias".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "divisor".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            vec![
+                model::OnnxValueInfo {
+                    name: "x".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "bias".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "divisor".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             vec![],
         );
 
@@ -12312,8 +14088,16 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
 
         // Assert: Sub → OpKind::Add, Div → OpKind::Mul
-        let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert_eq!(add_ops.len(), 1, "Sub should map to Add");
         assert_eq!(mul_ops.len(), 1, "Div should map to Mul");
     }
@@ -12342,8 +14126,16 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
-        let silu_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Silu)).collect();
-        let gelu_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gelu)).collect();
+        let silu_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Silu))
+            .collect();
+        let gelu_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gelu))
+            .collect();
         assert_eq!(silu_ops.len(), 1);
         assert_eq!(gelu_ops.len(), 1);
     }
@@ -12372,8 +14164,16 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert
-        let tanh_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Tanh)).collect();
-        let softmax_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Softmax)).collect();
+        let tanh_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Tanh))
+            .collect();
+        let softmax_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Softmax))
+            .collect();
         assert_eq!(tanh_ops.len(), 1);
         assert_eq!(softmax_ops.len(), 1);
     }
@@ -12382,10 +14182,30 @@ mod tests {
     fn rms_norm_then_layer_norm_chain() {
         // Arrange: RMS norm then Layer norm in sequence
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
-        let rms_sc = OnnxTensor::new("rms_sc".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let ln_sc = OnnxTensor::new("ln_sc".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let ln_bi = OnnxTensor::new("ln_bi".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let rms_sc = OnnxTensor::new(
+            "rms_sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_sc = OnnxTensor::new(
+            "ln_sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_bi = OnnxTensor::new(
+            "ln_bi".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         init.insert("rms_sc".to_string(), rms_sc);
@@ -12432,16 +14252,26 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
-        let rms_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::RmsNorm { .. })).collect();
-        let ln_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::LayerNorm { .. })).collect();
+        let rms_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .collect();
+        let ln_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .collect();
         assert_eq!(rms_ops.len(), 1);
         assert_eq!(ln_ops.len(), 1);
         // RMS default eps = 1e-5
-        if let OpKind::RmsNorm { feature_dim: _, eps } = rms_ops[0].kind {
+        if let Op::RmsNorm(spec) = &rms_ops[0].op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1e-5).abs() < 1e-10);
         }
         // LayerNorm default eps = 1e-5
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln_ops[0].kind {
+        if let Op::LayerNorm(spec) = &ln_ops[0].op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1e-5).abs() < 1e-10);
         }
     }
@@ -12469,9 +14299,12 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: MeanPool op with hidden = 64 (MatMul output shape is [seq_len, n=64])
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
             assert_eq!(*hidden, 64);
         }
     }
@@ -12480,7 +14313,12 @@ mod tests {
     fn reshape_after_gather() {
         // Arrange: Gather → Reshape
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), table);
 
@@ -12510,16 +14348,32 @@ mod tests {
 
         // Assert
         assert_eq!(graph.ops.len(), 2);
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gather { .. })));
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Reshape { .. })));
+        assert!(graph
+            .ops
+            .iter()
+            .any(|op| matches!(op.op_v2, Op::Gather { .. })));
+        assert!(graph
+            .ops
+            .iter()
+            .any(|op| matches!(op.op_v2, Op::Reshape { .. })));
     }
 
     #[test]
     fn transpose_after_rms_norm() {
         // Arrange: MatMul → RMSNorm → Transpose
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let sc = OnnxTensor::new("sc".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let sc = OnnxTensor::new(
+            "sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         init.insert("sc".to_string(), sc);
@@ -12545,13 +14399,16 @@ mod tests {
                     outputs: vec!["out".to_string()],
                     attributes: {
                         let mut a = HashMap::new();
-                        a.insert("perm".to_string(), attributes::OnnxAttribute {
-                            name: "perm".to_string(),
-                            value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                            doc_string: String::new(),
-                            ref_attr_name: None,
-                            attr_type: None,
-                        });
+                        a.insert(
+                            "perm".to_string(),
+                            attributes::OnnxAttribute {
+                                name: "perm".to_string(),
+                                value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                                doc_string: String::new(),
+                                ref_attr_name: None,
+                                attr_type: None,
+                            },
+                        );
                         a
                     },
                 },
@@ -12575,8 +14432,12 @@ mod tests {
 
         // Assert: 3 ops: Gemm, RmsNorm, Transpose
         assert_eq!(graph.ops.len(), 3);
-        let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).unwrap();
-        if let OpKind::Transpose { perm } = &tr.kind {
+        let tr = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .unwrap();
+        if let Op::Transpose { perm } = &tr.op_v2 {
             assert_eq!(*perm, vec![1, 0]);
         }
     }
@@ -12585,7 +14446,12 @@ mod tests {
     fn matmul_output_feeds_into_multiple_consumers() {
         // Arrange: MatMul → hidden, then hidden feeds into Add and Silu (fan-out)
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -12597,17 +14463,20 @@ mod tests {
                 make_node("add1", "Add", vec!["h", "bias"], vec!["added"]),
                 make_node("silu1", "Silu", vec!["h"], vec!["activated"]),
             ],
-            inputs: vec![model::OnnxValueInfo {
-                name: "x".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "bias".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            inputs: vec![
+                model::OnnxValueInfo {
+                    name: "x".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "bias".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -12622,8 +14491,16 @@ mod tests {
         // Assert: 3 ops
         assert_eq!(graph.ops.len(), 3);
         // Add and Silu both consume h
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).unwrap();
-        let silu_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Silu)).unwrap();
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
+            .unwrap();
+        let silu_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Silu))
+            .unwrap();
         // Both should have inputs
         assert_eq!(add_op.inputs.len(), 2);
         assert_eq!(silu_op.inputs.len(), 1);
@@ -12633,8 +14510,18 @@ mod tests {
     fn graph_with_multiple_outputs_registered() {
         // Arrange: Two MatMul ops producing two different outputs
         use super::super::tensor::OnnxTensor;
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w1);
         init.insert("w2".to_string(), w2);
@@ -12702,8 +14589,14 @@ mod tests {
         // Assert: 1x1 is valid 2D
         assert!(result.is_ok());
         let graph = result.unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .unwrap();
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 1);
             assert_eq!(*k, 1);
         }
@@ -12774,7 +14667,10 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::NoWeightInput { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConvertError::NoWeightInput { .. }
+        ));
     }
 
     #[test]
@@ -12816,7 +14712,12 @@ mod tests {
     fn gemm_with_scalar_bias_not_in_initializer() {
         // Arrange: Gemm with 3 inputs but third input is not an initializer
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -12849,8 +14750,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: non-initializer bias should fall back to Gemm (not GemmBias)
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gemm { .. })));
-        assert!(!graph.ops.iter().any(|op| matches!(op.kind, OpKind::GemmBias { .. })));
+        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gemm(..))));
+        assert!(!graph
+            .ops
+            .iter()
+            .any(|op| matches!(op.op_v2, Op::GemmBias(..))));
     }
 
     #[test]
@@ -12863,17 +14767,20 @@ mod tests {
                 make_node("mm", "MatMul", vec!["x", "w"], vec!["h"]),
                 make_node("pow", "Pow", vec!["h", "exp"], vec!["out"]),
             ],
-            vec![model::OnnxValueInfo {
-                name: "x".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "exp".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            vec![
+                model::OnnxValueInfo {
+                    name: "x".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "exp".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             vec![],
         );
 
@@ -12881,7 +14788,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Pow maps to Mul
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert_eq!(mul_ops.len(), 1);
     }
 
@@ -12895,17 +14806,20 @@ mod tests {
                 make_node("mm", "MatMul", vec!["x", "w"], vec!["h"]),
                 make_node("sqrt", "Sqrt", vec!["h", "dummy"], vec!["out"]),
             ],
-            vec![model::OnnxValueInfo {
-                name: "x".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "dummy".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            vec![
+                model::OnnxValueInfo {
+                    name: "x".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "dummy".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             vec![],
         );
 
@@ -12913,7 +14827,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Sqrt maps to Mul
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert_eq!(mul_ops.len(), 1);
     }
 
@@ -12921,14 +14839,24 @@ mod tests {
     fn gather_with_empty_table_shape() {
         // Arrange: 1D table with shape [0]
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("empty_t".to_string(), safetensors::Dtype::F32, vec![0], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "empty_t".to_string(),
+            safetensors::Dtype::F32,
+            vec![0],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("empty_t".to_string(), table);
 
         let onnx = OnnxGraph {
             name: "test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("g", "Gather", vec!["empty_t", "ids"], vec!["out"])],
+            nodes: vec![make_node(
+                "g",
+                "Gather",
+                vec!["empty_t", "ids"],
+                vec!["out"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "ids".to_string(),
                 value_type: None,
@@ -12947,8 +14875,17 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: table_rows=0, embed_dim=0 (from 1D shape, .get(1) is None → 0)
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).unwrap();
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .unwrap();
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 0);
             assert_eq!(*embed_dim, 0);
         }
@@ -12960,7 +14897,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("g", "Gather", vec!["table_act", "ids"], vec!["out"])],
+            nodes: vec![make_node(
+                "g",
+                "Gather",
+                vec!["table_act", "ids"],
+                vec!["out"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "table_act".to_string(),
@@ -12987,8 +14929,17 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: table_rows=0, embed_dim=0 (no initializer found)
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).unwrap();
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .unwrap();
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 0, "Non-initializer table → table_rows = 0");
             assert_eq!(*embed_dim, 0, "Non-initializer table → embed_dim = 0");
         }
@@ -13024,14 +14975,23 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: passthrough ops don't add ops to the graph
-        assert_eq!(graph.ops.len(), 0, "Passthrough ops should not produce graph ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Passthrough ops should not produce graph ops"
+        );
     }
 
     #[test]
     fn passthrough_maps_output_to_input_tensor_id() {
         // Arrange: Relu passthrough, then MatMul consuming the relu output
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -13061,7 +15021,7 @@ mod tests {
 
         // Assert: only MatMul op (Relu is passthrough)
         assert_eq!(graph.ops.len(), 1);
-        assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }));
+        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
     }
 
     #[test]
@@ -13096,7 +15056,12 @@ mod tests {
     fn detect_dtype_f16_initializer_detected() {
         // Arrange
         use super::super::tensor::OnnxTensor;
-        let t = OnnxTensor::new("w".to_string(), safetensors::Dtype::F16, vec![4], prost::bytes::Bytes::new());
+        let t = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F16,
+            vec![4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), t);
         let onnx = OnnxGraph {
@@ -13139,8 +15104,14 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .unwrap();
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 4);
             assert_eq!(*k, 8192);
         }
@@ -13150,20 +15121,33 @@ mod tests {
     fn layer_norm_with_custom_large_epsilon() {
         // Arrange
         use super::super::tensor::OnnxTensor;
-        let sc = OnnxTensor::new("sc".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bi = OnnxTensor::new("bi".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let sc = OnnxTensor::new(
+            "sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bi = OnnxTensor::new(
+            "bi".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("sc".to_string(), sc);
         init.insert("bi".to_string(), bi);
 
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Float(0.1),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Float(0.1),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
 
         let onnx = OnnxGraph {
             name: "test".to_string(),
@@ -13194,8 +15178,13 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).unwrap();
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .unwrap();
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 0.1).abs() < 1e-10);
         }
     }
@@ -13204,18 +15193,26 @@ mod tests {
     fn rms_norm_with_custom_small_epsilon() {
         // Arrange
         use super::super::tensor::OnnxTensor;
-        let sc = OnnxTensor::new("sc".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let sc = OnnxTensor::new(
+            "sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("sc".to_string(), sc);
 
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Float(1e-12),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Float(1e-12),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
 
         let onnx = OnnxGraph {
             name: "test".to_string(),
@@ -13246,8 +15243,13 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
-        let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).unwrap();
-        if let OpKind::RmsNorm { feature_dim: _, eps } = rms.kind {
+        let rms = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .unwrap();
+        if let Op::RmsNorm(spec) = &rms.op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1e-12).abs() < 1e-20);
         }
     }
@@ -13264,10 +15266,7 @@ mod tests {
                 value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                     elem_type: proto::tensor_proto::DataType::Float,
                     shape: types::OnnxTensorShape {
-                        dims: vec![
-                            types::OnnxDim::Known(128),
-                            types::OnnxDim::Known(768),
-                        ],
+                        dims: vec![types::OnnxDim::Known(128), types::OnnxDim::Known(768)],
                     },
                 })),
                 doc_string: String::new(),
@@ -13285,7 +15284,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
 
         // Assert: the activation tensor should have concrete dims
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x tensor should exist");
         assert_eq!(x_tensor.shape.len(), 2);
         assert!(matches!(&x_tensor.shape[0], SymDim::Concrete(128)));
         assert!(matches!(&x_tensor.shape[1], SymDim::Concrete(768)));
@@ -13324,7 +15327,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
 
         // Assert
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x tensor should exist");
         assert_eq!(x_tensor.shape.len(), 2);
         // First dim should be Symbolic with name "batch" and max_value=1024
         match &x_tensor.shape[0] {
@@ -13349,10 +15356,7 @@ mod tests {
                 value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                     elem_type: proto::tensor_proto::DataType::Float,
                     shape: types::OnnxTensorShape {
-                        dims: vec![
-                            types::OnnxDim::Unknown,
-                            types::OnnxDim::Known(512),
-                        ],
+                        dims: vec![types::OnnxDim::Unknown, types::OnnxDim::Known(512)],
                     },
                 })),
                 doc_string: String::new(),
@@ -13370,7 +15374,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Unknown dims become Symbolic with name "unknown"
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x tensor should exist");
         match &x_tensor.shape[0] {
             SymDim::Symbolic { name, max_value } => {
                 assert_eq!(name, "unknown");
@@ -13411,7 +15419,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: non-Tensor type falls back to default [Symbolic("seq_len")]
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x tensor should exist");
         assert_eq!(x_tensor.shape.len(), 1);
         match &x_tensor.shape[0] {
             SymDim::Symbolic { name, .. } => assert_eq!(name, "seq_len"),
@@ -13423,16 +15435,19 @@ mod tests {
     fn graph_inputs_excludes_producer_tensors() {
         // Arrange: A graph where the only non-output tensor with a producer is the MatMul output
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
         let onnx = OnnxGraph {
             name: "test".to_string(),
             doc_string: String::new(),
-            nodes: vec![
-                make_node("mm", "MatMul", vec!["x", "w"], vec!["y"]),
-            ],
+            nodes: vec![make_node("mm", "MatMul", vec!["x", "w"], vec!["y"])],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -13457,17 +15472,27 @@ mod tests {
 
         // Assert: inputs should only have the activation "x", not "y" (has producer) or "w" (initializer)
         // Note: "y" is in outputs, so it's excluded from inputs too
-        let input_names: Vec<_> = graph.inputs.iter()
+        let input_names: Vec<_> = graph
+            .inputs
+            .iter()
             .filter_map(|&tid| graph.tensor(tid).map(|t| t.name.as_str()))
             .collect();
-        assert!(input_names.iter().all(|&n| n != "y"), "Produced tensors should not be inputs");
+        assert!(
+            input_names.iter().all(|&n| n != "y"),
+            "Produced tensors should not be inputs"
+        );
     }
 
     #[test]
     fn graph_outputs_reference_correct_tensors() {
         // Arrange
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -13558,7 +15583,11 @@ mod tests {
 
         // Assert
         assert_eq!(graph.max_seq_len, 4096);
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y").expect("y tensor");
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
+            .expect("y tensor");
         match &y_tensor.shape[0] {
             SymDim::Symbolic { max_value, .. } => assert_eq!(*max_value, Some(4096)),
             other => panic!("Expected Symbolic first dim, got {other:?}"),
@@ -13569,7 +15598,12 @@ mod tests {
     fn initializer_shape_concrete_dimensions() {
         // Arrange: Weight with shape [256, 512]
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![256, 512], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![256, 512],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -13590,7 +15624,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: initializer tensors have Concrete dimensions
-        let w_tensor = graph.tensors.iter().find(|t| t.name == "w").expect("w tensor");
+        let w_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "w")
+            .expect("w tensor");
         assert_eq!(w_tensor.shape.len(), 2);
         assert!(matches!(&w_tensor.shape[0], SymDim::Concrete(256)));
         assert!(matches!(&w_tensor.shape[1], SymDim::Concrete(512)));
@@ -13600,8 +15638,18 @@ mod tests {
     fn binary_op_lower_rank_broadcasts() {
         // Arrange: Add between a 2D activation and a 1D bias
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         init.insert("bias".to_string(), bias);
@@ -13631,10 +15679,18 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Add output should use the higher-rank shape (h's shape)
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).unwrap();
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
+            .unwrap();
         let out_tid = add_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Add output tensor");
-        assert_eq!(out_tensor.shape.len(), 2, "Output should have 2D shape from higher-rank input");
+        assert_eq!(
+            out_tensor.shape.len(),
+            2,
+            "Output should have 2D shape from higher-rank input"
+        );
     }
 
     #[test]
@@ -13667,25 +15723,36 @@ mod tests {
         // Assert: first unsupported op causes error
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Conv3D"), "First unsupported op should be in error");
+        assert!(
+            err.to_string().contains("Conv3D"),
+            "First unsupported op should be in error"
+        );
     }
 
     #[test]
     fn gemm_transb_with_float_attr_defaults_no_transpose() {
         // Arrange: transB attribute as Float (not Int) → defaults to false
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
         let mut attrs = HashMap::new();
-        attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-            name: "transB".to_string(),
-            value: attributes::OnnxAttributeValue::Float(1.0),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "transB".to_string(),
+            attributes::OnnxAttribute {
+                name: "transB".to_string(),
+                value: attributes::OnnxAttributeValue::Float(1.0),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
 
         let onnx = OnnxGraph {
             name: "test".to_string(),
@@ -13716,8 +15783,14 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Float transB is ignored → no swap (n=32, k=16)
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .unwrap();
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "Float transB ignored, n = weight[0]");
             assert_eq!(*k, 16, "Float transB ignored, k = weight[1]");
         }
@@ -13748,8 +15821,12 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: hidden=0 when no shape info
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).unwrap();
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .unwrap();
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
             assert_eq!(*hidden, 0);
         }
     }
@@ -13758,7 +15835,12 @@ mod tests {
     fn layer_norm_missing_bias_input_still_works() {
         // Arrange: LayerNormalization with only 2 inputs (no bias)
         use super::super::tensor::OnnxTensor;
-        let sc = OnnxTensor::new("sc".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let sc = OnnxTensor::new(
+            "sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("sc".to_string(), sc);
 
@@ -13791,7 +15873,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: LayerNorm still created with 3 inputs (bias auto-created)
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).unwrap();
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .unwrap();
         assert_eq!(ln.inputs.len(), 3);
     }
 
@@ -13854,9 +15940,18 @@ mod tests {
     #[test]
     fn map_onnx_dtype_idempotent() {
         // Arrange/Act/Assert: calling map_onnx_dtype twice gives same result
-        assert_eq!(map_onnx_dtype(safetensors::Dtype::BF16), map_onnx_dtype(safetensors::Dtype::BF16));
-        assert_eq!(map_onnx_dtype(safetensors::Dtype::F16), map_onnx_dtype(safetensors::Dtype::F16));
-        assert_eq!(map_onnx_dtype(safetensors::Dtype::F32), map_onnx_dtype(safetensors::Dtype::F32));
+        assert_eq!(
+            map_onnx_dtype(safetensors::Dtype::BF16),
+            map_onnx_dtype(safetensors::Dtype::BF16)
+        );
+        assert_eq!(
+            map_onnx_dtype(safetensors::Dtype::F16),
+            map_onnx_dtype(safetensors::Dtype::F16)
+        );
+        assert_eq!(
+            map_onnx_dtype(safetensors::Dtype::F32),
+            map_onnx_dtype(safetensors::Dtype::F32)
+        );
     }
 
     #[test]
@@ -13866,7 +15961,12 @@ mod tests {
         let mut init = HashMap::new();
         for i in 0..5 {
             let name = format!("w{}", i);
-            let t = OnnxTensor::new(name.clone(), safetensors::Dtype::F32, vec![10 * (i + 1), 20], prost::bytes::Bytes::new());
+            let t = OnnxTensor::new(
+                name.clone(),
+                safetensors::Dtype::F32,
+                vec![10 * (i + 1), 20],
+                prost::bytes::Bytes::new(),
+            );
             init.insert(name, t);
         }
 
@@ -13887,7 +15987,9 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: all 5 initializer tensors registered
-        let init_tensors: Vec<_> = graph.tensors.iter()
+        let init_tensors: Vec<_> = graph
+            .tensors
+            .iter()
             .filter(|t| t.name.starts_with('w'))
             .collect();
         assert_eq!(init_tensors.len(), 5);
@@ -13897,7 +15999,12 @@ mod tests {
     fn transpose_default_empty_perm() {
         // Arrange: Transpose without perm attribute
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -13926,8 +16033,12 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: default perm is empty
-        let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).unwrap();
-        if let OpKind::Transpose { perm } = &tr.kind {
+        let tr = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .unwrap();
+        if let Op::Transpose { perm } = &tr.op_v2 {
             assert!(perm.is_empty(), "Default perm should be empty");
         }
     }
@@ -13972,7 +16083,12 @@ mod tests {
     fn reshape_target_shape_is_empty() {
         // Arrange
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
 
@@ -14001,8 +16117,12 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: target_shape is always vec![]
-        let rs = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).unwrap();
-        if let OpKind::Reshape { target_shape } = &rs.kind {
+        let rs = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .unwrap();
+        if let Op::Reshape { target_shape } = &rs.op_v2 {
             assert!(target_shape.is_empty());
         }
     }
@@ -14011,7 +16131,12 @@ mod tests {
     fn gather_output_shape_uses_seq_dim() {
         // Arrange
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![500, 256], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![500, 256],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), table);
 
@@ -14037,7 +16162,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
 
         // Assert: output shape = [Symbolic("seq_len"), Concrete(256)]
-        let out_tensor = graph.tensors.iter().find(|t| t.name == "out").expect("out tensor");
+        let out_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "out")
+            .expect("out tensor");
         assert_eq!(out_tensor.shape.len(), 2);
         match &out_tensor.shape[0] {
             SymDim::Symbolic { name, max_value } => {
@@ -14053,10 +16182,30 @@ mod tests {
     fn full_chain_gather_norm_gemm_silu_add() {
         // Arrange: Full chain: Gather → LayerNorm → Gemm → Silu → Add
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
-        let ln_sc = OnnxTensor::new("ln_sc".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let ln_bi = OnnxTensor::new("ln_bi".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let proj = OnnxTensor::new("proj".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_sc = OnnxTensor::new(
+            "ln_sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_bi = OnnxTensor::new(
+            "ln_bi".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let proj = OnnxTensor::new(
+            "proj".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("ln_sc".to_string(), ln_sc);
@@ -14072,13 +16221,27 @@ mod tests {
                     name: "ln".to_string(),
                     op_type: "LayerNormalization".to_string(),
                     domain: String::new(),
-                    inputs: vec!["hidden".to_string(), "ln_sc".to_string(), "ln_bi".to_string()],
+                    inputs: vec![
+                        "hidden".to_string(),
+                        "ln_sc".to_string(),
+                        "ln_bi".to_string(),
+                    ],
                     outputs: vec!["normed".to_string()],
                     attributes: HashMap::new(),
                 },
-                make_node("proj_mm", "MatMul", vec!["normed", "proj"], vec!["projected"]),
+                make_node(
+                    "proj_mm",
+                    "MatMul",
+                    vec!["normed", "proj"],
+                    vec!["projected"],
+                ),
                 make_node("silu", "Silu", vec!["projected"], vec!["activated"]),
-                make_node("res_add", "Add", vec!["activated", "residual"], vec!["output"]),
+                make_node(
+                    "res_add",
+                    "Add",
+                    vec!["activated", "residual"],
+                    vec!["output"],
+                ),
             ],
             inputs: vec![
                 model::OnnxValueInfo {
@@ -14111,12 +16274,16 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
 
         // Assert: 5 ops in order
-        assert_eq!(graph.ops.len(), 5, "Should have 5 ops: Gather, LayerNorm, Gemm, Silu, Add");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }));
-        assert!(matches!(graph.ops[1].kind, OpKind::LayerNorm { .. }));
-        assert!(matches!(graph.ops[2].kind, OpKind::Gemm { .. }));
-        assert!(matches!(graph.ops[3].kind, OpKind::Silu));
-        assert!(matches!(graph.ops[4].kind, OpKind::Add));
+        assert_eq!(
+            graph.ops.len(),
+            5,
+            "Should have 5 ops: Gather, LayerNorm, Gemm, Silu, Add"
+        );
+        assert!(matches!(graph.ops[0].op_v2, Op::Gather { .. }));
+        assert!(matches!(graph.ops[1].op_v2, Op::LayerNorm(..)));
+        assert!(matches!(graph.ops[2].op_v2, Op::Gemm(..)));
+        assert!(matches!(graph.ops[3].op_v2, Op::Silu));
+        assert!(matches!(graph.ops[4].op_v2, Op::Add));
         // Output tensor
         assert_eq!(graph.outputs.len(), 1);
     }
@@ -14147,8 +16314,14 @@ mod tests {
             vec![2],
             prost::bytes::Bytes::from_static(b"ab"),
         );
-        assert!(tensor.is_string, "new_string() should produce is_string=true");
-        assert!(matches!(tensor.dtype, safetensors::Dtype::U8), "String tensor dtype should be U8");
+        assert!(
+            tensor.is_string,
+            "new_string() should produce is_string=true"
+        );
+        assert!(
+            matches!(tensor.dtype, safetensors::Dtype::U8),
+            "String tensor dtype should be U8"
+        );
     }
 
     #[test]
@@ -14202,9 +16375,12 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 3333).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { index_dim, .. } = &gather.kind {
+        if let Op::Gather { index_dim, .. } = &gather.op_v2 {
             assert!(
                 matches!(index_dim, SymDim::Symbolic { name, max_value: Some(3333) } if name == "seq_len"),
                 "index_dim should be Symbolic(seq_len, 3333)"
@@ -14251,7 +16427,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
             .expect("hidden tensor should exist");
         assert_eq!(hidden.shape.len(), 2);
         assert!(
@@ -14300,9 +16479,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y tensor should exist");
-        assert!(y_tensor.producer.is_some(), "MatMul output should have a producer");
+        assert!(
+            y_tensor.producer.is_some(),
+            "MatMul output should have a producer"
+        );
     }
 
     // ── Initializer tensor has no producer ─────────────────────────────
@@ -14332,9 +16517,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let w_tensor = graph.tensors.iter().find(|t| t.name == "init_w")
+        let w_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "init_w")
             .expect("init_w should exist");
-        assert!(w_tensor.producer.is_none(), "Initializer should have no producer");
+        assert!(
+            w_tensor.producer.is_none(),
+            "Initializer should have no producer"
+        );
     }
 
     // ── Graph input activation has no producer ─────────────────────────
@@ -14360,9 +16551,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let act = graph.tensors.iter().find(|t| t.name == "input_act")
+        let act = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "input_act")
             .expect("input_act should exist");
-        assert!(act.producer.is_none(), "Graph input activation should have no producer");
+        assert!(
+            act.producer.is_none(),
+            "Graph input activation should have no producer"
+        );
     }
 
     // ── Gemm output tensor dtype matches graph dtype ───────────────────
@@ -14404,10 +16601,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { dtype, .. } = &gemm.kind {
-            assert!(matches!(dtype, DType::BF16), "Gemm dtype should be BF16 from initializer");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let dtype = &spec.dtype;
+            assert!(
+                matches!(dtype, DType::BF16),
+                "Gemm dtype should be BF16 from initializer"
+            );
         }
     }
 
@@ -14416,8 +16620,18 @@ mod tests {
     #[test]
     fn layer_norm_with_nan_epsilon_attribute_uses_default() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("s".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "s".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("s".to_string(), scale);
         onnx.initializers.insert("b".to_string(), bias);
@@ -14429,21 +16643,28 @@ mod tests {
             outputs: vec!["ln_nan_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(f32::NAN),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(f32::NAN),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
             assert!(eps.is_nan(), "NaN epsilon should be preserved as-is");
         }
     }
@@ -14487,9 +16708,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 65536);
             assert_eq!(*k, 32768);
         }
@@ -14500,8 +16726,18 @@ mod tests {
     #[test]
     fn two_rmsnorm_with_different_epsilons() {
         use super::super::tensor::OnnxTensor;
-        let s1 = OnnxTensor::new("s1".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let s2 = OnnxTensor::new("s2".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let s1 = OnnxTensor::new(
+            "s1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let s2 = OnnxTensor::new(
+            "s2".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("s1".to_string(), s1);
         onnx.initializers.insert("s2".to_string(), s2);
@@ -14513,13 +16749,16 @@ mod tests {
             outputs: vec!["h1".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1e-6),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1e-6),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
@@ -14531,26 +16770,33 @@ mod tests {
             outputs: vec!["h2".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1e-3),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1e-3),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norms: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norms: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .collect();
         assert_eq!(norms.len(), 2);
-        if let OpKind::RmsNorm { eps, .. } = norms[0].kind {
+        if let Op::RmsNorm(spec) = &norms[0].op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1e-6).abs() < 1e-12);
         }
-        if let OpKind::RmsNorm { eps, .. } = norms[1].kind {
+        if let Op::RmsNorm(spec) = &norms[1].op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1e-3).abs() < 1e-10);
         }
     }
@@ -14563,7 +16809,12 @@ mod tests {
         let mut init = HashMap::new();
         for i in 0..20 {
             let name = format!("weight_{i}");
-            let tensor = OnnxTensor::new(name.clone(), safetensors::Dtype::F32, vec![16, 16], prost::bytes::Bytes::new());
+            let tensor = OnnxTensor::new(
+                name.clone(),
+                safetensors::Dtype::F32,
+                vec![16, 16],
+                prost::bytes::Bytes::new(),
+            );
             init.insert(name, tensor);
         }
         let onnx = OnnxGraph {
@@ -14580,7 +16831,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.tensors.len(), 20, "All 20 initializers should be registered as tensors");
+        assert_eq!(
+            graph.tensors.len(),
+            20,
+            "All 20 initializers should be registered as tensors"
+        );
     }
 
     // ── ConvertError Clone roundtrip preserves type info ───────────────
@@ -14627,7 +16882,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "k")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "k")
             .expect("k should be registered");
         assert!(matches!(&t.shape[0], SymDim::Concrete(42)));
     }
@@ -14655,8 +16913,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
-        let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
+        let add_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .count();
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .count();
         assert_eq!(add_count, 2, "Original Add + Sub->Add = 2");
         assert_eq!(mul_count, 1, "Mul produces 1 Mul op");
     }
@@ -14666,7 +16932,12 @@ mod tests {
     #[test]
     fn relu_passthrough_then_rmsnorm() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ns".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ns".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ns".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -14687,13 +16958,21 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm after Relu passthrough");
         // RmsNorm should consume the qk_sum tensor (passthrough maps relu_out -> qk_sum)
-        let qk_sum = graph.tensors.iter().find(|t| t.name == "qk_sum")
+        let qk_sum = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
             .expect("qk_sum should exist");
-        assert!(norm.inputs.contains(&qk_sum.id),
-            "RmsNorm after Relu passthrough should consume the original tensor");
+        assert!(
+            norm.inputs.contains(&qk_sum.id),
+            "RmsNorm after Relu passthrough should consume the original tensor"
+        );
     }
 
     // ── Graph with input that has concrete shape ───────────────────────
@@ -14725,7 +17004,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "fixed_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "fixed_input")
             .expect("fixed_input should be registered");
         assert_eq!(t.shape.len(), 2);
         assert!(matches!(&t.shape[0], SymDim::Concrete(1)));
@@ -14745,21 +17027,27 @@ mod tests {
             outputs: vec!["t4d_out".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![3, 2, 1, 0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![3, 2, 1, 0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let transpose = graph.ops.iter().find(|op| op.label == "t4d")
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "t4d")
             .expect("Should find t4d Transpose");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(*perm, vec![3, 2, 1, 0]);
         }
     }
@@ -14788,13 +17076,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut a = HashMap::new();
-                    a.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(999),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    a.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(999),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     a
                 },
             }],
@@ -14813,9 +17104,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "Large positive transB swaps: n=shape[1]=32");
             assert_eq!(*k, 16, "Large positive transB swaps: k=shape[0]=16");
         }
@@ -14826,8 +17122,18 @@ mod tests {
     #[test]
     fn layernorm_output_shape_matches_input() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ls".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("lb".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ls".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "lb".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ls".to_string(), scale);
         onnx.initializers.insert("lb".to_string(), bias);
@@ -14841,12 +17147,21 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
             .expect("hidden should exist");
-        let ln_out = graph.tensors.iter().find(|t| t.name == "ln_out")
+        let ln_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "ln_out")
             .expect("ln_out should exist");
-        assert_eq!(hidden.shape.len(), ln_out.shape.len(),
-            "LayerNorm output should have same number of dims as input");
+        assert_eq!(
+            hidden.shape.len(),
+            ln_out.shape.len(),
+            "LayerNorm output should have same number of dims as input"
+        );
     }
 
     // ── RmsNorm output shape matches input shape ───────────────────────
@@ -14854,7 +17169,12 @@ mod tests {
     #[test]
     fn rmsnorm_output_shape_matches_input() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rs".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rs".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rs".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -14867,9 +17187,15 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
             .expect("hidden should exist");
-        let rn_out = graph.tensors.iter().find(|t| t.name == "rn_out")
+        let rn_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "rn_out")
             .expect("rn_out should exist");
         assert_eq!(hidden.shape.len(), rn_out.shape.len());
     }
@@ -14889,8 +17215,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let qk = graph.tensors.iter().find(|t| t.name == "qk_sum").expect("qk_sum");
-        let sm = graph.tensors.iter().find(|t| t.name == "sm_out").expect("sm_out");
+        let qk = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
+            .expect("qk_sum");
+        let sm = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "sm_out")
+            .expect("sm_out");
         assert_eq!(qk.shape.len(), sm.shape.len());
     }
 
@@ -14909,8 +17243,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden");
-        let silu_out = graph.tensors.iter().find(|t| t.name == "silu_out").expect("silu_out");
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
+            .expect("hidden");
+        let silu_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "silu_out")
+            .expect("silu_out");
         assert_eq!(hidden.shape.len(), silu_out.shape.len());
     }
 
@@ -14932,10 +17274,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert!(graph.tensors.is_empty(), "Empty graph should have no tensors");
+        assert!(
+            graph.tensors.is_empty(),
+            "Empty graph should have no tensors"
+        );
         assert!(graph.ops.is_empty(), "Empty graph should have no ops");
         assert!(graph.inputs.is_empty(), "Empty graph should have no inputs");
-        assert!(graph.outputs.is_empty(), "Empty graph should have no outputs");
+        assert!(
+            graph.outputs.is_empty(),
+            "Empty graph should have no outputs"
+        );
     }
 
     // ── Graph name preserved through conversion ────────────────────────
@@ -14998,9 +17346,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 1024, "n should be 1024");
             assert_eq!(*k, 256, "k should be 256");
         }
@@ -15011,7 +17364,12 @@ mod tests {
     #[test]
     fn op_labels_match_node_names() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -15069,10 +17427,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { seq_len, .. } = &pool.kind {
-            assert_eq!(*seq_len, 0, "MeanPool from ReduceMean should have seq_len=0");
+        if let Op::MeanPool { seq_len, .. } = &pool.op_v2 {
+            assert_eq!(
+                *seq_len, 0,
+                "MeanPool from ReduceMean should have seq_len=0"
+            );
         }
     }
 
@@ -15081,7 +17445,12 @@ mod tests {
     #[test]
     fn add_with_initializer_and_activation() {
         use super::super::tensor::OnnxTensor;
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("bias".to_string(), bias);
         onnx.nodes.push(OnnxNode {
@@ -15094,7 +17463,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add = graph.ops.iter().find(|op| op.label == "add_bias")
+        let add = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "add_bias")
             .expect("Should have add_bias op");
         assert_eq!(add.inputs.len(), 2);
     }
@@ -15147,7 +17519,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 0, "All passthrough chain should produce no ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "All passthrough chain should produce no ops"
+        );
         // Only "x" should be registered as a tensor (passthroughs create no new tensors)
         assert_eq!(graph.tensors.len(), 1, "Only input tensor should exist");
     }
@@ -15157,8 +17533,18 @@ mod tests {
     #[test]
     fn gemmbias_with_transb_swaps() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         init.insert("b".to_string(), bias);
@@ -15173,13 +17559,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut a = HashMap::new();
-                    a.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    a.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     a
                 },
             }],
@@ -15198,9 +17587,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gb = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let OpKind::GemmBias { n, k, .. } = &gb.kind {
+        if let Op::GemmBias(spec) = &gb.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "transB swaps n to shape[1]=64");
             assert_eq!(*k, 32, "transB swaps k to shape[0]=32");
         }
@@ -15239,8 +17633,18 @@ mod tests {
     #[test]
     fn detect_dtype_uses_first_initializer() {
         use super::super::tensor::OnnxTensor;
-        let bf16_t = OnnxTensor::new("a".to_string(), safetensors::Dtype::BF16, vec![4, 4], prost::bytes::Bytes::new());
-        let f16_t = OnnxTensor::new("b".to_string(), safetensors::Dtype::F16, vec![4, 4], prost::bytes::Bytes::new());
+        let bf16_t = OnnxTensor::new(
+            "a".to_string(),
+            safetensors::Dtype::BF16,
+            vec![4, 4],
+            prost::bytes::Bytes::new(),
+        );
+        let f16_t = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F16,
+            vec![4, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("a".to_string(), bf16_t);
         init.insert("b".to_string(), f16_t);
@@ -15273,7 +17677,11 @@ mod tests {
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape {
-                    dims: vec![types::OnnxDim::Unknown, types::OnnxDim::Unknown, types::OnnxDim::Unknown],
+                    dims: vec![
+                        types::OnnxDim::Unknown,
+                        types::OnnxDim::Unknown,
+                        types::OnnxDim::Unknown,
+                    ],
                 },
             })),
             doc_string: String::new(),
@@ -15293,7 +17701,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "all_unknown")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "all_unknown")
             .expect("all_unknown should be registered");
         assert_eq!(t.shape.len(), 3, "Should have 3 dims");
         for (i, dim) in t.shape.iter().enumerate() {
@@ -15309,7 +17720,12 @@ mod tests {
     #[test]
     fn input_name_collision_with_initializer_skips_registration() {
         use super::super::tensor::OnnxTensor;
-        let tensor = OnnxTensor::new("shared".to_string(), safetensors::Dtype::F32, vec![10, 10], prost::bytes::Bytes::new());
+        let tensor = OnnxTensor::new(
+            "shared".to_string(),
+            safetensors::Dtype::F32,
+            vec![10, 10],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("shared".to_string(), tensor);
         let onnx = OnnxGraph {
@@ -15337,7 +17753,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Initializer shape should win (10, 10), not the input shape (5, 5)
-        let t = graph.tensors.iter().find(|t| t.name == "shared")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "shared")
             .expect("shared should be registered");
         assert_eq!(t.shape.len(), 2);
         assert!(matches!(&t.shape[0], SymDim::Concrete(10)));
@@ -15349,7 +17768,12 @@ mod tests {
     #[test]
     fn outputs_excluded_from_inputs_list() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -15383,12 +17807,19 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y should exist");
-        assert!(!graph.inputs.contains(&y_tensor.id),
-            "y is an output and should not be in inputs");
-        assert!(graph.outputs.contains(&y_tensor.id),
-            "y should be in outputs");
+        assert!(
+            !graph.inputs.contains(&y_tensor.id),
+            "y is an output and should not be in inputs"
+        );
+        assert!(
+            graph.outputs.contains(&y_tensor.id),
+            "y should be in outputs"
+        );
     }
 
     // ── Reshape op kind contains empty target_shape ────────────────────
@@ -15406,10 +17837,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
             .expect("Should have Reshape");
-        if let OpKind::Reshape { target_shape } = &reshape.kind {
-            assert!(target_shape.is_empty(), "target_shape is always empty placeholder");
+        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+            assert!(
+                target_shape.is_empty(),
+                "target_shape is always empty placeholder"
+            );
         }
     }
 
@@ -15418,7 +17855,12 @@ mod tests {
     #[test]
     fn binary_op_output_shape_uses_higher_rank() {
         use super::super::tensor::OnnxTensor;
-        let bias = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let bias = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("b".to_string(), bias);
         let onnx = OnnxGraph {
@@ -15457,7 +17899,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let out = graph.tensors.iter().find(|t| t.name == "out")
+        let out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "out")
             .expect("out should exist");
         // h has shape [seq_len, 0] (from Gather with no initializer table), b has [32]
         // infer_output_shape_binary picks the higher-rank shape
@@ -15499,8 +17944,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
-        assert!(err.to_string().contains("InvalidOp"), "Should report first bad op");
-        assert!(!err.to_string().contains("AnotherBadOp"), "Should not reach second bad op");
+        assert!(
+            err.to_string().contains("InvalidOp"),
+            "Should report first bad op"
+        );
+        assert!(
+            !err.to_string().contains("AnotherBadOp"),
+            "Should not reach second bad op"
+        );
     }
 
     // ── GemmBias with transB=0 uses no-transpose ──────────────────────
@@ -15508,8 +17959,18 @@ mod tests {
     #[test]
     fn gemmbias_transb_zero_no_transpose() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
-        let b = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let b = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         init.insert("b".to_string(), b);
@@ -15524,13 +17985,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut a = HashMap::new();
-                    a.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(0),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    a.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(0),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     a
                 },
             }],
@@ -15549,9 +18013,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gb = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let OpKind::GemmBias { n, k, .. } = &gb.kind {
+        if let Op::GemmBias(spec) = &gb.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "transB=0: n should be shape[0]");
             assert_eq!(*k, 32, "transB=0: k should be shape[1]");
         }
@@ -15562,7 +18031,12 @@ mod tests {
     #[test]
     fn conversion_with_nodes_empty_succeeds() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![10, 20], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![10, 20],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -15599,7 +18073,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .count();
         assert_eq!(mul_count, 1, "Pow should map to Mul");
     }
 
@@ -15618,11 +18096,17 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
         // k_proj output has shape [seq_len, 16], last concrete dim = 16
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
-            assert_eq!(*hidden, 16, "hidden should be 16 (last dim of k_proj output)");
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+            assert_eq!(
+                *hidden, 16,
+                "hidden should be 16 (last dim of k_proj output)"
+            );
         }
     }
 
@@ -15680,9 +18164,24 @@ mod tests {
     #[test]
     fn full_chain_gather_add_silu_matmul() {
         use super::super::tensor::OnnxTensor;
-        let embed = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let proj = OnnxTensor::new("proj".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let proj = OnnxTensor::new(
+            "proj".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), embed);
         init.insert("bias".to_string(), bias);
@@ -15744,11 +18243,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert_eq!(graph.ops.len(), 4, "Should have 4 ops: Gather + Add + Silu + Gemm");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }));
-        assert!(matches!(graph.ops[1].kind, OpKind::Add));
-        assert!(matches!(graph.ops[2].kind, OpKind::Silu));
-        assert!(matches!(graph.ops[3].kind, OpKind::Gemm { .. }));
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Should have 4 ops: Gather + Add + Silu + Gemm"
+        );
+        assert!(matches!(graph.ops[0].op_v2, Op::Gather { .. }));
+        assert!(matches!(graph.ops[1].op_v2, Op::Add));
+        assert!(matches!(graph.ops[2].op_v2, Op::Silu));
+        assert!(matches!(graph.ops[3].op_v2, Op::Gemm(..)));
         assert_eq!(graph.outputs.len(), 1);
     }
 
@@ -15861,7 +18364,12 @@ mod tests {
     #[test]
     fn f16_initializer_propagates_dtype_to_ops() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F16, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F16,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -15890,9 +18398,13 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { dtype, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let dtype = &spec.dtype;
             assert!(matches!(dtype, DType::F16), "Gemm dtype should be F16");
         }
     }
@@ -15902,7 +18414,12 @@ mod tests {
     #[test]
     fn matmul_weight_zero_columns() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![64, 0], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 0],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -15931,9 +18448,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64);
             assert_eq!(*k, 0, "k should be 0 for weight with zero columns");
         }
@@ -15969,9 +18491,12 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
             assert_eq!(*hidden, 0, "Unknown input shape should default hidden to 0");
         }
     }
@@ -16014,9 +18539,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 0);
             assert_eq!(*embed_dim, 0);
         }
@@ -16039,7 +18572,12 @@ mod tests {
     #[test]
     fn sigmoid_passthrough_then_matmul() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("proj".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "proj".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("proj".to_string(), w);
         let onnx = OnnxGraph {
@@ -16079,7 +18617,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 1, "Sigmoid passthrough + MatMul = 1 op");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }));
+        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
     }
 
     // ── Tanh output tensor different from input ─────────────────────────
@@ -16097,9 +18635,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden");
-        let tanh_out = graph.tensors.iter().find(|t| t.name == "tanh_out").expect("tanh_out");
-        assert_ne!(hidden.id, tanh_out.id, "Tanh output should be a different tensor");
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
+            .expect("hidden");
+        let tanh_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "tanh_out")
+            .expect("tanh_out");
+        assert_ne!(
+            hidden.id, tanh_out.id,
+            "Tanh output should be a different tensor"
+        );
     }
 
     // ── Gelu output tensor different from input ─────────────────────────
@@ -16117,9 +18666,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden");
-        let gelu_out = graph.tensors.iter().find(|t| t.name == "gelu_out").expect("gelu_out");
-        assert_ne!(hidden.id, gelu_out.id, "Gelu output should be a different tensor");
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
+            .expect("hidden");
+        let gelu_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "gelu_out")
+            .expect("gelu_out");
+        assert_ne!(
+            hidden.id, gelu_out.id,
+            "Gelu output should be a different tensor"
+        );
     }
 
     // ── SymDim max_value matches max_seq_len for symbolic dims ─────────
@@ -16131,7 +18691,10 @@ mod tests {
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape {
-                    dims: vec![types::OnnxDim::Param("seq".to_string()), types::OnnxDim::Known(128)],
+                    dims: vec![
+                        types::OnnxDim::Param("seq".to_string()),
+                        types::OnnxDim::Known(128),
+                    ],
                 },
             })),
             doc_string: String::new(),
@@ -16151,7 +18714,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 7777).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "dyn")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "dyn")
             .expect("dyn should be registered");
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(7777) } if name == "seq"),
@@ -16164,7 +18730,12 @@ mod tests {
     #[test]
     fn bf16_initializer_tensor_dtype() {
         use super::super::tensor::OnnxTensor;
-        let tensor = OnnxTensor::new("bf16_w".to_string(), safetensors::Dtype::BF16, vec![4, 8], prost::bytes::Bytes::new());
+        let tensor = OnnxTensor::new(
+            "bf16_w".to_string(),
+            safetensors::Dtype::BF16,
+            vec![4, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("bf16_w".to_string(), tensor);
         let onnx = OnnxGraph {
@@ -16181,9 +18752,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "bf16_w")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "bf16_w")
             .expect("bf16_w should be registered");
-        assert!(matches!(t.dtype, DType::BF16), "Tensor dtype should be BF16");
+        assert!(
+            matches!(t.dtype, DType::BF16),
+            "Tensor dtype should be BF16"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -16195,12 +18772,47 @@ mod tests {
     #[test]
     fn convert_error_debug_unique_per_variant() {
         let errs = vec![
-            format!("{:?}", ConvertError::UnsupportedOp { op_type: "A".into(), node_name: "N".into() }),
-            format!("{:?}", ConvertError::MissingInitializer { name: "X".into(), node_name: "N".into() }),
-            format!("{:?}", ConvertError::InvalidMatMulShape { name: "W".into(), dims: 5 }),
-            format!("{:?}", ConvertError::NoWeightInput { node_name: "mm".into() }),
-            format!("{:?}", ConvertError::AttributeError { node_name: "ln".into(), reason: "r".into() }),
-            format!("{:?}", ConvertError::ShapeInferenceFailed { name: "t".into(), reason: "x".into() }),
+            format!(
+                "{:?}",
+                ConvertError::UnsupportedOp {
+                    op_type: "A".into(),
+                    node_name: "N".into()
+                }
+            ),
+            format!(
+                "{:?}",
+                ConvertError::MissingInitializer {
+                    name: "X".into(),
+                    node_name: "N".into()
+                }
+            ),
+            format!(
+                "{:?}",
+                ConvertError::InvalidMatMulShape {
+                    name: "W".into(),
+                    dims: 5
+                }
+            ),
+            format!(
+                "{:?}",
+                ConvertError::NoWeightInput {
+                    node_name: "mm".into()
+                }
+            ),
+            format!(
+                "{:?}",
+                ConvertError::AttributeError {
+                    node_name: "ln".into(),
+                    reason: "r".into()
+                }
+            ),
+            format!(
+                "{:?}",
+                ConvertError::ShapeInferenceFailed {
+                    name: "t".into(),
+                    reason: "x".into()
+                }
+            ),
         ];
         // Each Debug string should contain the variant name, making them distinguishable
         assert!(errs[0].contains("UnsupportedOp"));
@@ -16216,7 +18828,12 @@ mod tests {
     #[test]
     fn single_gather_only_no_other_ops() {
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("t".into(), safetensors::Dtype::F32, vec![50, 32], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "t".into(),
+            safetensors::Dtype::F32,
+            vec![50, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("t".into(), table);
         let onnx = OnnxGraph {
@@ -16245,8 +18862,12 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        assert_eq!(graph.ops.len(), 1, "Single Gather should produce exactly 1 op");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }));
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Single Gather should produce exactly 1 op"
+        );
+        assert!(matches!(graph.ops[0].op_v2, Op::Gather { .. }));
     }
 
     // ── ConvertError: UnsupportedOp with empty op_type ───────────────
@@ -16304,7 +18925,10 @@ mod tests {
             ref_attr_name: None,
             attr_type: Some(proto::attribute_proto::AttributeType::Float),
         };
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Float));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Float)
+        );
     }
 
     #[test]
@@ -16327,7 +18951,10 @@ mod tests {
             ref_attr_name: None,
             attr_type: Some(proto::attribute_proto::AttributeType::Graph),
         };
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Graph));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Graph)
+        );
     }
 
     // ── OnnxTensorShape: Clone preserves dims ────────────────────────
@@ -16335,7 +18962,10 @@ mod tests {
     #[test]
     fn onnx_tensor_shape_clone_preserves_dims() {
         let shape = types::OnnxTensorShape {
-            dims: vec![types::OnnxDim::Known(128), types::OnnxDim::Param("s".into())],
+            dims: vec![
+                types::OnnxDim::Known(128),
+                types::OnnxDim::Param("s".into()),
+            ],
         };
         let cloned = shape.clone();
         assert_eq!(shape.dims.len(), cloned.dims.len());
@@ -16379,7 +19009,9 @@ mod tests {
     fn onnx_type_clone_preserves_tensor_variant() {
         let t = types::OnnxType::Tensor(types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(10)],
+            },
         });
         let cloned = t.clone();
         assert_eq!(t, cloned);
@@ -16414,7 +19046,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "zero_dim").expect("tensor should exist");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "zero_dim")
+            .expect("tensor should exist");
         assert!(matches!(&t.shape[0], SymDim::Concrete(0)));
         assert!(matches!(&t.shape[1], SymDim::Concrete(64)));
     }
@@ -16424,7 +19060,12 @@ mod tests {
     #[test]
     fn gather_initializer_single_dim_embed_dim_zero() {
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("vec".into(), safetensors::Dtype::F32, vec![100], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "vec".into(),
+            safetensors::Dtype::F32,
+            vec![100],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("vec".into(), table);
         let onnx = OnnxGraph {
@@ -16453,8 +19094,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("should exist");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("should exist");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 100);
             assert_eq!(*embed_dim, 0, "1D initializer should have embed_dim=0");
         }
@@ -16511,7 +19161,12 @@ mod tests {
     #[test]
     fn matmul_zero_column_weight_succeeds() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".into(), safetensors::Dtype::F32, vec![32, 0], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".into(),
+            safetensors::Dtype::F32,
+            vec![32, 0],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".into(), w);
         let onnx = OnnxGraph {
@@ -16525,7 +19180,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -16535,7 +19195,9 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
+        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32);
             assert_eq!(*k, 0, "k should be 0 for weight with 0 columns");
         }
@@ -16574,7 +19236,12 @@ mod tests {
     #[test]
     fn gemm_weight_first_input_position() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("gw_first".into(), safetensors::Dtype::F32, vec![16, 32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "gw_first".into(),
+            safetensors::Dtype::F32,
+            vec![16, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_first".into(), w);
         let onnx = OnnxGraph {
@@ -16588,7 +19255,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -16599,7 +19271,10 @@ mod tests {
         let business = BusinessConfig::default();
         // Gemm always expects weight as second input
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
-        assert!(result.is_err(), "Gemm with weight in first position should fail");
+        assert!(
+            result.is_err(),
+            "Gemm with weight in first position should fail"
+        );
     }
 
     // ── Multiple Reshape ops preserve order ──────────────────────────
@@ -16625,7 +19300,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reshapes: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Reshape { .. })).collect();
+        let reshapes: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .collect();
         assert_eq!(reshapes.len(), 2);
         assert_eq!(reshapes[0].label, "rs1");
         assert_eq!(reshapes[1].label, "rs2");
@@ -16644,20 +19323,27 @@ mod tests {
             outputs: vec!["t_out".into()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".into(), attributes::OnnxAttribute {
-                    name: "perm".into(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".into(),
+                    attributes::OnnxAttribute {
+                        name: "perm".into(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let trans = graph.ops.iter().find(|op| op.label == "trans_1d").expect("should exist");
-        if let OpKind::Transpose { perm } = &trans.kind {
+        let trans = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "trans_1d")
+            .expect("should exist");
+        if let Op::Transpose { perm } = &trans.op_v2 {
             assert_eq!(*perm, vec![0]);
         }
     }
@@ -16667,7 +19353,12 @@ mod tests {
     #[test]
     fn graph_output_initializer_tensor_included() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w_out".into(), safetensors::Dtype::F32, vec![10, 20], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w_out".into(),
+            safetensors::Dtype::F32,
+            vec![10, 20],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w_out".into(), w);
         let onnx = OnnxGraph {
@@ -16675,7 +19366,12 @@ mod tests {
             doc_string: String::new(),
             nodes: vec![],
             inputs: vec![],
-            outputs: vec![model::OnnxValueInfo { name: "w_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "w_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -16684,7 +19380,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.outputs.len(), 1, "Initializer used as output should appear in graph.outputs");
+        assert_eq!(
+            graph.outputs.len(),
+            1,
+            "Initializer used as output should appear in graph.outputs"
+        );
     }
 
     // ── OnnxGraph: Clone produces equal but distinct instance ────────
@@ -16728,7 +19428,9 @@ mod tests {
             name: "x".into(),
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
-                shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+                shape: types::OnnxTensorShape {
+                    dims: vec![types::OnnxDim::Known(10)],
+                },
             })),
             doc_string: "desc".into(),
             metadata_props: HashMap::new(),
@@ -16753,12 +19455,47 @@ mod tests {
                 ConvertError::ShapeInferenceFailed { .. } => "shape",
             }
         }
-        assert_eq!(classify(ConvertError::UnsupportedOp { op_type: "X".into(), node_name: "N".into() }), "unsupported");
-        assert_eq!(classify(ConvertError::MissingInitializer { name: "w".into(), node_name: "n".into() }), "missing");
-        assert_eq!(classify(ConvertError::InvalidMatMulShape { name: "W".into(), dims: 3 }), "bad_shape");
-        assert_eq!(classify(ConvertError::NoWeightInput { node_name: "mm".into() }), "no_weight");
-        assert_eq!(classify(ConvertError::AttributeError { node_name: "ln".into(), reason: "r".into() }), "attr");
-        assert_eq!(classify(ConvertError::ShapeInferenceFailed { name: "t".into(), reason: "f".into() }), "shape");
+        assert_eq!(
+            classify(ConvertError::UnsupportedOp {
+                op_type: "X".into(),
+                node_name: "N".into()
+            }),
+            "unsupported"
+        );
+        assert_eq!(
+            classify(ConvertError::MissingInitializer {
+                name: "w".into(),
+                node_name: "n".into()
+            }),
+            "missing"
+        );
+        assert_eq!(
+            classify(ConvertError::InvalidMatMulShape {
+                name: "W".into(),
+                dims: 3
+            }),
+            "bad_shape"
+        );
+        assert_eq!(
+            classify(ConvertError::NoWeightInput {
+                node_name: "mm".into()
+            }),
+            "no_weight"
+        );
+        assert_eq!(
+            classify(ConvertError::AttributeError {
+                node_name: "ln".into(),
+                reason: "r".into()
+            }),
+            "attr"
+        );
+        assert_eq!(
+            classify(ConvertError::ShapeInferenceFailed {
+                name: "t".into(),
+                reason: "f".into()
+            }),
+            "shape"
+        );
     }
 
     // ── OnnxDim: Known(1) is distinct from Known(0) ──────────────────
@@ -16847,7 +19584,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 128).unwrap();
-        assert!(graph.tensors.is_empty(), "Empty graph should have no tensors");
+        assert!(
+            graph.tensors.is_empty(),
+            "Empty graph should have no tensors"
+        );
         assert!(graph.ops.is_empty());
         assert!(graph.inputs.is_empty());
         assert!(graph.outputs.is_empty());
@@ -16858,7 +19598,12 @@ mod tests {
     #[test]
     fn detect_dtype_order_does_not_crash() {
         use super::super::tensor::OnnxTensor;
-        let t1 = OnnxTensor::new("w1".into(), safetensors::Dtype::F32, vec![2], prost::bytes::Bytes::new());
+        let t1 = OnnxTensor::new(
+            "w1".into(),
+            safetensors::Dtype::F32,
+            vec![2],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".into(), t1);
         let onnx = OnnxGraph {
@@ -16882,9 +19627,18 @@ mod tests {
     #[test]
     fn map_onnx_dtype_many_calls_idempotent() {
         for _ in 0..100 {
-            assert!(matches!(map_onnx_dtype(safetensors::Dtype::F32), DType::F32));
-            assert!(matches!(map_onnx_dtype(safetensors::Dtype::BF16), DType::BF16));
-            assert!(matches!(map_onnx_dtype(safetensors::Dtype::F16), DType::F16));
+            assert!(matches!(
+                map_onnx_dtype(safetensors::Dtype::F32),
+                DType::F32
+            ));
+            assert!(matches!(
+                map_onnx_dtype(safetensors::Dtype::BF16),
+                DType::BF16
+            ));
+            assert!(matches!(
+                map_onnx_dtype(safetensors::Dtype::F16),
+                DType::F16
+            ));
         }
     }
 
@@ -16911,9 +19665,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let silu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Silu)).expect("should exist");
-        let tanh = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("should exist");
-        assert!(tanh.inputs.contains(&silu.outputs[0]), "Tanh should consume Silu output");
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Silu))
+            .expect("should exist");
+        let tanh = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .expect("should exist");
+        assert!(
+            tanh.inputs.contains(&silu.outputs[0]),
+            "Tanh should consume Silu output"
+        );
     }
 
     // ── Add then Softmax chain ───────────────────────────────────────
@@ -16931,8 +19696,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("should exist");
-        let sm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("should exist");
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
+            .expect("should exist");
+        let sm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("should exist");
         assert!(sm_op.inputs.contains(&add_op.outputs[0]));
     }
 
@@ -16941,9 +19714,24 @@ mod tests {
     #[test]
     fn gather_then_layernorm_chain() {
         use super::super::tensor::OnnxTensor;
-        let embed = OnnxTensor::new("emb".into(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
-        let scale = OnnxTensor::new("sc".into(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bi".into(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "emb".into(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let scale = OnnxTensor::new(
+            "sc".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bi".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".into(), embed);
         init.insert("sc".into(), scale);
@@ -16969,7 +19757,12 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "ids".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -16980,8 +19773,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 2);
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("should exist");
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("should exist");
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("should exist");
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .expect("should exist");
         assert!(ln.inputs.contains(&gather.outputs[0]));
     }
 
@@ -16990,7 +19791,12 @@ mod tests {
     #[test]
     fn rmsnorm_then_add_residual() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rn_s".into(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rn_s".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rn_s".into(), scale);
         onnx.nodes.push(OnnxNode {
@@ -17011,8 +19817,17 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("should exist");
-        let add_op = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).find(|op| op.label == "residual").expect("should exist");
+        let norm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .expect("should exist");
+        let add_op = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| op.label == "residual")
+            .expect("should exist");
         assert!(add_op.inputs.contains(&norm_op.outputs[0]));
     }
 
@@ -17052,7 +19867,10 @@ mod tests {
             attributes: vec!["attr1".into()],
             attribute_protos: HashMap::new(),
             nodes: vec![],
-            opset_import: vec![model::OnnxOperatorSet { domain: "ai.onnx".into(), version: 17 }],
+            opset_import: vec![model::OnnxOperatorSet {
+                domain: "ai.onnx".into(),
+                version: 17,
+            }],
             value_info: vec![],
             doc_string: "d".into(),
             metadata_props: HashMap::new(),
@@ -17075,7 +19893,10 @@ mod tests {
             domain: "d".into(),
             model_version: 100,
             doc_string: "doc".into(),
-            opset_import: vec![model::OnnxOperatorSet { domain: "ai.onnx".into(), version: 20 }],
+            opset_import: vec![model::OnnxOperatorSet {
+                domain: "ai.onnx".into(),
+                version: 20,
+            }],
             metadata_props: HashMap::new(),
         };
         let cloned = meta.clone();
@@ -17102,7 +19923,12 @@ mod tests {
     #[test]
     fn matmul_square_weight_preserves_dims() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("sq_w".into(), safetensors::Dtype::F32, vec![64, 64], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "sq_w".into(),
+            safetensors::Dtype::F32,
+            vec![64, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("sq_w".into(), w);
         let onnx = OnnxGraph {
@@ -17116,7 +19942,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -17126,7 +19957,9 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
+        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64);
             assert_eq!(*k, 64);
             assert_eq!(*n, *k, "Square weight should have n == k");
@@ -17138,8 +19971,18 @@ mod tests {
     #[test]
     fn gemmbias_bias_is_third_input_id() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("gb_w".into(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let b = OnnxTensor::new("gb_b".into(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "gb_w".into(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let b = OnnxTensor::new(
+            "gb_b".into(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gb_w".into(), w);
         init.insert("gb_b".into(), b);
@@ -17154,7 +19997,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -17164,10 +20012,21 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm_bias = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. })).expect("should exist");
+        let gemm_bias = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .expect("should exist");
         assert_eq!(gemm_bias.inputs.len(), 3);
-        let bias_tensor = graph.tensors.iter().find(|t| t.name == "gb_b").expect("bias should exist");
-        assert_eq!(gemm_bias.inputs[2], bias_tensor.id, "Third input should be bias tensor");
+        let bias_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "gb_b")
+            .expect("bias should exist");
+        assert_eq!(
+            gemm_bias.inputs[2], bias_tensor.id,
+            "Third input should be bias tensor"
+        );
     }
 
     // ── Graph with initializer-only: all tensors have no producer ────
@@ -17175,7 +20034,12 @@ mod tests {
     #[test]
     fn initializer_only_all_tensors_no_producer() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w_np".into(), safetensors::Dtype::F32, vec![10, 20], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w_np".into(),
+            safetensors::Dtype::F32,
+            vec![10, 20],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w_np".into(), w);
         let onnx = OnnxGraph {
@@ -17193,7 +20057,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         for t in &graph.tensors {
-            assert!(t.producer.is_none(), "Initializer tensor {} should have no producer", t.name);
+            assert!(
+                t.producer.is_none(),
+                "Initializer tensor {} should have no producer",
+                t.name
+            );
         }
     }
 
@@ -17221,7 +20089,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // The MatMul should find sig_mapped in tensor_map (mapped to qk_sum's tensor ID)
-        let gemm = graph.ops.iter().find(|op| op.label == "mm_after_sig").expect("should exist");
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mm_after_sig")
+            .expect("should exist");
         assert_eq!(gemm.inputs.len(), 2);
     }
 
@@ -17229,10 +20101,11 @@ mod tests {
 
     #[test]
     fn onnx_type_sequence_debug_output() {
-        let seq = types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
-            elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![] },
-        })));
+        let seq =
+            types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: types::OnnxTensorShape { dims: vec![] },
+            })));
         let debug = format!("{seq:?}");
         assert!(!debug.is_empty());
     }
@@ -17276,8 +20149,18 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "def1").expect("should exist");
-        assert!(matches!(&t.shape[0], SymDim::Symbolic { max_value: Some(1), .. }));
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "def1")
+            .expect("should exist");
+        assert!(matches!(
+            &t.shape[0],
+            SymDim::Symbolic {
+                max_value: Some(1),
+                ..
+            }
+        ));
     }
 
     // ── OnnxDim: Param with whitespace name ──────────────────────────
@@ -17317,7 +20200,12 @@ mod tests {
     #[test]
     fn gemm_2d_weight_is_valid() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w_2d".into(), safetensors::Dtype::F32, vec![4, 8], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w_2d".into(),
+            safetensors::Dtype::F32,
+            vec![4, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w_2d".into(), w);
         let onnx = OnnxGraph {
@@ -17331,7 +20219,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -17341,7 +20234,9 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
+        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 4);
             assert_eq!(*k, 8);
         }
@@ -17363,7 +20258,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_op = graph.ops.iter().find(|op| op.label == "mul_fresh").expect("should exist");
+        let mul_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mul_fresh")
+            .expect("should exist");
         assert_eq!(mul_op.inputs.len(), 2);
         // Both fresh inputs should have been created as tensors
         assert!(graph.tensors.iter().any(|t| t.name == "fresh_a"));
@@ -17422,7 +20321,12 @@ mod tests {
     #[test]
     fn rms_norm_very_large_epsilon() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("rn_big".into(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "rn_big".into(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("rn_big".into(), scale);
         onnx.nodes.push(OnnxNode {
@@ -17433,21 +20337,32 @@ mod tests {
             outputs: vec!["big_out".into()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".into(), attributes::OnnxAttribute {
-                    name: "epsilon".into(),
-                    value: attributes::OnnxAttributeValue::Float(1e10),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".into(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".into(),
+                        value: attributes::OnnxAttributeValue::Float(1e10),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        if let Some(norm) = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })) {
-            if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-                assert!((eps - 1e10).abs() < 1.0, "Large epsilon should be preserved");
+        if let Some(norm) = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+        {
+            if let Op::RmsNorm(spec) = &norm.op_v2 {
+                let eps = &spec.eps;
+                assert!(
+                    (eps - 1e10).abs() < 1.0,
+                    "Large epsilon should be preserved"
+                );
             }
         }
     }
@@ -17457,8 +20372,18 @@ mod tests {
     #[test]
     fn layer_norm_zero_epsilon() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_zs".into(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_zb".into(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_zs".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_zb".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ln_zs".into(), scale);
         onnx.initializers.insert("ln_zb".into(), bias);
@@ -17470,21 +20395,29 @@ mod tests {
             outputs: vec!["ln_z_out".into()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".into(), attributes::OnnxAttribute {
-                    name: "epsilon".into(),
-                    value: attributes::OnnxAttributeValue::Float(0.0),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".into(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".into(),
+                        value: attributes::OnnxAttributeValue::Float(0.0),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        if let Some(ln) = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })) {
-            if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-                assert_eq!(eps, 0.0, "Zero epsilon should be preserved");
+        if let Some(ln) = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+        {
+            if let Op::LayerNorm(spec) = &ln.op_v2 {
+                let eps = &spec.eps;
+                assert_eq!(*eps, 0.0, "Zero epsilon should be preserved");
             }
         }
     }
@@ -17502,20 +20435,27 @@ mod tests {
             outputs: vec!["rev4_out".into()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".into(), attributes::OnnxAttribute {
-                    name: "perm".into(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![3, 2, 1, 0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".into(),
+                    attributes::OnnxAttribute {
+                        name: "perm".into(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![3, 2, 1, 0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let trans = graph.ops.iter().find(|op| op.label == "trans_rev4").expect("should exist");
-        if let OpKind::Transpose { perm } = &trans.kind {
+        let trans = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "trans_rev4")
+            .expect("should exist");
+        if let Op::Transpose { perm } = &trans.op_v2 {
             assert_eq!(*perm, vec![3, 2, 1, 0]);
         }
     }
@@ -17525,9 +20465,24 @@ mod tests {
     #[test]
     fn graph_multiple_inputs_all_registered() {
         let inputs = vec![
-            model::OnnxValueInfo { name: "a".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() },
-            model::OnnxValueInfo { name: "b".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() },
-            model::OnnxValueInfo { name: "c".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() },
+            model::OnnxValueInfo {
+                name: "a".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            },
+            model::OnnxValueInfo {
+                name: "b".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            },
+            model::OnnxValueInfo {
+                name: "c".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            },
         ];
         let onnx = OnnxGraph {
             name: "multi_in".into(),
@@ -17543,9 +20498,18 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        assert!(graph.tensors.iter().any(|t| t.name == "a"), "input 'a' should be registered");
-        assert!(graph.tensors.iter().any(|t| t.name == "b"), "input 'b' should be registered");
-        assert!(graph.tensors.iter().any(|t| t.name == "c"), "input 'c' should be registered");
+        assert!(
+            graph.tensors.iter().any(|t| t.name == "a"),
+            "input 'a' should be registered"
+        );
+        assert!(
+            graph.tensors.iter().any(|t| t.name == "b"),
+            "input 'b' should be registered"
+        );
+        assert!(
+            graph.tensors.iter().any(|t| t.name == "c"),
+            "input 'c' should be registered"
+        );
     }
 
     // ── OnnxAttributeValue: all variants can be constructed ──────────
@@ -17555,17 +20519,33 @@ mod tests {
         let _float = attributes::OnnxAttributeValue::Float(1.0);
         let _int = attributes::OnnxAttributeValue::Int(42);
         let _string = attributes::OnnxAttributeValue::String("s".into());
-        let _tensor = attributes::OnnxAttributeValue::Tensor(super::super::tensor::OnnxTensor::new("t".into(), safetensors::Dtype::F32, vec![1], prost::bytes::Bytes::new()));
+        let _tensor =
+            attributes::OnnxAttributeValue::Tensor(super::super::tensor::OnnxTensor::new(
+                "t".into(),
+                safetensors::Dtype::F32,
+                vec![1],
+                prost::bytes::Bytes::new(),
+            ));
         let _graph_val = attributes::OnnxAttributeValue::Graph(Box::new(OnnxGraph {
-            name: "g".into(), doc_string: String::new(), nodes: vec![], inputs: vec![], outputs: vec![], value_info: vec![], initializers: HashMap::new(), sparse_initializers: vec![], quantization_annotation: vec![], metadata_props: HashMap::new(),
+            name: "g".into(),
+            doc_string: String::new(),
+            nodes: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            value_info: vec![],
+            initializers: HashMap::new(),
+            sparse_initializers: vec![],
+            quantization_annotation: vec![],
+            metadata_props: HashMap::new(),
         }));
         let _floats = attributes::OnnxAttributeValue::Floats(vec![1.0]);
         let _ints = attributes::OnnxAttributeValue::Ints(vec![1]);
         let _strings = attributes::OnnxAttributeValue::Strings(vec!["s".into()]);
-        let _type_val = attributes::OnnxAttributeValue::Type(types::OnnxType::Tensor(types::OnnxTensorType {
-            elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![] },
-        }));
+        let _type_val =
+            attributes::OnnxAttributeValue::Type(types::OnnxType::Tensor(types::OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: types::OnnxTensorShape { dims: vec![] },
+            }));
         let _ref_val = attributes::OnnxAttributeValue::Ref("r".into());
     }
 
@@ -17577,7 +20557,9 @@ mod tests {
             name: "intermediate".into(),
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
-                shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(64)] },
+                shape: types::OnnxTensorShape {
+                    dims: vec![types::OnnxDim::Known(64)],
+                },
             })),
             doc_string: String::new(),
             metadata_props: HashMap::new(),
@@ -17606,8 +20588,22 @@ mod tests {
             name: "multi_bad".into(),
             doc_string: String::new(),
             nodes: vec![
-                OnnxNode { name: "bad1".into(), op_type: "Foo".into(), domain: String::new(), inputs: vec![], outputs: vec!["o1".into()], attributes: HashMap::new() },
-                OnnxNode { name: "bad2".into(), op_type: "Bar".into(), domain: String::new(), inputs: vec![], outputs: vec!["o2".into()], attributes: HashMap::new() },
+                OnnxNode {
+                    name: "bad1".into(),
+                    op_type: "Foo".into(),
+                    domain: String::new(),
+                    inputs: vec![],
+                    outputs: vec!["o1".into()],
+                    attributes: HashMap::new(),
+                },
+                OnnxNode {
+                    name: "bad2".into(),
+                    op_type: "Bar".into(),
+                    domain: String::new(),
+                    inputs: vec![],
+                    outputs: vec!["o2".into()],
+                    attributes: HashMap::new(),
+                },
             ],
             inputs: vec![],
             outputs: vec![],
@@ -17619,8 +20615,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
-        assert!(matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Foo"),
-            "First unsupported op should be reported");
+        assert!(
+            matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Foo"),
+            "First unsupported op should be reported"
+        );
     }
 
     // ── Gemm with very large weight dimensions ───────────────────────
@@ -17628,7 +20626,12 @@ mod tests {
     #[test]
     fn gemm_very_large_weight() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("huge_w".into(), safetensors::Dtype::F32, vec![10000, 5000], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "huge_w".into(),
+            safetensors::Dtype::F32,
+            vec![10000, 5000],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("huge_w".into(), w);
         let onnx = OnnxGraph {
@@ -17642,7 +20645,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -17652,7 +20660,9 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
+        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 10000);
             assert_eq!(*k, 5000);
         }
@@ -17673,11 +20683,13 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let rm_out = graph.tensors.iter().find(|t| t.name == "rm_out").expect("should exist");
+        let rm_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "rm_out")
+            .expect("should exist");
         assert_eq!(rm_out.shape.len(), 1, "ReduceMean output should be 1-D");
     }
-
-
 
     // ── SymDim max_value propagation for initializer-free graph ──────
 
@@ -17708,7 +20720,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "sym_in").expect("should exist");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "sym_in")
+            .expect("should exist");
         if let SymDim::Symbolic { name, max_value } = &t.shape[0] {
             assert_eq!(name, "seq");
             assert_eq!(*max_value, Some(8192));
@@ -17735,7 +20751,12 @@ mod tests {
     #[test]
     fn single_matmul_correct_structure() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".into(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".into(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".into(), w);
         let onnx = OnnxGraph {
@@ -17749,8 +20770,18 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "y".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "y".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -17797,7 +20828,10 @@ mod tests {
     #[test]
     fn convert_error_send_sync_static() {
         fn assert_bounds<T: Send + Sync + 'static>(_: &T) {}
-        let err = ConvertError::UnsupportedOp { op_type: "X".into(), node_name: "N".into() };
+        let err = ConvertError::UnsupportedOp {
+            op_type: "X".into(),
+            node_name: "N".into(),
+        };
         assert_bounds(&err);
     }
 
@@ -17851,7 +20885,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "six_d").expect("should exist");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "six_d")
+            .expect("should exist");
         assert_eq!(t.shape.len(), 6);
         assert!(matches!(&t.shape[5], SymDim::Concrete(7)));
     }
@@ -17861,7 +20899,12 @@ mod tests {
     #[test]
     fn gather_indices_kind_default_value() {
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tk".into(), safetensors::Dtype::F32, vec![100, 32], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tk".into(),
+            safetensors::Dtype::F32,
+            vec![100, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tk".into(), table);
         let onnx = OnnxGraph {
@@ -17875,7 +20918,12 @@ mod tests {
                 outputs: vec!["out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "ids".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -17885,10 +20933,19 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("should exist");
-        if let OpKind::Gather { indices_kind, .. } = &gather.kind {
-            assert!(matches!(indices_kind, gllm_kernels::compiler::graph::GatherIndicesKind::Tensor),
-                "indices_kind should be Tensor (default) variant");
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("should exist");
+        if let Op::Gather { indices_kind, .. } = &gather.op_v2 {
+            assert!(
+                matches!(
+                    indices_kind,
+                    gllm_kernels::compiler::graph::GatherIndicesKind::Tensor
+                ),
+                "indices_kind should be Tensor (default) variant"
+            );
         }
     }
 
@@ -17907,8 +20964,12 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let reshape = graph.ops.iter().find(|op| op.label == "rs_empty").expect("should exist");
-        if let OpKind::Reshape { target_shape } = &reshape.kind {
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "rs_empty")
+            .expect("should exist");
+        if let Op::Reshape { target_shape } = &reshape.op_v2 {
             assert!(target_shape.is_empty());
         }
     }
@@ -17918,7 +20979,12 @@ mod tests {
     #[test]
     fn gemm_output_tensor_has_producer_set() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("gw_prod".into(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "gw_prod".into(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gw_prod".into(), w);
         let onnx = OnnxGraph {
@@ -17932,8 +20998,18 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "y".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "y".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -17942,8 +21018,15 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y").expect("should exist");
-        assert!(y_tensor.producer.is_some(), "Gemm output should have a producer");
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
+            .expect("should exist");
+        assert!(
+            y_tensor.producer.is_some(),
+            "Gemm output should have a producer"
+        );
     }
 
     // ── MatMul: 4D weight returns error ──────────────────────────────
@@ -17951,7 +21034,12 @@ mod tests {
     #[test]
     fn matmul_4d_weight_returns_error() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w4d".into(), safetensors::Dtype::F32, vec![2, 3, 4, 5], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w4d".into(),
+            safetensors::Dtype::F32,
+            vec![2, 3, 4, 5],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w4d".into(), w);
         let onnx = OnnxGraph {
@@ -17965,7 +21053,12 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -17976,7 +21069,10 @@ mod tests {
         let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::InvalidMatMulShape { dims: 4, .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConvertError::InvalidMatMulShape { dims: 4, .. }
+        ));
     }
 
     // ── Graph inputs exclude output tensors ──────────────────────────
@@ -17989,7 +21085,10 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let output_ids: std::collections::HashSet<_> = graph.outputs.iter().collect();
         for input_id in &graph.inputs {
-            assert!(!output_ids.contains(input_id), "Graph inputs should not contain output tensor IDs");
+            assert!(
+                !output_ids.contains(input_id),
+                "Graph inputs should not contain output tensor IDs"
+            );
         }
     }
 
@@ -18030,9 +21129,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let softmax_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Softmax)).collect();
+        let softmax_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Softmax))
+            .collect();
         assert_eq!(softmax_ops.len(), 2);
-        assert_ne!(softmax_ops[0].outputs[0], softmax_ops[1].outputs[0], "Different Softmax ops should produce different outputs");
+        assert_ne!(
+            softmax_ops[0].outputs[0], softmax_ops[1].outputs[0],
+            "Different Softmax ops should produce different outputs"
+        );
     }
 
     // ── Conversion: empty onnx graph is idempotent ───────────────────
@@ -18274,8 +21380,8 @@ mod tests {
 
     #[test]
     fn onnx_sparse_format_hash_consistency() {
-        use std::collections::HashSet;
         use super::super::tensor::OnnxSparseFormat;
+        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(OnnxSparseFormat::Coo);
         assert!(set.contains(&OnnxSparseFormat::Coo));
@@ -18347,7 +21453,10 @@ mod tests {
         );
         let val = t.scalar_f32();
         assert!(val.is_some(), "BF16 scalar_f32 should return Some");
-        assert!((val.unwrap() - 1.0f32).abs() < 0.01, "BF16 1.0 should decode to ~1.0");
+        assert!(
+            (val.unwrap() - 1.0f32).abs() < 0.01,
+            "BF16 1.0 should decode to ~1.0"
+        );
     }
 
     // ── OnnxTensor scalar_i64 from I64 dtype ─────────────────────────
@@ -18380,7 +21489,8 @@ mod tests {
 
     #[test]
     fn onnx_tensor_scalar_f32_none_for_2_elements() {
-        let data: Vec<u8> = [1.0f32, 2.0f32].iter()
+        let data: Vec<u8> = [1.0f32, 2.0f32]
+            .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
         let t = super::super::tensor::OnnxTensor::new(
@@ -18389,14 +21499,19 @@ mod tests {
             vec![2],
             data.into(),
         );
-        assert_eq!(t.scalar_f32(), None, "Multi-element tensor should return None for scalar_f32");
+        assert_eq!(
+            t.scalar_f32(),
+            None,
+            "Multi-element tensor should return None for scalar_f32"
+        );
     }
 
     // ── OnnxTensor scalar_i64 none for multi-element ──────────────────
 
     #[test]
     fn onnx_tensor_scalar_i64_none_for_2_elements() {
-        let data: Vec<u8> = [10_i64, 20_i64].iter()
+        let data: Vec<u8> = [10_i64, 20_i64]
+            .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
         let t = super::super::tensor::OnnxTensor::new(
@@ -18405,7 +21520,11 @@ mod tests {
             vec![2],
             data.into(),
         );
-        assert_eq!(t.scalar_i64(), None, "Multi-element tensor should return None for scalar_i64");
+        assert_eq!(
+            t.scalar_i64(),
+            None,
+            "Multi-element tensor should return None for scalar_i64"
+        );
     }
 
     // ── OnnxTensor scalar_f32 none for empty data ────────────────────
@@ -18418,7 +21537,11 @@ mod tests {
             vec![0],
             prost::bytes::Bytes::new(),
         );
-        assert_eq!(t.scalar_f32(), None, "Empty data should return None for scalar_f32");
+        assert_eq!(
+            t.scalar_f32(),
+            None,
+            "Empty data should return None for scalar_f32"
+        );
     }
 
     // ── OnnxTensor scalar_i64 none for empty data ────────────────────
@@ -18431,7 +21554,11 @@ mod tests {
             vec![0],
             prost::bytes::Bytes::new(),
         );
-        assert_eq!(t.scalar_i64(), None, "Empty data should return None for scalar_i64");
+        assert_eq!(
+            t.scalar_i64(),
+            None,
+            "Empty data should return None for scalar_i64"
+        );
     }
 
     // ── OnnxTensor is_string flag via new ─────────────────────────────
@@ -18503,7 +21630,10 @@ mod tests {
             prost::bytes::Bytes::new(),
         );
         let debug = format!("{t:?}");
-        assert!(debug.contains("debug_t"), "Debug should contain tensor name");
+        assert!(
+            debug.contains("debug_t"),
+            "Debug should contain tensor name"
+        );
     }
 
     // ── ConvertError UnsupportedOp with empty strings ─────────────────
@@ -18516,7 +21646,10 @@ mod tests {
         };
         let msg = err.to_string();
         // Should not panic, just produce a message with empty fields
-        assert!(!msg.is_empty(), "Display should produce non-empty output even with empty strings");
+        assert!(
+            !msg.is_empty(),
+            "Display should produce non-empty output even with empty strings"
+        );
     }
 
     // ── ConvertError MissingInitializer with empty name ───────────────
@@ -18554,7 +21687,10 @@ mod tests {
         };
         let first = err.to_string();
         let second = err.to_string();
-        assert_eq!(first, second, "ShapeInferenceFailed Display should be deterministic");
+        assert_eq!(
+            first, second,
+            "ShapeInferenceFailed Display should be deterministic"
+        );
     }
 
     // ── infer_shape from 6-dimensional tensor ─────────────────────────
@@ -18593,11 +21729,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "tensor_6d")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "tensor_6d")
             .expect("tensor_6d should be registered");
         assert_eq!(t.shape.len(), 6);
         for (i, dim) in t.shape.iter().enumerate() {
-            assert!(matches!(dim, SymDim::Concrete(_)), "Dim {i} should be Concrete");
+            assert!(
+                matches!(dim, SymDim::Concrete(_)),
+                "Dim {i} should be Concrete"
+            );
         }
     }
 
@@ -18610,7 +21752,11 @@ mod tests {
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape {
-                    dims: vec![types::OnnxDim::Unknown, types::OnnxDim::Unknown, types::OnnxDim::Unknown],
+                    dims: vec![
+                        types::OnnxDim::Unknown,
+                        types::OnnxDim::Unknown,
+                        types::OnnxDim::Unknown,
+                    ],
                 },
             })),
             doc_string: String::new(),
@@ -18630,11 +21776,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.tensors.iter().find(|t| t.name == "all_unknown")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "all_unknown")
             .expect("all_unknown should be registered");
         assert_eq!(t.shape.len(), 3);
         for dim in &t.shape {
-            assert!(matches!(dim, SymDim::Symbolic { .. }), "All unknown dims should become Symbolic");
+            assert!(
+                matches!(dim, SymDim::Symbolic { .. }),
+                "All unknown dims should become Symbolic"
+            );
         }
     }
 
@@ -18646,12 +21798,15 @@ mod tests {
         let mut init = HashMap::new();
         for i in 0..5 {
             let name = format!("w_{i}");
-            init.insert(name.clone(), OnnxTensor::new(
-                name,
-                safetensors::Dtype::F32,
-                vec![i + 1, (i + 1) * 2],
-                prost::bytes::Bytes::new(),
-            ));
+            init.insert(
+                name.clone(),
+                OnnxTensor::new(
+                    name,
+                    safetensors::Dtype::F32,
+                    vec![i + 1, (i + 1) * 2],
+                    prost::bytes::Bytes::new(),
+                ),
+            );
         }
         let onnx = OnnxGraph {
             name: "many_init".to_string(),
@@ -18669,10 +21824,15 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         for i in 0..5 {
             let name = format!("w_{i}");
-            let t = graph.tensors.iter().find(|t| t.name == name)
+            let t = graph
+                .tensors
+                .iter()
+                .find(|t| t.name == name)
                 .unwrap_or_else(|| panic!("{name} should be registered"));
-            assert!(t.shape.iter().all(|d| matches!(d, SymDim::Concrete(_))),
-                "Initializer shapes should all be Concrete");
+            assert!(
+                t.shape.iter().all(|d| matches!(d, SymDim::Concrete(_))),
+                "Initializer shapes should all be Concrete"
+            );
         }
     }
 
@@ -18699,8 +21859,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
-        let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .count();
+        let add_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .count();
         assert_eq!(mul_count, 1, "Div should produce 1 Mul");
         assert_eq!(add_count, 2, "Should have 2 Add ops (original + new)");
     }
@@ -18728,7 +21896,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce 1 Mul op");
     }
 
@@ -18757,12 +21929,21 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Sigmoid is passthrough (no op), Silu adds 1 op
         assert_eq!(graph.ops.len(), 5, "Should have 4 original + 1 Silu");
-        let silu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Silu))
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Silu))
             .expect("Should have Silu op");
         // Silu consumes the same tensor as qk_sum (passthrough)
-        let qk_sum = graph.tensors.iter().find(|t| t.name == "qk_sum")
+        let qk_sum = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "qk_sum")
             .expect("qk_sum should exist");
-        assert_eq!(silu.inputs[0], qk_sum.id, "Silu should consume qk_sum via passthrough");
+        assert_eq!(
+            silu.inputs[0], qk_sum.id,
+            "Silu should consume qk_sum via passthrough"
+        );
     }
 
     // ── Graph with only passthrough ops produces no new ops ───────────
@@ -18798,7 +21979,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        assert_eq!(graph.ops.len(), 0, "All passthrough ops should produce 0 ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "All passthrough ops should produce 0 ops"
+        );
     }
 
     // ── OnnxType Sequence equality ─────────────────────────────────────
@@ -18807,7 +21992,9 @@ mod tests {
     fn onnx_type_sequence_equal() {
         let inner = types::OnnxType::Tensor(types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(10)],
+            },
         });
         let s1 = types::OnnxType::Sequence(Box::new(inner.clone()));
         let s2 = types::OnnxType::Sequence(Box::new(inner));
@@ -18831,19 +22018,20 @@ mod tests {
 
     #[test]
     fn onnx_type_optional_different_inner() {
-        let o1 = types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(
-            types::OnnxTensorType {
+        let o1 =
+            types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape { dims: vec![] },
-            },
-        )));
-        let o2 = types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(
-            types::OnnxTensorType {
+            })));
+        let o2 =
+            types::OnnxType::Optional(Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Int64,
                 shape: types::OnnxTensorShape { dims: vec![] },
-            },
-        )));
-        assert_ne!(o1, o2, "Optional with different inner types should not be equal");
+            })));
+        assert_ne!(
+            o1, o2,
+            "Optional with different inner types should not be equal"
+        );
     }
 
     // ── OnnxMapType different key_type not equal ──────────────────────
@@ -18864,7 +22052,10 @@ mod tests {
                 shape: types::OnnxTensorShape { dims: vec![] },
             })),
         };
-        assert_ne!(m1, m2, "Map types with different key_type should not be equal");
+        assert_ne!(
+            m1, m2,
+            "Map types with different key_type should not be equal"
+        );
     }
 
     // ── OnnxType clone preserves variant ──────────────────────────────
@@ -18923,20 +22114,32 @@ mod tests {
     fn onnx_attr_value_sparse_tensors_with_entries() {
         let s1 = super::super::tensor::OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
-                "v1".to_string(), safetensors::Dtype::F32, vec![1], prost::bytes::Bytes::new(),
+                "v1".to_string(),
+                safetensors::Dtype::F32,
+                vec![1],
+                prost::bytes::Bytes::new(),
             ),
             indices: super::super::tensor::OnnxTensor::new(
-                "i1".to_string(), safetensors::Dtype::I64, vec![1], prost::bytes::Bytes::new(),
+                "i1".to_string(),
+                safetensors::Dtype::I64,
+                vec![1],
+                prost::bytes::Bytes::new(),
             ),
             dims: vec![2],
             format: super::super::tensor::OnnxSparseFormat::Coo,
         };
         let s2 = super::super::tensor::OnnxSparseTensor {
             values: super::super::tensor::OnnxTensor::new(
-                "v2".to_string(), safetensors::Dtype::F32, vec![2], prost::bytes::Bytes::new(),
+                "v2".to_string(),
+                safetensors::Dtype::F32,
+                vec![2],
+                prost::bytes::Bytes::new(),
             ),
             indices: super::super::tensor::OnnxTensor::new(
-                "i2".to_string(), safetensors::Dtype::I64, vec![2], prost::bytes::Bytes::new(),
+                "i2".to_string(),
+                safetensors::Dtype::I64,
+                vec![2],
+                prost::bytes::Bytes::new(),
             ),
             dims: vec![3],
             format: super::super::tensor::OnnxSparseFormat::Csr,
@@ -18963,7 +22166,9 @@ mod tests {
     fn onnx_attr_value_types_multiple_entries() {
         let t1 = types::OnnxType::Tensor(types::OnnxTensorType {
             elem_type: proto::tensor_proto::DataType::Float,
-            shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(10)] },
+            shape: types::OnnxTensorShape {
+                dims: vec![types::OnnxDim::Known(10)],
+            },
         });
         let t2 = types::OnnxType::Map(types::OnnxMapType {
             key_type: proto::tensor_proto::DataType::Int64,
@@ -18995,16 +22200,14 @@ mod tests {
         let inner = OnnxGraph {
             name: "if_body".to_string(),
             doc_string: "then branch".to_string(),
-            nodes: vec![
-                OnnxNode {
-                    name: "inner_add".to_string(),
-                    op_type: "Add".to_string(),
-                    domain: String::new(),
-                    inputs: vec!["a".to_string(), "b".to_string()],
-                    outputs: vec!["c".to_string()],
-                    attributes: HashMap::new(),
-                },
-            ],
+            nodes: vec![OnnxNode {
+                name: "inner_add".to_string(),
+                op_type: "Add".to_string(),
+                domain: String::new(),
+                inputs: vec!["a".to_string(), "b".to_string()],
+                outputs: vec!["c".to_string()],
+                attributes: HashMap::new(),
+            }],
             inputs: vec![],
             outputs: vec![],
             value_info: vec![],
@@ -19055,7 +22258,10 @@ mod tests {
             ref_attr_name: None,
             attr_type: Some(proto::attribute_proto::AttributeType::Ints),
         };
-        assert_eq!(attr.attr_type, Some(proto::attribute_proto::AttributeType::Ints));
+        assert_eq!(
+            attr.attr_type,
+            Some(proto::attribute_proto::AttributeType::Ints)
+        );
     }
 
     // ── OnnxQuantizationAnnotation clone ───────────────────────────────
@@ -19085,13 +22291,16 @@ mod tests {
     #[test]
     fn onnx_function_with_attr_protos() {
         let mut protos = HashMap::new();
-        protos.insert("alpha".to_string(), attributes::OnnxAttribute {
-            name: "alpha".to_string(),
-            value: attributes::OnnxAttributeValue::Float(0.5),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        protos.insert(
+            "alpha".to_string(),
+            attributes::OnnxAttribute {
+                name: "alpha".to_string(),
+                value: attributes::OnnxAttributeValue::Float(0.5),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let func = model::OnnxFunction {
             name: "ScaledAdd".to_string(),
             domain: "custom".to_string(),
@@ -19108,7 +22317,9 @@ mod tests {
         };
         assert_eq!(func.attribute_protos.len(), 1);
         let alpha = func.attribute_protos.get("alpha").unwrap();
-        assert!(matches!(&alpha.value, attributes::OnnxAttributeValue::Float(v) if (*v - 0.5).abs() < f32::EPSILON));
+        assert!(
+            matches!(&alpha.value, attributes::OnnxAttributeValue::Float(v) if (*v - 0.5).abs() < f32::EPSILON)
+        );
     }
 
     // ── OnnxModelMetadata with all fields populated ────────────────────
@@ -19123,8 +22334,14 @@ mod tests {
             model_version: 999,
             doc_string: "full metadata".to_string(),
             opset_import: vec![
-                model::OnnxOperatorSet { domain: "ai.onnx".to_string(), version: 21 },
-                model::OnnxOperatorSet { domain: "ai.onnx.ml".to_string(), version: 5 },
+                model::OnnxOperatorSet {
+                    domain: "ai.onnx".to_string(),
+                    version: 21,
+                },
+                model::OnnxOperatorSet {
+                    domain: "ai.onnx.ml".to_string(),
+                    version: 5,
+                },
             ],
             metadata_props: {
                 let mut m = HashMap::new();
@@ -19156,8 +22373,18 @@ mod tests {
     #[test]
     fn gemmbias_transb_with_bias() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("wt".to_string(), safetensors::Dtype::F32, vec![16, 32], prost::bytes::Bytes::new());
-        let b = OnnxTensor::new("bias_t".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "wt".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let b = OnnxTensor::new(
+            "bias_t".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("wt".to_string(), w);
         init.insert("bias_t".to_string(), b);
@@ -19172,13 +22399,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -19197,10 +22427,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let gemm_bias = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
-        assert_eq!(gemm_bias.inputs.len(), 3, "GemmBias with transB should have 3 inputs");
+        assert_eq!(
+            gemm_bias.inputs.len(),
+            3,
+            "GemmBias with transB should have 3 inputs"
+        );
     }
 
     // ── detect_dtype with multiple different initializers uses first ───
@@ -19210,12 +22446,24 @@ mod tests {
         use super::super::tensor::OnnxTensor;
         let mut init = HashMap::new();
         // HashMap iteration order is not guaranteed, but the first value() should determine dtype
-        init.insert("bf16_w".to_string(), OnnxTensor::new(
-            "bf16_w".to_string(), safetensors::Dtype::BF16, vec![4, 4], prost::bytes::Bytes::new(),
-        ));
-        init.insert("f32_w".to_string(), OnnxTensor::new(
-            "f32_w".to_string(), safetensors::Dtype::F32, vec![4, 4], prost::bytes::Bytes::new(),
-        ));
+        init.insert(
+            "bf16_w".to_string(),
+            OnnxTensor::new(
+                "bf16_w".to_string(),
+                safetensors::Dtype::BF16,
+                vec![4, 4],
+                prost::bytes::Bytes::new(),
+            ),
+        );
+        init.insert(
+            "f32_w".to_string(),
+            OnnxTensor::new(
+                "f32_w".to_string(),
+                safetensors::Dtype::F32,
+                vec![4, 4],
+                prost::bytes::Bytes::new(),
+            ),
+        );
         let graph = OnnxGraph {
             name: "multi_dtype".to_string(),
             doc_string: String::new(),
@@ -19230,8 +22478,10 @@ mod tests {
         };
         let dtype = detect_dtype(&graph);
         // Should be either BF16 or F32 depending on HashMap iteration order
-        assert!(matches!(dtype, DType::BF16 | DType::F32),
-            "detect_dtype should return a valid dtype from initializers");
+        assert!(
+            matches!(dtype, DType::BF16 | DType::F32),
+            "detect_dtype should return a valid dtype from initializers"
+        );
     }
 
     // ── MatMul output tensor has symbolic seq_dim ──────────────────────
@@ -19239,7 +22489,12 @@ mod tests {
     #[test]
     fn matmul_output_has_symbolic_seq_dim() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("mw".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "mw".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("mw".to_string(), w);
         let onnx = OnnxGraph {
@@ -19268,7 +22523,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let y = graph.tensors.iter().find(|t| t.name == "y")
+        let y = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y tensor should exist");
         assert_eq!(y.shape.len(), 2, "MatMul output should be 2D");
         assert!(
@@ -19283,7 +22541,12 @@ mod tests {
     #[test]
     fn gather_output_shape_is_symbolic_seq_embed() {
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("gt".to_string(), safetensors::Dtype::F32, vec![1000, 128], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "gt".to_string(),
+            safetensors::Dtype::F32,
+            vec![1000, 128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("gt".to_string(), table);
         let onnx = OnnxGraph {
@@ -19312,7 +22575,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
-        let emb = graph.tensors.iter().find(|t| t.name == "emb")
+        let emb = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "emb")
             .expect("emb tensor should exist");
         assert_eq!(emb.shape.len(), 2);
         assert!(
@@ -19337,11 +22603,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let pooled = graph.tensors.iter().find(|t| t.name == "pooled")
+        let pooled = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "pooled")
             .expect("pooled tensor should exist");
         assert_eq!(pooled.shape.len(), 1, "ReduceMean output should be 1D");
-        assert!(matches!(&pooled.shape[0], SymDim::Concrete(64)),
-            "Only dim should be hidden=64");
+        assert!(
+            matches!(&pooled.shape[0], SymDim::Concrete(64)),
+            "Only dim should be hidden=64"
+        );
     }
 
     // ── Multiple Softmax ops on same input ─────────────────────────────
@@ -19367,12 +22638,16 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let sm_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Softmax))
+        let sm_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Softmax))
             .collect();
         assert_eq!(sm_ops.len(), 2, "Should have 2 Softmax ops");
-        assert_ne!(sm_ops[0].outputs[0], sm_ops[1].outputs[0],
-            "Two Softmax ops should produce distinct output tensors");
+        assert_ne!(
+            sm_ops[0].outputs[0], sm_ops[1].outputs[0],
+            "Two Softmax ops should produce distinct output tensors"
+        );
     }
 
     // ── Where followed by Clip followed by MatMul ──────────────────────
@@ -19380,7 +22655,12 @@ mod tests {
     #[test]
     fn where_clip_matmul_chain() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("wcw".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "wcw".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("wcw".to_string(), w);
         let onnx = OnnxGraph {
@@ -19428,7 +22708,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Both Where and Clip are passthrough, only MatMul produces an op
-        assert_eq!(graph.ops.len(), 1, "Where+Clip passthrough + MatMul should produce 1 op");
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Where+Clip passthrough + MatMul should produce 1 op"
+        );
     }
 
     // ── Graph with value_info not processed as inputs ──────────────────
@@ -19446,7 +22730,9 @@ mod tests {
                     name: "inter1".to_string(),
                     value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                         elem_type: proto::tensor_proto::DataType::Float,
-                        shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(100)] },
+                        shape: types::OnnxTensorShape {
+                            dims: vec![types::OnnxDim::Known(100)],
+                        },
                     })),
                     doc_string: String::new(),
                     metadata_props: HashMap::new(),
@@ -19455,7 +22741,9 @@ mod tests {
                     name: "inter2".to_string(),
                     value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                         elem_type: proto::tensor_proto::DataType::Int32,
-                        shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(50)] },
+                        shape: types::OnnxTensorShape {
+                            dims: vec![types::OnnxDim::Known(50)],
+                        },
                     })),
                     doc_string: String::new(),
                     metadata_props: HashMap::new(),
@@ -19490,7 +22778,10 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        assert!(g.doc_string.contains('\n'), "doc_string should preserve newlines");
+        assert!(
+            g.doc_string.contains('\n'),
+            "doc_string should preserve newlines"
+        );
         assert!(g.doc_string.starts_with("This"));
     }
 
@@ -19508,12 +22799,47 @@ mod tests {
                 ConvertError::ShapeInferenceFailed { .. } => "shape_fail".to_string(),
             }
         }
-        assert_eq!(classify(ConvertError::UnsupportedOp { op_type: "X".into(), node_name: "N".into() }), "unsupported");
-        assert_eq!(classify(ConvertError::MissingInitializer { name: "w".into(), node_name: "N".into() }), "missing");
-        assert_eq!(classify(ConvertError::InvalidMatMulShape { name: "W".into(), dims: 3 }), "bad_shape");
-        assert_eq!(classify(ConvertError::NoWeightInput { node_name: "mm".into() }), "no_weight");
-        assert_eq!(classify(ConvertError::AttributeError { node_name: "ln".into(), reason: "bad".into() }), "attr_err");
-        assert_eq!(classify(ConvertError::ShapeInferenceFailed { name: "t".into(), reason: "fail".into() }), "shape_fail");
+        assert_eq!(
+            classify(ConvertError::UnsupportedOp {
+                op_type: "X".into(),
+                node_name: "N".into()
+            }),
+            "unsupported"
+        );
+        assert_eq!(
+            classify(ConvertError::MissingInitializer {
+                name: "w".into(),
+                node_name: "N".into()
+            }),
+            "missing"
+        );
+        assert_eq!(
+            classify(ConvertError::InvalidMatMulShape {
+                name: "W".into(),
+                dims: 3
+            }),
+            "bad_shape"
+        );
+        assert_eq!(
+            classify(ConvertError::NoWeightInput {
+                node_name: "mm".into()
+            }),
+            "no_weight"
+        );
+        assert_eq!(
+            classify(ConvertError::AttributeError {
+                node_name: "ln".into(),
+                reason: "bad".into()
+            }),
+            "attr_err"
+        );
+        assert_eq!(
+            classify(ConvertError::ShapeInferenceFailed {
+                name: "t".into(),
+                reason: "fail".into()
+            }),
+            "shape_fail"
+        );
     }
 
     // ── Additional unit tests (wave-12x34) ─────────────────────────────────
@@ -19594,7 +22920,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        assert_eq!(graph.ops.len(), 5, "MatMul + Silu + Gelu + Tanh + Softmax = 5 ops");
+        assert_eq!(
+            graph.ops.len(),
+            5,
+            "MatMul + Silu + Gelu + Tanh + Softmax = 5 ops"
+        );
     }
 
     #[test]
@@ -19610,13 +22940,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                        name: "perm".to_string(),
-                        value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "perm".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "perm".to_string(),
+                            value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -19642,8 +22975,8 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 128).unwrap();
         assert_eq!(graph.ops.len(), 1);
         let op = &graph.ops[0];
-        match &op.kind {
-            OpKind::Transpose { perm } => {
+        match &op.op_v2 {
+            Op::Transpose { perm } => {
                 assert_eq!(*perm, vec![1, 0]);
             }
             other => panic!("expected Transpose, got {other:?}"),
@@ -19808,7 +23141,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let input_tensor = graph.tensors.iter().find(|t| t.name == "input_tensor")
+        let input_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "input_tensor")
             .expect("input_tensor should be registered");
         assert_eq!(input_tensor.shape.len(), 2);
         // First dim: Symbolic from Param("batch")
@@ -19860,7 +23196,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 1);
-        assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }), "should be Gemm not GemmBias");
+        assert!(
+            matches!(graph.ops[0].op_v2, Op::Gemm(..)),
+            "should be Gemm not GemmBias"
+        );
     }
 
     #[test]
@@ -19888,17 +23227,24 @@ mod tests {
                 name: "ln1".to_string(),
                 op_type: "LayerNormalization".to_string(),
                 domain: String::new(),
-                inputs: vec!["x".to_string(), "ln.weight".to_string(), "ln.bias".to_string()],
+                inputs: vec![
+                    "x".to_string(),
+                    "ln.weight".to_string(),
+                    "ln.bias".to_string(),
+                ],
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                        name: "epsilon".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(42),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "epsilon".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "epsilon".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(42),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -19917,11 +23263,18 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("should have LayerNorm op");
-        match ln_op.kind {
-            OpKind::LayerNorm { feature_dim: _, eps } => {
-                assert!((eps - 1e-5).abs() < 1e-10, "int epsilon should default to 1e-5, got {eps}");
+        match &ln_op.op_v2 {
+            Op::LayerNorm(spec) => {
+                let eps = &spec.eps;
+                assert!(
+                    (eps - 1e-5).abs() < 1e-10,
+                    "int epsilon should default to 1e-5, got {eps}"
+                );
             }
             ref other => panic!("expected LayerNorm, got {other:?}"),
         }
@@ -19949,13 +23302,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                        name: "epsilon".to_string(),
-                        value: attributes::OnnxAttributeValue::String("0.001".to_string()),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "epsilon".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "epsilon".to_string(),
+                            value: attributes::OnnxAttributeValue::String("0.001".to_string()),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -19974,11 +23330,18 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let rn_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let rn_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("should have RmsNorm op");
-        match rn_op.kind {
-            OpKind::RmsNorm { feature_dim: _, eps } => {
-                assert!((eps - 1e-5).abs() < 1e-10, "string epsilon should default to 1e-5, got {eps}");
+        match &rn_op.op_v2 {
+            Op::RmsNorm(spec) => {
+                let eps = &spec.eps;
+                assert!(
+                    (eps - 1e-5).abs() < 1e-10,
+                    "string epsilon should default to 1e-5, got {eps}"
+                );
             }
             ref other => panic!("expected RmsNorm, got {other:?}"),
         }
@@ -20064,8 +23427,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let mm = &graph.ops[0];
-        match &mm.kind {
-            OpKind::Gemm { n, k, .. } => {
+        match &mm.op_v2 {
+            Op::Gemm(spec) => {
+                let n = &spec.n;
+                let k = &spec.k;
                 assert_eq!(*n, 1, "n should be 1 from weight shape [1, 0]");
                 assert_eq!(*k, 0, "k should be 0 from weight shape [1, 0]");
             }
@@ -20098,7 +23463,10 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let tensor = graph.tensors.iter().find(|t| t.name == "my_weight")
+        let tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "my_weight")
             .expect("my_weight should be registered");
         assert_eq!(tensor.shape.len(), 2);
         assert!(matches!(&tensor.shape[0], SymDim::Concrete(128)));
@@ -20134,13 +23502,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -20160,9 +23531,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 1);
-        match &graph.ops[0].kind {
-            OpKind::GemmBias { n, k, .. } => {
-                // transB: weight [32, 64] → n=64, k=32
+        match &graph.ops[0].op_v2 {
+            Op::GemmBias(spec) => {
+                let n = &spec.n;
+                let k = &spec.k; // transB: weight [32, 64] → n=64, k=32
                 assert_eq!(*n, 64, "transB swaps: n = weight.shape[1]");
                 assert_eq!(*k, 32, "transB swaps: k = weight.shape[0]");
             }
@@ -20234,8 +23606,15 @@ mod tests {
         assert_eq!(graph.ops.len(), 1, "passthrough + MatMul = 1 op");
         let mm = &graph.ops[0];
         // Input tensor of MatMul should be the original x tensor (passthrough preserves tensor id)
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor");
-        assert_eq!(mm.inputs[0], x_tensor.id, "MatMul input should be x tensor id (passthrough)");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x tensor");
+        assert_eq!(
+            mm.inputs[0], x_tensor.id,
+            "MatMul input should be x tensor id (passthrough)"
+        );
     }
 
     #[test]
@@ -20307,10 +23686,18 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.outputs.len(), 2, "should have 2 graph outputs");
         // First output = tensor "a" from mm1
-        let a_tensor = graph.tensors.iter().find(|t| t.name == "a").expect("a tensor");
+        let a_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "a")
+            .expect("a tensor");
         assert_eq!(graph.outputs[0], a_tensor.id);
         // Second output = tensor "b" from mm2
-        let b_tensor = graph.tensors.iter().find(|t| t.name == "b").expect("b tensor");
+        let b_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "b")
+            .expect("b tensor");
         assert_eq!(graph.outputs[1], b_tensor.id);
     }
 
@@ -20356,10 +23743,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Where is passthrough: "c_out" maps to the same tensor as "x"
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor");
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
+            .expect("x tensor");
         assert_eq!(graph.outputs.len(), 1, "should have 1 graph output");
-        assert_eq!(graph.outputs[0], x_tensor.id,
-            "graph output should reference the tensor aliased by Where passthrough");
+        assert_eq!(
+            graph.outputs[0], x_tensor.id,
+            "graph output should reference the tensor aliased by Where passthrough"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -20386,9 +23779,12 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_op = graph.ops.iter().find(|op| op.label == "mul_scale")
+        let mul_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mul_scale")
             .expect("Should have mul_scale op");
-        assert!(matches!(mul_op.kind, OpKind::Mul), "Mul op kind should be Mul");
+        assert!(matches!(mul_op.op_v2, Op::Mul), "Mul op kind should be Mul");
         assert_eq!(mul_op.inputs.len(), 2, "Mul should have 2 inputs");
     }
 
@@ -20430,9 +23826,15 @@ mod tests {
         let graph = onnx_to_compiler_graph(&extended, &business, 2048).unwrap();
         // 4 original ops + 3 new = 7
         assert_eq!(graph.ops.len(), 7, "Should have 7 ops total");
-        let final_tensor = graph.tensors.iter().find(|t| t.name == "final_out")
+        let final_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "final_out")
             .expect("final_out tensor should exist");
-        assert!(final_tensor.producer.is_some(), "final_out should have a producer");
+        assert!(
+            final_tensor.producer.is_some(),
+            "final_out should have a producer"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -20469,9 +23871,12 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
             assert_eq!(*hidden, 48, "hidden should be Gather's embed_dim=48");
         }
     }
@@ -20516,9 +23921,14 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32);
             assert_eq!(*k, 64);
         }
@@ -20531,19 +23941,32 @@ mod tests {
     fn layer_norm_explicit_zero_epsilon_preserved() {
         use super::super::attributes::OnnxAttributeValue;
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("ln_s".to_string(), scale);
         init.insert("ln_b".to_string(), bias);
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), super::super::attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: OnnxAttributeValue::Float(0.0),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            super::super::attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: OnnxAttributeValue::Float(0.0),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "ln_zero_eps".to_string(),
             doc_string: String::new(),
@@ -20570,9 +23993,13 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = &ln.kind {
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
             assert_eq!(*eps, 0.0, "Explicit zero epsilon should be preserved");
         }
     }
@@ -20623,7 +24050,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 0, "Passthrough-only graph should have 0 ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Passthrough-only graph should have 0 ops"
+        );
         assert_eq!(graph.outputs.len(), 1, "Should have 1 graph output");
     }
 
@@ -20637,9 +24068,21 @@ mod tests {
         let g1 = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let g2 = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(g1.ops.len(), g2.ops.len(), "Op count should be identical");
-        assert_eq!(g1.tensors.len(), g2.tensors.len(), "Tensor count should be identical");
-        assert_eq!(g1.outputs.len(), g2.outputs.len(), "Output count should be identical");
-        assert_eq!(g1.inputs.len(), g2.inputs.len(), "Input count should be identical");
+        assert_eq!(
+            g1.tensors.len(),
+            g2.tensors.len(),
+            "Tensor count should be identical"
+        );
+        assert_eq!(
+            g1.outputs.len(),
+            g2.outputs.len(),
+            "Output count should be identical"
+        );
+        assert_eq!(
+            g1.inputs.len(),
+            g2.inputs.len(),
+            "Input count should be identical"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -20658,13 +24101,16 @@ mod tests {
         let mut init = HashMap::new();
         init.insert("wt".to_string(), w);
         let mut attrs = HashMap::new();
-        attrs.insert("transB".to_string(), super::super::attributes::OnnxAttribute {
-            name: "transB".to_string(),
-            value: OnnxAttributeValue::Int(1),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "transB".to_string(),
+            super::super::attributes::OnnxAttribute {
+                name: "transB".to_string(),
+                value: OnnxAttributeValue::Int(1),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "gemm_transb_nobias".to_string(),
             doc_string: String::new(),
@@ -20692,8 +24138,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // bias_act is not an initializer, so Gemm (not GemmBias)
-        assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gemm { .. })),
-            "Should produce Gemm (not GemmBias) when bias is non-initializer");
+        assert!(
+            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gemm(..))),
+            "Should produce Gemm (not GemmBias) when bias is non-initializer"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -20720,10 +24168,18 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let sub_op = graph.ops.iter().find(|op| op.label == "sub1").expect("sub1 op");
-        assert!(matches!(sub_op.kind, OpKind::Add), "Sub should produce Add");
-        let div_op = graph.ops.iter().find(|op| op.label == "div1").expect("div1 op");
-        assert!(matches!(div_op.kind, OpKind::Mul), "Div should produce Mul");
+        let sub_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "sub1")
+            .expect("sub1 op");
+        assert!(matches!(sub_op.op_v2, Op::Add), "Sub should produce Add");
+        let div_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "div1")
+            .expect("div1 op");
+        assert!(matches!(div_op.op_v2, Op::Mul), "Div should produce Mul");
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -20747,10 +24203,21 @@ mod tests {
             vec![],
         );
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        let h_tensor = graph.tensors.iter().find(|t| t.name == "h").expect("h tensor");
-        let out_tensor = graph.tensors.iter().find(|t| t.name == "out").expect("out tensor");
-        assert_eq!(h_tensor.shape.len(), out_tensor.shape.len(),
-            "Reshape output should have same rank as input (shape copy)");
+        let h_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "h")
+            .expect("h tensor");
+        let out_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "out")
+            .expect("out tensor");
+        assert_eq!(
+            h_tensor.shape.len(),
+            out_tensor.shape.len(),
+            "Reshape output should have same rank as input (shape copy)"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -20785,9 +24252,17 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 50, "table_rows should be 50");
             assert_eq!(*embed_dim, 0, "embed_dim should be 0");
         }
@@ -20837,13 +24312,17 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let gemms: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemms: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
             .collect();
         assert_eq!(gemms.len(), 2, "Should have 2 Gemm ops");
         // Both should have n=48, k=32
         for gemm in &gemms {
-            if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+            if let Op::Gemm(spec) = &gemm.op_v2 {
+                let n = &spec.n;
+                let k = &spec.k;
                 assert_eq!(*n, 48);
                 assert_eq!(*k, 32);
             }
@@ -20878,13 +24357,16 @@ mod tests {
     fn transpose_with_5_element_perm() {
         use super::super::attributes::OnnxAttributeValue;
         let mut attrs = HashMap::new();
-        attrs.insert("perm".to_string(), super::super::attributes::OnnxAttribute {
-            name: "perm".to_string(),
-            value: OnnxAttributeValue::Ints(vec![4, 3, 2, 1, 0]),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "perm".to_string(),
+            super::super::attributes::OnnxAttribute {
+                name: "perm".to_string(),
+                value: OnnxAttributeValue::Ints(vec![4, 3, 2, 1, 0]),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "perm5".to_string(),
             doc_string: String::new(),
@@ -20911,9 +24393,12 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let t = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let t = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose");
-        if let OpKind::Transpose { perm } = &t.kind {
+        if let Op::Transpose { perm } = &t.op_v2 {
             assert_eq!(*perm, vec![4, 3, 2, 1, 0], "perm should be [4,3,2,1,0]");
         }
     }
@@ -20924,8 +24409,18 @@ mod tests {
     #[test]
     fn rms_norm_then_layer_norm_in_sequence() {
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("s".to_string(), scale);
         init.insert("b".to_string(), bias);
@@ -20966,8 +24461,14 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 2, "Should have 2 norm ops");
-        assert!(matches!(graph.ops[0].kind, OpKind::RmsNorm { .. }), "First op should be RmsNorm");
-        assert!(matches!(graph.ops[1].kind, OpKind::LayerNorm { .. }), "Second op should be LayerNorm");
+        assert!(
+            matches!(graph.ops[0].op_v2, Op::RmsNorm(..)),
+            "First op should be RmsNorm"
+        );
+        assert!(
+            matches!(graph.ops[1].op_v2, Op::LayerNorm(..)),
+            "Second op should be LayerNorm"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -21047,8 +24548,10 @@ mod tests {
         let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 256);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::NoWeightInput { .. }),
-            "MatMul with two activations should return NoWeightInput");
+        assert!(
+            matches!(result.unwrap_err(), ConvertError::NoWeightInput { .. }),
+            "MatMul with two activations should return NoWeightInput"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -21056,7 +24559,12 @@ mod tests {
     #[test]
     fn gemm_3d_weight_returns_invalid_shape() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w3d".to_string(), safetensors::Dtype::F32, vec![2, 3, 4], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w3d".to_string(),
+            safetensors::Dtype::F32,
+            vec![2, 3, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w3d".to_string(), w);
         let onnx = OnnxGraph {
@@ -21112,7 +24620,10 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let dtype = detect_dtype(&onnx);
-        assert!(matches!(dtype, DType::F32), "No initializers should default to F32");
+        assert!(
+            matches!(dtype, DType::F32),
+            "No initializers should default to F32"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -21170,10 +24681,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        let t = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let t = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose");
-        if let OpKind::Transpose { perm } = &t.kind {
-            assert!(perm.is_empty(), "Transpose without perm should produce empty perm");
+        if let Op::Transpose { perm } = &t.op_v2 {
+            assert!(
+                perm.is_empty(),
+                "Transpose without perm should produce empty perm"
+            );
         }
     }
 
@@ -21208,11 +24725,25 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
-            assert_eq!(*table_rows, 0, "Non-initializer table should have table_rows=0");
-            assert_eq!(*embed_dim, 0, "Non-initializer table should have embed_dim=0");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
+            assert_eq!(
+                *table_rows, 0,
+                "Non-initializer table should have table_rows=0"
+            );
+            assert_eq!(
+                *embed_dim, 0,
+                "Non-initializer table should have embed_dim=0"
+            );
         }
     }
 
@@ -21232,9 +24763,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // The Add op with empty output should still be created
-        let add_op = graph.ops.iter().find(|op| op.label == "empty_out")
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "empty_out")
             .expect("Should have empty_out op");
-        assert!(matches!(add_op.kind, OpKind::Add));
+        assert!(matches!(add_op.op_v2, Op::Add));
         assert_eq!(add_op.outputs.len(), 1);
     }
 
@@ -21253,9 +24787,15 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let sqrt_op = graph.ops.iter().find(|op| op.label == "sqrt1")
+        let sqrt_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "sqrt1")
             .expect("Should have sqrt1 op");
-        assert!(matches!(sqrt_op.kind, OpKind::Mul), "Sqrt should map to Mul op");
+        assert!(
+            matches!(sqrt_op.op_v2, Op::Mul),
+            "Sqrt should map to Mul op"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -21264,7 +24804,12 @@ mod tests {
     #[test]
     fn graph_input_same_name_as_initializer_no_duplicate() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("x".to_string(), safetensors::Dtype::F32, vec![8, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "x".to_string(),
+            safetensors::Dtype::F32,
+            vec![8, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("x".to_string(), w);
         let onnx = OnnxGraph {
@@ -21287,7 +24832,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let x_count = graph.tensors.iter().filter(|t| t.name == "x").count();
-        assert_eq!(x_count, 1, "Initializer/input overlap should produce exactly 1 tensor");
+        assert_eq!(
+            x_count, 1,
+            "Initializer/input overlap should produce exactly 1 tensor"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -21295,7 +24843,12 @@ mod tests {
     #[test]
     fn matmul_1d_weight_returns_invalid_shape() {
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w1d".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w1d".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1d".to_string(), w);
         let onnx = OnnxGraph {
@@ -21359,9 +24912,12 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let silu = graph.ops.iter().find(|op| op.label == "silu_empty")
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "silu_empty")
             .expect("Should have silu_empty op");
-        assert!(matches!(silu.kind, OpKind::Silu));
+        assert!(matches!(silu.op_v2, Op::Silu));
         // The input should have been auto-created with seq_dim shape
         assert_eq!(silu.inputs.len(), 1);
     }
@@ -21375,8 +24931,14 @@ mod tests {
             reason: "missing required attribute 'axis'".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("test_node"), "Display should contain node name");
-        assert!(msg.contains("missing required attribute 'axis'"), "Display should contain reason");
+        assert!(
+            msg.contains("test_node"),
+            "Display should contain node name"
+        );
+        assert!(
+            msg.contains("missing required attribute 'axis'"),
+            "Display should contain reason"
+        );
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -21386,9 +24948,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "rm_unknown".to_string(),
             doc_string: String::new(),
-            nodes: vec![
-                make_node("rm1", "ReduceMean", vec!["mystery"], vec!["pooled"]),
-            ],
+            nodes: vec![make_node(
+                "rm1",
+                "ReduceMean",
+                vec!["mystery"],
+                vec!["pooled"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "mystery".to_string(),
                 value_type: None,
@@ -21403,9 +24968,12 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let OpKind::MeanPool { hidden, .. } = &pool.kind {
+        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
             assert_eq!(*hidden, 0, "Unknown shape should default hidden to 0");
         }
     }
@@ -21422,24 +24990,52 @@ mod tests {
         // Act
         let cloned = err.clone();
         // Assert
-        assert_eq!(err.to_string(), cloned.to_string(), "Cloned error should have same Display output");
-        assert_eq!(format!("{err:?}"), format!("{cloned:?}"), "Cloned error should have same Debug output");
+        assert_eq!(
+            err.to_string(),
+            cloned.to_string(),
+            "Cloned error should have same Display output"
+        );
+        assert_eq!(
+            format!("{err:?}"),
+            format!("{cloned:?}"),
+            "Cloned error should have same Debug output"
+        );
     }
 
     #[test]
     fn convert_error_all_variants_produce_non_empty_display() {
         // Arrange & Act
         let variants: Vec<ConvertError> = vec![
-            ConvertError::UnsupportedOp { op_type: "A".to_string(), node_name: "B".to_string() },
-            ConvertError::MissingInitializer { name: "C".to_string(), node_name: "D".to_string() },
-            ConvertError::InvalidMatMulShape { name: "E".to_string(), dims: 5 },
-            ConvertError::NoWeightInput { node_name: "F".to_string() },
-            ConvertError::AttributeError { node_name: "G".to_string(), reason: "bad".to_string() },
-            ConvertError::ShapeInferenceFailed { name: "H".to_string(), reason: "fail".to_string() },
+            ConvertError::UnsupportedOp {
+                op_type: "A".to_string(),
+                node_name: "B".to_string(),
+            },
+            ConvertError::MissingInitializer {
+                name: "C".to_string(),
+                node_name: "D".to_string(),
+            },
+            ConvertError::InvalidMatMulShape {
+                name: "E".to_string(),
+                dims: 5,
+            },
+            ConvertError::NoWeightInput {
+                node_name: "F".to_string(),
+            },
+            ConvertError::AttributeError {
+                node_name: "G".to_string(),
+                reason: "bad".to_string(),
+            },
+            ConvertError::ShapeInferenceFailed {
+                name: "H".to_string(),
+                reason: "fail".to_string(),
+            },
         ];
         // Assert
         for err in &variants {
-            assert!(!err.to_string().is_empty(), "Display should not be empty for {err:?}");
+            assert!(
+                !err.to_string().is_empty(),
+                "Display should not be empty for {err:?}"
+            );
         }
     }
 
@@ -21459,7 +25055,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Pow should produce a Mul op (not an error)
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert!(mul_ops.len() >= 1, "Pow should produce at least one Mul op");
     }
 
@@ -21487,7 +25087,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: 4 base ops (Gather + 2 MatMul + Add), no additional ops from Clip+Relu
-        assert_eq!(graph.ops.len(), 4, "Clip and Relu passthrough should not add ops");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Clip and Relu passthrough should not add ops"
+        );
     }
 
     #[test]
@@ -21526,7 +25130,10 @@ mod tests {
             matches!(err, ConvertError::UnsupportedOp { .. }),
             "Empty op_type should produce UnsupportedOp error"
         );
-        assert!(err.to_string().contains("n1"), "Error should reference node name");
+        assert!(
+            err.to_string().contains("n1"),
+            "Error should reference node name"
+        );
     }
 
     #[test]
@@ -21546,9 +25153,13 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Tanh is a unary op, which creates 1 output tensor from first() output name
-        let tanh = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh));
+        let tanh = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Tanh));
         assert!(tanh.is_some(), "Tanh op should be created");
-        assert_eq!(tanh.unwrap().outputs.len(), 1, "Unary op should have 1 output");
+        assert_eq!(
+            tanh.unwrap().outputs.len(),
+            1,
+            "Unary op should have 1 output"
+        );
     }
 
     #[test]
@@ -21596,10 +25207,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }));
-        let gemm_bias = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }));
+        let gemm = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Gemm(..)));
+        let gemm_bias = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)));
         assert!(gemm.is_some(), "Should produce Gemm (no bias)");
-        assert!(gemm_bias.is_none(), "Should NOT produce GemmBias for empty third input");
+        assert!(
+            gemm_bias.is_none(),
+            "Should NOT produce GemmBias for empty third input"
+        );
     }
 
     #[test]
@@ -21617,16 +25234,14 @@ mod tests {
         let onnx = OnnxGraph {
             name: "gather_zero_rows".to_string(),
             doc_string: String::new(),
-            nodes: vec![
-                OnnxNode {
-                    name: "g_zr".to_string(),
-                    op_type: "Gather".to_string(),
-                    domain: String::new(),
-                    inputs: vec!["tbl_zn".to_string(), "idx".to_string()],
-                    outputs: vec!["gathered".to_string()],
-                    attributes: HashMap::new(),
-                },
-            ],
+            nodes: vec![OnnxNode {
+                name: "g_zr".to_string(),
+                op_type: "Gather".to_string(),
+                domain: String::new(),
+                inputs: vec!["tbl_zn".to_string(), "idx".to_string()],
+                outputs: vec!["gathered".to_string()],
+                attributes: HashMap::new(),
+            }],
             inputs: vec![model::OnnxValueInfo {
                 name: "idx".to_string(),
                 value_type: None,
@@ -21644,9 +25259,17 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 0, "table_rows should be 0");
             assert_eq!(*embed_dim, 32, "embed_dim should be 32");
         }
@@ -21697,9 +25320,14 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "Square weight n = 64");
             assert_eq!(*k, 64, "Square weight k = 64");
         }
@@ -21727,7 +25355,11 @@ mod tests {
             name: "ln1".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["qk_sum".to_string(), "ln_scale".to_string(), "ln_bias".to_string()],
+            inputs: vec![
+                "qk_sum".to_string(),
+                "ln_scale".to_string(),
+                "ln_bias".to_string(),
+            ],
             outputs: vec!["lned".to_string()],
             attributes: HashMap::new(),
         });
@@ -21735,9 +25367,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        assert_eq!(ln.inputs.len(), 3, "LayerNorm should have 3 inputs (input, scale, bias)");
+        assert_eq!(
+            ln.inputs.len(),
+            3,
+            "LayerNorm should have 3 inputs (input, scale, bias)"
+        );
     }
 
     #[test]
@@ -21764,15 +25403,18 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let gelu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu));
-        let softmax = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax));
+        let gelu = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Gelu));
+        let softmax = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Softmax));
         assert!(gelu.is_some(), "Gelu op should exist");
         assert!(softmax.is_some(), "Softmax op should exist");
         // Verify data flow: softmax input should come from gelu output
         if let (Some(g), Some(s)) = (gelu, softmax) {
             assert_eq!(g.outputs.len(), 1);
             assert_eq!(s.inputs.len(), 1);
-            assert_eq!(g.outputs[0], s.inputs[0], "Softmax should consume Gelu output tensor");
+            assert_eq!(
+                g.outputs[0], s.inputs[0],
+                "Softmax should consume Gelu output tensor"
+            );
         }
     }
 
@@ -21820,7 +25462,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: "x" is an activation with no producer, should be in graph.inputs
-        assert!(!graph.inputs.is_empty(), "Graph should have at least one external input");
+        assert!(
+            !graph.inputs.is_empty(),
+            "Graph should have at least one external input"
+        );
     }
 
     #[test]
@@ -21828,7 +25473,10 @@ mod tests {
         // Arrange & Act
         let result = map_onnx_dtype(safetensors::Dtype::BF16);
         // Assert
-        assert!(matches!(result, DType::BF16), "BF16 should map to DType::BF16, not F32");
+        assert!(
+            matches!(result, DType::BF16),
+            "BF16 should map to DType::BF16, not F32"
+        );
         assert!(!matches!(result, DType::F32), "BF16 should not map to F32");
     }
 
@@ -21848,7 +25496,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Where is passthrough, no additional op
-        assert_eq!(graph.ops.len(), 4, "Where passthrough should not add a new op");
+        assert_eq!(
+            graph.ops.len(),
+            4,
+            "Where passthrough should not add a new op"
+        );
     }
 
     #[test]
@@ -21870,13 +25522,16 @@ mod tests {
             outputs: vec!["rnormed".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), super::super::attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: super::super::attributes::OnnxAttributeValue::Float(1.0),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    super::super::attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: super::super::attributes::OnnxAttributeValue::Float(1.0),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
@@ -21884,9 +25539,13 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
             assert!((eps - 1.0).abs() < 1e-10, "eps should be 1.0, got {eps}");
         }
     }
@@ -21903,13 +25562,16 @@ mod tests {
             outputs: vec!["transposed".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
@@ -21917,9 +25579,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(perm.len(), 1, "perm should have 1 element");
             assert_eq!(perm[0], 0, "perm[0] should be 0");
         }
@@ -22038,7 +25703,10 @@ mod tests {
         match &err {
             ConvertError::UnsupportedOp { op_type, node_name } => {
                 assert!(op_type.is_empty(), "op_type should be empty, got {op_type}");
-                assert_eq!(node_name, "empty_op", "node_name should be 'empty_op', got {node_name}");
+                assert_eq!(
+                    node_name, "empty_op",
+                    "node_name should be 'empty_op', got {node_name}"
+                );
             }
             other => panic!("expected UnsupportedOp, got {other:?}"),
         }
@@ -22088,10 +25756,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: output tensor shape should be [Symbolic(seq_len), Concrete(128)]
-        let output_tid = graph.tensors.iter().find(|t| t.name == "output")
+        let output_tid = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "output")
             .expect("output tensor should exist");
         assert_eq!(output_tid.shape.len(), 2, "output should be 2-D");
-        assert!(matches!(&output_tid.shape[1], SymDim::Concrete(128)), "second dim should be Concrete(128), got {:?}", output_tid.shape[1]);
+        assert!(
+            matches!(&output_tid.shape[1], SymDim::Concrete(128)),
+            "second dim should be Concrete(128), got {:?}",
+            output_tid.shape[1]
+        );
     }
 
     #[test]
@@ -22116,27 +25791,41 @@ mod tests {
             name: "ln_neg_eps".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_scale_neg".to_string(), "ln_bias_neg".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_scale_neg".to_string(),
+                "ln_bias_neg".to_string(),
+            ],
             outputs: vec!["lneg_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(-1e-5),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(-1e-5),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: epsilon value should be exactly what was provided
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - (-1e-5)).abs() < 1e-10, "eps should be -1e-5, got {eps}");
+        if let Op::LayerNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - (-1e-5)).abs() < 1e-10,
+                "eps should be -1e-5, got {eps}"
+            );
         }
     }
 
@@ -22159,23 +25848,33 @@ mod tests {
             outputs: vec!["rn_tiny_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1e-12),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1e-12),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 1e-12).abs() < 1e-15, "eps should be 1e-12, got {eps}");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-12).abs() < 1e-15,
+                "eps should be 1e-12, got {eps}"
+            );
         }
     }
 
@@ -22187,11 +25886,22 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = gather.kind {
-            assert_eq!(table_rows, 100, "table_rows should be 100, got {table_rows}");
-            assert_eq!(embed_dim, 64, "embed_dim should be 64, got {embed_dim}");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
+            assert_eq!(
+                *table_rows, 100,
+                "table_rows should be 100, got {table_rows}"
+            );
+            assert_eq!(*embed_dim, 64, "embed_dim should be 64, got {embed_dim}");
         }
     }
 
@@ -22210,9 +25920,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: output tensor "reduced" should have 1-D shape
-        let reduced = graph.tensors.iter().find(|t| t.name == "reduced")
+        let reduced = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "reduced")
             .expect("reduced tensor should exist");
-        assert_eq!(reduced.shape.len(), 1, "ReduceMean output should be 1-D, got {}-D", reduced.shape.len());
+        assert_eq!(
+            reduced.shape.len(),
+            1,
+            "ReduceMean output should be 1-D, got {}-D",
+            reduced.shape.len()
+        );
     }
 
     #[test]
@@ -22227,22 +25945,28 @@ mod tests {
             outputs: vec!["rev_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
-        let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(perm, &[1, 0], "perm should be [1, 0]");
         }
     }
@@ -22278,10 +26002,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: total ops = 4 (base graph) + 3 unary = 7
-        let unary_ops: Vec<_> = graph.ops.iter().filter(|op| {
-            matches!(op.kind, OpKind::Silu | OpKind::Tanh | OpKind::Softmax)
-        }).collect();
-        assert_eq!(unary_ops.len(), 3, "should have 3 unary ops (Silu, Tanh, Softmax)");
+        let unary_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Silu | Op::Tanh | Op::Softmax))
+            .collect();
+        assert_eq!(
+            unary_ops.len(),
+            3,
+            "should have 3 unary ops (Silu, Tanh, Softmax)"
+        );
     }
 
     #[test]
@@ -22299,10 +26029,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
-        let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
             .expect("Should have Reshape op");
-        if let OpKind::Reshape { target_shape } = &reshape.kind {
-            assert!(target_shape.is_empty(), "target_shape should be empty (not populated from ONNX attributes)");
+        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+            assert!(
+                target_shape.is_empty(),
+                "target_shape should be empty (not populated from ONNX attributes)"
+            );
         }
     }
 
@@ -22334,11 +26070,18 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: the output shape should match the higher-rank input
-        let broadcast_out = graph.tensors.iter().find(|t| t.name == "broadcast_out")
+        let broadcast_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "broadcast_out")
             .expect("broadcast_out tensor should exist");
         // q has shape [seq_len, 64] and k has shape [seq_len, 16]; infer_output_shape_binary
         // picks the one with >= rank — both are 2-D, so it picks first (a = "q" => [seq, 64])
-        assert_eq!(broadcast_out.shape.len(), 2, "broadcast output should be 2-D");
+        assert_eq!(
+            broadcast_out.shape.len(),
+            2,
+            "broadcast output should be 2-D"
+        );
     }
 
     #[test]
@@ -22346,7 +26089,10 @@ mod tests {
         // Arrange & Act
         let result = map_onnx_dtype(safetensors::Dtype::F64);
         // Assert: F64 maps to F32 (precision loss is acceptable per design)
-        assert!(matches!(result, DType::F32), "F64 should map to F32, got {result:?}");
+        assert!(
+            matches!(result, DType::F32),
+            "F64 should map to F32, got {result:?}"
+        );
     }
 
     #[test]
@@ -22417,7 +26163,12 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: Clip is passthrough, so op count should remain the same as base
-        assert_eq!(graph.ops.len(), base_op_count, "Clip passthrough should not add a new op, got {} ops", graph.ops.len());
+        assert_eq!(
+            graph.ops.len(),
+            base_op_count,
+            "Clip passthrough should not add a new op, got {} ops",
+            graph.ops.len()
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -22470,9 +26221,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Should produce Gemm (not GemmBias) since bias is not an initializer
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op (not GemmBias)");
-        assert_eq!(gemm.inputs.len(), 2, "Non-initializer bias should not produce GemmBias");
+        assert_eq!(
+            gemm.inputs.len(),
+            2,
+            "Non-initializer bias should not produce GemmBias"
+        );
     }
 
     #[test]
@@ -22525,12 +26283,18 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: ReduceMean output should be 1-D (no seq dim)
-        let reduced = graph.tensors.iter().find(|t| t.name == "reduced_rm")
+        let reduced = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "reduced_rm")
             .expect("reduced_rm should exist");
         assert_eq!(reduced.shape.len(), 1, "ReduceMean output should be 1-D");
         // hidden dim comes from last dim of MatMul output shape [seq_dim, Concrete(n=64)]
-        assert!(matches!(&reduced.shape[0], SymDim::Concrete(64)),
-            "ReduceMean output should be Concrete(hidden_dim), got {:?}", reduced.shape);
+        assert!(
+            matches!(&reduced.shape[0], SymDim::Concrete(64)),
+            "ReduceMean output should be Concrete(hidden_dim), got {:?}",
+            reduced.shape
+        );
     }
 
     #[test]
@@ -22558,8 +26322,18 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Labels should be in exact node order
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
-        assert_eq!(labels, &["gather_embed", "q_proj", "k_proj", "add_qk", "silu_chain", "tanh_chain"],
-            "Ops should preserve insertion order");
+        assert_eq!(
+            labels,
+            &[
+                "gather_embed",
+                "q_proj",
+                "k_proj",
+                "add_qk",
+                "silu_chain",
+                "tanh_chain"
+            ],
+            "Ops should preserve insertion order"
+        );
     }
 
     #[test]
@@ -22612,7 +26386,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert
-        let t = graph.tensors.iter().find(|t| t.name == "my_bias")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "my_bias")
             .expect("my_bias should be registered");
         assert_eq!(t.shape.len(), 1, "1-D initializer should have 1 shape dim");
         assert!(matches!(&t.shape[0], SymDim::Concrete(768)));
@@ -22630,13 +26407,16 @@ mod tests {
             outputs: vec!["trans3_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
@@ -22644,9 +26424,13 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let transpose = graph.ops.iter().rev().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transpose = graph
+            .ops
+            .iter()
+            .rev()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(*perm, vec![2, 0, 1], "perm should be [2, 0, 1]");
         }
     }
@@ -22685,7 +26469,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
-        let t = graph.tensors.iter().find(|t| t.name == "all_known")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "all_known")
             .expect("all_known should be registered");
         assert_eq!(t.shape.len(), 3);
         assert!(matches!(&t.shape[0], SymDim::Concrete(32)));
@@ -22733,14 +26520,22 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 16384).unwrap();
         // Assert
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 4096, "n should be 4096");
             assert_eq!(*k, 11008, "k should be 11008");
         }
         // Also verify the output tensor shape uses max_seq_len
-        let out = graph.tensors.iter().find(|t| t.name == "y")
+        let out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y should exist");
         assert_eq!(out.shape.len(), 2);
         assert!(
@@ -22790,9 +26585,17 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: Gather extracts first two dims (table_rows=50, embed_dim=30)
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 50, "table_rows should be shape[0]");
             assert_eq!(*embed_dim, 30, "embed_dim should be shape[1]");
         }
@@ -22814,9 +26617,18 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: get_or_create should have created a default tensor for the missing name
-        let missing_t = graph.tensors.iter().find(|t| t.name == "nonexistent_tensor");
-        assert!(missing_t.is_some(), "get_or_create should create tensor for unknown name");
-        let add_op = graph.ops.iter().find(|op| op.label == "add_single")
+        let missing_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "nonexistent_tensor");
+        assert!(
+            missing_t.is_some(),
+            "get_or_create should create tensor for unknown name"
+        );
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "add_single")
             .expect("add_single should exist");
         assert_eq!(add_op.inputs.len(), 2, "Add should have 2 inputs");
     }
@@ -22825,10 +26637,30 @@ mod tests {
     fn multiple_layer_norm_nodes_produce_separate_ops() {
         // Arrange: Two LayerNormalization nodes on different inputs
         use super::super::tensor::OnnxTensor;
-        let scale1 = OnnxTensor::new("s1".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias1 = OnnxTensor::new("b1".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let scale2 = OnnxTensor::new("s2".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
-        let bias2 = OnnxTensor::new("b2".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let scale1 = OnnxTensor::new(
+            "s1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias1 = OnnxTensor::new(
+            "b1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let scale2 = OnnxTensor::new(
+            "s2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
+        let bias2 = OnnxTensor::new(
+            "b2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("s1".to_string(), scale1);
         onnx.initializers.insert("b1".to_string(), bias1);
@@ -22854,11 +26686,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let ln_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .collect();
         assert_eq!(ln_ops.len(), 2, "Should have 2 separate LayerNorm ops");
-        assert_ne!(ln_ops[0].label, ln_ops[1].label, "LayerNorm ops should have different labels");
+        assert_ne!(
+            ln_ops[0].label, ln_ops[1].label,
+            "LayerNorm ops should have different labels"
+        );
     }
 
     #[test]
@@ -22885,12 +26722,21 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Both output tensors should have the same shape as the input
-        let silu_out = graph.tensors.iter().find(|t| t.name == "silu_s_out")
+        let silu_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "silu_s_out")
             .expect("silu_s_out should exist");
-        let tanh_out = graph.tensors.iter().find(|t| t.name == "tanh_s_out")
+        let tanh_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "tanh_s_out")
             .expect("tanh_s_out should exist");
-        assert_eq!(silu_out.shape.len(), tanh_out.shape.len(),
-            "Silu and Tanh output shapes should have same rank");
+        assert_eq!(
+            silu_out.shape.len(),
+            tanh_out.shape.len(),
+            "Silu and Tanh output shapes should have same rank"
+        );
     }
 
     #[test]
@@ -22913,13 +26759,16 @@ mod tests {
             outputs: vec!["rn_tiny_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1e-15),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1e-15),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
@@ -22927,10 +26776,17 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 1e-15).abs() < 1e-25, "eps should be 1e-15, got {eps}");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-15).abs() < 1e-25,
+                "eps should be 1e-15, got {eps}"
+            );
         }
     }
 
@@ -22986,11 +26842,15 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert
-        let gemm_bias = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
         assert_eq!(gemm_bias.inputs.len(), 3, "GemmBias should have 3 inputs");
-        if let OpKind::GemmBias { n, k, .. } = &gemm_bias.kind {
+        if let Op::GemmBias(spec) = &gemm_bias.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 128);
             assert_eq!(*k, 64);
         }
@@ -23004,10 +26864,15 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: "input_ids" is a graph input with no producer, should be in graph.inputs
-        let input_ids_tensor = graph.tensors.iter().find(|t| t.name == "input_ids")
+        let input_ids_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "input_ids")
             .expect("input_ids should be registered as a tensor");
-        assert!(input_ids_tensor.producer.is_none(),
-            "input_ids should have no producer");
+        assert!(
+            input_ids_tensor.producer.is_none(),
+            "input_ids should have no producer"
+        );
         assert!(
             graph.inputs.iter().any(|&tid| tid == input_ids_tensor.id),
             "input_ids tensor should be in graph.inputs"
@@ -23045,12 +26910,21 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Gelu output tensor should have same shape rank as q (which is [seq, 64])
-        let gelu_out = graph.tensors.iter().find(|t| t.name == "gelu_out")
+        let gelu_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "gelu_out")
             .expect("gelu_out tensor should exist");
-        let q_tensor = graph.tensors.iter().find(|t| t.name == "q")
+        let q_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "q")
             .expect("q tensor should exist");
-        assert_eq!(gelu_out.shape.len(), q_tensor.shape.len(),
-            "Gelu output rank should match input rank");
+        assert_eq!(
+            gelu_out.shape.len(),
+            q_tensor.shape.len(),
+            "Gelu output rank should match input rank"
+        );
     }
 
     // @trace TEST-GC-805 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23072,8 +26946,10 @@ mod tests {
         // Assert
         assert!(result.is_err(), "Upper-case MATMUL should be unsupported");
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("MATMUL"),
-            "Error message should contain the upper-case op_type");
+        assert!(
+            err.to_string().contains("MATMUL"),
+            "Error message should contain the upper-case op_type"
+        );
     }
 
     // @trace TEST-GC-806 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23113,7 +26989,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: passthrough maps output to input tensor id, no new op added
-        assert_eq!(graph.ops.len(), 0, "Single Relu passthrough should produce zero ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Single Relu passthrough should produce zero ops"
+        );
     }
 
     // @trace TEST-GC-807 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23141,14 +27021,24 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Sub maps to OpKind::Add, Div maps to OpKind::Mul
-        let sub_op = graph.ops.iter().find(|op| op.label == "sub1")
+        let sub_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "sub1")
             .expect("sub1 op should exist");
-        assert!(matches!(sub_op.kind, OpKind::Add),
-            "Sub should produce OpKind::Add");
-        let div_op = graph.ops.iter().find(|op| op.label == "div1")
+        assert!(
+            matches!(sub_op.op_v2, Op::Add),
+            "Sub should produce OpKind::Add"
+        );
+        let div_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "div1")
             .expect("div1 op should exist");
-        assert!(matches!(div_op.kind, OpKind::Mul),
-            "Div should produce OpKind::Mul");
+        assert!(
+            matches!(div_op.op_v2, Op::Mul),
+            "Div should produce OpKind::Mul"
+        );
     }
 
     // @trace TEST-GC-808 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23192,10 +27082,15 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: output tensor first dim should be Symbolic (seq_len)
-        let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
+        let y_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "y")
             .expect("y tensor should exist");
-        assert!(matches!(y_tensor.shape.first(), Some(SymDim::Symbolic { .. })),
-            "Gemm output first dimension should be Symbolic seq_len");
+        assert!(
+            matches!(y_tensor.shape.first(), Some(SymDim::Symbolic { .. })),
+            "Gemm output first dimension should be Symbolic seq_len"
+        );
     }
 
     // @trace TEST-GC-809 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23203,8 +27098,18 @@ mod tests {
     fn multiple_gemm_nodes_with_different_transb() {
         // Arrange: Two Gemm nodes — one with transB=1, one without
         use super::super::tensor::OnnxTensor;
-        let w1 = OnnxTensor::new("mw1".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("mw2".to_string(), safetensors::Dtype::F32, vec![16, 64], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "mw1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "mw2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("mw1".to_string(), w1);
         init.insert("mw2".to_string(), w2);
@@ -23228,13 +27133,16 @@ mod tests {
                     outputs: vec!["g2_out".to_string()],
                     attributes: {
                         let mut a = HashMap::new();
-                        a.insert("transB".to_string(), attributes::OnnxAttribute {
-                            name: "transB".to_string(),
-                            value: attributes::OnnxAttributeValue::Int(1),
-                            doc_string: String::new(),
-                            ref_attr_name: None,
-                            attr_type: None,
-                        });
+                        a.insert(
+                            "transB".to_string(),
+                            attributes::OnnxAttribute {
+                                name: "transB".to_string(),
+                                value: attributes::OnnxAttributeValue::Int(1),
+                                doc_string: String::new(),
+                                ref_attr_name: None,
+                                attr_type: None,
+                            },
+                        );
                         a
                     },
                 },
@@ -23256,19 +27164,25 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: both Gemm ops exist with different n/k values
-        let gemm_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
             .collect();
         assert_eq!(gemm_ops.len(), 2, "Should have 2 Gemm ops");
         // g1_no_t: weight [64,32] → n=64, k=32 (no transpose)
-        if let OpKind::Gemm { n, k, .. } = gemm_ops[0].kind {
-            assert_eq!(n, 64, "g1 n should be 64");
-            assert_eq!(k, 32, "g1 k should be 32");
+        if let Op::Gemm(spec) = &gemm_ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(*n, 64, "g1 n should be 64");
+            assert_eq!(*k, 32, "g1 k should be 32");
         }
         // g2_trans: weight [16,64] transB=1 → n=64, k=16 (transposed)
-        if let OpKind::Gemm { n, k, .. } = gemm_ops[1].kind {
-            assert_eq!(n, 64, "g2 n should be 64 after transB");
-            assert_eq!(k, 16, "g2 k should be 16 after transB");
+        if let Op::Gemm(spec) = &gemm_ops[1].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(*n, 64, "g2 n should be 64 after transB");
+            assert_eq!(*k, 16, "g2 k should be 16 after transB");
         }
     }
 
@@ -23293,13 +27207,16 @@ mod tests {
             outputs: vec!["tr_out".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
@@ -23307,16 +27224,23 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let transpose = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(perm, &[2, 0, 1], "perm should be [2, 0, 1]");
         }
-        let reshape = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Reshape { .. }))
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
             .expect("Should have Reshape op");
-        assert_eq!(reshape.label, "rs1", "Reshape should appear before Transpose");
+        assert_eq!(
+            reshape.label, "rs1",
+            "Reshape should appear before Transpose"
+        );
     }
 
     // @trace TEST-GC-811 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23324,8 +27248,18 @@ mod tests {
     fn layer_norm_default_epsilon_when_no_attribute() {
         // Arrange: LayerNorm without epsilon attribute — should use default 1e-5
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("ln_def_s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("ln_def_b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "ln_def_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "ln_def_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ln_def_s".to_string(), scale);
         onnx.initializers.insert("ln_def_b".to_string(), bias);
@@ -23333,7 +27267,11 @@ mod tests {
             name: "ln_def".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_def_s".to_string(), "ln_def_b".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_def_s".to_string(),
+                "ln_def_b".to_string(),
+            ],
             outputs: vec!["ln_def_out".to_string()],
             attributes: HashMap::new(),
         });
@@ -23341,12 +27279,17 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let ln = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!((eps - 1e-5).abs() < 1e-12,
-                "Default epsilon should be 1e-5, got {eps}");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-12,
+                "Default epsilon should be 1e-5, got {eps}"
+            );
         }
     }
 
@@ -23359,14 +27302,25 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let gather = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
-            assert_eq!(*table_rows, 100,
-                "table_rows should match embed.weight shape[0]=100");
-            assert_eq!(*embed_dim, 64,
-                "embed_dim should match embed.weight shape[1]=64");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
+            assert_eq!(
+                *table_rows, 100,
+                "table_rows should match embed.weight shape[0]=100"
+            );
+            assert_eq!(
+                *embed_dim, 64,
+                "embed_dim should match embed.weight shape[1]=64"
+            );
         }
     }
 
@@ -23375,7 +27329,12 @@ mod tests {
     fn binary_op_with_one_initializer_creates_default_for_other() {
         // Arrange: Add where one input is an initializer and the other is a fresh activation
         use super::super::tensor::OnnxTensor;
-        let bias = OnnxTensor::new("bias_w".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let bias = OnnxTensor::new(
+            "bias_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("bias_w".to_string(), bias);
         onnx.nodes.push(OnnxNode {
@@ -23392,7 +27351,10 @@ mod tests {
         // Assert: bias_w should be registered as a tensor from initializers
         let bias_t = graph.tensors.iter().find(|t| t.name == "bias_w");
         assert!(bias_t.is_some(), "bias_w should be registered as a tensor");
-        let add_op = graph.ops.iter().find(|op| op.label == "add_bias")
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "add_bias")
             .expect("add_bias op should exist");
         assert_eq!(add_op.inputs.len(), 2, "Add should have 2 inputs");
     }
@@ -23417,8 +27379,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         // Assert
-        assert_eq!(graph.max_seq_len, 4096,
-            "max_seq_len should be propagated to the resulting CompilerGraph");
+        assert_eq!(
+            graph.max_seq_len, 4096,
+            "max_seq_len should be propagated to the resulting CompilerGraph"
+        );
     }
 
     // @trace TEST-GC-815 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23426,7 +27390,12 @@ mod tests {
     fn silu_then_add_then_matmul_chain_produces_correct_op_sequence() {
         // Arrange: Silu -> Add -> MatMul chain, verifying op types and order
         use super::super::tensor::OnnxTensor;
-        let ff_w = OnnxTensor::new("ff_w".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let ff_w = OnnxTensor::new(
+            "ff_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut onnx = make_test_graph();
         onnx.initializers.insert("ff_w".to_string(), ff_w);
         onnx.nodes.push(OnnxNode {
@@ -23458,16 +27427,40 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: ops should be in order — base ops, then Silu, Add, Gemm
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
-        assert!(labels.contains(&"silu_chain"), "Should contain silu_chain op");
+        assert!(
+            labels.contains(&"silu_chain"),
+            "Should contain silu_chain op"
+        );
         assert!(labels.contains(&"add_chain"), "Should contain add_chain op");
         assert!(labels.contains(&"mm_chain"), "Should contain mm_chain op");
         // Verify op kinds
-        let silu = graph.ops.iter().find(|op| op.label == "silu_chain").expect("silu_chain");
-        assert!(matches!(silu.kind, OpKind::Silu), "silu_chain should be OpKind::Silu");
-        let add = graph.ops.iter().find(|op| op.label == "add_chain").expect("add_chain");
-        assert!(matches!(add.kind, OpKind::Add), "add_chain should be OpKind::Add");
-        let mm = graph.ops.iter().find(|op| op.label == "mm_chain").expect("mm_chain");
-        assert!(matches!(mm.kind, OpKind::Gemm { .. }), "mm_chain should be OpKind::Gemm");
+        let silu = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "silu_chain")
+            .expect("silu_chain");
+        assert!(
+            matches!(silu.op_v2, Op::Silu),
+            "silu_chain should be OpKind::Silu"
+        );
+        let add = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "add_chain")
+            .expect("add_chain");
+        assert!(
+            matches!(add.op_v2, Op::Add),
+            "add_chain should be OpKind::Add"
+        );
+        let mm = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mm_chain")
+            .expect("mm_chain");
+        assert!(
+            matches!(mm.op_v2, Op::Gemm(..)),
+            "mm_chain should be OpKind::Gemm"
+        );
     }
 
     // @trace TEST-GC-816 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23487,11 +27480,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: ReduceMean on q (shape [seq, 64]) should produce hidden=64
-        let rm = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let rm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool op from ReduceMean");
-        if let OpKind::MeanPool { hidden, .. } = rm.kind {
-            assert_eq!(hidden, 64, "hidden should be 64 from q_proj weight n dimension");
+        if let Op::MeanPool { hidden, .. } = &rm.op_v2 {
+            assert_eq!(
+                *hidden, 64,
+                "hidden should be 64 from q_proj weight n dimension"
+            );
         }
     }
 
@@ -23500,7 +27498,12 @@ mod tests {
     fn gemm_transb_false_explicit_zero_attribute() {
         // Arrange: Gemm with explicit transB=0 — should behave as no transpose
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("tw0".to_string(), safetensors::Dtype::F32, vec![48, 32], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "tw0".to_string(),
+            safetensors::Dtype::F32,
+            vec![48, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tw0".to_string(), weight);
         let onnx = OnnxGraph {
@@ -23514,13 +27517,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut a = HashMap::new();
-                    a.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(0),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    a.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(0),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     a
                 },
             }],
@@ -23541,12 +27547,16 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: transB=0 means no transpose, n=48, k=32
-        let gemm = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = gemm.kind {
-            assert_eq!(n, 48, "n should be 48 (no transB)");
-            assert_eq!(k, 32, "k should be 32 (no transB)");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(*n, 48, "n should be 48 (no transB)");
+            assert_eq!(*k, 32, "k should be 32 (no transB)");
         }
     }
 
@@ -23559,20 +27569,32 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: output tensor "hidden" from Gather should have [Symbolic, Concrete(64)]
-        let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
+        let hidden = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "hidden")
             .expect("hidden tensor should exist");
         assert_eq!(hidden.shape.len(), 2, "Gather output should be 2-D");
-        assert!(matches!(&hidden.shape[0], SymDim::Symbolic { .. }),
-            "First dim should be Symbolic seq_len");
-        assert!(matches!(&hidden.shape[1], SymDim::Concrete(64)),
-            "Second dim should be Concrete(64) matching embed_dim");
+        assert!(
+            matches!(&hidden.shape[0], SymDim::Symbolic { .. }),
+            "First dim should be Symbolic seq_len"
+        );
+        assert!(
+            matches!(&hidden.shape[1], SymDim::Concrete(64)),
+            "Second dim should be Concrete(64) matching embed_dim"
+        );
     }
 
     // @trace TEST-GC-819 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn detect_dtype_from_bf16_initializer() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::BF16, vec![32, 16], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::BF16,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -23604,16 +27626,27 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
-        assert!(result.is_err(), "MatMul with both activation inputs should fail");
+        assert!(
+            result.is_err(),
+            "MatMul with both activation inputs should fail"
+        );
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("both_act"), "Error should mention node name: {msg}");
+        assert!(
+            msg.contains("both_act"),
+            "Error should mention node name: {msg}"
+        );
     }
 
     // @trace TEST-GC-823 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn gemm_with_transb_true_swaps_n_k() {
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("wt".to_string(), safetensors::Dtype::F32, vec![32, 48], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "wt".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 48],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("wt".to_string(), weight);
         let onnx = OnnxGraph {
@@ -23627,17 +27660,25 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut a = HashMap::new();
-                    a.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    a.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     a
                 },
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".to_string(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".to_string(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -23647,10 +27688,16 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Should have Gemm");
-        if let OpKind::Gemm { n, k, .. } = gemm.kind {
-            assert_eq!(n, 48, "transB=1 swaps n to 48");
-            assert_eq!(k, 32, "transB=1 swaps k to 32");
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Should have Gemm");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(*n, 48, "transB=1 swaps n to 48");
+            assert_eq!(*k, 32, "transB=1 swaps k to 32");
         }
     }
 
@@ -23660,9 +27707,17 @@ mod tests {
         let onnx = make_test_graph();
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Should have Gather");
-        if let OpKind::Gather { .. } = &gather_op.kind {
-            let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden tensor");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Should have Gather");
+        if let Op::Gather { .. } = &gather_op.op_v2 {
+            let hidden = graph
+                .tensors
+                .iter()
+                .find(|t| t.name == "hidden")
+                .expect("hidden tensor");
             if let SymDim::Symbolic { max_value, .. } = &hidden.shape[0] {
                 assert_eq!(*max_value, Some(4096), "max_value should be 4096");
             }
@@ -23683,7 +27738,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
+        let add_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .count();
         assert_eq!(add_count, 2, "Should have 2 Add ops");
     }
 
@@ -23702,7 +27761,10 @@ mod tests {
     fn rms_norm_default_epsilon_when_missing() {
         let mut onnx = make_test_graph();
         let scale = super::super::tensor::OnnxTensor::new(
-            "norm2.weight".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new(),
+            "norm2.weight".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
         );
         onnx.initializers.insert("norm2.weight".to_string(), scale);
         onnx.nodes.push(OnnxNode {
@@ -23715,10 +27777,17 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm_op.kind {
-            assert!((eps - 1e-5).abs() < 1e-10, "Default eps should be 1e-5, got {eps}");
+        if let Op::RmsNorm(spec) = &norm_op.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-10,
+                "Default eps should be 1e-5, got {eps}"
+            );
         }
     }
 
@@ -23726,7 +27795,12 @@ mod tests {
     #[test]
     fn gather_with_1d_initializer_succeeds() {
         use super::super::tensor::OnnxTensor;
-        let bias = OnnxTensor::new("bias_1d".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let bias = OnnxTensor::new(
+            "bias_1d".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("bias_1d".to_string(), bias);
         let onnx = OnnxGraph {
@@ -23740,7 +27814,12 @@ mod tests {
                 outputs: vec!["out_1d".to_string()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "idx".to_string(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "idx".to_string(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -23752,10 +27831,25 @@ mod tests {
         let result = onnx_to_compiler_graph(&onnx, &business, 1024);
         assert!(result.is_ok(), "1D initializer Gather should succeed");
         let graph = result.unwrap();
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Should have Gather");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
-            assert_eq!(*table_rows, 64, "1D [64] initializer treated as 64-row table");
-            assert_eq!(*embed_dim, 0, "1D [64] initializer has no second dim, embed_dim=0");
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Should have Gather");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
+            assert_eq!(
+                *table_rows, 64,
+                "1D [64] initializer treated as 64-row table"
+            );
+            assert_eq!(
+                *embed_dim, 0,
+                "1D [64] initializer has no second dim, embed_dim=0"
+            );
         }
     }
 
@@ -23763,7 +27857,12 @@ mod tests {
     #[test]
     fn graph_with_only_gather_has_single_op() {
         use super::super::tensor::OnnxTensor;
-        let embed = OnnxTensor::new("e".to_string(), safetensors::Dtype::F32, vec![50, 32], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "e".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("e".to_string(), embed);
         let onnx = OnnxGraph {
@@ -23777,8 +27876,18 @@ mod tests {
                 outputs: vec!["hid".to_string()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "ids".to_string(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "hid".to_string(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".to_string(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "hid".to_string(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -23787,7 +27896,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 1, "Single Gather should produce exactly 1 op");
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Single Gather should produce exactly 1 op"
+        );
     }
 
     // @trace TEST-GC-831 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23795,10 +27908,16 @@ mod tests {
     fn convert_mul_with_two_initializers_creates_default_tensor() {
         let mut onnx = make_test_graph();
         let bias_a = super::super::tensor::OnnxTensor::new(
-            "ba".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new(),
+            "ba".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
         );
         let bias_b = super::super::tensor::OnnxTensor::new(
-            "bb".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new(),
+            "bb".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
         );
         onnx.initializers.insert("ba".to_string(), bias_a);
         onnx.initializers.insert("bb".to_string(), bias_b);
@@ -23820,10 +27939,16 @@ mod tests {
     fn layer_norm_with_explicit_axis_1() {
         let mut onnx = make_test_graph();
         let gamma = super::super::tensor::OnnxTensor::new(
-            "ln_gamma".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new(),
+            "ln_gamma".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
         );
         let beta = super::super::tensor::OnnxTensor::new(
-            "ln_beta".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new(),
+            "ln_beta".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
         );
         onnx.initializers.insert("ln_gamma".to_string(), gamma);
         onnx.initializers.insert("ln_beta".to_string(), beta);
@@ -23831,26 +27956,40 @@ mod tests {
             name: "ln1".to_string(),
             op_type: "LayerNormalization".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "ln_gamma".to_string(), "ln_beta".to_string()],
+            inputs: vec![
+                "hidden".to_string(),
+                "ln_gamma".to_string(),
+                "ln_beta".to_string(),
+            ],
             outputs: vec!["ln_out".to_string()],
             attributes: {
                 let mut a = HashMap::new();
-                a.insert("axis".to_string(), attributes::OnnxAttribute {
-                    name: "axis".to_string(),
-                    value: attributes::OnnxAttributeValue::Int(-1),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                a.insert(
+                    "axis".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "axis".to_string(),
+                        value: attributes::OnnxAttributeValue::Int(-1),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 a
             },
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln_op.kind {
-            assert!((eps - 1e-5).abs() < 1e-10, "Default LayerNorm eps should be 1e-5, got {eps}");
+        if let Op::LayerNorm(spec) = &ln_op.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-10,
+                "Default LayerNorm eps should be 1e-5, got {eps}"
+            );
         }
     }
 
@@ -23878,7 +28017,12 @@ mod tests {
                 outputs: vec!["embed_out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "ids".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -23889,12 +28033,26 @@ mod tests {
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
         // Assert: uses first two dims — table_rows=50, embed_dim=32
-        if let OpKind::Gather { table_rows, embed_dim, .. } = gather_op.kind {
-            assert_eq!(table_rows, 50, "table_rows should be first dim of 3D initializer");
-            assert_eq!(embed_dim, 32, "embed_dim should be second dim of 3D initializer");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather_op.op_v2
+        {
+            assert_eq!(
+                *table_rows, 50,
+                "table_rows should be first dim of 3D initializer"
+            );
+            assert_eq!(
+                *embed_dim, 32,
+                "embed_dim should be second dim of 3D initializer"
+            );
         }
     }
 
@@ -23915,7 +28073,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Sqrt should produce a Mul op
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert!(mul_ops.len() >= 1, "Sqrt should map to at least one Mul op");
     }
 
@@ -23936,8 +28098,14 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Div should produce Mul op kind
-        let div_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Mul) && op.label == "div1");
-        assert!(div_op.is_some(), "Div node should produce Mul op with matching label");
+        let div_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Mul) && op.label == "div1");
+        assert!(
+            div_op.is_some(),
+            "Div node should produce Mul op with matching label"
+        );
     }
 
     // @trace TEST-GC-837 [req:REQ-LOADER-ONNX] [level:unit]
@@ -23961,25 +28129,34 @@ mod tests {
             outputs: vec!["sln_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![1, 2, 3]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![1, 2, 3]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
         // Assert: Ints epsilon attribute falls back to default 1e-5
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 1e-5).abs() < 1e-15,
-                "Ints epsilon attribute should fall back to default 1e-5, got {eps}");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-15,
+                "Ints epsilon attribute should fall back to default 1e-5, got {eps}"
+            );
         }
     }
 
@@ -24004,25 +28181,34 @@ mod tests {
             outputs: vec!["rn_fs_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-                    name: "epsilon".to_string(),
-                    value: attributes::OnnxAttributeValue::Floats(vec![0.001, 0.002]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "epsilon".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "epsilon".to_string(),
+                        value: attributes::OnnxAttributeValue::Floats(vec![0.001, 0.002]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let norm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
         // Assert: Floats (vector) epsilon should fall back to default 1e-5
-        if let OpKind::RmsNorm { feature_dim: _, eps } = norm.kind {
-            assert!((eps - 1e-5).abs() < 1e-15,
-                "Floats epsilon attribute should fall back to default 1e-5, got {eps}");
+        if let Op::RmsNorm(spec) = &norm.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-15,
+                "Floats epsilon attribute should fall back to default 1e-5, got {eps}"
+            );
         }
     }
 
@@ -24039,24 +28225,34 @@ mod tests {
             outputs: vec!["tr_out".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Float(1.0),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Float(1.0),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        let tr_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let tr_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
         // Assert: Float perm should be treated as non-Ints, defaulting to empty
-        if let OpKind::Transpose { perm } = &tr_op.kind {
-            assert!(perm.is_empty(), "Float perm attribute should default to empty perm, got {:?}", perm);
+        if let Op::Transpose { perm } = &tr_op.op_v2 {
+            assert!(
+                perm.is_empty(),
+                "Float perm attribute should default to empty perm, got {:?}",
+                perm
+            );
         }
     }
 
@@ -24065,7 +28261,9 @@ mod tests {
     fn gather_with_long_table_name_succeeds() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Gather with very long initializer name
-        let long_name = "model_encoder_layer_000_transformer_self_attention_embedding_table_weights".to_string();
+        let long_name =
+            "model_encoder_layer_000_transformer_self_attention_embedding_table_weights"
+                .to_string();
         let table = OnnxTensor::new(
             long_name.clone(),
             safetensors::Dtype::F32,
@@ -24085,7 +28283,12 @@ mod tests {
                 outputs: vec!["embed_out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "ids".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -24099,8 +28302,14 @@ mod tests {
         // Assert: should succeed despite long name
         assert!(result.is_ok(), "Gather with long table name should succeed");
         let graph = result.unwrap();
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }));
-        assert!(gather_op.is_some(), "Should have Gather op with long table name");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }));
+        assert!(
+            gather_op.is_some(),
+            "Should have Gather op with long table name"
+        );
     }
 
     // @trace TEST-GC-841 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24108,7 +28317,12 @@ mod tests {
     fn convert_matmul_after_passthrough_preserves_shape() {
         // Arrange: Sigmoid (passthrough) followed by MatMul — the MatMul should still get correct tensor id
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("pw".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "pw".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("pw".to_string(), w);
         let onnx = OnnxGraph {
@@ -24132,8 +28346,18 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "mm_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "mm_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24144,10 +28368,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: should have 1 op (MatMul) — Sigmoid is passthrough and adds no op
-        assert_eq!(graph.ops.len(), 1, "Sigmoid passthrough + MatMul should produce 1 op");
-        if let OpKind::Gemm { n, k, .. } = graph.ops[0].kind {
-            assert_eq!(n, 64, "MatMul n should be 64 from weight shape [64, 32]");
-            assert_eq!(k, 32, "MatMul k should be 32 from weight shape [64, 32]");
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Sigmoid passthrough + MatMul should produce 1 op"
+        );
+        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(*n, 64, "MatMul n should be 64 from weight shape [64, 32]");
+            assert_eq!(*k, 32, "MatMul k should be 32 from weight shape [64, 32]");
         }
     }
 
@@ -24156,7 +28386,12 @@ mod tests {
     fn graph_output_same_name_as_initializer_output_included() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Graph output references an initializer directly (no node produces it)
-        let w = OnnxTensor::new("direct_out".to_string(), safetensors::Dtype::F32, vec![10, 20], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "direct_out".to_string(),
+            safetensors::Dtype::F32,
+            vec![10, 20],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("direct_out".to_string(), w);
         let onnx = OnnxGraph {
@@ -24164,7 +28399,12 @@ mod tests {
             doc_string: String::new(),
             nodes: vec![],
             inputs: vec![],
-            outputs: vec![model::OnnxValueInfo { name: "direct_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "direct_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24175,7 +28415,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: output should reference the initializer tensor (it's in tensor_map)
-        assert_eq!(graph.outputs.len(), 1, "Output referencing an initializer should be included");
+        assert_eq!(
+            graph.outputs.len(),
+            1,
+            "Output referencing an initializer should be included"
+        );
     }
 
     // @trace TEST-GC-843 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24183,8 +28427,18 @@ mod tests {
     fn gather_output_feeds_into_next_gather() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Two Gather nodes chained — first Gather output feeds into second Gather
-        let table_a = OnnxTensor::new("table_a".to_string(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
-        let table_b = OnnxTensor::new("table_b".to_string(), safetensors::Dtype::F32, vec![64, 16], prost::bytes::Bytes::new());
+        let table_a = OnnxTensor::new(
+            "table_a".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let table_b = OnnxTensor::new(
+            "table_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("table_a".to_string(), table_a);
         init.insert("table_b".to_string(), table_b);
@@ -24209,8 +28463,18 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "ids".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "gather_b_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "gather_b_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24221,11 +28485,18 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: should have 2 Gather ops
-        let gathers: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gather { .. })).collect();
+        let gathers: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .collect();
         assert_eq!(gathers.len(), 2, "Chained Gather should produce 2 ops");
         // Second gather uses table_b which has embed_dim=16
-        if let OpKind::Gather { embed_dim, .. } = gathers[1].kind {
-            assert_eq!(embed_dim, 16, "Second Gather should use table_b embed_dim=16");
+        if let Op::Gather { embed_dim, .. } = &gathers[1].op_v2 {
+            assert_eq!(
+                *embed_dim, 16,
+                "Second Gather should use table_b embed_dim=16"
+            );
         }
     }
 
@@ -24234,8 +28505,18 @@ mod tests {
     fn graph_only_initializers_no_inputs_no_nodes() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Graph with only initializers, no inputs, no nodes, no outputs
-        let w = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![4, 4], prost::bytes::Bytes::new());
-        let b = OnnxTensor::new("b1".to_string(), safetensors::Dtype::F32, vec![4], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 4],
+            prost::bytes::Bytes::new(),
+        );
+        let b = OnnxTensor::new(
+            "b1".to_string(),
+            safetensors::Dtype::F32,
+            vec![4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w);
         init.insert("b1".to_string(), b);
@@ -24256,8 +28537,16 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: no ops, no outputs, tensors are registered
         assert_eq!(graph.ops.len(), 0, "No nodes should mean no ops");
-        assert_eq!(graph.outputs.len(), 0, "No outputs declared should mean no outputs");
-        assert_eq!(graph.tensors.len(), 2, "Both initializers should be registered as tensors");
+        assert_eq!(
+            graph.outputs.len(),
+            0,
+            "No outputs declared should mean no outputs"
+        );
+        assert_eq!(
+            graph.tensors.len(),
+            2,
+            "Both initializers should be registered as tensors"
+        );
     }
 
     // @trace TEST-GC-845 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24277,8 +28566,14 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Pow should produce Mul op kind
-        let pow_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Mul) && op.label == "pow1");
-        assert!(pow_op.is_some(), "Pow node should produce Mul op with label 'pow1'");
+        let pow_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Mul) && op.label == "pow1");
+        assert!(
+            pow_op.is_some(),
+            "Pow node should produce Mul op with label 'pow1'"
+        );
     }
 
     // @trace TEST-GC-846 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24286,8 +28581,18 @@ mod tests {
     fn matmul_output_name_reused_by_add_node() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Two MatMul nodes where the second reuses the first's output name "hidden"
-        let w = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![64, 64], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w);
         init.insert("w2".to_string(), w2);
@@ -24312,8 +28617,18 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "hidden".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "hidden".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24343,8 +28658,18 @@ mod tests {
                 outputs: vec!["clip_out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "clip_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "clip_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -24355,7 +28680,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: passthrough ops produce no ops in the graph
-        assert_eq!(graph.ops.len(), 0, "Clip passthrough should produce zero ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Clip passthrough should produce zero ops"
+        );
     }
 
     // @trace TEST-GC-848 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24386,11 +28715,18 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         // Assert: output tensor should have shape [seq_dim]
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add))
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
             .expect("Should have Add op");
         let out_tid = add_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
-        assert_eq!(out_tensor.shape.len(), 1, "Default binary output should have 1 dimension");
+        assert_eq!(
+            out_tensor.shape.len(),
+            1,
+            "Default binary output should have 1 dimension"
+        );
         if let SymDim::Symbolic { name, max_value } = &out_tensor.shape[0] {
             assert_eq!(name, "seq_len", "Default shape should be seq_len");
             assert_eq!(*max_value, Some(4096), "max_value should match max_seq_len");
@@ -24404,8 +28740,18 @@ mod tests {
     fn graph_output_points_to_tensor_produced_by_last_matmul() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Two MatMul nodes chained; graph output should reference the second's output tensor
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![64, 16], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w1);
         init.insert("w2".to_string(), w2);
@@ -24430,8 +28776,18 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "final_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "final_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24445,7 +28801,10 @@ mod tests {
         assert_eq!(graph.outputs.len(), 1, "Should have 1 graph output");
         let out_tid = graph.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
-        assert!(out_tensor.producer.is_some(), "Graph output tensor should have a producer (mm2)");
+        assert!(
+            out_tensor.producer.is_some(),
+            "Graph output tensor should have a producer (mm2)"
+        );
         assert_eq!(out_tensor.name, "final_out");
     }
 
@@ -24454,7 +28813,12 @@ mod tests {
     fn matmul_weight_as_first_input_uses_it_as_weight() {
         use super::super::tensor::OnnxTensor;
         // Arrange: MatMul where first input is initializer, second is activation
-        let weight = OnnxTensor::new("weight".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "weight".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("weight".to_string(), weight);
         let onnx = OnnxGraph {
@@ -24468,8 +28832,18 @@ mod tests {
                 outputs: vec!["out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "activation".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "activation".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24480,11 +28854,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: should produce a Gemm op with n=32, k=16
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, .. } = gemm_op.kind {
-            assert_eq!(n, 32, "n should be weight.shape[0]");
-            assert_eq!(k, 16, "k should be weight.shape[1]");
+        if let Op::Gemm(spec) = &gemm_op.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            assert_eq!(*n, 32, "n should be weight.shape[0]");
+            assert_eq!(*k, 16, "k should be weight.shape[1]");
         }
     }
 
@@ -24503,8 +28882,18 @@ mod tests {
                 outputs: vec!["out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -24515,10 +28904,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
-        let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool op");
-        if let OpKind::MeanPool { cls_mode, .. } = &pool.kind {
-            assert!(!cls_mode, "cls_mode should always be false for ONNX ReduceMean");
+        if let Op::MeanPool { cls_mode, .. } = &pool.op_v2 {
+            assert!(
+                !cls_mode,
+                "cls_mode should always be false for ONNX ReduceMean"
+            );
         }
     }
 
@@ -24537,8 +28932,18 @@ mod tests {
                 outputs: vec!["clipped".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "clipped".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "clipped".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -24550,14 +28955,22 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "clipped" and "x" should resolve to the same tensor ID
         // Graph output should still work because it references the aliased tensor
-        assert_eq!(graph.outputs.len(), 1, "Should have 1 graph output (clipped → aliased to x)");
-        assert_eq!(graph.ops.len(), 0, "Clip passthrough should produce zero ops");
+        assert_eq!(
+            graph.outputs.len(),
+            1,
+            "Should have 1 graph output (clipped → aliased to x)"
+        );
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Clip passthrough should produce zero ops"
+        );
     }
 
     // @trace TEST-GC-853 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn graph_input_shape_from_value_info_tensor_type() {
-        use super::super::types::{OnnxType, OnnxTensorType, OnnxTensorShape, OnnxDim};
+        use super::super::types::{OnnxDim, OnnxTensorShape, OnnxTensorType, OnnxType};
         // Arrange: Graph input with value_info specifying [Known(128), Known(256)]
         let onnx = OnnxGraph {
             name: "value_info_shape".into(),
@@ -24585,10 +28998,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         // Assert: input tensor should have shape [Concrete(128), Concrete(256)]
-        assert!(!graph.inputs.is_empty(), "Should have at least 1 graph input");
+        assert!(
+            !graph.inputs.is_empty(),
+            "Should have at least 1 graph input"
+        );
         let in_tid = graph.inputs[0];
         let in_tensor = graph.tensor(in_tid).expect("Input tensor should exist");
-        assert_eq!(in_tensor.shape.len(), 2, "Should have 2 dimensions from value_info");
+        assert_eq!(
+            in_tensor.shape.len(),
+            2,
+            "Should have 2 dimensions from value_info"
+        );
         assert!(matches!(&in_tensor.shape[0], SymDim::Concrete(128)));
         assert!(matches!(&in_tensor.shape[1], SymDim::Concrete(256)));
     }
@@ -24598,7 +29018,12 @@ mod tests {
     fn gemm_output_first_dim_is_symbolic_seq() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Gemm node — output tensor first dim should be symbolic seq_dim
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -24612,8 +29037,18 @@ mod tests {
                 outputs: vec!["out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24624,7 +29059,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
         let out_tid = gemm_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
@@ -24635,7 +29073,10 @@ mod tests {
         } else {
             panic!("First dim of Gemm output should be symbolic");
         }
-        assert!(matches!(&out_tensor.shape[1], SymDim::Concrete(64)), "Second dim should be n=64");
+        assert!(
+            matches!(&out_tensor.shape[1], SymDim::Concrete(64)),
+            "Second dim should be n=64"
+        );
     }
 
     // @trace TEST-GC-855 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24644,7 +29085,12 @@ mod tests {
         // Arrange: Binary op where one input has shape from initializer (2D),
         // other is fresh activation (1D default). Output should pick 2D shape.
         use super::super::tensor::OnnxTensor;
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("bias".to_string(), bias);
         let onnx = OnnxGraph {
@@ -24670,11 +29116,18 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "fresh" has 1D [seq], "bias" has 2D [32,16] → output should be 2D
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add))
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
             .expect("Should have Add op");
         let out_tid = add_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
-        assert_eq!(out_tensor.shape.len(), 2, "Broadcast should pick the higher rank (2D from bias)");
+        assert_eq!(
+            out_tensor.shape.len(),
+            2,
+            "Broadcast should pick the higher rank (2D from bias)"
+        );
     }
 
     // @trace TEST-GC-856 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24692,7 +29145,12 @@ mod tests {
                 outputs: vec!["sig_out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![],
             value_info: vec![],
             initializers: HashMap::new(),
@@ -24704,7 +29162,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: no ops added (passthrough)
-        assert_eq!(graph.ops.len(), 0, "Sigmoid passthrough should produce zero ops");
+        assert_eq!(
+            graph.ops.len(),
+            0,
+            "Sigmoid passthrough should produce zero ops"
+        );
     }
 
     // @trace TEST-GC-857 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24712,7 +29174,12 @@ mod tests {
     fn node_with_empty_name_still_converts() {
         use super::super::tensor::OnnxTensor;
         // Arrange: MatMul node with empty string name — should still convert
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -24726,8 +29193,18 @@ mod tests {
                 outputs: vec!["out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24738,9 +29215,13 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
-        assert_eq!(graph.ops.len(), 1, "Should produce 1 Gemm op even with empty node name");
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Should produce 1 Gemm op even with empty node name"
+        );
         let gemm_op = &graph.ops[0];
-        assert!(matches!(gemm_op.kind, OpKind::Gemm { .. }));
+        assert!(matches!(gemm_op.op_v2, Op::Gemm(..)));
     }
 
     // @trace TEST-GC-858 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24748,8 +29229,18 @@ mod tests {
     fn multiple_graph_outputs_all_reference_valid_tensors() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Graph with two MatMul nodes, each producing a separate graph output
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![8, 4], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![8, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w1);
         init.insert("w2".to_string(), w2);
@@ -24774,10 +29265,25 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             outputs: vec![
-                model::OnnxValueInfo { name: "out1".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() },
-                model::OnnxValueInfo { name: "out2".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() },
+                model::OnnxValueInfo {
+                    name: "out1".into(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "out2".into(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
             ],
             value_info: vec![],
             initializers: init,
@@ -24791,7 +29297,9 @@ mod tests {
         // Assert: both outputs should exist and reference valid tensors with producers
         assert_eq!(graph.outputs.len(), 2, "Should have 2 graph outputs");
         for (i, &tid) in graph.outputs.iter().enumerate() {
-            let t = graph.tensor(tid).unwrap_or_else(|| panic!("Output {i} tensor should exist"));
+            let t = graph
+                .tensor(tid)
+                .unwrap_or_else(|| panic!("Output {i} tensor should exist"));
             assert!(t.producer.is_some(), "Output {i} should have a producer");
         }
     }
@@ -24812,8 +29320,18 @@ mod tests {
                 outputs: vec!["mean_out".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "data".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "mean_out".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "data".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "mean_out".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -24824,7 +29342,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: output tensor should be 1D (reduced over seq)
-        let pool_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("Should have MeanPool op");
         let out_tid = pool_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
@@ -24846,18 +29367,31 @@ mod tests {
                 outputs: vec!["transposed".into()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                        name: "perm".to_string(),
-                        value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "perm".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "perm".to_string(),
+                            value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "transposed".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "transposed".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -24868,9 +29402,12 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Transpose op should have perm = [1, 0]
-        let tr_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let tr_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let OpKind::Transpose { perm } = &tr_op.kind {
+        if let Op::Transpose { perm } = &tr_op.op_v2 {
             assert_eq!(perm, &vec![1_usize, 0_usize], "perm should be [1, 0]");
         }
     }
@@ -24880,9 +29417,24 @@ mod tests {
     fn initializer_count_matches_tensor_map_entries() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Graph with 3 initializers — tensor_map should register all 3
-        let t1 = OnnxTensor::new("a".to_string(), safetensors::Dtype::F32, vec![2, 3], prost::bytes::Bytes::new());
-        let t2 = OnnxTensor::new("b".to_string(), safetensors::Dtype::F32, vec![3, 4], prost::bytes::Bytes::new());
-        let t3 = OnnxTensor::new("c".to_string(), safetensors::Dtype::F32, vec![4, 5], prost::bytes::Bytes::new());
+        let t1 = OnnxTensor::new(
+            "a".to_string(),
+            safetensors::Dtype::F32,
+            vec![2, 3],
+            prost::bytes::Bytes::new(),
+        );
+        let t2 = OnnxTensor::new(
+            "b".to_string(),
+            safetensors::Dtype::F32,
+            vec![3, 4],
+            prost::bytes::Bytes::new(),
+        );
+        let t3 = OnnxTensor::new(
+            "c".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 5],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("a".to_string(), t1);
         init.insert("b".to_string(), t2);
@@ -24903,8 +29455,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: all 3 initializer tensors should be in the graph
-        let init_tensors: Vec<_> = graph.tensors.iter().filter(|t| t.producer.is_none()).collect();
-        assert_eq!(init_tensors.len(), 3, "Should have 3 initializer tensors (no producer)");
+        let init_tensors: Vec<_> = graph
+            .tensors
+            .iter()
+            .filter(|t| t.producer.is_none())
+            .collect();
+        assert_eq!(
+            init_tensors.len(),
+            3,
+            "Should have 3 initializer tensors (no producer)"
+        );
     }
 
     // @trace TEST-GC-862 [req:REQ-LOADER-ONNX] [level:unit]
@@ -24912,7 +29472,12 @@ mod tests {
     fn graph_input_count_excludes_initializer_inputs() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Graph has 1 graph input that is NOT an initializer, and 1 initializer
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![8, 4], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![8, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -24926,8 +29491,18 @@ mod tests {
                 outputs: vec!["y".into()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo { name: "x".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "y".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "x".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "y".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24940,8 +29515,13 @@ mod tests {
         // Assert: "x" is no-producer, not an output → should be in graph.inputs
         // "w" is an initializer (no producer) but it should also appear in inputs
         // because it has no producer and is not in output_names
-        assert!(!graph.inputs.is_empty(), "Should have at least 'x' as graph input");
-        let input_names: Vec<&str> = graph.inputs.iter()
+        assert!(
+            !graph.inputs.is_empty(),
+            "Should have at least 'x' as graph input"
+        );
+        let input_names: Vec<&str> = graph
+            .inputs
+            .iter()
             .filter_map(|&tid| graph.tensor(tid).map(|t| t.name.as_str()))
             .collect();
         assert!(input_names.contains(&"x"), "'x' should be in graph inputs");
@@ -24952,8 +29532,18 @@ mod tests {
     fn graph_output_tensor_producer_is_set() {
         use super::super::tensor::OnnxTensor;
         // Arrange: Simple Gather → MatMul chain; both output tensors should have producers
-        let embed = OnnxTensor::new("embed".to_string(), safetensors::Dtype::F32, vec![50, 32], prost::bytes::Bytes::new());
-        let proj = OnnxTensor::new("proj".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "embed".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let proj = OnnxTensor::new(
+            "proj".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("embed".to_string(), embed);
         init.insert("proj".to_string(), proj);
@@ -24978,8 +29568,18 @@ mod tests {
                     attributes: HashMap::new(),
                 },
             ],
-            inputs: vec![model::OnnxValueInfo { name: "ids".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
-            outputs: vec![model::OnnxValueInfo { name: "logits".into(), value_type: None, doc_string: String::new(), metadata_props: HashMap::new() }],
+            inputs: vec![model::OnnxValueInfo {
+                name: "ids".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
+            outputs: vec![model::OnnxValueInfo {
+                name: "logits".into(),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            }],
             value_info: vec![],
             initializers: init,
             sparse_initializers: vec![],
@@ -24990,15 +29590,28 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "hidden" tensor (Gather output) should have producer
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
         let hidden_tid = gather_op.outputs[0];
-        let hidden_tensor = graph.tensor(hidden_tid).expect("hidden tensor should exist");
-        assert!(hidden_tensor.producer.is_some(), "Gather output 'hidden' should have a producer");
+        let hidden_tensor = graph
+            .tensor(hidden_tid)
+            .expect("hidden tensor should exist");
+        assert!(
+            hidden_tensor.producer.is_some(),
+            "Gather output 'hidden' should have a producer"
+        );
         // "logits" (MatMul output) should have producer
         let logits_tid = graph.outputs[0];
-        let logits_tensor = graph.tensor(logits_tid).expect("logits tensor should exist");
-        assert!(logits_tensor.producer.is_some(), "MatMul output 'logits' should have a producer");
+        let logits_tensor = graph
+            .tensor(logits_tid)
+            .expect("logits tensor should exist");
+        assert!(
+            logits_tensor.producer.is_some(),
+            "MatMul output 'logits' should have a producer"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -25050,13 +29663,16 @@ mod tests {
                 outputs: vec!["y".to_string()],
                 attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-                        name: "transB".to_string(),
-                        value: attributes::OnnxAttributeValue::Int(1),
-                        doc_string: String::new(),
-                        ref_attr_name: None,
-                        attr_type: None,
-                    });
+                    attrs.insert(
+                        "transB".to_string(),
+                        attributes::OnnxAttribute {
+                            name: "transB".to_string(),
+                            value: attributes::OnnxAttributeValue::Int(1),
+                            doc_string: String::new(),
+                            ref_attr_name: None,
+                            attr_type: None,
+                        },
+                    );
                     attrs
                 },
             }],
@@ -25077,11 +29693,15 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 应产生 GemmBias 且 transB 交换了 n/k
-        let gemm_bias = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
         assert_eq!(gemm_bias.inputs.len(), 3, "GemmBias should have 3 inputs");
-        if let OpKind::GemmBias { n, k, .. } = &gemm_bias.kind {
+        if let Op::GemmBias(spec) = &gemm_bias.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "transB=true: n should be shape[1]=32");
             assert_eq!(*k, 16, "transB=true: k should be shape[0]=16");
         }
@@ -25121,13 +29741,16 @@ mod tests {
                     outputs: vec!["transposed".to_string()],
                     attributes: {
                         let mut attrs = HashMap::new();
-                        attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                            name: "perm".to_string(),
-                            value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
-                            doc_string: String::new(),
-                            ref_attr_name: None,
-                            attr_type: None,
-                        });
+                        attrs.insert(
+                            "perm".to_string(),
+                            attributes::OnnxAttribute {
+                                name: "perm".to_string(),
+                                value: attributes::OnnxAttributeValue::Ints(vec![1, 0]),
+                                doc_string: String::new(),
+                                ref_attr_name: None,
+                                attr_type: None,
+                            },
+                        );
                         attrs
                     },
                 },
@@ -25149,12 +29772,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Transpose 应消费 Gather 的输出 tensor
-        let gather = graph.ops.iter().find(|op| op.label == "embed")
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "embed")
             .expect("Should have embed Gather op");
-        let transpose = graph.ops.iter().find(|op| op.label == "transpose")
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "transpose")
             .expect("Should have transpose op");
-        assert!(transpose.inputs.contains(&gather.outputs[0]),
-            "Transpose should consume Gather's output tensor");
+        assert!(
+            transpose.inputs.contains(&gather.outputs[0]),
+            "Transpose should consume Gather's output tensor"
+        );
     }
 
     // ── 二元算子输出形状：两个输入都是默认形状时选 b 的形状 ─────────
@@ -25210,12 +29841,22 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Add 输出形状应为 2-D（选 a 的 2-D 而非 b 的 1-D）
-        let add_op = graph.ops.iter().find(|op| op.label == "add_rank")
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "add_rank")
             .expect("Should have add_rank op");
-        let c_tensor = graph.tensors.iter().find(|t| t.name == "c")
+        let c_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "c")
             .expect("c tensor should exist");
         assert!(add_op.outputs.contains(&c_tensor.id));
-        assert_eq!(c_tensor.shape.len(), 2, "Should pick higher rank (2-D from Gather output)");
+        assert_eq!(
+            c_tensor.shape.len(),
+            2,
+            "Should pick higher rank (2-D from Gather output)"
+        );
     }
 
     // ── 三层 passthrough 链后接真实算子 ─────────────────────────────
@@ -25286,13 +29927,22 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 只有 MatMul 产生 op；三层 passthrough 全部跳过
-        assert_eq!(graph.ops.len(), 1, "Triple passthrough should not produce any ops");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }));
+        assert_eq!(
+            graph.ops.len(),
+            1,
+            "Triple passthrough should not produce any ops"
+        );
+        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
         // MatMul 应消费原始 "x" tensor（所有 passthrough 都 alias 到 x）
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x")
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
             .expect("x tensor should exist");
-        assert_eq!(graph.ops[0].inputs[0], x_tensor.id,
-            "MatMul should consume original 'x' tensor through passthrough chain");
+        assert_eq!(
+            graph.ops[0].inputs[0], x_tensor.id,
+            "MatMul should consume original 'x' tensor through passthrough chain"
+        );
     }
 
     // ── Transpose 带 4D perm 属性 ──────────────────────────────────
@@ -25309,13 +29959,16 @@ mod tests {
             outputs: vec!["trans_4d".to_string()],
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-                    name: "perm".to_string(),
-                    value: attributes::OnnxAttributeValue::Ints(vec![0, 3, 1, 2]),
-                    doc_string: String::new(),
-                    ref_attr_name: None,
-                    attr_type: None,
-                });
+                attrs.insert(
+                    "perm".to_string(),
+                    attributes::OnnxAttribute {
+                        name: "perm".to_string(),
+                        value: attributes::OnnxAttributeValue::Ints(vec![0, 3, 1, 2]),
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
                 attrs
             },
         });
@@ -25323,10 +29976,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let transpose = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Transpose { .. }) && op.label == "transpose_4d")
+        let transpose = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }) && op.label == "transpose_4d")
             .expect("Should have Transpose op with 4D perm");
-        if let OpKind::Transpose { perm } = &transpose.kind {
+        if let Op::Transpose { perm } = &transpose.op_v2 {
             assert_eq!(*perm, vec![0, 3, 1, 2], "perm should be [0, 3, 1, 2]");
         }
     }
@@ -25373,10 +30028,17 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Gemm 的 dtype 应为 BF16
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { dtype, .. } = &gemm.kind {
-            assert!(matches!(dtype, DType::BF16), "Gemm dtype should be BF16 from initializer");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let dtype = &spec.dtype;
+            assert!(
+                matches!(dtype, DType::BF16),
+                "Gemm dtype should be BF16 from initializer"
+            );
         }
     }
 
@@ -25432,12 +30094,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Gather 的 index 输入应为 Reshape 的输出 tensor
-        let reshape = graph.ops.iter().find(|op| op.label == "reshape_first")
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "reshape_first")
             .expect("Should have reshape op");
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        assert!(gather.inputs.contains(&reshape.outputs[0]),
-            "Gather's index input should be Reshape's output tensor");
+        assert!(
+            gather.inputs.contains(&reshape.outputs[0]),
+            "Gather's index input should be Reshape's output tensor"
+        );
     }
 
     // ── 空图仍然能检测 dtype（无 initializer 时默认 F32）───────────
@@ -25463,7 +30133,10 @@ mod tests {
         // Assert: 空 graph 应正常生成，max_seq_len 传播正确
         assert_eq!(graph.ops.len(), 0);
         assert_eq!(graph.max_seq_len, 256);
-        assert!(graph.tensors.is_empty(), "Empty graph should have no tensors");
+        assert!(
+            graph.tensors.is_empty(),
+            "Empty graph should have no tensors"
+        );
     }
 
     // ── 同一激活值分别喂入两个不同 MatMul（fan-out 拓扑）───────────
@@ -25472,8 +30145,18 @@ mod tests {
     fn single_activation_fan_out_to_two_matmuls() {
         // Arrange: 同一个 "x" 分别和 w1、w2 做 MatMul，产生 y1、y2
         use super::super::tensor::OnnxTensor;
-        let w1 = OnnxTensor::new("fan_w1".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("fan_w2".to_string(), safetensors::Dtype::F32, vec![32, 8], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "fan_w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "fan_w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("fan_w1".to_string(), w1);
         init.insert("fan_w2".to_string(), w2);
@@ -25515,17 +30198,25 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: 两个 Gemm 都消费同一个 x tensor
-        let gemm_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
             .collect();
         assert_eq!(gemm_ops.len(), 2);
-        assert_eq!(gemm_ops[0].inputs[0], gemm_ops[1].inputs[0],
-            "Both Gemm ops should share the same activation tensor");
+        assert_eq!(
+            gemm_ops[0].inputs[0], gemm_ops[1].inputs[0],
+            "Both Gemm ops should share the same activation tensor"
+        );
         // 不同的权重和输出
-        assert_ne!(gemm_ops[0].inputs[1], gemm_ops[1].inputs[1],
-            "Different weights should have different tensor IDs");
-        assert_ne!(gemm_ops[0].outputs[0], gemm_ops[1].outputs[0],
-            "Different outputs should have different tensor IDs");
+        assert_ne!(
+            gemm_ops[0].inputs[1], gemm_ops[1].inputs[1],
+            "Different weights should have different tensor IDs"
+        );
+        assert_ne!(
+            gemm_ops[0].outputs[0], gemm_ops[1].outputs[0],
+            "Different outputs should have different tensor IDs"
+        );
     }
 
     // ── LayerNorm → RmsNorm 级联正确连接 ──────────────────────────
@@ -25534,9 +30225,24 @@ mod tests {
     fn layer_norm_then_rms_norm_chain() {
         // Arrange: LayerNorm 输出直接馈入 RmsNorm
         use super::super::tensor::OnnxTensor;
-        let ln_scale = OnnxTensor::new("ln_s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let ln_bias = OnnxTensor::new("ln_b".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let rn_scale = OnnxTensor::new("rn_s".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let ln_scale = OnnxTensor::new(
+            "ln_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_bias = OnnxTensor::new(
+            "ln_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let rn_scale = OnnxTensor::new(
+            "rn_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("ln_s".to_string(), ln_scale);
         init.insert("ln_b".to_string(), ln_bias);
@@ -25579,12 +30285,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: RmsNorm 应消费 LayerNorm 的输出
-        let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        let rn_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let rn_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        assert!(rn_op.inputs.contains(&ln_op.outputs[0]),
-            "RmsNorm should consume LayerNorm's output tensor");
+        assert!(
+            rn_op.inputs.contains(&ln_op.outputs[0]),
+            "RmsNorm should consume LayerNorm's output tensor"
+        );
     }
 
     // ── MatMul 使用极大权重维度 8192x4096（边界值）─────────────
@@ -25629,9 +30343,15 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 16384).unwrap();
         // Assert
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let OpKind::Gemm { n, k, m, .. } = &gemm.kind {
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
+            let m = &spec.m;
             assert_eq!(*n, 8192, "n should be 8192");
             assert_eq!(*k, 4096, "k should be 4096");
             assert!(
@@ -25651,13 +30371,17 @@ mod tests {
             node_name: "matmul".to_string(),
         };
         // Act: 通过 move 语义将错误传递到新线程
-        let handle = std::thread::spawn(move || {
-            err.to_string()
-        });
+        let handle = std::thread::spawn(move || err.to_string());
         let result = handle.join().expect("Thread should not panic");
         // Assert: 跨线程后 Display 输出仍然正确
-        assert!(result.contains("weight"), "Error message should survive thread move: {result}");
-        assert!(result.contains("matmul"), "Error message should survive thread move: {result}");
+        assert!(
+            result.contains("weight"),
+            "Error message should survive thread move: {result}"
+        );
+        assert!(
+            result.contains("matmul"),
+            "Error message should survive thread move: {result}"
+        );
     }
 
     // ── Gather 索引输入名称在 initializer 中也能正常工作 ───────────
@@ -25704,9 +30428,17 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Gather 应成功，table_rows=100, embed_dim=64
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 100, "table_rows should be 100");
             assert_eq!(*embed_dim, 64, "embed_dim should be 64");
         }
@@ -25747,10 +30479,15 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: result_w 应该在 graph.outputs 中
-        let result_w = graph.tensors.iter().find(|t| t.name == "result_w")
+        let result_w = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "result_w")
             .expect("result_w should be registered as tensor");
-        assert!(graph.outputs.contains(&result_w.id),
-            "Initializer matching output name should be included in graph.outputs");
+        assert!(
+            graph.outputs.contains(&result_w.id),
+            "Initializer matching output name should be included in graph.outputs"
+        );
     }
 
     // ── 节点名称为空字符串不影响转换 ──────────────────────────────
@@ -25796,7 +30533,10 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 空名称不应导致 panic，op 应成功添加
         assert_eq!(graph.ops.len(), 1, "Should have 1 Gemm op");
-        assert_eq!(graph.ops[0].label, "", "Op label should preserve empty node name");
+        assert_eq!(
+            graph.ops[0].label, "",
+            "Op label should preserve empty node name"
+        );
     }
 
     // ── Batch 6: 新增 15 个测试 (边界条件 & 未覆盖链路) ───────────
@@ -25853,14 +30593,21 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Where 输出 "where_out" 和 "x" 应映射到同一 tensor_id
-        let x_tensor = graph.tensors.iter().find(|t| t.name == "x")
+        let x_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "x")
             .expect("x tensor should exist");
-        let where_out_tid = graph.ops.iter()
+        let where_out_tid = graph
+            .ops
+            .iter()
             .find(|op| op.label == "mm")
             .expect("MatMul op should exist")
             .inputs[0];
-        assert_eq!(where_out_tid, x_tensor.id,
-            "Where passthrough should alias output to input tensor");
+        assert_eq!(
+            where_out_tid, x_tensor.id,
+            "Where passthrough should alias output to input tensor"
+        );
     }
 
     // ── 2. Sigmoid passthrough 输出别名到输入 tensor_id ──────────────
@@ -25915,12 +30662,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Sigmoid 输出 "sig_out" 应与 "act" 共享同一 tensor_id
-        let act_tensor = graph.tensors.iter().find(|t| t.name == "act")
+        let act_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "act")
             .expect("act tensor should exist");
-        let mm_op = graph.ops.iter().find(|op| op.label == "mm_sig")
+        let mm_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mm_sig")
             .expect("MatMul op should exist");
-        assert_eq!(mm_op.inputs[0], act_tensor.id,
-            "Sigmoid passthrough should alias output to input tensor");
+        assert_eq!(
+            mm_op.inputs[0], act_tensor.id,
+            "Sigmoid passthrough should alias output to input tensor"
+        );
     }
 
     // ── 3. Relu passthrough 输出别名到输入 tensor_id ──────────────
@@ -25975,12 +30730,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: Relu passthrough 后 MatMul 消费原始输入 tensor
-        let input_tensor = graph.tensors.iter().find(|t| t.name == "input_act")
+        let input_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "input_act")
             .expect("input_act tensor should exist");
-        let mm_op = graph.ops.iter().find(|op| op.label == "relu_mm")
+        let mm_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "relu_mm")
             .expect("MatMul after Relu should exist");
-        assert_eq!(mm_op.inputs[0], input_tensor.id,
-            "Relu passthrough should alias output to input tensor");
+        assert_eq!(
+            mm_op.inputs[0], input_tensor.id,
+            "Relu passthrough should alias output to input tensor"
+        );
     }
 
     // ── 4. Div 输出 tensor 形状验证 ────────────────────────────────
@@ -26035,15 +30798,25 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Div 的 OpKind 应为 Mul（Div 映射到 Mul）
-        let div_op = graph.ops.iter().find(|op| op.label == "div_op")
+        let div_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "div_op")
             .expect("Div op should exist");
-        assert!(matches!(div_op.kind, OpKind::Mul),
-            "Div should map to OpKind::Mul");
+        assert!(
+            matches!(div_op.op_v2, Op::Mul),
+            "Div should map to OpKind::Mul"
+        );
         // 输出 tensor 名称应为 "div_result"
-        let div_result = graph.tensors.iter().find(|t| t.name == "div_result")
+        let div_result = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "div_result")
             .expect("div_result tensor should exist");
-        assert!(div_result.shape.len() >= 1,
-            "Div output should have at least one dimension");
+        assert!(
+            div_result.shape.len() >= 1,
+            "Div output should have at least one dimension"
+        );
     }
 
     // ── 5. Sub 输出 tensor 形状验证 ────────────────────────────────
@@ -26098,12 +30871,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Sub 映射到 Add OpKind
-        let sub_op = graph.ops.iter().find(|op| op.label == "sub_op")
+        let sub_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "sub_op")
             .expect("Sub op should exist");
-        assert!(matches!(sub_op.kind, OpKind::Add),
-            "Sub should map to OpKind::Add");
+        assert!(
+            matches!(sub_op.op_v2, Op::Add),
+            "Sub should map to OpKind::Add"
+        );
         // 输出 tensor 名称为 "sub_result"
-        let sub_result = graph.tensors.iter().find(|t| t.name == "sub_result")
+        let sub_result = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "sub_result")
             .expect("sub_result tensor should exist");
         assert_eq!(sub_result.name, "sub_result");
     }
@@ -26160,12 +30941,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: MatMul 应消费 Transpose 的输出 tensor
-        let trans_op = graph.ops.iter().find(|op| op.label == "trans_first")
+        let trans_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "trans_first")
             .expect("Transpose op should exist");
-        let mm_op = graph.ops.iter().find(|op| op.label == "mm_after_trans")
+        let mm_op = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "mm_after_trans")
             .expect("MatMul op should exist");
-        assert_eq!(mm_op.inputs[0], trans_op.outputs[0],
-            "MatMul activation input should be Transpose output tensor");
+        assert_eq!(
+            mm_op.inputs[0], trans_op.outputs[0],
+            "MatMul activation input should be Transpose output tensor"
+        );
     }
 
     // ── 7. Gather 后接 RmsNorm 正确连接 ───────────────────────────
@@ -26227,14 +31016,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: RmsNorm 应消费 Gather 的输出 tensor
-        let gather_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Gather op should exist");
-        let rms_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
+        let rms_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
             .expect("RmsNorm op should exist");
-        assert!(rms_op.inputs.contains(&gather_op.outputs[0]),
-            "RmsNorm should consume Gather's output tensor");
+        assert!(
+            rms_op.inputs.contains(&gather_op.outputs[0]),
+            "RmsNorm should consume Gather's output tensor"
+        );
     }
 
     // ── 8. Gather 后接 LayerNorm 正确连接 ──────────────────────────
@@ -26281,7 +31076,11 @@ mod tests {
                     name: "ln_after_emb".to_string(),
                     op_type: "LayerNormalization".to_string(),
                     domain: String::new(),
-                    inputs: vec!["emb_out".to_string(), "ln_gamma".to_string(), "ln_beta".to_string()],
+                    inputs: vec![
+                        "emb_out".to_string(),
+                        "ln_gamma".to_string(),
+                        "ln_beta".to_string(),
+                    ],
                     outputs: vec!["ln_result".to_string()],
                     attributes: HashMap::new(),
                 },
@@ -26303,14 +31102,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: LayerNorm 应消费 Gather 的输出
-        let gather_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Gather op should exist");
-        let ln_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .expect("LayerNorm op should exist");
-        assert!(ln_op.inputs.contains(&gather_op.outputs[0]),
-            "LayerNorm should consume Gather's output tensor");
+        assert!(
+            ln_op.inputs.contains(&gather_op.outputs[0]),
+            "LayerNorm should consume Gather's output tensor"
+        );
     }
 
     // ── 9. GemmBias 输出 tensor n 维度来自权重 ──────────────────────
@@ -26362,13 +31167,19 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: GemmBias 的 n=48（权重行数）, 输出 tensor 的第二维 = 48
-        let gb_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gb_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
-        if let OpKind::GemmBias { n, .. } = &gb_op.kind {
+        if let Op::GemmBias(spec) = &gb_op.op_v2 {
+            let n = &spec.n;
             assert_eq!(*n, 48, "GemmBias n should be 48 (weight rows)");
         }
-        let gb_out = graph.tensors.iter().find(|t| t.name == "gb_out")
+        let gb_out = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "gb_out")
             .expect("gb_out tensor should exist");
         if let SymDim::Concrete(dim) = gb_out.shape.get(1).unwrap() {
             assert_eq!(*dim, 48, "Output tensor second dim should be 48");
@@ -26437,14 +31248,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Reshape 应消费 ReduceMean 的输出
-        let mean_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let mean_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("ReduceMean should produce MeanPool op");
-        let reshape_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Reshape { .. }))
+        let reshape_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
             .expect("Reshape op should exist");
-        assert_eq!(reshape_op.inputs[0], mean_op.outputs[0],
-            "Reshape should consume ReduceMean's output tensor");
+        assert_eq!(
+            reshape_op.inputs[0], mean_op.outputs[0],
+            "Reshape should consume ReduceMean's output tensor"
+        );
     }
 
     // ── 11. ReduceMean 后接 Transpose 正确连接 ─────────────────────
@@ -26507,14 +31324,20 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: Transpose 应消费 ReduceMean 的输出
-        let rm_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let rm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .expect("ReduceMean should produce MeanPool op");
-        let trans_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Transpose { .. }))
+        let trans_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
             .expect("Transpose op should exist");
-        assert_eq!(trans_op.inputs[0], rm_op.outputs[0],
-            "Transpose should consume ReduceMean's output tensor");
+        assert_eq!(
+            trans_op.inputs[0], rm_op.outputs[0],
+            "Transpose should consume ReduceMean's output tensor"
+        );
     }
 
     // ── 12. 图输入使用 OnnxDim::Param 命名维度正确传播 ───────────
@@ -26551,7 +31374,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 输入 tensor 形状应包含 Symbolic("batch_size") + Concrete(128)
-        let batch_tensor = graph.tensors.iter().find(|t| t.name == "batch_input")
+        let batch_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "batch_input")
             .expect("batch_input tensor should exist");
         assert_eq!(batch_tensor.shape.len(), 2, "Should have 2 dimensions");
         assert!(
@@ -26578,10 +31404,7 @@ mod tests {
                 value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                     elem_type: proto::tensor_proto::DataType::Float,
                     shape: types::OnnxTensorShape {
-                        dims: vec![
-                            types::OnnxDim::Unknown,
-                            types::OnnxDim::Known(64),
-                        ],
+                        dims: vec![types::OnnxDim::Unknown, types::OnnxDim::Known(64)],
                     },
                 })),
                 doc_string: String::new(),
@@ -26598,7 +31421,10 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Unknown 维度应变为 Symbolic("unknown", max_value=1024)
-        let unk_tensor = graph.tensors.iter().find(|t| t.name == "unk_input")
+        let unk_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "unk_input")
             .expect("unk_input tensor should exist");
         assert_eq!(unk_tensor.shape.len(), 2);
         assert!(
@@ -26649,11 +31475,16 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: 应产生一个 Add op，消费两个不同的激活 tensor
         assert_eq!(graph.ops.len(), 1, "Should have exactly 1 Add op");
-        assert!(matches!(graph.ops[0].kind, OpKind::Add));
-        assert_ne!(graph.ops[0].inputs[0], graph.ops[0].inputs[1],
-            "Two different activations should have different tensor IDs");
+        assert!(matches!(graph.ops[0].op_v2, Op::Add));
+        assert_ne!(
+            graph.ops[0].inputs[0], graph.ops[0].inputs[1],
+            "Two different activations should have different tensor IDs"
+        );
         // 输出 tensor 应为 "added"
-        let added_tensor = graph.tensors.iter().find(|t| t.name == "added")
+        let added_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "added")
             .expect("added tensor should exist");
         assert_eq!(graph.ops[0].outputs[0], added_tensor.id);
     }
@@ -26710,17 +31541,25 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Silu 应消费 Gather 的输出 tensor
-        let gather_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Gather op should exist");
-        let silu_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Silu))
+        let silu_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Silu))
             .expect("Silu op should exist");
-        assert_eq!(silu_op.inputs[0], gather_op.outputs[0],
-            "Silu should consume Gather's output tensor");
+        assert_eq!(
+            silu_op.inputs[0], gather_op.outputs[0],
+            "Silu should consume Gather's output tensor"
+        );
         // Silu 输出 tensor 应是不同 ID（非 passthrough）
-        assert_ne!(silu_op.outputs[0], gather_op.outputs[0],
-            "Silu output should be a new tensor, not aliased");
+        assert_ne!(
+            silu_op.outputs[0], gather_op.outputs[0],
+            "Silu output should be a new tensor, not aliased"
+        );
     }
 
     // ── 16. Tanh 输出接 Gemm 验证正确连接 ────────────────────────────
@@ -26768,10 +31607,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
         // Assert
-        let tanh_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("Tanh op");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
-        assert_eq!(gemm_op.inputs[0], tanh_op.outputs[0],
-            "Gemm should consume Tanh output tensor");
+        let tanh_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .expect("Tanh op");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm op");
+        assert_eq!(
+            gemm_op.inputs[0], tanh_op.outputs[0],
+            "Gemm should consume Tanh output tensor"
+        );
     }
 
     // ── 17. Gather 输出接 Softmax 验证形状传播 ────────────────────────
@@ -26811,13 +31660,25 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
-        let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
-        assert_eq!(softmax_op.inputs[0], gather_op.outputs[0],
-            "Softmax should consume Gather output");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather");
+        let softmax_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("Softmax");
+        assert_eq!(
+            softmax_op.inputs[0], gather_op.outputs[0],
+            "Softmax should consume Gather output"
+        );
         // Softmax output tensor should be distinct (not passthrough)
-        assert_ne!(softmax_op.outputs[0], gather_op.outputs[0],
-            "Softmax should produce a new output tensor");
+        assert_ne!(
+            softmax_op.outputs[0], gather_op.outputs[0],
+            "Softmax should produce a new output tensor"
+        );
     }
 
     // ── 18. Sub 输出接 Softmax 验证 Add-opkind 映射和连接 ───────────
@@ -26826,8 +31687,18 @@ mod tests {
     fn sub_output_feeds_into_softmax() {
         // Arrange: two MatMuls produce q and k, Sub(q,k), then Softmax
         use super::super::tensor::OnnxTensor;
-        let qw = OnnxTensor::new("qw".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let kw = OnnxTensor::new("kw".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let qw = OnnxTensor::new(
+            "qw".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let kw = OnnxTensor::new(
+            "kw".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("qw".to_string(), qw);
         init.insert("kw".to_string(), kw);
@@ -26856,12 +31727,22 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: Sub maps to Add OpKind
-        let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .collect();
         assert!(add_ops.len() >= 1, "Sub should be mapped to Add OpKind");
-        let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
+        let softmax_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("Softmax");
         let sub_op = add_ops[0];
-        assert_eq!(softmax_op.inputs[0], sub_op.outputs[0],
-            "Softmax should consume Sub (Add-opkind) output");
+        assert_eq!(
+            softmax_op.inputs[0], sub_op.outputs[0],
+            "Softmax should consume Sub (Add-opkind) output"
+        );
     }
 
     // ── 19. ReduceMean 输出接 Gemm 验证连接 ──────────────────────────
@@ -26870,8 +31751,18 @@ mod tests {
     fn reduce_mean_output_feeds_into_gemm() {
         // Arrange: Gather → ReduceMean → Gemm (pooled output feeds linear)
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb_w".to_string(), safetensors::Dtype::F32, vec![100, 32], prost::bytes::Bytes::new());
-        let linear_w = OnnxTensor::new("lw".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let linear_w = OnnxTensor::new(
+            "lw".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb_w".to_string(), emb);
         init.insert("lw".to_string(), linear_w);
@@ -26899,10 +31790,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
-        let reduce_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).expect("ReduceMean");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
-        assert_eq!(gemm_op.inputs[0], reduce_op.outputs[0],
-            "Gemm should consume ReduceMean output tensor");
+        let reduce_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .expect("ReduceMean");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm");
+        assert_eq!(
+            gemm_op.inputs[0], reduce_op.outputs[0],
+            "Gemm should consume ReduceMean output tensor"
+        );
     }
 
     // ── 20. Gemm 输出接 Gelu 接 MatMul 三级链验证 ──────────────────
@@ -26911,9 +31812,24 @@ mod tests {
     fn gemm_gelu_matmul_three_stage_chain() {
         // Arrange: Gather → Gemm → Gelu → MatMul
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![50, 32], prost::bytes::Bytes::new());
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![16, 64], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("w1".to_string(), w1);
@@ -26944,12 +31860,30 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: chain connectivity
         assert_eq!(graph.ops.len(), 4, "Should have 4 ops in chain");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
-        let gelu_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu");
-        let matmul_op = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
-            .nth(1).expect("Second Gemm (MatMul)");
-        assert_eq!(gelu_op.inputs[0], gemm_op.outputs[0], "Gelu should consume Gemm output");
-        assert_eq!(matmul_op.inputs[0], gelu_op.outputs[0], "MatMul should consume Gelu output");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm");
+        let gelu_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .expect("Gelu");
+        let matmul_op = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .nth(1)
+            .expect("Second Gemm (MatMul)");
+        assert_eq!(
+            gelu_op.inputs[0], gemm_op.outputs[0],
+            "Gelu should consume Gemm output"
+        );
+        assert_eq!(
+            matmul_op.inputs[0], gelu_op.outputs[0],
+            "MatMul should consume Gelu output"
+        );
     }
 
     // ── 21. Pow 输出接 Add 验证 Mul OpKind 映射链 ──────────────────
@@ -26958,8 +31892,18 @@ mod tests {
     fn pow_output_feeds_into_add() {
         // Arrange: Gather → Pow (mapped to Mul) → Add
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tbl".to_string(), safetensors::Dtype::F32, vec![30, 16], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tbl".to_string(),
+            safetensors::Dtype::F32,
+            vec![30, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tbl".to_string(), table);
         init.insert("bias".to_string(), bias);
@@ -26987,12 +31931,22 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Pow maps to Mul, then Add
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert!(mul_ops.len() >= 1, "Pow should be mapped to Mul OpKind");
-        let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .collect();
         assert!(add_ops.len() >= 1, "Add should exist");
-        assert_eq!(add_ops[0].inputs[0], mul_ops[0].outputs[0],
-            "Add should consume Pow (Mul-mapped) output");
+        assert_eq!(
+            add_ops[0].inputs[0], mul_ops[0].outputs[0],
+            "Add should consume Pow (Mul-mapped) output"
+        );
     }
 
     // ── 22. Div 输出接 Softmax 验证 Mul OpKind 映射和连接 ───────────
@@ -27001,8 +31955,18 @@ mod tests {
     fn div_output_feeds_into_softmax() {
         // Arrange: two MatMuls → Div → Softmax (attention score scaling)
         use super::super::tensor::OnnxTensor;
-        let qw = OnnxTensor::new("qw".to_string(), safetensors::Dtype::F32, vec![32, 8], prost::bytes::Bytes::new());
-        let kw = OnnxTensor::new("kw".to_string(), safetensors::Dtype::F32, vec![32, 8], prost::bytes::Bytes::new());
+        let qw = OnnxTensor::new(
+            "qw".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 8],
+            prost::bytes::Bytes::new(),
+        );
+        let kw = OnnxTensor::new(
+            "kw".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("qw".to_string(), qw);
         init.insert("kw".to_string(), kw);
@@ -27031,11 +31995,21 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: Div maps to Mul OpKind
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert!(mul_ops.len() >= 1, "Div should be mapped to Mul OpKind");
-        let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
-        assert_eq!(softmax_op.inputs[0], mul_ops[0].outputs[0],
-            "Softmax should consume Div (Mul-mapped) output");
+        let softmax_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("Softmax");
+        assert_eq!(
+            softmax_op.inputs[0], mul_ops[0].outputs[0],
+            "Softmax should consume Div (Mul-mapped) output"
+        );
     }
 
     // ── 23. Add 输出接 ReduceMean 验证池化路径连接 ──────────────────
@@ -27044,9 +32018,24 @@ mod tests {
     fn add_output_feeds_into_reduce_mean() {
         // Arrange: Gather → MatMul → Add → ReduceMean
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![40, 24], prost::bytes::Bytes::new());
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![24, 24], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![24], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![40, 24],
+            prost::bytes::Bytes::new(),
+        );
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![24, 24],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![24],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("w".to_string(), w);
@@ -27076,10 +32065,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("Add");
-        let reduce_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).expect("ReduceMean");
-        assert_eq!(reduce_op.inputs[0], add_op.outputs[0],
-            "ReduceMean should consume Add output tensor");
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
+            .expect("Add");
+        let reduce_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .expect("ReduceMean");
+        assert_eq!(
+            reduce_op.inputs[0], add_op.outputs[0],
+            "ReduceMean should consume Add output tensor"
+        );
     }
 
     // ── 24. MatMul 输出接 Reshape 验证形状传递 ──────────────────────
@@ -27088,8 +32087,18 @@ mod tests {
     fn matmul_output_feeds_into_reshape() {
         // Arrange: Gather → MatMul → Reshape
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![60, 32], prost::bytes::Bytes::new());
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![60, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("w".to_string(), w);
@@ -27117,10 +32126,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert
-        let gemm_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. })).collect();
-        let reshape_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
-        assert_eq!(reshape_op.inputs[0], gemm_ops[0].outputs[0],
-            "Reshape should consume MatMul output tensor");
+        let gemm_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .collect();
+        let reshape_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .expect("Reshape");
+        assert_eq!(
+            reshape_op.inputs[0], gemm_ops[0].outputs[0],
+            "Reshape should consume MatMul output tensor"
+        );
     }
 
     // ── 25. Sqrt 输出接 Add 验证 Mul OpKind 映射 ──────────────────
@@ -27129,8 +32148,18 @@ mod tests {
     fn sqrt_output_feeds_into_add() {
         // Arrange: MatMul → Sqrt (maps to Mul) → Add with bias
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         init.insert("bias".to_string(), bias);
@@ -27158,12 +32187,22 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Sqrt maps to Mul OpKind
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
         assert!(mul_ops.len() >= 1, "Sqrt should be mapped to Mul OpKind");
-        let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
+            .collect();
         assert!(add_ops.len() >= 1, "Add should exist");
-        assert_eq!(add_ops[0].inputs[0], mul_ops[0].outputs[0],
-            "Add should consume Sqrt (Mul-mapped) output");
+        assert_eq!(
+            add_ops[0].inputs[0], mul_ops[0].outputs[0],
+            "Add should consume Sqrt (Mul-mapped) output"
+        );
     }
 
     // ── 26. LayerNorm 输出接 Gelu 接 MatMul 验证完整前馈链 ─────────
@@ -27172,10 +32211,30 @@ mod tests {
     fn layernorm_gelu_matmul_feed_forward_chain() {
         // Arrange: Gather → LayerNorm → Gelu → MatMul (FFN block pattern)
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![100, 32], prost::bytes::Bytes::new());
-        let ln_scale = OnnxTensor::new("ln_s".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let ln_bias = OnnxTensor::new("ln_b".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_scale = OnnxTensor::new(
+            "ln_s".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let ln_bias = OnnxTensor::new(
+            "ln_b".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("ln_s".to_string(), ln_scale);
@@ -27186,7 +32245,12 @@ mod tests {
             doc_string: String::new(),
             nodes: vec![
                 make_node("g1", "Gather", vec!["emb", "ids"], vec!["h0"]),
-                make_node("ln1", "LayerNormalization", vec!["h0", "ln_s", "ln_b"], vec!["h1"]),
+                make_node(
+                    "ln1",
+                    "LayerNormalization",
+                    vec!["h0", "ln_s", "ln_b"],
+                    vec!["h1"],
+                ),
                 make_node("gelu1", "Gelu", vec!["h1"], vec!["h2"]),
                 make_node("mm1", "MatMul", vec!["h2", "w2"], vec!["out"]),
             ],
@@ -27206,12 +32270,30 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: full chain connectivity
-        let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
-        let gelu_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu");
-        let gemm_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. })).collect();
+        let ln_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .expect("LayerNorm");
+        let gelu_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .expect("Gelu");
+        let gemm_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .collect();
         let matmul_op = gemm_ops.last().expect("Final MatMul");
-        assert_eq!(gelu_op.inputs[0], ln_op.outputs[0], "Gelu should consume LayerNorm output");
-        assert_eq!(matmul_op.inputs[0], gelu_op.outputs[0], "MatMul should consume Gelu output");
+        assert_eq!(
+            gelu_op.inputs[0], ln_op.outputs[0],
+            "Gelu should consume LayerNorm output"
+        );
+        assert_eq!(
+            matmul_op.inputs[0], gelu_op.outputs[0],
+            "MatMul should consume Gelu output"
+        );
     }
 
     // ── 27. Gather 输出接 Gelu 接 Gemm 验证激活后线性变换 ───────────
@@ -27220,8 +32302,18 @@ mod tests {
     fn gather_gelu_gemm_chain() {
         // Arrange: Gather → Gelu → Gemm
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tbl".to_string(), safetensors::Dtype::F32, vec![80, 24], prost::bytes::Bytes::new());
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![48, 24], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tbl".to_string(),
+            safetensors::Dtype::F32,
+            vec![80, 24],
+            prost::bytes::Bytes::new(),
+        );
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![48, 24],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tbl".to_string(), table);
         init.insert("w".to_string(), w);
@@ -27249,11 +32341,29 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
-        let gelu_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
-        assert_eq!(gelu_op.inputs[0], gather_op.outputs[0], "Gelu should consume Gather output");
-        assert_eq!(gemm_op.inputs[0], gelu_op.outputs[0], "Gemm should consume Gelu output");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather");
+        let gelu_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .expect("Gelu");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm");
+        assert_eq!(
+            gelu_op.inputs[0], gather_op.outputs[0],
+            "Gelu should consume Gather output"
+        );
+        assert_eq!(
+            gemm_op.inputs[0], gelu_op.outputs[0],
+            "Gemm should consume Gelu output"
+        );
     }
 
     // ── 28. Softmax 输出接 Add 验证注意力残差连接模式 ──────────────
@@ -27262,8 +32372,18 @@ mod tests {
     fn softmax_output_feeds_into_add() {
         // Arrange: MatMul(q,k) → Softmax → Add (residual)
         use super::super::tensor::OnnxTensor;
-        let qw = OnnxTensor::new("qw".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
-        let kw = OnnxTensor::new("kw".to_string(), safetensors::Dtype::F32, vec![16, 8], prost::bytes::Bytes::new());
+        let qw = OnnxTensor::new(
+            "qw".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
+        let kw = OnnxTensor::new(
+            "kw".to_string(),
+            safetensors::Dtype::F32,
+            vec![16, 8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("qw".to_string(), qw);
         init.insert("kw".to_string(), kw);
@@ -27292,10 +32412,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
-        let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("Add");
-        assert_eq!(add_op.inputs[0], softmax_op.outputs[0],
-            "Add should consume Softmax output tensor");
+        let softmax_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("Softmax");
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
+            .expect("Add");
+        assert_eq!(
+            add_op.inputs[0], softmax_op.outputs[0],
+            "Add should consume Softmax output tensor"
+        );
     }
 
     // ── 29. Gemm bias 输出接 Softmax 验证 bias+激活路径 ─────────────
@@ -27304,9 +32434,24 @@ mod tests {
     fn gemm_bias_output_feeds_into_softmax() {
         // Arrange: Gather → GemmBias → Softmax
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![50, 16], prost::bytes::Bytes::new());
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![8, 16], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![8], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![8, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![8],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("w".to_string(), w);
@@ -27335,12 +32480,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert
-        let gemm_bias_op = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .expect("GemmBias");
-        let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
-        assert_eq!(softmax_op.inputs[0], gemm_bias_op.outputs[0],
-            "Softmax should consume GemmBias output tensor");
+        let softmax_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("Softmax");
+        assert_eq!(
+            softmax_op.inputs[0], gemm_bias_op.outputs[0],
+            "Softmax should consume GemmBias output tensor"
+        );
     }
 
     // ── 30. Gather+Pow+Sqrt 三节点验证 Pow 和 Sqrt 均 Mul 映射 ─────
@@ -27349,7 +32502,12 @@ mod tests {
     fn gather_pow_sqrt_chain_both_map_to_mul() {
         // Arrange: Gather → Pow (→Mul) → Sqrt (→Mul)
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tbl".to_string(), safetensors::Dtype::F32, vec![40, 12], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tbl".to_string(),
+            safetensors::Dtype::F32,
+            vec![40, 12],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tbl".to_string(), table);
         let onnx = OnnxGraph {
@@ -27376,11 +32534,21 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Pow and Sqrt both map to Mul OpKind
-        let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
-        assert_eq!(mul_ops.len(), 2, "Pow and Sqrt should each produce one Mul op");
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .collect();
+        assert_eq!(
+            mul_ops.len(),
+            2,
+            "Pow and Sqrt should each produce one Mul op"
+        );
         // Second Mul should consume first Mul's output
-        assert_eq!(mul_ops[1].inputs[0], mul_ops[0].outputs[0],
-            "Sqrt (second Mul) should consume Pow (first Mul) output");
+        assert_eq!(
+            mul_ops[1].inputs[0], mul_ops[0].outputs[0],
+            "Sqrt (second Mul) should consume Pow (first Mul) output"
+        );
     }
 
     // ── 31. Conv op is unsupported and returns UnsupportedOp error ──────
@@ -27389,13 +32557,23 @@ mod tests {
     fn conv_op_returns_unsupported_error() {
         // Arrange: a graph with a single Conv node
         use super::super::tensor::OnnxTensor;
-        let kernel = OnnxTensor::new("conv_w".to_string(), safetensors::Dtype::F32, vec![32, 3, 3, 3], prost::bytes::Bytes::new());
+        let kernel = OnnxTensor::new(
+            "conv_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 3, 3, 3],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("conv_w".to_string(), kernel);
         let onnx = OnnxGraph {
             name: "conv_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("c1", "Conv", vec!["image", "conv_w"], vec!["feat"])],
+            nodes: vec![make_node(
+                "c1",
+                "Conv",
+                vec!["image", "conv_w"],
+                vec!["feat"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "image".to_string(),
                 value_type: None,
@@ -27457,7 +32635,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "quant_linear".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("ql1", "QuantizeLinear", vec!["fp32_in", "scale", "zp"], vec!["q_out"])],
+            nodes: vec![make_node(
+                "ql1",
+                "QuantizeLinear",
+                vec!["fp32_in", "scale", "zp"],
+                vec!["q_out"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "fp32_in".to_string(),
                 value_type: None,
@@ -27488,7 +32671,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "dequant_linear".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("dql1", "DequantizeLinear", vec!["q_in", "scale", "zp"], vec!["fp32_out"])],
+            nodes: vec![make_node(
+                "dql1",
+                "DequantizeLinear",
+                vec!["q_in", "scale", "zp"],
+                vec!["fp32_out"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "q_in".to_string(),
                 value_type: None,
@@ -27519,7 +32707,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "resize_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("rs1", "Resize", vec!["x", "roi", "scales", "sizes"], vec!["resized"])],
+            nodes: vec![make_node(
+                "rs1",
+                "Resize",
+                vec!["x", "roi", "scales", "sizes"],
+                vec!["resized"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -27620,7 +32813,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "bn_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("bn1", "BatchNormalization", vec!["x", "scale", "bias", "mean", "var"], vec!["bn_out"])],
+            nodes: vec![make_node(
+                "bn1",
+                "BatchNormalization",
+                vec!["x", "scale", "bias", "mean", "var"],
+                vec!["bn_out"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -27681,8 +32879,18 @@ mod tests {
         // Arrange: Gather -> Relu (passthrough) -> MatMul
         // Relu output aliases input (passthrough), so MatMul should consume Gather output
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("emb".to_string(), safetensors::Dtype::F32, vec![100, 64], prost::bytes::Bytes::new());
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![128, 64], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "emb".to_string(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            prost::bytes::Bytes::new(),
+        );
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![128, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("emb".to_string(), emb);
         init.insert("w".to_string(), w);
@@ -27710,12 +32918,26 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Relu is passthrough (no separate op), so only Gather + Gemm ops
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather op");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op (MatMul)");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather op");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm op (MatMul)");
         // MatMul should consume Gather output (Relu passthrough aliases the tensor)
-        assert_eq!(gemm_op.inputs[0], gather_op.outputs[0],
-            "MatMul should consume Gather output because Relu is passthrough");
-        assert_eq!(graph.ops.len(), 2, "Should have 2 ops (Gather + MatMul), Relu is passthrough");
+        assert_eq!(
+            gemm_op.inputs[0], gather_op.outputs[0],
+            "MatMul should consume Gather output because Relu is passthrough"
+        );
+        assert_eq!(
+            graph.ops.len(),
+            2,
+            "Should have 2 ops (Gather + MatMul), Relu is passthrough"
+        );
     }
 
     // ── 41. Gather -> Sigmoid (passthrough) -> Gemm chain ───────────────
@@ -27724,8 +32946,18 @@ mod tests {
     fn gather_sigmoid_passthrough_feeds_into_gemm() {
         // Arrange: Gather -> Sigmoid (passthrough) -> Gemm
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tbl".to_string(), safetensors::Dtype::F32, vec![200, 48], prost::bytes::Bytes::new());
-        let weight = OnnxTensor::new("proj_w".to_string(), safetensors::Dtype::F32, vec![96, 48], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tbl".to_string(),
+            safetensors::Dtype::F32,
+            vec![200, 48],
+            prost::bytes::Bytes::new(),
+        );
+        let weight = OnnxTensor::new(
+            "proj_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![96, 48],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tbl".to_string(), table);
         init.insert("proj_w".to_string(), weight);
@@ -27753,11 +32985,25 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Sigmoid passthrough, Gemm should consume Gather output directly
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
-        assert_eq!(gemm_op.inputs[0], gather_op.outputs[0],
-            "Gemm should consume Gather output (Sigmoid is passthrough)");
-        assert_eq!(graph.ops.len(), 2, "Should have 2 ops (Gather + Gemm), Sigmoid is passthrough");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm");
+        assert_eq!(
+            gemm_op.inputs[0], gather_op.outputs[0],
+            "Gemm should consume Gather output (Sigmoid is passthrough)"
+        );
+        assert_eq!(
+            graph.ops.len(),
+            2,
+            "Should have 2 ops (Gather + Gemm), Sigmoid is passthrough"
+        );
     }
 
     // ── 42. Gather -> Clip (passthrough) -> MatMul chain ────────────────
@@ -27766,8 +33012,18 @@ mod tests {
     fn gather_clip_passthrough_feeds_into_matmul() {
         // Arrange: Gather -> Clip (passthrough) -> MatMul
         use super::super::tensor::OnnxTensor;
-        let emb = OnnxTensor::new("embed".to_string(), safetensors::Dtype::F32, vec![80, 32], prost::bytes::Bytes::new());
-        let w = OnnxTensor::new("fc_w".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let emb = OnnxTensor::new(
+            "embed".to_string(),
+            safetensors::Dtype::F32,
+            vec![80, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let w = OnnxTensor::new(
+            "fc_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("embed".to_string(), emb);
         init.insert("fc_w".to_string(), w);
@@ -27795,11 +33051,25 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 32).unwrap();
         // Assert: Clip is passthrough, MatMul should consume Gather output
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("MatMul Gemm");
-        assert_eq!(gemm_op.inputs[0], gather_op.outputs[0],
-            "MatMul should consume Gather output (Clip is passthrough)");
-        assert_eq!(graph.ops.len(), 2, "Should have 2 ops (Gather + MatMul), Clip is passthrough");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("MatMul Gemm");
+        assert_eq!(
+            gemm_op.inputs[0], gather_op.outputs[0],
+            "MatMul should consume Gather output (Clip is passthrough)"
+        );
+        assert_eq!(
+            graph.ops.len(),
+            2,
+            "Should have 2 ops (Gather + MatMul), Clip is passthrough"
+        );
     }
 
     // ── 43. MatMul with two graph-input activations returns NoWeightInput ─
@@ -27810,7 +33080,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "no_weight_mm".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("mm1", "MatMul", vec!["act_a", "act_b"], vec!["out"])],
+            nodes: vec![make_node(
+                "mm1",
+                "MatMul",
+                vec!["act_a", "act_b"],
+                vec!["out"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "act_a".to_string(),
@@ -27847,7 +33122,12 @@ mod tests {
     fn gemm_with_1d_weight_returns_invalid_shape_error() {
         // Arrange: Gemm node with a 1-D weight initializer
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("flat_w".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "flat_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("flat_w".to_string(), w);
         let onnx = OnnxGraph {
@@ -27913,7 +33193,12 @@ mod tests {
     fn gather_where_passthrough_feeds_into_add() {
         // Arrange: Gather -> Where (passthrough) -> Add
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("vocab".to_string(), safetensors::Dtype::F32, vec![500, 128], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "vocab".to_string(),
+            safetensors::Dtype::F32,
+            vec![500, 128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("vocab".to_string(), table);
         let onnx = OnnxGraph {
@@ -27948,11 +33233,25 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: Where is passthrough, Add should consume Gather output
-        let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
-        let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("Add");
-        assert_eq!(add_op.inputs[0], gather_op.outputs[0],
-            "Add should consume Gather output (Where is passthrough)");
-        assert_eq!(graph.ops.len(), 2, "Should have 2 ops (Gather + Add), Where is passthrough");
+        let gather_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather");
+        let add_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Add))
+            .expect("Add");
+        assert_eq!(
+            add_op.inputs[0], gather_op.outputs[0],
+            "Add should consume Gather output (Where is passthrough)"
+        );
+        assert_eq!(
+            graph.ops.len(),
+            2,
+            "Should have 2 ops (Gather + Add), Where is passthrough"
+        );
     }
 
     // ── Wave 12x33: 15 new tests ──────────────────────────────────────────
@@ -27965,7 +33264,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "expand_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("ex1", "Expand", vec!["x", "shape"], vec!["expanded"])],
+            nodes: vec![make_node(
+                "ex1",
+                "Expand",
+                vec!["x", "shape"],
+                vec!["expanded"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "x".to_string(),
@@ -28004,7 +33308,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "tile_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("tile1", "Tile", vec!["x", "repeats"], vec!["tiled"])],
+            nodes: vec![make_node(
+                "tile1",
+                "Tile",
+                vec!["x", "repeats"],
+                vec!["tiled"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "x".to_string(),
@@ -28074,7 +33383,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "gathernd_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("gnd1", "GatherND", vec!["data", "indices"], vec!["gathered"])],
+            nodes: vec![make_node(
+                "gnd1",
+                "GatherND",
+                vec!["data", "indices"],
+                vec!["gathered"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "data".to_string(),
@@ -28113,7 +33427,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "scatternd_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("snd1", "ScatterND", vec!["data", "indices", "updates"], vec!["scattered"])],
+            nodes: vec![make_node(
+                "snd1",
+                "ScatterND",
+                vec!["data", "indices", "updates"],
+                vec!["scattered"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "data".to_string(),
@@ -28158,7 +33477,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "nms_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("nms1", "NonMaxSuppression", vec!["boxes", "scores"], vec!["selected"])],
+            nodes: vec![make_node(
+                "nms1",
+                "NonMaxSuppression",
+                vec!["boxes", "scores"],
+                vec!["selected"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "boxes".to_string(),
@@ -28197,7 +33521,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "topk_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("tk1", "TopK", vec!["x", "k"], vec!["values", "indices"])],
+            nodes: vec![make_node(
+                "tk1",
+                "TopK",
+                vec!["x", "k"],
+                vec!["values", "indices"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "x".to_string(),
@@ -28236,7 +33565,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "range_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("rng1", "Range", vec!["start", "limit", "delta"], vec!["output"])],
+            nodes: vec![make_node(
+                "rng1",
+                "Range",
+                vec!["start", "limit", "delta"],
+                vec!["output"],
+            )],
             inputs: vec![
                 model::OnnxValueInfo {
                     name: "start".to_string(),
@@ -28279,8 +33613,18 @@ mod tests {
     fn multiple_graph_outputs_all_registered_in_compiler_graph() {
         // Arrange: two MatMul nodes producing two separate outputs
         use super::super::tensor::OnnxTensor;
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![64, 16], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w1);
         init.insert("w2".to_string(), w2);
@@ -28321,7 +33665,9 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: two outputs should be populated
         assert_eq!(graph.outputs.len(), 2, "Should have 2 graph outputs");
-        let out_names: Vec<&str> = graph.outputs.iter()
+        let out_names: Vec<&str> = graph
+            .outputs
+            .iter()
             .filter_map(|&tid| graph.tensor(tid).map(|t| t.name.as_str()))
             .collect();
         assert!(out_names.contains(&"y1"), "y1 should be a graph output");
@@ -28370,7 +33716,9 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: all three inputs should appear in graph.inputs (no producer)
-        let input_names: Vec<&str> = graph.inputs.iter()
+        let input_names: Vec<&str> = graph
+            .inputs
+            .iter()
             .filter_map(|&tid| graph.tensor(tid).map(|t| t.name.as_str()))
             .collect();
         assert!(input_names.contains(&"a"), "a should be a graph input");
@@ -28386,7 +33734,12 @@ mod tests {
         // Arrange: MatMul -> Expand (unsupported) -> Add
         // The converter processes nodes sequentially, so it should error at Expand
         use super::super::tensor::OnnxTensor;
-        let w = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), w);
         let onnx = OnnxGraph {
@@ -28440,17 +33793,25 @@ mod tests {
     fn gemm_with_large_int64_transb_attribute() {
         // Arrange: Gemm node with transB set to a large int64 value (non-zero = true)
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 64], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         let mut attrs = HashMap::new();
-        attrs.insert("transB".to_string(), attributes::OnnxAttribute {
-            name: "transB".to_string(),
-            value: attributes::OnnxAttributeValue::Int(i64::MAX),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "transB".to_string(),
+            attributes::OnnxAttribute {
+                name: "transB".to_string(),
+                value: attributes::OnnxAttributeValue::Int(i64::MAX),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "gemm_large_transb".to_string(),
             doc_string: String::new(),
@@ -28481,8 +33842,14 @@ mod tests {
         // which causes n/k swap in convert_gemm (n=shape[1], k=shape[0]).
         // The OpKind::Gemm trans_b field itself is always false in current code,
         // but the n/k dimensions reflect the transpose effect.
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm op");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 64, "n should be weight shape[1]=64 (transB swaps n/k)");
             assert_eq!(*k, 32, "k should be weight shape[0]=32 (transB swaps n/k)");
         }
@@ -28494,19 +33861,32 @@ mod tests {
     fn layernorm_with_large_epsilon_attribute() {
         // Arrange: LayerNormalization with epsilon = 1e10 (unrealistic but tests attribute parsing)
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("scale".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "scale".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("scale".to_string(), scale);
         init.insert("bias".to_string(), bias);
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Float(1e10),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Float(1e10),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "ln_large_eps".to_string(),
             doc_string: String::new(),
@@ -28534,9 +33914,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: epsilon should be the value from the attribute
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!((eps - 1e10).abs() < 1.0, "epsilon should be 1e10, got {eps}");
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .expect("LayerNorm");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e10).abs() < 1.0,
+                "epsilon should be 1e10, got {eps}"
+            );
         }
     }
 
@@ -28575,7 +33963,12 @@ mod tests {
     fn gather_reshape_softmax_three_op_chain() {
         // Arrange: Gather -> Reshape -> Softmax — verifies 3-op chain with metadata op in middle
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("vocab".to_string(), safetensors::Dtype::F32, vec![200, 64], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "vocab".to_string(),
+            safetensors::Dtype::F32,
+            vec![200, 64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("vocab".to_string(), table);
         let onnx = OnnxGraph {
@@ -28602,16 +33995,36 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: all 3 ops present, data flows correctly
-        assert_eq!(graph.ops.len(), 3, "Should have 3 ops (Gather + Reshape + Softmax)");
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
-        let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
-        let softmax = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
+        assert_eq!(
+            graph.ops.len(),
+            3,
+            "Should have 3 ops (Gather + Reshape + Softmax)"
+        );
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather");
+        let reshape = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .expect("Reshape");
+        let softmax = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .expect("Softmax");
         // Reshape consumes Gather output
-        assert_eq!(reshape.inputs[0], gather.outputs[0],
-            "Reshape should consume Gather output");
+        assert_eq!(
+            reshape.inputs[0], gather.outputs[0],
+            "Reshape should consume Gather output"
+        );
         // Softmax consumes Reshape output
-        assert_eq!(softmax.inputs[0], reshape.outputs[0],
-            "Softmax should consume Reshape output");
+        assert_eq!(
+            softmax.inputs[0], reshape.outputs[0],
+            "Softmax should consume Reshape output"
+        );
     }
 
     // ── 63. Dropout returns UnsupportedOp error ──────────────────────────
@@ -28736,13 +34149,16 @@ mod tests {
     fn constant_node_returns_unsupported_op_error() {
         // Arrange: Constant op produces a tensor from attributes (value/value_float/etc.)
         let mut attrs = HashMap::new();
-        attrs.insert("value_float".to_string(), attributes::OnnxAttribute {
-            name: "value_float".to_string(),
-            value: attributes::OnnxAttributeValue::Float(1.0),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "value_float".to_string(),
+            attributes::OnnxAttribute {
+                name: "value_float".to_string(),
+                value: attributes::OnnxAttributeValue::Float(1.0),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "constant_err".to_string(),
             doc_string: String::new(),
@@ -28845,13 +34261,16 @@ mod tests {
     fn cast_returns_unsupported_op_error() {
         // Arrange: Cast converts tensor dtype (e.g., FP32→FP16)
         let mut attrs = HashMap::new();
-        attrs.insert("to".to_string(), attributes::OnnxAttribute {
-            name: "to".to_string(),
-            value: attributes::OnnxAttributeValue::Int(1), // ONNX DataType float
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "to".to_string(),
+            attributes::OnnxAttribute {
+                name: "to".to_string(),
+                value: attributes::OnnxAttributeValue::Int(1), // ONNX DataType float
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "cast_err".to_string(),
             doc_string: String::new(),
@@ -28893,13 +34312,16 @@ mod tests {
     fn transpose_with_perm_2_0_1_stores_correct_perm() {
         // Arrange: 3D transpose with perm [2,0,1] — a cyclic rotation
         let mut attrs = HashMap::new();
-        attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-            name: "perm".to_string(),
-            value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "perm".to_string(),
+            attributes::OnnxAttribute {
+                name: "perm".to_string(),
+                value: attributes::OnnxAttributeValue::Ints(vec![2, 0, 1]),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "tr_perm_201".to_string(),
             doc_string: String::new(),
@@ -28927,8 +34349,12 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
-        let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose op");
-        if let OpKind::Transpose { perm } = &tr.kind {
+        let tr = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .expect("Transpose op");
+        if let Op::Transpose { perm } = &tr.op_v2 {
             assert_eq!(perm, &[2usize, 0, 1], "perm should be [2,0,1]");
         }
     }
@@ -28939,13 +34365,16 @@ mod tests {
     fn transpose_with_large_perm_dimension_indices() {
         // Arrange: Transpose with perm [5,3,1,0,2,4] — 6D permutation
         let mut attrs = HashMap::new();
-        attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-            name: "perm".to_string(),
-            value: attributes::OnnxAttributeValue::Ints(vec![5, 3, 1, 0, 2, 4]),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "perm".to_string(),
+            attributes::OnnxAttribute {
+                name: "perm".to_string(),
+                value: attributes::OnnxAttributeValue::Ints(vec![5, 3, 1, 0, 2, 4]),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "tr_large_perm".to_string(),
             doc_string: String::new(),
@@ -28973,9 +34402,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
-        let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose");
-        if let OpKind::Transpose { perm } = &tr.kind {
-            assert_eq!(perm, &[5usize, 3, 1, 0, 2, 4], "perm should preserve large indices");
+        let tr = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .expect("Transpose");
+        if let Op::Transpose { perm } = &tr.op_v2 {
+            assert_eq!(
+                perm,
+                &[5usize, 3, 1, 0, 2, 4],
+                "perm should preserve large indices"
+            );
         }
     }
 
@@ -29008,10 +34445,21 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: two distinct ops
         assert_eq!(graph.ops.len(), 2, "Should have 2 ops");
-        let gelu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu op");
-        let tanh = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("Tanh op");
+        let gelu = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .expect("Gelu op");
+        let tanh = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .expect("Tanh op");
         // Gelu output feeds Tanh input
-        assert_eq!(tanh.inputs[0], gelu.outputs[0], "Tanh should consume Gelu output");
+        assert_eq!(
+            tanh.inputs[0], gelu.outputs[0],
+            "Tanh should consume Gelu output"
+        );
     }
 
     // ── 73. MatMul without attributes uses default behavior ──────────────
@@ -29020,7 +34468,12 @@ mod tests {
     fn matmul_with_no_attributes_processes_normally() {
         // Arrange: MatMul node with empty attribute map — should not panic
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -29043,8 +34496,14 @@ mod tests {
         // Act: should succeed without panicking on missing attributes
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: MatMul maps to Gemm with n=shape[0], k=shape[1]
-        let mm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm from MatMul");
-        if let OpKind::Gemm { n, k, .. } = &mm.kind {
+        let mm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm from MatMul");
+        if let Op::Gemm(spec) = &mm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "n should be weight shape[0]=32");
             assert_eq!(*k, 16, "k should be weight shape[1]=16");
         }
@@ -29075,7 +34534,11 @@ mod tests {
         // Act: no axes attribute, should still succeed
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
-        let rm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).expect("MeanPool from ReduceMean");
+        let rm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .expect("MeanPool from ReduceMean");
         assert_eq!(rm.label, "rm1", "label should match node name");
     }
 
@@ -29085,13 +34548,16 @@ mod tests {
     fn transpose_with_identity_perm_stores_verbatim() {
         // Arrange: Transpose with perm [0,1] is a no-op permutation but should store it
         let mut attrs = HashMap::new();
-        attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-            name: "perm".to_string(),
-            value: attributes::OnnxAttributeValue::Ints(vec![0, 1]),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "perm".to_string(),
+            attributes::OnnxAttribute {
+                name: "perm".to_string(),
+                value: attributes::OnnxAttributeValue::Ints(vec![0, 1]),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "tr_identity_perm".to_string(),
             doc_string: String::new(),
@@ -29119,9 +34585,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: identity perm stored as-is, not optimized away
-        let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose");
-        if let OpKind::Transpose { perm } = &tr.kind {
-            assert_eq!(perm, &[0usize, 1], "identity perm [0,1] should be stored verbatim");
+        let tr = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .expect("Transpose");
+        if let Op::Transpose { perm } = &tr.op_v2 {
+            assert_eq!(
+                perm,
+                &[0usize, 1],
+                "identity perm [0,1] should be stored verbatim"
+            );
         }
     }
 
@@ -29131,17 +34605,25 @@ mod tests {
     fn gemm_with_alpha_attr_but_no_transb_defaults_no_transpose() {
         // Arrange: Gemm with alpha=2.0 (float attr) but no transB attr at all
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("w".to_string(), safetensors::Dtype::F32, vec![48, 32], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "w".to_string(),
+            safetensors::Dtype::F32,
+            vec![48, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w".to_string(), weight);
         let mut attrs = HashMap::new();
-        attrs.insert("alpha".to_string(), attributes::OnnxAttribute {
-            name: "alpha".to_string(),
-            value: attributes::OnnxAttributeValue::Float(2.0),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "alpha".to_string(),
+            attributes::OnnxAttribute {
+                name: "alpha".to_string(),
+                value: attributes::OnnxAttributeValue::Float(2.0),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "gemm_alpha_no_transb".to_string(),
             doc_string: String::new(),
@@ -29169,8 +34651,14 @@ mod tests {
         // Act: missing transB should default to false, no panic
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: n/k should reflect no transpose (n=shape[0], k=shape[1])
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 48, "n should be weight shape[0]=48 (no transB)");
             assert_eq!(*k, 32, "k should be weight shape[1]=32 (no transB)");
         }
@@ -29201,9 +34689,16 @@ mod tests {
         // Act: should not panic on missing shape attribute
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
-        let rs = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
-        if let OpKind::Reshape { target_shape } = &rs.kind {
-            assert!(target_shape.is_empty(), "target_shape should be empty when no attribute");
+        let rs = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .expect("Reshape");
+        if let Op::Reshape { target_shape } = &rs.op_v2 {
+            assert!(
+                target_shape.is_empty(),
+                "target_shape should be empty when no attribute"
+            );
         }
     }
 
@@ -29213,8 +34708,18 @@ mod tests {
     fn layernorm_without_epsilon_attribute_uses_default() {
         // Arrange: LayerNorm with scale/bias but no epsilon attribute in map
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("scale".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
-        let bias = OnnxTensor::new("bias".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "scale".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
+        let bias = OnnxTensor::new(
+            "bias".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("scale".to_string(), scale);
         init.insert("bias".to_string(), bias);
@@ -29245,9 +34750,17 @@ mod tests {
         // Act: missing epsilon should not panic
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: default epsilon is 1e-5
-        let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
-        if let OpKind::LayerNorm { feature_dim: _, eps } = ln.kind {
-            assert!((eps - 1e-5).abs() < 1e-10, "default epsilon should be 1e-5, got {eps}");
+        let ln = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .expect("LayerNorm");
+        if let Op::LayerNorm(spec) = &ln.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                (eps - 1e-5).abs() < 1e-10,
+                "default epsilon should be 1e-5, got {eps}"
+            );
         }
     }
 
@@ -29280,9 +34793,15 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: BOOL initializer tensor should have F32 dtype (map_onnx_dtype maps BOOL to F32)
-        let t = graph.tensors.iter().find(|t| t.name == "bool_weight")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "bool_weight")
             .expect("bool_weight should be registered");
-        assert!(matches!(t.dtype, DType::F32), "BOOL initializer tensor should have F32 dtype");
+        assert!(
+            matches!(t.dtype, DType::F32),
+            "BOOL initializer tensor should have F32 dtype"
+        );
     }
 
     // ── 80. Unsupported op error message format for exotic op type ──────
@@ -29301,17 +34820,20 @@ mod tests {
                 outputs: vec!["c".to_string()],
                 attributes: HashMap::new(),
             }],
-            inputs: vec![model::OnnxValueInfo {
-                name: "a".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "b".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            inputs: vec![
+                model::OnnxValueInfo {
+                    name: "a".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "b".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             outputs: vec![],
             value_info: vec![],
             initializers: HashMap::new(),
@@ -29323,9 +34845,18 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap_err();
         // Assert: error message must contain both the op_type and node_name verbatim
         let msg = err.to_string();
-        assert!(msg.contains("BitShift"), "Error must contain op_type 'BitShift': {msg}");
-        assert!(msg.contains("bitshift_left_node"), "Error must contain node name 'bitshift_left_node': {msg}");
-        assert!(msg.contains("unsupported"), "Error should mention 'unsupported': {msg}");
+        assert!(
+            msg.contains("BitShift"),
+            "Error must contain op_type 'BitShift': {msg}"
+        );
+        assert!(
+            msg.contains("bitshift_left_node"),
+            "Error must contain node name 'bitshift_left_node': {msg}"
+        );
+        assert!(
+            msg.contains("unsupported"),
+            "Error should mention 'unsupported': {msg}"
+        );
     }
 
     // ── 81. Multi-node graph preserves exact insertion order for 4 diverse ops
@@ -29334,8 +34865,18 @@ mod tests {
     fn four_diverse_ops_preserve_exact_node_order_in_graph_ops() {
         // Arrange: Gather -> Softmax -> MatMul -> Add — ops must appear in this exact order
         use super::super::tensor::OnnxTensor;
-        let embed = OnnxTensor::new("embed_w".to_string(), safetensors::Dtype::F32, vec![50, 32], prost::bytes::Bytes::new());
-        let proj = OnnxTensor::new("proj_w".to_string(), safetensors::Dtype::F32, vec![64, 32], prost::bytes::Bytes::new());
+        let embed = OnnxTensor::new(
+            "embed_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![50, 32],
+            prost::bytes::Bytes::new(),
+        );
+        let proj = OnnxTensor::new(
+            "proj_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64, 32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("embed_w".to_string(), embed);
         init.insert("proj_w".to_string(), proj);
@@ -29348,17 +34889,20 @@ mod tests {
                 make_node("n3", "MatMul", vec!["soft", "proj_w"], vec!["proj_out"]),
                 make_node("n4", "Add", vec!["proj_out", "bias"], vec!["final"]),
             ],
-            inputs: vec![model::OnnxValueInfo {
-                name: "ids".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }, model::OnnxValueInfo {
-                name: "bias".to_string(),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            }],
+            inputs: vec![
+                model::OnnxValueInfo {
+                    name: "ids".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+                model::OnnxValueInfo {
+                    name: "bias".to_string(),
+                    value_type: None,
+                    doc_string: String::new(),
+                    metadata_props: HashMap::new(),
+                },
+            ],
             outputs: vec![],
             value_info: vec![],
             initializers: init,
@@ -29370,10 +34914,22 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: ops must appear in the exact order: Gather, Softmax, MatMul(=Gemm), Add
         assert_eq!(graph.ops.len(), 4, "Should have exactly 4 ops");
-        assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }), "First op should be Gather");
-        assert!(matches!(graph.ops[1].kind, OpKind::Softmax), "Second op should be Softmax");
-        assert!(matches!(graph.ops[2].kind, OpKind::Gemm { .. }), "Third op should be Gemm (MatMul)");
-        assert!(matches!(graph.ops[3].kind, OpKind::Add), "Fourth op should be Add");
+        assert!(
+            matches!(graph.ops[0].op_v2, Op::Gather { .. }),
+            "First op should be Gather"
+        );
+        assert!(
+            matches!(graph.ops[1].op_v2, Op::Softmax),
+            "Second op should be Softmax"
+        );
+        assert!(
+            matches!(graph.ops[2].op_v2, Op::Gemm(..)),
+            "Third op should be Gemm (MatMul)"
+        );
+        assert!(
+            matches!(graph.ops[3].op_v2, Op::Add),
+            "Fourth op should be Add"
+        );
     }
 
     // ── 82. Weight name with ONNX-style dot notation maps correctly ────
@@ -29415,7 +34971,9 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: tensor name preserved verbatim
-        let tensor = graph.tensors.iter()
+        let tensor = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "model.layers.0.self_attn.q_proj.weight")
             .expect("Dotted weight name should be preserved as-is");
         assert_eq!(tensor.shape.len(), 2, "Weight should be 2-D");
@@ -29453,7 +35011,12 @@ mod tests {
     fn single_gather_roundtrip_verifies_label_and_tensor_connections() {
         // Arrange: Minimal single-Gather graph with verifiable roundtrip
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("tbl".to_string(), safetensors::Dtype::F32, vec![300, 128], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "tbl".to_string(),
+            safetensors::Dtype::F32,
+            vec![300, 128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("tbl".to_string(), table);
         let onnx = OnnxGraph {
@@ -29478,11 +35041,14 @@ mod tests {
         // Assert
         assert_eq!(graph.ops.len(), 1, "Exactly one op");
         let op = &graph.ops[0];
-        assert!(matches!(op.kind, OpKind::Gather { .. }));
+        assert!(matches!(op.op_v2, Op::Gather { .. }));
         assert_eq!(op.label, "g_rt", "Label should match node name");
         assert_eq!(op.inputs.len(), 2, "Gather should have 2 inputs");
         assert_eq!(op.outputs.len(), 1, "Gather should have 1 output");
-        let out_tensor = graph.tensors.iter().find(|t| t.id == op.outputs[0])
+        let out_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.id == op.outputs[0])
             .expect("Output tensor should exist");
         assert_eq!(out_tensor.name, "emb", "Output tensor name should be 'emb'");
     }
@@ -29493,17 +35059,25 @@ mod tests {
     fn rmsnorm_with_flt_min_epsilon_preserves_subnormal() {
         // Arrange: SimplifiedLayerNormalization with epsilon = f32::MIN_POSITIVE (smallest positive f32)
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("sc".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "sc".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("sc".to_string(), scale);
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Float(f32::MIN_POSITIVE),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Float(f32::MIN_POSITIVE),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "rms_flt_min".to_string(),
             doc_string: String::new(),
@@ -29531,10 +35105,18 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: epsilon should be exactly f32::MIN_POSITIVE
-        let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("RmsNorm");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = rms.kind {
-            assert_eq!(eps.to_bits(), f32::MIN_POSITIVE.to_bits(),
-                "epsilon should be exactly f32::MIN_POSITIVE, got {eps}");
+        let rms = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .expect("RmsNorm");
+        if let Op::RmsNorm(spec) = &rms.op_v2 {
+            let eps = &spec.eps;
+            assert_eq!(
+                eps.to_bits(),
+                f32::MIN_POSITIVE.to_bits(),
+                "epsilon should be exactly f32::MIN_POSITIVE, got {eps}"
+            );
         }
     }
 
@@ -29544,17 +35126,25 @@ mod tests {
     fn rmsnorm_with_negative_infinity_epsilon_preserved_in_output() {
         // Arrange: SimplifiedLayerNormalization with epsilon = f32::NEG_INFINITY
         use super::super::tensor::OnnxTensor;
-        let scale = OnnxTensor::new("sc_neg_inf".to_string(), safetensors::Dtype::F32, vec![32], prost::bytes::Bytes::new());
+        let scale = OnnxTensor::new(
+            "sc_neg_inf".to_string(),
+            safetensors::Dtype::F32,
+            vec![32],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("sc_neg_inf".to_string(), scale);
         let mut attrs = HashMap::new();
-        attrs.insert("epsilon".to_string(), attributes::OnnxAttribute {
-            name: "epsilon".to_string(),
-            value: attributes::OnnxAttributeValue::Float(f32::NEG_INFINITY),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "epsilon".to_string(),
+            attributes::OnnxAttribute {
+                name: "epsilon".to_string(),
+                value: attributes::OnnxAttributeValue::Float(f32::NEG_INFINITY),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "rms_neg_inf".to_string(),
             doc_string: String::new(),
@@ -29582,10 +35172,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: negative infinity should be preserved as-is
-        let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("RmsNorm");
-        if let OpKind::RmsNorm { feature_dim: _, eps } = rms.kind {
-            assert!(eps.is_infinite() && eps.is_sign_negative(),
-                "epsilon should be negative infinity, got {eps}");
+        let rms = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .expect("RmsNorm");
+        if let Op::RmsNorm(spec) = &rms.op_v2 {
+            let eps = &spec.eps;
+            assert!(
+                eps.is_infinite() && eps.is_sign_negative(),
+                "epsilon should be negative infinity, got {eps}"
+            );
         }
     }
 
@@ -29620,11 +35217,20 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: INT64 type input should still have its declared concrete shape
-        let t = graph.tensors.iter().find(|t| t.name == "int64_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "int64_input")
             .expect("int64_input should be registered");
         assert_eq!(t.shape.len(), 2, "Should have 2 dimensions");
-        assert!(matches!(&t.shape[0], SymDim::Concrete(10)), "First dim should be 10");
-        assert!(matches!(&t.shape[1], SymDim::Concrete(20)), "Second dim should be 20");
+        assert!(
+            matches!(&t.shape[0], SymDim::Concrete(10)),
+            "First dim should be 10"
+        );
+        assert!(
+            matches!(&t.shape[1], SymDim::Concrete(20)),
+            "Second dim should be 20"
+        );
     }
 
     // ── 88. Graph input with MAP type falls back to default shape ───────
@@ -29638,7 +35244,9 @@ mod tests {
                 key_type: proto::tensor_proto::DataType::String,
                 value_type: Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
                     elem_type: proto::tensor_proto::DataType::Float,
-                    shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(5)] },
+                    shape: types::OnnxTensorShape {
+                        dims: vec![types::OnnxDim::Known(5)],
+                    },
                 })),
             })),
             doc_string: String::new(),
@@ -29659,7 +35267,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: MAP type is not Tensor, so falls back to default [Symbolic("seq_len")]
-        let t = graph.tensors.iter().find(|t| t.name == "map_input")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "map_input")
             .expect("map_input should be registered");
         assert_eq!(t.shape.len(), 1, "MAP fallback should produce 1-D shape");
         assert!(
@@ -29697,8 +35308,16 @@ mod tests {
         // Assert
         assert_eq!(graph.ops.len(), 1, "Should have 1 Gather op");
         let op = &graph.ops[0];
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &op.kind {
-            assert_eq!(*table_rows, 0, "Empty input Gather should have table_rows=0");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &op.op_v2
+        {
+            assert_eq!(
+                *table_rows, 0,
+                "Empty input Gather should have table_rows=0"
+            );
             assert_eq!(*embed_dim, 0, "Empty input Gather should have embed_dim=0");
         }
     }
@@ -29731,8 +35350,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert: should fail with NoWeightInput (empty string is not an initializer)
         let msg = err.to_string();
-        assert!(msg.contains("mm_bad") || msg.contains("MatMul"),
-            "Error should reference the node name or op type: {msg}");
+        assert!(
+            msg.contains("mm_bad") || msg.contains("MatMul"),
+            "Error should reference the node name or op type: {msg}"
+        );
     }
 
     // ── 91. Gemm node with no inputs returns appropriate error ──────────
@@ -29794,19 +35415,43 @@ mod tests {
             reason: "unknown".to_string(),
         };
         // Act & Assert: each variant's Display output should be unique
-        let msgs: Vec<String> = vec![e1, e2, e3, e4, e5, e6].iter().map(|e| e.to_string()).collect();
+        let msgs: Vec<String> = vec![e1, e2, e3, e4, e5, e6]
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
-                assert_ne!(msgs[i], msgs[j],
-                    "ConvertError variant {} and {} should produce distinct messages", i, j);
+                assert_ne!(
+                    msgs[i], msgs[j],
+                    "ConvertError variant {} and {} should produce distinct messages",
+                    i, j
+                );
             }
         }
-        assert!(msgs[0].contains("Conv") && msgs[0].contains("n1"), "UnsupportedOp should contain op_type and node_name");
-        assert!(msgs[1].contains("w") && msgs[1].contains("n2"), "MissingInitializer should contain name and node_name");
-        assert!(msgs[2].contains("bad_w") && msgs[2].contains("3"), "InvalidMatMulShape should contain name and dims");
-        assert!(msgs[3].contains("n3"), "NoWeightInput should contain node_name");
-        assert!(msgs[4].contains("n4") && msgs[4].contains("bad attr"), "AttributeError should contain node_name and reason");
-        assert!(msgs[5].contains("t1") && msgs[5].contains("unknown"), "ShapeInferenceFailed should contain name and reason");
+        assert!(
+            msgs[0].contains("Conv") && msgs[0].contains("n1"),
+            "UnsupportedOp should contain op_type and node_name"
+        );
+        assert!(
+            msgs[1].contains("w") && msgs[1].contains("n2"),
+            "MissingInitializer should contain name and node_name"
+        );
+        assert!(
+            msgs[2].contains("bad_w") && msgs[2].contains("3"),
+            "InvalidMatMulShape should contain name and dims"
+        );
+        assert!(
+            msgs[3].contains("n3"),
+            "NoWeightInput should contain node_name"
+        );
+        assert!(
+            msgs[4].contains("n4") && msgs[4].contains("bad attr"),
+            "AttributeError should contain node_name and reason"
+        );
+        assert!(
+            msgs[5].contains("t1") && msgs[5].contains("unknown"),
+            "ShapeInferenceFailed should contain name and reason"
+        );
     }
 
     // ── 93. Multiple initializers with same shape produce distinct tensor IDs
@@ -29815,9 +35460,24 @@ mod tests {
     fn multiple_initializers_same_shape_get_unique_tensor_ids() {
         // Arrange: Three initializers with identical shape [32, 16]
         use super::super::tensor::OnnxTensor;
-        let w1 = OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let w2 = OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
-        let w3 = OnnxTensor::new("w3".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let w1 = OnnxTensor::new(
+            "w1".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w2 = OnnxTensor::new(
+            "w2".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
+        let w3 = OnnxTensor::new(
+            "w3".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("w1".to_string(), w1);
         init.insert("w2".to_string(), w2);
@@ -29839,7 +35499,11 @@ mod tests {
         // Assert: three distinct tensors with unique IDs
         let ids: Vec<_> = graph.tensors.iter().map(|t| t.id).collect();
         let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique_ids.len(), 3, "Three initializers should produce 3 unique tensor IDs");
+        assert_eq!(
+            unique_ids.len(),
+            3,
+            "Three initializers should produce 3 unique tensor IDs"
+        );
         assert_eq!(graph.tensors.len(), 3, "Should have exactly 3 tensors");
     }
 
@@ -29849,13 +35513,23 @@ mod tests {
     fn reshape_with_two_inputs_data_and_shape_converts_normally() {
         // Arrange: Reshape node that takes both data input and a shape initializer
         use super::super::tensor::OnnxTensor;
-        let shape_tensor = OnnxTensor::new("target_shape".to_string(), safetensors::Dtype::I64, vec![2], prost::bytes::Bytes::new());
+        let shape_tensor = OnnxTensor::new(
+            "target_shape".to_string(),
+            safetensors::Dtype::I64,
+            vec![2],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("target_shape".to_string(), shape_tensor);
         let onnx = OnnxGraph {
             name: "rs_two_in".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("rs1", "Reshape", vec!["data", "target_shape"], vec!["reshaped"])],
+            nodes: vec![make_node(
+                "rs1",
+                "Reshape",
+                vec!["data", "target_shape"],
+                vec!["reshaped"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "data".to_string(),
                 value_type: None,
@@ -29872,9 +35546,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Reshape should convert with empty target_shape (shape from initializer is not parsed)
-        let rs = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
-        if let OpKind::Reshape { target_shape } = &rs.kind {
-            assert!(target_shape.is_empty(), "target_shape should be empty (shape initializer not parsed into attribute)");
+        let rs = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .expect("Reshape");
+        if let Op::Reshape { target_shape } = &rs.op_v2 {
+            assert!(
+                target_shape.is_empty(),
+                "target_shape should be empty (shape initializer not parsed into attribute)"
+            );
         }
     }
 
@@ -29885,12 +35566,16 @@ mod tests {
         // Arrange: Input with Optional(Sequence(Tensor(F32, [5]))) — two layers of nesting
         let vi = model::OnnxValueInfo {
             name: "opt_seq_in".to_string(),
-            value_type: Some(types::OnnxType::Optional(Box::new(types::OnnxType::Sequence(
-                Box::new(types::OnnxType::Tensor(types::OnnxTensorType {
-                    elem_type: proto::tensor_proto::DataType::Float,
-                    shape: types::OnnxTensorShape { dims: vec![types::OnnxDim::Known(5)] },
-                })),
-            )))),
+            value_type: Some(types::OnnxType::Optional(Box::new(
+                types::OnnxType::Sequence(Box::new(types::OnnxType::Tensor(
+                    types::OnnxTensorType {
+                        elem_type: proto::tensor_proto::DataType::Float,
+                        shape: types::OnnxTensorShape {
+                            dims: vec![types::OnnxDim::Known(5)],
+                        },
+                    },
+                ))),
+            ))),
             doc_string: String::new(),
             metadata_props: HashMap::new(),
         };
@@ -29909,9 +35594,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Optional is not Tensor, so falls back to default [Symbolic("seq_len")]
-        let t = graph.tensors.iter().find(|t| t.name == "opt_seq_in")
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "opt_seq_in")
             .expect("opt_seq_in should be registered");
-        assert_eq!(t.shape.len(), 1, "Optional(Sequence(Tensor)) should fall back to 1-D");
+        assert_eq!(
+            t.shape.len(),
+            1,
+            "Optional(Sequence(Tensor)) should fall back to 1-D"
+        );
         assert!(
             matches!(&t.shape[0], SymDim::Symbolic { name, max_value: Some(128) } if name == "seq_len"),
             "Nested non-Tensor type should default to seq_len Symbolic"
@@ -29951,8 +35643,14 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert: Unicode node name must appear verbatim in error message
         let msg = err.to_string();
-        assert!(msg.contains("节点_卷积_01"), "Error must preserve unicode node name: {msg}");
-        assert!(msg.contains("AveragePool"), "Error must mention op_type: {msg}");
+        assert!(
+            msg.contains("节点_卷积_01"),
+            "Error must preserve unicode node name: {msg}"
+        );
+        assert!(
+            msg.contains("AveragePool"),
+            "Error must mention op_type: {msg}"
+        );
     }
 
     // ── 97. Exp op returns unsupported error (not silently dropped) ──────
@@ -29982,7 +35680,10 @@ mod tests {
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("Exp"), "Error must mention Exp op_type: {msg}");
-        assert!(msg.contains("exp_node"), "Error must mention node name: {msg}");
+        assert!(
+            msg.contains("exp_node"),
+            "Error must mention node name: {msg}"
+        );
     }
 
     // ── 98. Pow with initializer second input converts to Mul binary op ─
@@ -30009,11 +35710,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: second op should be Mul (Pow maps to Mul)
-        let mul_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce exactly one Mul op");
-        assert_eq!(mul_ops[0].inputs.len(), 2, "Mul from Pow must have 2 inputs");
+        assert_eq!(
+            mul_ops[0].inputs.len(),
+            2,
+            "Mul from Pow must have 2 inputs"
+        );
     }
 
     // ── 99. Sqrt with single input converts to Mul binary op ────────────
@@ -30039,11 +35746,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Sqrt maps to Mul, should have 2 inputs (even if same tensor)
-        let mul_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Sqrt should produce one Mul op");
-        assert_eq!(mul_ops[0].inputs.len(), 2, "Sqrt-converted Mul needs 2 inputs");
+        assert_eq!(
+            mul_ops[0].inputs.len(),
+            2,
+            "Sqrt-converted Mul needs 2 inputs"
+        );
     }
 
     // ── 100. Double broadcast: Add with two same-shape activation inputs ─
@@ -30088,8 +35801,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: output shape should be [4, 8] from broadcast (a and b same rank)
-        let out_t = graph.tensors.iter().find(|t| t.name == "sum").expect("sum tensor");
-        assert_eq!(out_t.shape.len(), 2, "Same-rank broadcast output should have 2 dims");
+        let out_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "sum")
+            .expect("sum tensor");
+        assert_eq!(
+            out_t.shape.len(),
+            2,
+            "Same-rank broadcast output should have 2 dims"
+        );
         assert_eq!(out_t.shape[0], SymDim::Concrete(4));
         assert_eq!(out_t.shape[1], SymDim::Concrete(8));
     }
@@ -30105,7 +35826,12 @@ mod tests {
             let name = format!("weight_{:02}", i);
             let rows = (i + 1) * 2;
             let cols = (i + 1) * 4;
-            let tensor = OnnxTensor::new(name.clone(), safetensors::Dtype::F32, vec![rows, cols], prost::bytes::Bytes::new());
+            let tensor = OnnxTensor::new(
+                name.clone(),
+                safetensors::Dtype::F32,
+                vec![rows, cols],
+                prost::bytes::Bytes::new(),
+            );
             init.insert(name, tensor);
         }
         let onnx = OnnxGraph {
@@ -30123,8 +35849,13 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: all 50 initializers registered as tensors
-        assert_eq!(graph.tensors.len(), 50, "All 50 initializers must become tensors");
-        let unique_names: std::collections::HashSet<_> = graph.tensors.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(
+            graph.tensors.len(),
+            50,
+            "All 50 initializers must become tensors"
+        );
+        let unique_names: std::collections::HashSet<_> =
+            graph.tensors.iter().map(|t| t.name.clone()).collect();
         assert_eq!(unique_names.len(), 50, "All tensor names must be unique");
     }
 
@@ -30135,13 +35866,23 @@ mod tests {
         // Arrange: A tensor name is both an initializer AND a node output.
         // The node output should shadow the initializer in tensor_map.
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("shared_name".to_string(), safetensors::Dtype::F32, vec![4, 4], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "shared_name".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("shared_name".to_string(), weight);
         let onnx = OnnxGraph {
             name: "conflict_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("mm", "MatMul", vec!["x", "shared_name"], vec!["shared_name"])],
+            nodes: vec![make_node(
+                "mm",
+                "MatMul",
+                vec!["x", "shared_name"],
+                vec!["shared_name"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -30176,7 +35917,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "unique_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("uniq", "Unique", vec!["x"], vec!["y", "idx", "counts"])],
+            nodes: vec![make_node(
+                "uniq",
+                "Unique",
+                vec!["x"],
+                vec!["y", "idx", "counts"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -30194,7 +35940,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("Unique"), "Error must mention Unique op_type: {msg}");
+        assert!(
+            msg.contains("Unique"),
+            "Error must mention Unique op_type: {msg}"
+        );
         assert!(msg.contains("uniq"), "Error must mention node name: {msg}");
     }
 
@@ -30204,9 +35953,17 @@ mod tests {
     fn string_initializer_maps_to_f32_via_catchall_dtype_path() {
         // Arrange: STRING-type initializer created via new_string (dtype=U8 placeholder)
         use super::super::tensor::OnnxTensor;
-        let string_tensor = OnnxTensor::new_string("labels".to_string(), vec![10], prost::bytes::Bytes::new());
-        assert!(string_tensor.is_string, "Precondition: should be a string tensor");
-        assert_eq!(string_tensor.dtype, safetensors::Dtype::U8, "Precondition: string dtype is U8 placeholder");
+        let string_tensor =
+            OnnxTensor::new_string("labels".to_string(), vec![10], prost::bytes::Bytes::new());
+        assert!(
+            string_tensor.is_string,
+            "Precondition: should be a string tensor"
+        );
+        assert_eq!(
+            string_tensor.dtype,
+            safetensors::Dtype::U8,
+            "Precondition: string dtype is U8 placeholder"
+        );
         let mut init = HashMap::new();
         init.insert("labels".to_string(), string_tensor);
         let onnx = OnnxGraph {
@@ -30224,8 +35981,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: U8 dtype falls through map_onnx_dtype catchall → F32
-        let t = graph.tensors.iter().find(|t| t.name == "labels").expect("labels tensor");
-        assert_eq!(t.dtype, DType::F32, "U8 placeholder for STRING maps to F32 via catchall");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "labels")
+            .expect("labels tensor");
+        assert_eq!(
+            t.dtype,
+            DType::F32,
+            "U8 placeholder for STRING maps to F32 via catchall"
+        );
         assert_eq!(t.shape.len(), 1, "Shape should be [10]");
         assert_eq!(t.shape[0], SymDim::Concrete(10));
     }
@@ -30247,7 +36012,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "fp16_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("mm", "MatMul", vec!["x", "fp16_weight"], vec!["y"])],
+            nodes: vec![make_node(
+                "mm",
+                "MatMul",
+                vec!["x", "fp16_weight"],
+                vec!["y"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -30264,10 +36034,23 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: the weight tensor and Gemm output should carry F16 dtype
-        let weight_t = graph.tensors.iter().find(|t| t.name == "fp16_weight").expect("fp16_weight tensor");
-        assert_eq!(weight_t.dtype, DType::F16, "FP16 initializer should produce F16 tensor");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
-        if let OpKind::Gemm { dtype, .. } = &gemm_op.kind {
+        let weight_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "fp16_weight")
+            .expect("fp16_weight tensor");
+        assert_eq!(
+            weight_t.dtype,
+            DType::F16,
+            "FP16 initializer should produce F16 tensor"
+        );
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm op");
+        if let Op::Gemm(spec) = &gemm_op.op_v2 {
+            let dtype = &spec.dtype;
             assert_eq!(*dtype, DType::F16, "Gemm op should carry F16 dtype");
         }
     }
@@ -30289,7 +36072,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "bf16_test".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("mm", "MatMul", vec!["x", "bf16_weight"], vec!["y"])],
+            nodes: vec![make_node(
+                "mm",
+                "MatMul",
+                vec!["x", "bf16_weight"],
+                vec!["y"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -30306,10 +36094,23 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: weight tensor and Gemm op should carry BF16 dtype
-        let weight_t = graph.tensors.iter().find(|t| t.name == "bf16_weight").expect("bf16_weight tensor");
-        assert_eq!(weight_t.dtype, DType::BF16, "BF16 initializer should produce BF16 tensor");
-        let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
-        if let OpKind::Gemm { dtype, .. } = &gemm_op.kind {
+        let weight_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "bf16_weight")
+            .expect("bf16_weight tensor");
+        assert_eq!(
+            weight_t.dtype,
+            DType::BF16,
+            "BF16 initializer should produce BF16 tensor"
+        );
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm op");
+        if let Op::Gemm(spec) = &gemm_op.op_v2 {
+            let dtype = &spec.dtype;
             assert_eq!(*dtype, DType::BF16, "Gemm op should carry BF16 dtype");
         }
     }
@@ -30348,8 +36149,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: F64 initializer should be downgraded to F32
-        let weight_t = graph.tensors.iter().find(|t| t.name == "f64_w").expect("f64_w tensor");
-        assert_eq!(weight_t.dtype, DType::F32, "F64 initializer should be mapped to F32");
+        let weight_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "f64_w")
+            .expect("f64_w tensor");
+        assert_eq!(
+            weight_t.dtype,
+            DType::F32,
+            "F64 initializer should be mapped to F32"
+        );
     }
 
     // ── 108. Gemm with I8 initializer falls through catchall to F32 ─────
@@ -30386,8 +36195,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: I8 falls through to F32 catchall
-        let weight_t = graph.tensors.iter().find(|t| t.name == "quant_w").expect("quant_w tensor");
-        assert_eq!(weight_t.dtype, DType::F32, "I8 initializer should fall through to F32");
+        let weight_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "quant_w")
+            .expect("quant_w tensor");
+        assert_eq!(
+            weight_t.dtype,
+            DType::F32,
+            "I8 initializer should fall through to F32"
+        );
     }
 
     // ── 109. Mixed initializer dtypes: first initializer wins for graph dtype
@@ -30429,10 +36246,26 @@ mod tests {
         // Assert: the graph should have 2 tensors with their own dtypes
         assert_eq!(graph.tensors.len(), 2, "Should have 2 weight tensors");
         // Each initializer keeps its mapped dtype
-        let f16_t = graph.tensors.iter().find(|t| t.name == "f16_w").expect("f16_w");
-        let f32_t = graph.tensors.iter().find(|t| t.name == "f32_w").expect("f32_w");
-        assert_eq!(f16_t.dtype, DType::F16, "F16 initializer must keep F16 dtype");
-        assert_eq!(f32_t.dtype, DType::F32, "F32 initializer must keep F32 dtype");
+        let f16_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "f16_w")
+            .expect("f16_w");
+        let f32_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "f32_w")
+            .expect("f32_w");
+        assert_eq!(
+            f16_t.dtype,
+            DType::F16,
+            "F16 initializer must keep F16 dtype"
+        );
+        assert_eq!(
+            f32_t.dtype,
+            DType::F32,
+            "F32 initializer must keep F32 dtype"
+        );
     }
 
     // ── 110. Gather with FP16 initializer preserves F16 embed dimensions ─
@@ -30452,7 +36285,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "fp16_gather".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("g1", "Gather", vec!["fp16_embed", "ids"], vec!["hidden"])],
+            nodes: vec![make_node(
+                "g1",
+                "Gather",
+                vec!["fp16_embed", "ids"],
+                vec!["hidden"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "ids".to_string(),
                 value_type: None,
@@ -30469,8 +36307,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: Gather should have table_rows=200, embed_dim=48
-        let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather op");
-        if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .expect("Gather op");
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 200, "FP16 Gather table_rows should be 200");
             assert_eq!(*embed_dim, 48, "FP16 Gather embed_dim should be 48");
         }
@@ -30514,7 +36361,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "missing_init".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("gemm1", "Gemm", vec!["x", "phantom_weight"], vec!["y"])],
+            nodes: vec![make_node(
+                "gemm1",
+                "Gemm",
+                vec!["x", "phantom_weight"],
+                vec!["y"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -30532,7 +36384,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("phantom_weight"), "Error must mention weight name: {msg}");
+        assert!(
+            msg.contains("phantom_weight"),
+            "Error must mention weight name: {msg}"
+        );
         assert!(msg.contains("gemm1"), "Error must mention node name: {msg}");
     }
 
@@ -30542,7 +36397,12 @@ mod tests {
     fn matmul_with_1d_weight_returns_invalid_matmul_shape_error() {
         // Arrange: MatMul weight with only 1 dimension (not 2-D)
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("flat_w".to_string(), safetensors::Dtype::F32, vec![64], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "flat_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![64],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("flat_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -30566,8 +36426,14 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("flat_w"), "Error must mention weight name: {msg}");
-        assert!(msg.contains("1-D"), "Error must mention dimensionality: {msg}");
+        assert!(
+            msg.contains("flat_w"),
+            "Error must mention weight name: {msg}"
+        );
+        assert!(
+            msg.contains("1-D"),
+            "Error must mention dimensionality: {msg}"
+        );
     }
 
     // ── 114. ConvertError::ShapeInferenceFailed Display format ───────────
@@ -30582,8 +36448,14 @@ mod tests {
         // Act
         let msg = err.to_string();
         // Assert
-        assert!(msg.contains("mystery_tensor"), "Display must include tensor name: {msg}");
-        assert!(msg.contains("could not broadcast"), "Display must include reason: {msg}");
+        assert!(
+            msg.contains("mystery_tensor"),
+            "Display must include tensor name: {msg}"
+        );
+        assert!(
+            msg.contains("could not broadcast"),
+            "Display must include reason: {msg}"
+        );
     }
 
     // ── 115. ConvertError::AttributeError Display format ────────────────
@@ -30598,8 +36470,14 @@ mod tests {
         // Act
         let msg = err.to_string();
         // Assert
-        assert!(msg.contains("norm_node"), "Display must include node name: {msg}");
-        assert!(msg.contains("epsilon must be positive"), "Display must include reason: {msg}");
+        assert!(
+            msg.contains("norm_node"),
+            "Display must include node name: {msg}"
+        );
+        assert!(
+            msg.contains("epsilon must be positive"),
+            "Display must include reason: {msg}"
+        );
     }
 
     // ── 116. Gemm with 3-D weight returns InvalidMatMulShape ───────────
@@ -30608,7 +36486,12 @@ mod tests {
     fn gemm_with_3d_weight_returns_invalid_matmul_shape_error() {
         // Arrange: Gemm B input is a 3-D tensor (not 2-D)
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("cube_w".to_string(), safetensors::Dtype::F32, vec![4, 8, 16], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "cube_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![4, 8, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("cube_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -30632,7 +36515,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("cube_w"), "Error must mention weight name: {msg}");
+        assert!(
+            msg.contains("cube_w"),
+            "Error must mention weight name: {msg}"
+        );
         assert!(msg.contains("3-D"), "Error must say 3-D: {msg}");
     }
 
@@ -30667,7 +36553,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: Unknown dims should produce Symbolic with max_value = 512
-        let t = graph.tensors.iter().find(|t| t.name == "mystery_input").expect("mystery_input tensor");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "mystery_input")
+            .expect("mystery_input tensor");
         assert_eq!(t.shape.len(), 2, "Should have 2 dimensions");
         for (i, dim) in t.shape.iter().enumerate() {
             match dim {
@@ -30703,8 +36593,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Sub should produce OpKind::Add
-        let add_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Add))
+        let add_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
             .collect();
         assert_eq!(add_ops.len(), 1, "Sub should produce exactly one Add op");
     }
@@ -30732,8 +36624,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Div should produce OpKind::Mul
-        let mul_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Div should produce exactly one Mul op");
     }
@@ -30764,7 +36658,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("HardSwish"), "Error must mention HardSwish op_type: {msg}");
+        assert!(
+            msg.contains("HardSwish"),
+            "Error must mention HardSwish op_type: {msg}"
+        );
         assert!(msg.contains("hs1"), "Error must mention node name: {msg}");
     }
 
@@ -30794,7 +36691,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("Celu"), "Error must mention Celu op_type: {msg}");
+        assert!(
+            msg.contains("Celu"),
+            "Error must mention Celu op_type: {msg}"
+        );
         assert!(msg.contains("celu1"), "Error must mention node name: {msg}");
     }
 
@@ -30824,7 +36724,10 @@ mod tests {
         let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("Selu"), "Error must mention Selu op_type: {msg}");
+        assert!(
+            msg.contains("Selu"),
+            "Error must mention Selu op_type: {msg}"
+        );
         assert!(msg.contains("selu1"), "Error must mention node name: {msg}");
     }
 
@@ -30846,7 +36749,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "unicode_weight".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("mm", "MatMul", vec!["x", &unicode_name], vec!["y"])],
+            nodes: vec![make_node(
+                "mm",
+                "MatMul",
+                vec!["x", &unicode_name],
+                vec!["y"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -30863,7 +36771,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Unicode name should be preserved verbatim
-        let t = graph.tensors.iter().find(|t| t.name == "模型_层_权重_alpha").expect("unicode tensor");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "模型_层_权重_alpha")
+            .expect("unicode tensor");
         assert_eq!(t.shape.len(), 2, "Should have 2-D shape");
     }
 
@@ -30877,7 +36789,11 @@ mod tests {
             value_type: Some(types::OnnxType::Tensor(types::OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
                 shape: types::OnnxTensorShape {
-                    dims: vec![types::OnnxDim::Known(2), types::OnnxDim::Known(4), types::OnnxDim::Known(8)],
+                    dims: vec![
+                        types::OnnxDim::Known(2),
+                        types::OnnxDim::Known(4),
+                        types::OnnxDim::Known(8),
+                    ],
                 },
             })),
             doc_string: String::new(),
@@ -30897,7 +36813,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "broadcast_3d_1d".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("add1", "Add", vec!["a_3d", "b_1d"], vec!["result"])],
+            nodes: vec![make_node(
+                "add1",
+                "Add",
+                vec!["a_3d", "b_1d"],
+                vec!["result"],
+            )],
             inputs: vec![vi_a, vi_b],
             outputs: vec![],
             value_info: vec![],
@@ -30909,8 +36830,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: output shape should be [2, 4, 8] from the higher-rank input
-        let out_t = graph.tensors.iter().find(|t| t.name == "result").expect("result tensor");
-        assert_eq!(out_t.shape.len(), 3, "Broadcast output should have 3 dims (higher rank)");
+        let out_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "result")
+            .expect("result tensor");
+        assert_eq!(
+            out_t.shape.len(),
+            3,
+            "Broadcast output should have 3 dims (higher rank)"
+        );
         assert_eq!(out_t.shape[0], SymDim::Concrete(2));
         assert_eq!(out_t.shape[1], SymDim::Concrete(4));
         assert_eq!(out_t.shape[2], SymDim::Concrete(8));
@@ -30945,8 +36874,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: I32 falls through to F32
-        let t = graph.tensors.iter().find(|t| t.name == "int32_bias").expect("int32_bias tensor");
-        assert_eq!(t.dtype, DType::F32, "I32 initializer should fall through to F32");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "int32_bias")
+            .expect("int32_bias tensor");
+        assert_eq!(
+            t.dtype,
+            DType::F32,
+            "I32 initializer should fall through to F32"
+        );
         assert_eq!(t.shape.len(), 1, "Shape should be [32]");
     }
 
@@ -30957,9 +36894,33 @@ mod tests {
         // Arrange: Graph with 3 initializers but zero inputs and zero nodes
         use super::super::tensor::OnnxTensor;
         let mut init = HashMap::new();
-        init.insert("w1".to_string(), OnnxTensor::new("w1".to_string(), safetensors::Dtype::F32, vec![4, 4], prost::bytes::Bytes::new()));
-        init.insert("w2".to_string(), OnnxTensor::new("w2".to_string(), safetensors::Dtype::F32, vec![8, 4], prost::bytes::Bytes::new()));
-        init.insert("w3".to_string(), OnnxTensor::new("w3".to_string(), safetensors::Dtype::BF16, vec![4, 2], prost::bytes::Bytes::new()));
+        init.insert(
+            "w1".to_string(),
+            OnnxTensor::new(
+                "w1".to_string(),
+                safetensors::Dtype::F32,
+                vec![4, 4],
+                prost::bytes::Bytes::new(),
+            ),
+        );
+        init.insert(
+            "w2".to_string(),
+            OnnxTensor::new(
+                "w2".to_string(),
+                safetensors::Dtype::F32,
+                vec![8, 4],
+                prost::bytes::Bytes::new(),
+            ),
+        );
+        init.insert(
+            "w3".to_string(),
+            OnnxTensor::new(
+                "w3".to_string(),
+                safetensors::Dtype::BF16,
+                vec![4, 2],
+                prost::bytes::Bytes::new(),
+            ),
+        );
         let onnx = OnnxGraph {
             name: "constants_only".to_string(),
             doc_string: String::new(),
@@ -30987,7 +36948,12 @@ mod tests {
         // Arrange: MatMul where input_a is the initializer, input_b is the activation
         // This tests the second branch of the weight detection in convert_matmul
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("rev_w".to_string(), safetensors::Dtype::F32, vec![32, 16], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "rev_w".to_string(),
+            safetensors::Dtype::F32,
+            vec![32, 16],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("rev_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -31010,8 +36976,14 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Should successfully produce a Gemm op
-        let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
-        if let OpKind::Gemm { n, k, .. } = &gemm.kind {
+        let gemm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .expect("Gemm op");
+        if let Op::Gemm(spec) = &gemm.op_v2 {
+            let n = &spec.n;
+            let k = &spec.k;
             assert_eq!(*n, 32, "n should be 32 from weight shape [32, 16]");
             assert_eq!(*k, 16, "k should be 16 from weight shape [32, 16]");
         }
@@ -31053,7 +37025,9 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("mm1"), "Error must mention node name: {msg}");
         assert!(
-            msg.to_lowercase().contains("no") || msg.to_lowercase().contains("weight") || msg.to_lowercase().contains("initializer"),
+            msg.to_lowercase().contains("no")
+                || msg.to_lowercase().contains("weight")
+                || msg.to_lowercase().contains("initializer"),
             "Error must describe the no-weight problem: {msg}"
         );
     }
@@ -31064,7 +37038,12 @@ mod tests {
     fn f64_initializer_detects_as_f32_dtype_in_graph() {
         // Arrange: Single F64 initializer — detect_dtype should map it to F32
         use super::super::tensor::OnnxTensor;
-        let weight = OnnxTensor::new("f64_w".to_string(), safetensors::Dtype::F64, vec![8, 4], prost::bytes::Bytes::new());
+        let weight = OnnxTensor::new(
+            "f64_w".to_string(),
+            safetensors::Dtype::F64,
+            vec![8, 4],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("f64_w".to_string(), weight);
         let onnx = OnnxGraph {
@@ -31087,8 +37066,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: F64 initializer should map to F32
-        let w_tensor = graph.tensors.iter().find(|t| t.name == "f64_w").expect("f64_w tensor");
-        assert_eq!(w_tensor.dtype, DType::F32, "F64 should map to F32 in detect_dtype");
+        let w_tensor = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "f64_w")
+            .expect("f64_w tensor");
+        assert_eq!(
+            w_tensor.dtype,
+            DType::F32,
+            "F64 should map to F32 in detect_dtype"
+        );
     }
 
     // ── 130. Empty graph with zero initializers, zero nodes succeeds ──
@@ -31124,13 +37111,23 @@ mod tests {
     fn gather_output_shape_has_symbolic_seq_and_concrete_embed() {
         // Arrange: Gather from a [200, 48] table → output should be [seq_len, 48]
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("vocab".to_string(), safetensors::Dtype::F32, vec![200, 48], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "vocab".to_string(),
+            safetensors::Dtype::F32,
+            vec![200, 48],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("vocab".to_string(), table);
         let onnx = OnnxGraph {
             name: "gather_shape".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("g1", "Gather", vec!["vocab", "ids"], vec!["embedded"])],
+            nodes: vec![make_node(
+                "g1",
+                "Gather",
+                vec!["vocab", "ids"],
+                vec!["embedded"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "ids".to_string(),
                 value_type: None,
@@ -31147,7 +37144,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: output shape = [Symbolic(seq_len), Concrete(48)]
-        let out_t = graph.tensors.iter().find(|t| t.name == "embedded").expect("embedded tensor");
+        let out_t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "embedded")
+            .expect("embedded tensor");
         assert_eq!(out_t.shape.len(), 2, "Gather output should be 2-D");
         match &out_t.shape[0] {
             SymDim::Symbolic { name, max_value } => {
@@ -31156,7 +37157,11 @@ mod tests {
             }
             other => panic!("First dim should be Symbolic, got {other:?}"),
         }
-        assert_eq!(out_t.shape[1], SymDim::Concrete(48), "Second dim should be Concrete(48)");
+        assert_eq!(
+            out_t.shape[1],
+            SymDim::Concrete(48),
+            "Second dim should be Concrete(48)"
+        );
     }
 
     // ── 132. Transpose with identity perm produces correct op ────────
@@ -31165,13 +37170,16 @@ mod tests {
     fn transpose_identity_perm_produces_transpose_with_same_perm() {
         // Arrange: Transpose node with perm = [0, 1] (identity permutation)
         let mut attrs = HashMap::new();
-        attrs.insert("perm".to_string(), attributes::OnnxAttribute {
-            name: "perm".to_string(),
-            value: attributes::OnnxAttributeValue::Ints(vec![0, 1]),
-            doc_string: String::new(),
-            ref_attr_name: None,
-            attr_type: None,
-        });
+        attrs.insert(
+            "perm".to_string(),
+            attributes::OnnxAttribute {
+                name: "perm".to_string(),
+                value: attributes::OnnxAttributeValue::Ints(vec![0, 1]),
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            },
+        );
         let onnx = OnnxGraph {
             name: "identity_transpose".to_string(),
             doc_string: String::new(),
@@ -31199,8 +37207,12 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
-        let t_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose op");
-        if let OpKind::Transpose { perm } = &t_op.kind {
+        let t_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .expect("Transpose op");
+        if let Op::Transpose { perm } = &t_op.op_v2 {
             assert_eq!(*perm, vec![0usize, 1], "Identity perm should be [0, 1]");
         }
     }
@@ -31228,8 +37240,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Pow should produce OpKind::Mul
-        let mul_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce exactly one Mul op");
     }
@@ -31257,8 +37271,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Sqrt should produce OpKind::Mul
-        let mul_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Sqrt should produce exactly one Mul op");
     }
@@ -31271,7 +37287,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "where_passthrough".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("where1", "Where", vec!["cond", "a", "b"], vec!["out"])],
+            nodes: vec![make_node(
+                "where1",
+                "Where",
+                vec!["cond", "a", "b"],
+                vec!["out"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "cond".to_string(),
                 value_type: None,
@@ -31288,9 +37309,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: "out" should map to same tensor id as "cond" (passthrough)
-        let cond_tid = graph.tensors.iter().find(|t| t.name == "cond").expect("cond tensor");
+        let cond_tid = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "cond")
+            .expect("cond tensor");
         let out_tid = graph.tensors.iter().find(|t| t.name == "out");
-        assert!(out_tid.is_none(), "Passthrough should not create a new tensor for 'out'; it reuses the input tensor id");
+        assert!(
+            out_tid.is_none(),
+            "Passthrough should not create a new tensor for 'out'; it reuses the input tensor id"
+        );
     }
 
     // ── 136. Clip op maps to passthrough (output shares tensor id) ──
@@ -31301,7 +37329,12 @@ mod tests {
         let onnx = OnnxGraph {
             name: "clip_passthrough".to_string(),
             doc_string: String::new(),
-            nodes: vec![make_node("clip1", "Clip", vec!["x", "min", "max"], vec!["clipped"])],
+            nodes: vec![make_node(
+                "clip1",
+                "Clip",
+                vec!["x", "min", "max"],
+                vec!["clipped"],
+            )],
             inputs: vec![model::OnnxValueInfo {
                 name: "x".to_string(),
                 value_type: None,
@@ -31319,7 +37352,10 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: "clipped" should not appear as a separate tensor (passthrough)
         let clipped_tid = graph.tensors.iter().find(|t| t.name == "clipped");
-        assert!(clipped_tid.is_none(), "Passthrough should not create a new tensor for 'clipped'");
+        assert!(
+            clipped_tid.is_none(),
+            "Passthrough should not create a new tensor for 'clipped'"
+        );
     }
 
     // ── 137. Tanh op produces correct OpKind ──────────────────────
@@ -31345,7 +37381,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
-        let tanh_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("Tanh op");
+        let tanh_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .expect("Tanh op");
         assert_eq!(tanh_op.inputs.len(), 1, "Tanh should have 1 input");
         assert_eq!(tanh_op.outputs.len(), 1, "Tanh should have 1 output");
     }
@@ -31356,7 +37396,12 @@ mod tests {
     fn multiple_gather_same_table_produces_distinct_ops() {
         // Arrange: Two Gather nodes sharing the same embedding table but different index inputs
         use super::super::tensor::OnnxTensor;
-        let table = OnnxTensor::new("vocab".to_string(), safetensors::Dtype::F32, vec![500, 128], prost::bytes::Bytes::new());
+        let table = OnnxTensor::new(
+            "vocab".to_string(),
+            safetensors::Dtype::F32,
+            vec![500, 128],
+            prost::bytes::Bytes::new(),
+        );
         let mut init = HashMap::new();
         init.insert("vocab".to_string(), table);
         let onnx = OnnxGraph {
@@ -31390,20 +37435,38 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: Should have 2 Gather ops, both referencing the same table
-        let gather_ops: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather_ops: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
             .collect();
         assert_eq!(gather_ops.len(), 2, "Should have exactly 2 Gather ops");
         for g in &gather_ops {
-            if let OpKind::Gather { table_rows, embed_dim, .. } = &g.kind {
+            if let Op::Gather {
+                table_rows,
+                embed_dim,
+                ..
+            } = &g.op_v2
+            {
                 assert_eq!(*table_rows, 500, "table_rows should be 500");
                 assert_eq!(*embed_dim, 128, "embed_dim should be 128");
             }
         }
         // Output tensors should be distinct
-        let emb_a = graph.tensors.iter().find(|t| t.name == "emb_a").expect("emb_a");
-        let emb_b = graph.tensors.iter().find(|t| t.name == "emb_b").expect("emb_b");
-        assert_ne!(emb_a.id, emb_b.id, "emb_a and emb_b should be different tensors");
+        let emb_a = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "emb_a")
+            .expect("emb_a");
+        let emb_b = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "emb_b")
+            .expect("emb_b");
+        assert_ne!(
+            emb_a.id, emb_b.id,
+            "emb_a and emb_b should be different tensors"
+        );
     }
 
     // ── 139. ConvertError::NoWeightInput Display format ────────────
@@ -31417,9 +37480,14 @@ mod tests {
         // Act
         let msg = err.to_string();
         // Assert
-        assert!(msg.contains("matmul_42"), "Display must include node name: {msg}");
         assert!(
-            msg.to_lowercase().contains("no") || msg.to_lowercase().contains("weight") || msg.to_lowercase().contains("initializer"),
+            msg.contains("matmul_42"),
+            "Display must include node name: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("no")
+                || msg.to_lowercase().contains("weight")
+                || msg.to_lowercase().contains("initializer"),
             "Display must describe the problem: {msg}"
         );
     }
@@ -31458,7 +37526,11 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 4096).unwrap();
         // Assert: Param("batch_size") should become Symbolic { name: "batch_size", max_value: Some(4096) }
-        let t = graph.tensors.iter().find(|t| t.name == "batch_input").expect("batch_input tensor");
+        let t = graph
+            .tensors
+            .iter()
+            .find(|t| t.name == "batch_input")
+            .expect("batch_input tensor");
         assert_eq!(t.shape.len(), 2, "Should have 2 dimensions");
         match &t.shape[0] {
             SymDim::Symbolic { name, max_value } => {
@@ -31467,8 +37539,10 @@ mod tests {
             }
             other => panic!("First dim should be Symbolic, got {other:?}"),
         }
-        assert_eq!(t.shape[1], SymDim::Concrete(768), "Second dim should be Concrete(768)");
+        assert_eq!(
+            t.shape[1],
+            SymDim::Concrete(768),
+            "Second dim should be Concrete(768)"
+        );
     }
-
 }
-

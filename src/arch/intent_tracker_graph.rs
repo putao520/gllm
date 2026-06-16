@@ -560,7 +560,10 @@ mod tests {
         let name = "some_weight_xyz";
         let err = TrackerGraphError::MissingWeight(name.to_string());
         let msg = format!("{err}");
-        assert!(msg.contains(name), "error message should contain the weight name");
+        assert!(
+            msg.contains(name),
+            "error message should contain the weight name"
+        );
     }
 
     #[test]
@@ -568,7 +571,10 @@ mod tests {
         let desc = "hidden_size must be divisible by num_heads";
         let err = TrackerGraphError::InvalidDimension(desc.to_string());
         let msg = format!("{err}");
-        assert!(msg.contains(desc), "error message should contain the dimension description");
+        assert!(
+            msg.contains(desc),
+            "error message should contain the dimension description"
+        );
     }
 
     #[test]
@@ -628,7 +634,10 @@ mod tests {
         let c1 = IntentTrackerConfig::default();
         let mut c2 = c1.clone();
         c2.hidden_size = 512;
-        assert_eq!(c1.hidden_size, 768, "original should be unchanged after clone modification");
+        assert_eq!(
+            c1.hidden_size, 768,
+            "original should be unchanged after clone modification"
+        );
         assert_eq!(c2.hidden_size, 512);
     }
 
@@ -654,7 +663,11 @@ mod tests {
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // SPEC §2.1: task_logits (B, 3) + difficulty_logits (B, 4)
-        assert_eq!(graph.outputs.len(), 2, "graph should have exactly 2 outputs");
+        assert_eq!(
+            graph.outputs.len(),
+            2,
+            "graph should have exactly 2 outputs"
+        );
     }
 
     #[test]
@@ -680,15 +693,27 @@ mod tests {
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Verify key input tensors exist with correct dtypes
-        let emb_idx = graph.tensors.iter().position(|t| t.name == "embeddings").unwrap();
+        let emb_idx = graph
+            .tensors
+            .iter()
+            .position(|t| t.name == "embeddings")
+            .unwrap();
         let emb = graph.tensor(TensorId(emb_idx as u32));
         assert!(emb.is_some());
         assert_eq!(emb.unwrap().dtype, DType::F32);
 
-        let roles_idx = graph.tensors.iter().position(|t| t.name == "roles").unwrap();
+        let roles_idx = graph
+            .tensors
+            .iter()
+            .position(|t| t.name == "roles")
+            .unwrap();
         assert!(graph.tensor(TensorId(roles_idx as u32)).is_some());
 
-        let signals_idx = graph.tensors.iter().position(|t| t.name == "signals").unwrap();
+        let signals_idx = graph
+            .tensors
+            .iter()
+            .position(|t| t.name == "signals")
+            .unwrap();
         assert!(graph.tensor(TensorId(signals_idx as u32)).is_some());
     }
 
@@ -697,8 +722,14 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let has_mha = graph.ops.iter().any(|op| matches!(op.kind, OpKind::MultiHeadAttention { causal: true, .. }));
-        assert!(has_mha, "graph should contain a causal MultiHeadAttention op");
+        let has_mha = graph
+            .ops
+            .iter()
+            .any(|op| matches!(&op.op_v2, Op::MultiHeadAttention(spec) if matches!(spec.mask, AttentionMask::Causal)));
+        assert!(
+            has_mha,
+            "graph should contain a causal MultiHeadAttention op"
+        );
     }
 
     #[test]
@@ -706,9 +737,16 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mha = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MultiHeadAttention { .. })).unwrap();
-        if let OpKind::MultiHeadAttention { causal, .. } = mha.kind {
-            assert!(causal, "attention should be causal for intent tracker");
+        let mha = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .unwrap();
+        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+            assert!(
+                matches!(spec.mask, AttentionMask::Causal),
+                "attention should be causal for intent tracker"
+            );
         }
     }
 
@@ -717,10 +755,14 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mha = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MultiHeadAttention { .. })).unwrap();
-        if let OpKind::MultiHeadAttention { num_heads, head_dim, .. } = mha.kind {
-            assert_eq!(num_heads, config.num_heads);
-            assert_eq!(head_dim, config.head_dim);
+        let mha = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .unwrap();
+        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+            assert_eq!(spec.geometry.num_q_heads, config.num_heads);
+            assert_eq!(spec.geometry.head_dim, config.head_dim);
         }
     }
 
@@ -729,10 +771,14 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let has_gather = graph.ops.iter().any(|op| {
-            matches!(op.kind, OpKind::Gather { .. }) && op.label == "role_gather"
-        });
-        assert!(has_gather, "graph should have a Gather op named 'role_gather'");
+        let has_gather = graph
+            .ops
+            .iter()
+            .any(|op| matches!(op.op_v2, Op::Gather { .. }) && op.label == "role_gather");
+        assert!(
+            has_gather,
+            "graph should have a Gather op named 'role_gather'"
+        );
     }
 
     #[test]
@@ -740,10 +786,15 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let ln_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .count();
-        assert_eq!(ln_count, 2, "should have per-head LayerNorm and context LayerNorm");
+        assert_eq!(
+            ln_count, 2,
+            "should have per-head LayerNorm and context LayerNorm"
+        );
     }
 
     #[test]
@@ -751,11 +802,16 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let silu_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Silu))
+        let silu_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Silu))
             .count();
         // info MLP: 3 Silu, signal encoder: 2 Silu, task classifier: 2 Silu, diff classifier: 2 Silu = 9
-        assert!(silu_count >= 8, "should have multiple SiLU activations, found {silu_count}");
+        assert!(
+            silu_count >= 8,
+            "should have multiple SiLU activations, found {silu_count}"
+        );
     }
 
     #[test]
@@ -763,10 +819,15 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let pool_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pool_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .count();
-        assert_eq!(pool_count, 2, "should have CLS-mode pool and mean-mode pool");
+        assert_eq!(
+            pool_count, 2,
+            "should have CLS-mode pool and mean-mode pool"
+        );
     }
 
     #[test]
@@ -774,9 +835,11 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let pools: Vec<_> = graph.ops.iter()
-            .filter_map(|op| match &op.kind {
-                OpKind::MeanPool { cls_mode, .. } => Some(*cls_mode),
+        let pools: Vec<_> = graph
+            .ops
+            .iter()
+            .filter_map(|op| match &op.op_v2 {
+                Op::MeanPool { cls_mode, .. } => Some(*cls_mode),
                 _ => None,
             })
             .collect();
@@ -789,11 +852,16 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gemm_bias_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .count();
         // QKV projections (3) + info MLP (3) + signal encoder (3) + task classifier (3) + diff classifier (3) = 15
-        assert!(gemm_bias_count >= 14, "should have many GemmBias ops, found {gemm_bias_count}");
+        assert!(
+            gemm_bias_count >= 14,
+            "should have many GemmBias ops, found {gemm_bias_count}"
+        );
     }
 
     // ─── Missing weight tests (comprehensive) ───
@@ -825,7 +893,10 @@ mod tests {
         weights.remove("info_net_fc1_weight");
         let result = build_intent_tracker_graph(&config, &weights);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("info_net_fc1_weight"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("info_net_fc1_weight"));
     }
 
     #[test]
@@ -835,7 +906,10 @@ mod tests {
         weights.remove("info_net_fc2_bias");
         let result = build_intent_tracker_graph(&config, &weights);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("info_net_fc2_bias"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("info_net_fc2_bias"));
     }
 
     #[test]
@@ -912,7 +986,10 @@ mod tests {
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         let chains = graph.def_use_chains();
-        assert!(!chains.is_empty(), "graph should have def-use chains for all tensors");
+        assert!(
+            !chains.is_empty(),
+            "graph should have def-use chains for all tensors"
+        );
     }
 
     // ─── Output tensor shape tests ───
@@ -922,10 +999,15 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let task_out = graph.tensor(graph.outputs[0]).expect("task output tensor exists");
+        let task_out = graph
+            .tensor(graph.outputs[0])
+            .expect("task output tensor exists");
         // Task logits: (B, num_tasks) → shape should have batch + num_tasks
         let shape_strs: Vec<String> = task_out.shape.iter().map(|s| format!("{s:?}")).collect();
-        assert!(shape_strs.len() >= 1, "task output should have at least batch dim");
+        assert!(
+            shape_strs.len() >= 1,
+            "task output should have at least batch dim"
+        );
     }
 
     #[test]
@@ -933,9 +1015,14 @@ mod tests {
         let config = IntentTrackerConfig::default();
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let diff_out = graph.tensor(graph.outputs[1]).expect("difficulty output tensor exists");
+        let diff_out = graph
+            .tensor(graph.outputs[1])
+            .expect("difficulty output tensor exists");
         let shape_strs: Vec<String> = diff_out.shape.iter().map(|s| format!("{s:?}")).collect();
-        assert!(shape_strs.len() >= 1, "difficulty output should have at least batch dim");
+        assert!(
+            shape_strs.len() >= 1,
+            "difficulty output should have at least batch dim"
+        );
     }
 
     // ─── Tensor count and op count sanity ───
@@ -946,7 +1033,11 @@ mod tests {
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // We have 37 weight tensors + 5 inputs + many intermediates + 2 outputs
-        assert!(graph.num_tensors() > 40, "should have substantial tensor count, got {}", graph.num_tensors());
+        assert!(
+            graph.num_tensors() > 40,
+            "should have substantial tensor count, got {}",
+            graph.num_tensors()
+        );
     }
 
     #[test]
@@ -955,7 +1046,11 @@ mod tests {
         let weights = default_weight_shapes();
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Many ops: Gather, Add, GemmBias×15, Silu×9+, Mul, MHA, LayerNorm×2, MeanPool×2
-        assert!(graph.num_ops() > 20, "should have substantial op count, got {}", graph.num_ops());
+        assert!(
+            graph.num_ops() > 20,
+            "should have substantial op count, got {}",
+            graph.num_ops()
+        );
     }
 
     // ─── Custom config with different output sizes ───
@@ -1203,8 +1298,14 @@ mod tests {
         // Act
         let display = format!("{err}");
         // Assert: formatted string contains both "missing weight" and the name
-        assert!(display.contains("missing weight"), "display should contain 'missing weight'");
-        assert!(display.contains("my_param"), "display should contain the weight name");
+        assert!(
+            display.contains("missing weight"),
+            "display should contain 'missing weight'"
+        );
+        assert!(
+            display.contains("my_param"),
+            "display should contain the weight name"
+        );
     }
 
     #[test]
@@ -1214,8 +1315,14 @@ mod tests {
         // Act
         let display = format!("{err}");
         // Assert
-        assert!(display.contains("invalid dimension"), "display should contain 'invalid dimension'");
-        assert!(display.contains("head_dim mismatch"), "display should contain the description");
+        assert!(
+            display.contains("invalid dimension"),
+            "display should contain 'invalid dimension'"
+        );
+        assert!(
+            display.contains("head_dim mismatch"),
+            "display should contain the description"
+        );
     }
 
     #[test]
@@ -1229,7 +1336,10 @@ mod tests {
         assert!(!debug.is_empty());
         assert!(!display.is_empty());
         // Debug typically includes variant name, Display uses #[error] format
-        assert!(debug.contains("MissingWeight"), "Debug should show variant name");
+        assert!(
+            debug.contains("MissingWeight"),
+            "Debug should show variant name"
+        );
     }
 
     #[test]
@@ -1239,7 +1349,10 @@ mod tests {
         // Act
         let display = format!("{err}");
         // Assert: does not panic, produces valid output
-        assert!(!display.is_empty(), "display should still produce output for empty string");
+        assert!(
+            !display.is_empty(),
+            "display should still produce output for empty string"
+        );
     }
 
     #[test]
@@ -1249,7 +1362,10 @@ mod tests {
         // Act
         let display = format!("{err}");
         // Assert: Unicode is preserved
-        assert!(display.contains("维度不匹配"), "display should preserve Unicode");
+        assert!(
+            display.contains("维度不匹配"),
+            "display should preserve Unicode"
+        );
     }
 
     // ─── New tests: graph dataflow, op properties, structural invariants ───
@@ -1262,10 +1378,14 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: role embedding addition exists
-        let has_add = graph.ops.iter().any(|op| {
-            matches!(op.kind, OpKind::Add) && op.label == "add_role"
-        });
-        assert!(has_add, "graph should have Add op for role embedding injection");
+        let has_add = graph
+            .ops
+            .iter()
+            .any(|op| matches!(op.op_v2, Op::Add) && op.label == "add_role");
+        assert!(
+            has_add,
+            "graph should have Add op for role embedding injection"
+        );
     }
 
     #[test]
@@ -1276,11 +1396,17 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: multiple Mul ops for V modulation and gated context paths
-        let mul_ops: Vec<&str> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_ops: Vec<&str> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .map(|op| op.label.as_str())
             .collect();
-        assert!(mul_ops.len() >= 3, "should have at least 3 Mul ops (v_modulate, gate_last, gate_mean), found {}", mul_ops.len());
+        assert!(
+            mul_ops.len() >= 3,
+            "should have at least 3 Mul ops (v_modulate, gate_last, gate_mean), found {}",
+            mul_ops.len()
+        );
     }
 
     #[test]
@@ -1290,11 +1416,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let v_mod = graph.ops.iter()
+        let v_mod = graph
+            .ops
+            .iter()
             .find(|op| op.label == "v_modulate")
             .expect("v_modulate op should exist");
         // Assert: v_modulate takes v_raw and info_weight as inputs
-        assert_eq!(v_mod.inputs.len(), 2, "v_modulate should have 2 inputs (v_raw, info_weight)");
+        assert_eq!(
+            v_mod.inputs.len(),
+            2,
+            "v_modulate should have 2 inputs (v_raw, info_weight)"
+        );
         assert_eq!(v_mod.outputs.len(), 1, "v_modulate should produce 1 output");
     }
 
@@ -1306,10 +1438,16 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert
-        let dual_add = graph.ops.iter()
+        let dual_add = graph
+            .ops
+            .iter()
             .find(|op| op.label == "dual_context_add")
             .expect("dual_context_add op should exist");
-        assert_eq!(dual_add.inputs.len(), 2, "dual context add should combine 2 gated paths");
+        assert_eq!(
+            dual_add.inputs.len(),
+            2,
+            "dual context add should combine 2 gated paths"
+        );
     }
 
     #[test]
@@ -1319,11 +1457,19 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gather = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Gather op should exist");
         // Assert: role embedding has 3 rows (user/assistant/system)
-        if let OpKind::Gather { table_rows, embed_dim, indices_kind, .. } = &gather.kind {
+        if let Op::Gather {
+            table_rows,
+            embed_dim,
+            indices_kind,
+            ..
+        } = &gather.op_v2
+        {
             assert_eq!(*table_rows, 3, "role embedding table should have 3 rows");
             assert_eq!(*embed_dim, config.hidden_size);
             assert!(matches!(indices_kind, GatherIndicesKind::Tensor));
@@ -1337,11 +1483,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gather = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Gather op should exist");
         // Assert: Gather takes role_emb_weight table + roles indices
-        assert_eq!(gather.inputs.len(), 2, "Gather should have 2 inputs (table + indices)");
+        assert_eq!(
+            gather.inputs.len(),
+            2,
+            "Gather should have 2 inputs (table + indices)"
+        );
     }
 
     #[test]
@@ -1351,9 +1503,11 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let ln_ops: Vec<f32> = graph.ops.iter()
-            .filter_map(|op| match op.kind {
-                OpKind::LayerNorm { feature_dim: _, eps } => Some(eps),
+        let ln_ops: Vec<f32> = graph
+            .ops
+            .iter()
+            .filter_map(|op| match &op.op_v2 {
+                Op::LayerNorm(spec) => Some(spec.eps),
                 _ => None,
             })
             .collect();
@@ -1372,12 +1526,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mha = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MultiHeadAttention { .. }))
+        let mha = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
             .expect("MHA op should exist");
         // Assert: intent tracker uses MHA (not GQA), so num_kv_heads == num_heads
-        if let OpKind::MultiHeadAttention { num_heads, num_kv_heads, .. } = mha.kind {
-            assert_eq!(num_kv_heads, num_heads, "intent tracker MHA should have equal num_heads and num_kv_heads");
+        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+            assert_eq!(
+                spec.geometry.num_kv_heads, spec.geometry.num_q_heads,
+                "intent tracker MHA should have equal num_heads and num_kv_heads"
+            );
         }
     }
 
@@ -1388,12 +1547,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mha = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MultiHeadAttention { .. }))
+        let mha = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
             .expect("MHA op should exist");
         // Assert
-        if let OpKind::MultiHeadAttention { attention_sinks, .. } = mha.kind {
-            assert!(!attention_sinks, "intent tracker should not use attention sinks");
+        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+            assert!(
+                matches!(spec.sinks, SinksSpec::None),
+                "intent tracker should not use attention sinks"
+            );
         }
     }
 
@@ -1404,11 +1568,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let emb = graph.tensors.iter()
+        let emb = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "embeddings")
             .expect("embeddings tensor should exist");
         // Assert: (batch, seq_len, hidden_size) = 3 dims
-        assert_eq!(emb.shape.len(), 3, "embeddings should have 3 dimensions (B, T, H)");
+        assert_eq!(
+            emb.shape.len(),
+            3,
+            "embeddings should have 3 dimensions (B, T, H)"
+        );
         assert_eq!(emb.dtype, DType::F32);
     }
 
@@ -1419,11 +1589,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let roles = graph.tensors.iter()
+        let roles = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "roles")
             .expect("roles tensor should exist");
         // Assert: (batch, seq_len) = 2 dims
-        assert_eq!(roles.shape.len(), 2, "roles should have 2 dimensions (B, T)");
+        assert_eq!(
+            roles.shape.len(),
+            2,
+            "roles should have 2 dimensions (B, T)"
+        );
     }
 
     #[test]
@@ -1433,11 +1609,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let signals = graph.tensors.iter()
+        let signals = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "signals")
             .expect("signals tensor should exist");
         // Assert: (batch, signal_dim) = 2 dims
-        assert_eq!(signals.shape.len(), 2, "signals should have 2 dimensions (B, signal_dim)");
+        assert_eq!(
+            signals.shape.len(),
+            2,
+            "signals should have 2 dimensions (B, signal_dim)"
+        );
     }
 
     #[test]
@@ -1471,14 +1653,26 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gemm_bias_ops: Vec<&CompilerOp> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .collect();
         // Assert: every GemmBias takes (input, weight, bias) = 3 inputs
         assert!(!gemm_bias_ops.is_empty(), "should have GemmBias ops");
         for op in &gemm_bias_ops {
-            assert_eq!(op.inputs.len(), 3, "GemmBias '{}' should have 3 inputs (input, weight, bias)", op.label);
-            assert_eq!(op.outputs.len(), 1, "GemmBias '{}' should have 1 output", op.label);
+            assert_eq!(
+                op.inputs.len(),
+                3,
+                "GemmBias '{}' should have 3 inputs (input, weight, bias)",
+                op.label
+            );
+            assert_eq!(
+                op.outputs.len(),
+                1,
+                "GemmBias '{}' should have 1 output",
+                op.label
+            );
         }
     }
 
@@ -1489,12 +1683,15 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gemm_bias_ops: Vec<&CompilerOp> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .collect();
         // Assert: all GemmBias use trans_b=true (weight transposed for row-major storage)
         for op in &gemm_bias_ops {
-            if let OpKind::GemmBias { trans_b, .. } = op.kind {
+            if let Op::GemmBias(spec) = &op.op_v2 {
+                let trans_b = &spec.trans_b;
                 assert!(trans_b, "GemmBias '{}' should have trans_b=true", op.label);
             }
         }
@@ -1507,13 +1704,18 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let pools: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pools: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .collect();
         // Assert: all MeanPool ops use config.hidden_size
         for pool in &pools {
-            if let OpKind::MeanPool { hidden, .. } = pool.kind {
-                assert_eq!(hidden, config.hidden_size, "MeanPool hidden should match config.hidden_size");
+            if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+                assert_eq!(
+                    *hidden, config.hidden_size,
+                    "MeanPool hidden should match config.hidden_size"
+                );
             }
         }
     }
@@ -1525,13 +1727,18 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let pools: Vec<_> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::MeanPool { .. }))
+        let pools: Vec<_> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
             .collect();
         // Assert
         for pool in &pools {
-            if let OpKind::MeanPool { seq_len, .. } = pool.kind {
-                assert_eq!(seq_len, config.max_seq_len, "MeanPool seq_len should match config.max_seq_len");
+            if let Op::MeanPool { seq_len, .. } = &pool.op_v2 {
+                assert_eq!(
+                    *seq_len, config.max_seq_len,
+                    "MeanPool seq_len should match config.max_seq_len"
+                );
             }
         }
     }
@@ -1546,8 +1753,14 @@ mod tests {
         let task_name = graph.tensor(graph.outputs[0]).unwrap().name.as_str();
         let diff_name = graph.tensor(graph.outputs[1]).unwrap().name.as_str();
         // Assert: task_logits is first output, diff_logits is second
-        assert_eq!(task_name, "task_logits", "first output should be task_logits");
-        assert_eq!(diff_name, "diff_logits", "second output should be diff_logits");
+        assert_eq!(
+            task_name, "task_logits",
+            "first output should be task_logits"
+        );
+        assert_eq!(
+            diff_name, "diff_logits",
+            "second output should be diff_logits"
+        );
     }
 
     #[test]
@@ -1560,7 +1773,11 @@ mod tests {
         let names: Vec<&str> = graph.tensors.iter().map(|t| t.name.as_str()).collect();
         let unique_count = names.iter().collect::<std::collections::HashSet<_>>().len();
         // Assert: all tensor names are unique
-        assert_eq!(names.len(), unique_count, "all tensor names should be unique");
+        assert_eq!(
+            names.len(),
+            unique_count,
+            "all tensor names should be unique"
+        );
     }
 
     #[test]
@@ -1571,7 +1788,10 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
-        let unique_count = labels.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_count = labels
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         // Assert: all op labels are unique
         assert_eq!(labels.len(), unique_count, "all op labels should be unique");
     }
@@ -1590,7 +1810,9 @@ mod tests {
                 assert!(
                     (tid.0 as usize) < num_tensors,
                     "op '{}' references tensor id {:?} which does not exist (num_tensors={})",
-                    op.label, tid, num_tensors
+                    op.label,
+                    tid,
+                    num_tensors
                 );
             }
         }
@@ -1610,7 +1832,9 @@ mod tests {
                 assert!(
                     (tid.0 as usize) < num_tensors,
                     "op '{}' output tensor id {:?} does not exist (num_tensors={})",
-                    op.label, tid, num_tensors
+                    op.label,
+                    tid,
+                    num_tensors
                 );
             }
         }
@@ -1635,7 +1859,8 @@ mod tests {
                     assert!(
                         produced.contains(&input_tid),
                         "op '{}' uses tensor {:?} before it was produced",
-                        op.label, input_tid
+                        op.label,
+                        input_tid
                     );
                 }
             }
@@ -1654,7 +1879,11 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         let chains = graph.def_use_chains();
         // Assert: every tensor in the graph has an entry in def-use chains
-        assert_eq!(chains.len(), graph.num_tensors(), "def-use chains should cover all tensors");
+        assert_eq!(
+            chains.len(),
+            graph.num_tensors(),
+            "def-use chains should cover all tensors"
+        );
     }
 
     #[test]
@@ -1673,7 +1902,8 @@ mod tests {
                     assert!(
                         matches!(dim, SymDim::Concrete(_)),
                         "weight tensor '{}' should have concrete shape, found {:?}",
-                        tensor.name, dim
+                        tensor.name,
+                        dim
                     );
                 }
             }
@@ -1689,8 +1919,16 @@ mod tests {
         let graph1 = build_intent_tracker_graph(&config, &weights).unwrap();
         let graph2 = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: same op and tensor counts (structure is deterministic)
-        assert_eq!(graph1.num_ops(), graph2.num_ops(), "graph structure should be deterministic");
-        assert_eq!(graph1.num_tensors(), graph2.num_tensors(), "graph structure should be deterministic");
+        assert_eq!(
+            graph1.num_ops(),
+            graph2.num_ops(),
+            "graph structure should be deterministic"
+        );
+        assert_eq!(
+            graph1.num_tensors(),
+            graph2.num_tensors(),
+            "graph structure should be deterministic"
+        );
         assert_eq!(graph1.outputs.len(), graph2.outputs.len());
     }
 
@@ -1701,11 +1939,16 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let info_sigmoid = graph.ops.iter()
+        let info_sigmoid = graph
+            .ops
+            .iter()
             .find(|op| op.label == "info_sigmoid")
             .expect("info_sigmoid op should exist");
         // Assert
-        assert!(matches!(info_sigmoid.kind, OpKind::Silu), "info_sigmoid should be a Silu activation");
+        assert!(
+            matches!(info_sigmoid.op_v2, Op::Silu),
+            "info_sigmoid should be a Silu activation"
+        );
     }
 
     #[test]
@@ -1715,11 +1958,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let info_ops: Vec<&CompilerOp> = graph.ops.iter()
+        let info_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
             .filter(|op| op.label.starts_with("info_"))
             .collect();
         // Assert: info MLP has 3 linear stages + activations + sigmoid = 7 ops
-        assert!(info_ops.len() >= 6, "info MLP should have multiple stages, found {}", info_ops.len());
+        assert!(
+            info_ops.len() >= 6,
+            "info MLP should have multiple stages, found {}",
+            info_ops.len()
+        );
     }
 
     #[test]
@@ -1729,11 +1978,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let sig_relu_ops: Vec<&CompilerOp> = graph.ops.iter()
+        let sig_relu_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
             .filter(|op| op.label.starts_with("sig_relu"))
             .collect();
         // Assert: signal encoder has 2 SiLU activations (2-layer MLP)
-        assert_eq!(sig_relu_ops.len(), 2, "signal encoder should have 2 SiLU activations");
+        assert_eq!(
+            sig_relu_ops.len(),
+            2,
+            "signal encoder should have 2 SiLU activations"
+        );
     }
 
     #[test]
@@ -1743,11 +1998,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let task_relu_ops: Vec<&CompilerOp> = graph.ops.iter()
+        let task_relu_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
             .filter(|op| op.label.starts_with("task_relu"))
             .collect();
         // Assert: task classifier has 2 SiLU activations
-        assert_eq!(task_relu_ops.len(), 2, "task classifier should have 2 SiLU activations");
+        assert_eq!(
+            task_relu_ops.len(),
+            2,
+            "task classifier should have 2 SiLU activations"
+        );
     }
 
     #[test]
@@ -1757,11 +2018,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let diff_relu_ops: Vec<&CompilerOp> = graph.ops.iter()
+        let diff_relu_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
             .filter(|op| op.label.starts_with("diff_relu"))
             .collect();
         // Assert: difficulty classifier has 2 SiLU activations
-        assert_eq!(diff_relu_ops.len(), 2, "diff classifier should have 2 SiLU activations");
+        assert_eq!(
+            diff_relu_ops.len(),
+            2,
+            "diff classifier should have 2 SiLU activations"
+        );
     }
 
     #[test]
@@ -1776,8 +2043,14 @@ mod tests {
         let gate_mean = graph.ops.iter().find(|op| op.label == "gate_mean");
         assert!(gate_last.is_some(), "gate_last op should exist");
         assert!(gate_mean.is_some(), "gate_mean op should exist");
-        assert!(matches!(gate_last.unwrap().kind, OpKind::Mul), "gate_last should be Mul");
-        assert!(matches!(gate_mean.unwrap().kind, OpKind::Mul), "gate_mean should be Mul");
+        assert!(
+            matches!(gate_last.unwrap().op_v2, Op::Mul),
+            "gate_last should be Mul"
+        );
+        assert!(
+            matches!(gate_mean.unwrap().op_v2, Op::Mul),
+            "gate_mean should be Mul"
+        );
     }
 
     #[test]
@@ -1787,13 +2060,19 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let ctx_ln = graph.ops.iter()
-            .find(|op| op.label == "context_layernorm");
+        let ctx_ln = graph.ops.iter().find(|op| op.label == "context_layernorm");
         // Assert
         assert!(ctx_ln.is_some(), "context_layernorm op should exist");
         let op = ctx_ln.unwrap();
-        assert!(matches!(op.kind, OpKind::LayerNorm { .. }), "context_layernorm should be LayerNorm");
-        assert_eq!(op.inputs.len(), 3, "LayerNorm should take (input, weight, bias)");
+        assert!(
+            matches!(op.op_v2, Op::LayerNorm(..)),
+            "context_layernorm should be LayerNorm"
+        );
+        assert_eq!(
+            op.inputs.len(),
+            3,
+            "LayerNorm should take (input, weight, bias)"
+        );
     }
 
     #[test]
@@ -1803,11 +2082,10 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let attn_ln = graph.ops.iter()
-            .find(|op| op.label == "attn_layernorm");
+        let attn_ln = graph.ops.iter().find(|op| op.label == "attn_layernorm");
         // Assert
         assert!(attn_ln.is_some(), "attn_layernorm op should exist");
-        assert!(matches!(attn_ln.unwrap().kind, OpKind::LayerNorm { .. }));
+        assert!(matches!(attn_ln.unwrap().op_v2, Op::LayerNorm(..)));
     }
 
     #[test]
@@ -1817,14 +2095,21 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let task_fc0 = graph.ops.iter()
+        let task_fc0 = graph
+            .ops
+            .iter()
             .find(|op| op.label == "task_h0")
             .expect("task_h0 should exist");
-        let diff_fc0 = graph.ops.iter()
+        let diff_fc0 = graph
+            .ops
+            .iter()
             .find(|op| op.label == "diff_h0")
             .expect("diff_h0 should exist");
         // Assert: both classifiers start from the same context_normed tensor
-        assert_eq!(task_fc0.inputs[0], diff_fc0.inputs[0], "task and diff classifiers should share context_normed input");
+        assert_eq!(
+            task_fc0.inputs[0], diff_fc0.inputs[0],
+            "task and diff classifiers should share context_normed input"
+        );
     }
 
     #[test]
@@ -1850,12 +2135,15 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: q_proj, k_proj, v_raw are all GemmBias ops
         for label in &["q_proj", "k_proj", "v_raw"] {
-            let op = graph.ops.iter()
+            let op = graph
+                .ops
+                .iter()
                 .find(|op| op.label == *label)
                 .unwrap_or_else(|| panic!("{} op should exist", label));
             assert!(
-                matches!(op.kind, OpKind::GemmBias { .. }),
-                "{} should be a GemmBias op", label
+                matches!(op.op_v2, Op::GemmBias(..)),
+                "{} should be a GemmBias op",
+                label
             );
         }
     }
@@ -1867,11 +2155,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let role_out = graph.tensors.iter()
+        let role_out = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "role_emb_out")
             .expect("role_emb_out tensor should exist");
         // Assert: (B, T, H) = 3 dimensions
-        assert_eq!(role_out.shape.len(), 3, "role_emb_out should have 3 dimensions (B, T, H)");
+        assert_eq!(
+            role_out.shape.len(),
+            3,
+            "role_emb_out should have 3 dimensions (B, T, H)"
+        );
     }
 
     #[test]
@@ -1881,11 +2175,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let info_weight = graph.tensors.iter()
+        let info_weight = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "info_weight")
             .expect("info_weight tensor should exist");
         // Assert: (B, T) = 2 dimensions — scalar per token
-        assert_eq!(info_weight.shape.len(), 2, "info_weight should have 2 dimensions (B, T)");
+        assert_eq!(
+            info_weight.shape.len(),
+            2,
+            "info_weight should have 2 dimensions (B, T)"
+        );
     }
 
     #[test]
@@ -1895,11 +2195,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let dual_ctx = graph.tensors.iter()
+        let dual_ctx = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "dual_context")
             .expect("dual_context tensor should exist");
         // Assert: (B, H) = 2 dimensions — pooled context
-        assert_eq!(dual_ctx.shape.len(), 2, "dual_context should have 2 dimensions (B, H)");
+        assert_eq!(
+            dual_ctx.shape.len(),
+            2,
+            "dual_context should have 2 dimensions (B, H)"
+        );
     }
 
     #[test]
@@ -1912,8 +2218,11 @@ mod tests {
         // Assert: all tensors use F32 dtype
         for tensor in &graph.tensors {
             assert_eq!(
-                tensor.dtype, DType::F32,
-                "tensor '{}' should be F32, found {:?}", tensor.name, tensor.dtype
+                tensor.dtype,
+                DType::F32,
+                "tensor '{}' should be F32, found {:?}",
+                tensor.name,
+                tensor.dtype
             );
         }
     }
@@ -1927,7 +2236,10 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert
         for op in &graph.ops {
-            assert!(!op.label.is_empty(), "every op should have a non-empty label");
+            assert!(
+                !op.label.is_empty(),
+                "every op should have a non-empty label"
+            );
         }
     }
 
@@ -1940,7 +2252,10 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert
         for tensor in &graph.tensors {
-            assert!(!tensor.name.is_empty(), "every tensor should have a non-empty name");
+            assert!(
+                !tensor.name.is_empty(),
+                "every tensor should have a non-empty name"
+            );
         }
     }
 
@@ -1951,14 +2266,26 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let silu_ops: Vec<&CompilerOp> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Silu))
+        let silu_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Silu))
             .collect();
         // Assert: Silu is elementwise, 1 input → 1 output
         assert!(!silu_ops.is_empty(), "should have SiLU ops");
         for op in &silu_ops {
-            assert_eq!(op.inputs.len(), 1, "SiLU '{}' should have 1 input", op.label);
-            assert_eq!(op.outputs.len(), 1, "SiLU '{}' should have 1 output", op.label);
+            assert_eq!(
+                op.inputs.len(),
+                1,
+                "SiLU '{}' should have 1 input",
+                op.label
+            );
+            assert_eq!(
+                op.outputs.len(),
+                1,
+                "SiLU '{}' should have 1 output",
+                op.label
+            );
         }
     }
 
@@ -1969,14 +2296,26 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let add_ops: Vec<&CompilerOp> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Add))
+        let add_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
             .collect();
         // Assert: Add always takes 2 inputs, produces 1 output
         assert!(!add_ops.is_empty(), "should have Add ops");
         for op in &add_ops {
-            assert_eq!(op.inputs.len(), 2, "Add '{}' should have 2 inputs", op.label);
-            assert_eq!(op.outputs.len(), 1, "Add '{}' should have 1 output", op.label);
+            assert_eq!(
+                op.inputs.len(),
+                2,
+                "Add '{}' should have 2 inputs",
+                op.label
+            );
+            assert_eq!(
+                op.outputs.len(),
+                1,
+                "Add '{}' should have 1 output",
+                op.label
+            );
         }
     }
 
@@ -1993,9 +2332,14 @@ mod tests {
             assert!(
                 (output_id.0 as usize) < num_tensors,
                 "output tensor id {:?} should be valid (num_tensors={})",
-                output_id, num_tensors
+                output_id,
+                num_tensors
             );
-            assert!(graph.tensor(output_id).is_some(), "output tensor {:?} should exist", output_id);
+            assert!(
+                graph.tensor(output_id).is_some(),
+                "output tensor {:?} should exist",
+                output_id
+            );
         }
     }
 
@@ -2006,14 +2350,26 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let ln_ops: Vec<&CompilerOp> = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
+        let ln_ops: Vec<&CompilerOp> = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
             .collect();
         // Assert: LayerNorm takes (input, weight, bias)
         assert_eq!(ln_ops.len(), 2, "should have 2 LayerNorm ops");
         for op in &ln_ops {
-            assert_eq!(op.inputs.len(), 3, "LayerNorm '{}' should have 3 inputs", op.label);
-            assert_eq!(op.outputs.len(), 1, "LayerNorm '{}' should have 1 output", op.label);
+            assert_eq!(
+                op.inputs.len(),
+                3,
+                "LayerNorm '{}' should have 3 inputs",
+                op.label
+            );
+            assert_eq!(
+                op.outputs.len(),
+                1,
+                "LayerNorm '{}' should have 1 output",
+                op.label
+            );
         }
     }
 
@@ -2024,8 +2380,10 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mha = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MultiHeadAttention { .. }))
+        let mha = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
             .expect("MHA should exist");
         // Assert: MHA takes (Q, K, V)
         assert_eq!(mha.inputs.len(), 3, "MHA should have 3 inputs (Q, K, V)");
@@ -2115,11 +2473,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let ctx_normed = graph.tensors.iter()
+        let ctx_normed = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "context_normed")
             .expect("context_normed tensor should exist");
         // Assert: (B, H) = 2 dimensions after LayerNorm on pooled context
-        assert_eq!(ctx_normed.shape.len(), 2, "context_normed should have 2 dimensions (B, H)");
+        assert_eq!(
+            ctx_normed.shape.len(),
+            2,
+            "context_normed should have 2 dimensions (B, H)"
+        );
     }
 
     #[test]
@@ -2129,11 +2493,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let attn_out = graph.tensors.iter()
+        let attn_out = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "attn_out")
             .expect("attn_out tensor should exist");
         // Assert: (B, T, H) = 3 dimensions
-        assert_eq!(attn_out.shape.len(), 3, "attn_out should have 3 dimensions (B, T, H)");
+        assert_eq!(
+            attn_out.shape.len(),
+            3,
+            "attn_out should have 3 dimensions (B, T, H)"
+        );
     }
 
     #[test]
@@ -2158,7 +2528,11 @@ mod tests {
         // Assert: V modulation output tensor exists
         let v_mod = graph.tensors.iter().find(|t| t.name == "v_modulated");
         assert!(v_mod.is_some(), "v_modulated tensor should exist");
-        assert_eq!(v_mod.unwrap().shape.len(), 3, "v_modulated should have 3 dimensions (B, T, H)");
+        assert_eq!(
+            v_mod.unwrap().shape.len(),
+            3,
+            "v_modulated should have 3 dimensions (B, T, H)"
+        );
     }
 
     #[test]
@@ -2168,11 +2542,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gated_last = graph.tensors.iter()
+        let gated_last = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "gated_last")
             .expect("gated_last tensor should exist");
         // Assert: (B, H) = 2 dimensions
-        assert_eq!(gated_last.shape.len(), 2, "gated_last should have 2 dimensions (B, H)");
+        assert_eq!(
+            gated_last.shape.len(),
+            2,
+            "gated_last should have 2 dimensions (B, H)"
+        );
     }
 
     #[test]
@@ -2185,7 +2565,11 @@ mod tests {
         // Assert: signal encoder output tensor exists
         let sig_out = graph.tensors.iter().find(|t| t.name == "sig_out");
         assert!(sig_out.is_some(), "sig_out tensor should exist");
-        assert_eq!(sig_out.unwrap().shape.len(), 2, "sig_out should have 2 dimensions (B, signal_hidden_dim)");
+        assert_eq!(
+            sig_out.unwrap().shape.len(),
+            2,
+            "sig_out should have 2 dimensions (B, signal_hidden_dim)"
+        );
     }
 
     // ─── Additional edge case tests ───
@@ -2197,11 +2581,13 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gather = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::Gather { .. }))
+        let gather = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
             .expect("Gather op should exist");
         // Assert: index_dim should be Symbolic (seq_len), not Concrete
-        if let OpKind::Gather { index_dim, .. } = &gather.kind {
+        if let Op::Gather { index_dim, .. } = &gather.op_v2 {
             assert!(
                 matches!(index_dim, SymDim::Symbolic { .. }),
                 "Gather index_dim should be Symbolic for dynamic sequence length, found {:?}",
@@ -2217,14 +2603,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mha = graph.ops.iter()
-            .find(|op| matches!(op.kind, OpKind::MultiHeadAttention { .. }))
+        let mha = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
             .expect("MHA op should exist");
         // Assert: MHA seq_len should be Symbolic (runtime-dynamic)
-        if let OpKind::MultiHeadAttention { seq_len, .. } = &mha.kind {
+        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
             assert!(
-                matches!(seq_len, SymDim::Symbolic { .. }),
-                "MHA seq_len should be Symbolic, found {:?}", seq_len
+                matches!(spec.seq_len, SymDim::Symbolic { .. }),
+                "MHA seq_len should be Symbolic, found {:?}",
+                spec.seq_len
             );
         }
     }
@@ -2236,11 +2625,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let context_last = graph.tensors.iter()
+        let context_last = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "context_last")
             .expect("context_last tensor should exist");
         // Assert: after MeanPool CLS mode, shape is (B, H) = 2 dims
-        assert_eq!(context_last.shape.len(), 2, "context_last should have 2 dimensions (B, H)");
+        assert_eq!(
+            context_last.shape.len(),
+            2,
+            "context_last should have 2 dimensions (B, H)"
+        );
     }
 
     #[test]
@@ -2250,11 +2645,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let context_mean = graph.tensors.iter()
+        let context_mean = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "context_mean")
             .expect("context_mean tensor should exist");
         // Assert: after MeanPool mean mode, shape is (B, H) = 2 dims
-        assert_eq!(context_mean.shape.len(), 2, "context_mean should have 2 dimensions (B, H)");
+        assert_eq!(
+            context_mean.shape.len(),
+            2,
+            "context_mean should have 2 dimensions (B, H)"
+        );
     }
 
     #[test]
@@ -2264,11 +2665,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gated_mean = graph.tensors.iter()
+        let gated_mean = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "gated_mean")
             .expect("gated_mean tensor should exist");
         // Assert: (B, H) = 2 dimensions — same as gated_last
-        assert_eq!(gated_mean.shape.len(), 2, "gated_mean should have 2 dimensions (B, H)");
+        assert_eq!(
+            gated_mean.shape.len(),
+            2,
+            "gated_mean should have 2 dimensions (B, H)"
+        );
     }
 
     #[test]
@@ -2281,7 +2688,11 @@ mod tests {
         // Assert: info MLP produces intermediate tensors at each stage
         for name in &["info_h0", "info_a0", "info_h1", "info_a1", "info_h2"] {
             let found = graph.tensors.iter().any(|t| t.name == *name);
-            assert!(found, "intermediate tensor '{}' should exist in info MLP path", name);
+            assert!(
+                found,
+                "intermediate tensor '{}' should exist in info MLP path",
+                name
+            );
         }
     }
 
@@ -2295,7 +2706,11 @@ mod tests {
         // Assert: signal encoder produces intermediate tensors at each stage
         for name in &["sig_h0", "sig_a0", "sig_h1", "sig_a1"] {
             let found = graph.tensors.iter().any(|t| t.name == *name);
-            assert!(found, "intermediate tensor '{}' should exist in signal encoder path", name);
+            assert!(
+                found,
+                "intermediate tensor '{}' should exist in signal encoder path",
+                name
+            );
         }
     }
 
@@ -2306,11 +2721,17 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let attn_normed = graph.tensors.iter()
+        let attn_normed = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "attn_normed")
             .expect("attn_normed tensor should exist");
         // Assert: (B, T, H) = 3 dimensions — same as attn_out before pooling
-        assert_eq!(attn_normed.shape.len(), 3, "attn_normed should have 3 dimensions (B, T, H)");
+        assert_eq!(
+            attn_normed.shape.len(),
+            3,
+            "attn_normed should have 3 dimensions (B, T, H)"
+        );
     }
 
     #[test]
@@ -2324,7 +2745,11 @@ mod tests {
         // Assert
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("signal_fc2_weight"), "error should mention signal_fc2_weight, got: {}", msg);
+        assert!(
+            msg.contains("signal_fc2_weight"),
+            "error should mention signal_fc2_weight, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -2338,7 +2763,11 @@ mod tests {
         // Assert
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("diff_fc1_weight"), "error should mention diff_fc1_weight, got: {}", msg);
+        assert!(
+            msg.contains("diff_fc1_weight"),
+            "error should mention diff_fc1_weight, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -2349,15 +2778,27 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: 1D GemmBias ops (signal encoder + classifiers) use M=Concrete(1)
-        let gemm_1d_labels = ["sig_h0", "sig_h1", "sig_out", "task_h0", "task_h1", "task_logits",
-                              "diff_h0", "diff_h1", "diff_logits"];
+        let gemm_1d_labels = [
+            "sig_h0",
+            "sig_h1",
+            "sig_out",
+            "task_h0",
+            "task_h1",
+            "task_logits",
+            "diff_h0",
+            "diff_h1",
+            "diff_logits",
+        ];
         for label in &gemm_1d_labels {
             let op = graph.ops.iter().find(|op| op.label == *label);
             if let Some(op) = op {
-                if let OpKind::GemmBias { m, .. } = &op.kind {
+                if let Op::GemmBias(spec) = &op.op_v2 {
+                    let m = &spec.m;
                     assert!(
                         matches!(m, SymDim::Concrete(1)),
-                        "1D GemmBias '{}' should use M=Concrete(1), found {:?}", label, m
+                        "1D GemmBias '{}' should use M=Concrete(1), found {:?}",
+                        label,
+                        m
                     );
                 }
             }
@@ -2376,10 +2817,13 @@ mod tests {
         for label in &gemm_2d_labels {
             let op = graph.ops.iter().find(|op| op.label == *label);
             if let Some(op) = op {
-                if let OpKind::GemmBias { m, .. } = &op.kind {
+                if let Op::GemmBias(spec) = &op.op_v2 {
+                    let m = &spec.m;
                     assert!(
                         matches!(m, SymDim::Symbolic { .. }),
-                        "2D GemmBias '{}' should use Symbolic M, found {:?}", label, m
+                        "2D GemmBias '{}' should use Symbolic M, found {:?}",
+                        label,
+                        m
                     );
                 }
             }
@@ -2393,12 +2837,30 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let q_proj = graph.ops.iter().find(|op| op.label == "q_proj").expect("q_proj should exist");
-        let k_proj = graph.ops.iter().find(|op| op.label == "k_proj").expect("k_proj should exist");
-        let v_raw = graph.ops.iter().find(|op| op.label == "v_raw").expect("v_raw should exist");
+        let q_proj = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "q_proj")
+            .expect("q_proj should exist");
+        let k_proj = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "k_proj")
+            .expect("k_proj should exist");
+        let v_raw = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "v_raw")
+            .expect("v_raw should exist");
         // Assert: Q, K, V all take e_plus_role as their first input (shared input)
-        assert_eq!(q_proj.inputs[0], k_proj.inputs[0], "q_proj and k_proj should share first input");
-        assert_eq!(k_proj.inputs[0], v_raw.inputs[0], "k_proj and v_raw should share first input");
+        assert_eq!(
+            q_proj.inputs[0], k_proj.inputs[0],
+            "q_proj and k_proj should share first input"
+        );
+        assert_eq!(
+            k_proj.inputs[0], v_raw.inputs[0],
+            "k_proj and v_raw should share first input"
+        );
     }
 
     // ─── 13 additional tests to reach 156 total ───
@@ -2408,8 +2870,10 @@ mod tests {
         // Arrange: thiserror derives std::error::Error; source() should be None for leaf errors
         let err = TrackerGraphError::MissingWeight("x".to_string());
         // Act & Assert: source is None (no chained error)
-        assert!(std::error::Error::source(&err).is_none(),
-            "MissingWeight is a leaf error and should have no source");
+        assert!(
+            std::error::Error::source(&err).is_none(),
+            "MissingWeight is a leaf error and should have no source"
+        );
     }
 
     #[test]
@@ -2417,8 +2881,10 @@ mod tests {
         // Arrange
         let err = TrackerGraphError::InvalidDimension("y".to_string());
         // Act & Assert: source is None (no chained error)
-        assert!(std::error::Error::source(&err).is_none(),
-            "InvalidDimension is a leaf error and should have no source");
+        assert!(
+            std::error::Error::source(&err).is_none(),
+            "InvalidDimension is a leaf error and should have no source"
+        );
     }
 
     #[test]
@@ -2428,8 +2894,10 @@ mod tests {
         // Act
         let debug = format!("{err:?}");
         // Assert: Debug output includes the variant identifier
-        assert!(debug.contains("InvalidDimension"),
-            "Debug should include variant name 'InvalidDimension', got: {debug}");
+        assert!(
+            debug.contains("InvalidDimension"),
+            "Debug should include variant name 'InvalidDimension', got: {debug}"
+        );
     }
 
     #[test]
@@ -2441,7 +2909,10 @@ mod tests {
         };
         // Assert: field is stored as zero
         assert_eq!(config.signal_dim, 0);
-        assert_eq!(config.hidden_size, 768, "other fields should remain at default");
+        assert_eq!(
+            config.hidden_size, 768,
+            "other fields should remain at default"
+        );
     }
 
     #[test]
@@ -2465,8 +2936,11 @@ mod tests {
         };
         // Assert: stored correctly (even though num_heads * head_dim != hidden_size)
         assert_eq!(config.head_dim, 0);
-        assert_ne!(config.num_heads * config.head_dim, config.hidden_size,
-            "zero head_dim intentionally breaks the hidden_size invariant");
+        assert_ne!(
+            config.num_heads * config.head_dim,
+            config.hidden_size,
+            "zero head_dim intentionally breaks the hidden_size invariant"
+        );
     }
 
     #[test]
@@ -2476,11 +2950,16 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let silu_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Silu))
+        let silu_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Silu))
             .count();
         // Assert: info MLP (3 Silu: relu0/relu1/sigmoid) + signal (2) + task (2) + diff (2) = 9
-        assert_eq!(silu_count, 9, "expected exactly 9 SiLU ops, found {silu_count}");
+        assert_eq!(
+            silu_count, 9,
+            "expected exactly 9 SiLU ops, found {silu_count}"
+        );
     }
 
     #[test]
@@ -2490,11 +2969,16 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let gemm_bias_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::GemmBias { .. }))
+        let gemm_bias_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
             .count();
         // Assert: QKV (3) + info MLP (3) + signal (3) + task (3) + diff (3) = 15
-        assert_eq!(gemm_bias_count, 15, "expected exactly 15 GemmBias ops, found {gemm_bias_count}");
+        assert_eq!(
+            gemm_bias_count, 15,
+            "expected exactly 15 GemmBias ops, found {gemm_bias_count}"
+        );
     }
 
     #[test]
@@ -2504,11 +2988,16 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let mul_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Mul))
+        let mul_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Mul))
             .count();
         // Assert: v_modulate + gate_last + gate_mean = 3 Mul ops
-        assert_eq!(mul_count, 3, "expected exactly 3 Mul ops (v_modulate, gate_last, gate_mean), found {mul_count}");
+        assert_eq!(
+            mul_count, 3,
+            "expected exactly 3 Mul ops (v_modulate, gate_last, gate_mean), found {mul_count}"
+        );
     }
 
     #[test]
@@ -2518,11 +3007,16 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let add_count = graph.ops.iter()
-            .filter(|op| matches!(op.kind, OpKind::Add))
+        let add_count = graph
+            .ops
+            .iter()
+            .filter(|op| matches!(op.op_v2, Op::Add))
             .count();
         // Assert: add_role + dual_context_add = 2 Add ops
-        assert_eq!(add_count, 2, "expected exactly 2 Add ops, found {add_count}");
+        assert_eq!(
+            add_count, 2,
+            "expected exactly 2 Add ops, found {add_count}"
+        );
     }
 
     #[test]
@@ -2535,7 +3029,10 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights);
         // Assert: extra keys are ignored, graph builds successfully
-        assert!(graph.is_ok(), "extra weight keys should not cause build failure");
+        assert!(
+            graph.is_ok(),
+            "extra weight keys should not cause build failure"
+        );
         assert_eq!(graph.unwrap().outputs.len(), 2);
     }
 
@@ -2550,7 +3047,10 @@ mod tests {
         // Assert
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("signal_fc2_bias"), "error should reference signal_fc2_bias, got: {msg}");
+        assert!(
+            msg.contains("signal_fc2_bias"),
+            "error should reference signal_fc2_bias, got: {msg}"
+        );
     }
 
     #[test]
@@ -2563,7 +3063,11 @@ mod tests {
         // Assert: task classifier produces intermediate tensors at each stage
         for name in &["task_h0", "task_a0", "task_h1", "task_a1"] {
             let found = graph.tensors.iter().any(|t| t.name == *name);
-            assert!(found, "intermediate tensor '{}' should exist in task classifier path", name);
+            assert!(
+                found,
+                "intermediate tensor '{}' should exist in task classifier path",
+                name
+            );
         }
     }
 
@@ -2579,7 +3083,11 @@ mod tests {
         // Assert: difficulty classifier produces intermediate tensors at each stage
         for name in &["diff_h0", "diff_a0", "diff_h1", "diff_a1"] {
             let found = graph.tensors.iter().any(|t| t.name == *name);
-            assert!(found, "intermediate tensor '{}' should exist in diff classifier path", name);
+            assert!(
+                found,
+                "intermediate tensor '{}' should exist in diff classifier path",
+                name
+            );
         }
     }
 
@@ -2592,8 +3100,11 @@ mod tests {
         };
         // Assert: field is stored as zero, hidden_size invariant is intentionally broken
         assert_eq!(config.num_heads, 0);
-        assert_ne!(config.num_heads * config.head_dim, config.hidden_size,
-            "zero num_heads intentionally breaks the hidden_size invariant");
+        assert_ne!(
+            config.num_heads * config.head_dim,
+            config.hidden_size,
+            "zero num_heads intentionally breaks the hidden_size invariant"
+        );
     }
 
     #[test]
@@ -2607,15 +3118,24 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: input tensors with seq_len should have Symbolic max_value matching config
-        let emb = graph.tensors.iter()
+        let emb = graph
+            .tensors
+            .iter()
             .find(|t| t.name == "embeddings")
             .expect("embeddings tensor should exist");
         let seq_dim = &emb.shape[1];
         if let SymDim::Symbolic { name, max_value } = seq_dim {
             assert_eq!(name, "seq_len", "seq dimension should be named 'seq_len'");
-            assert_eq!(*max_value, Some(48), "max_value should match config.max_seq_len");
+            assert_eq!(
+                *max_value,
+                Some(48),
+                "max_value should match config.max_seq_len"
+            );
         } else {
-            panic!("embeddings seq dimension should be Symbolic, found {:?}", seq_dim);
+            panic!(
+                "embeddings seq dimension should be Symbolic, found {:?}",
+                seq_dim
+            );
         }
     }
 
@@ -2627,15 +3147,24 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: key input tensors should have Symbolic batch_size as first dim
-        for tensor_name in &["embeddings", "roles", "signals", "seq_lens", "context_turns"] {
-            let tensor = graph.tensors.iter()
+        for tensor_name in &[
+            "embeddings",
+            "roles",
+            "signals",
+            "seq_lens",
+            "context_turns",
+        ] {
+            let tensor = graph
+                .tensors
+                .iter()
                 .find(|t| t.name == *tensor_name)
                 .unwrap_or_else(|| panic!("{} tensor should exist", tensor_name));
             let batch_dim = &tensor.shape[0];
             assert!(
                 matches!(batch_dim, SymDim::Symbolic { name, .. } if name == "batch_size"),
                 "first dim of '{}' should be Symbolic('batch_size'), found {:?}",
-                tensor_name, batch_dim
+                tensor_name,
+                batch_dim
             );
         }
     }
@@ -2649,9 +3178,15 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: every GemmBias op is explicitly F32
         for op in &graph.ops {
-            if let OpKind::GemmBias { dtype, .. } = op.kind {
-                assert_eq!(dtype, DType::F32,
-                    "GemmBias '{}' should use F32 dtype, found {:?}", op.label, dtype);
+            if let Op::GemmBias(spec) = &op.op_v2 {
+                let dtype = &spec.dtype;
+                assert_eq!(
+                    *dtype,
+                    DType::F32,
+                    "GemmBias '{}' should use F32 dtype, found {:?}",
+                    op.label,
+                    dtype
+                );
             }
         }
     }
@@ -2664,15 +3199,27 @@ mod tests {
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: 1D GemmBias ops exist for signal encoder (3) + task classifier (3) + diff classifier (3) = 9
-        let gemm_1d_labels = ["sig_h0", "sig_h1", "sig_out", "task_h0", "task_h1", "task_logits",
-                              "diff_h0", "diff_h1", "diff_logits"];
+        let gemm_1d_labels = [
+            "sig_h0",
+            "sig_h1",
+            "sig_out",
+            "task_h0",
+            "task_h1",
+            "task_logits",
+            "diff_h0",
+            "diff_h1",
+            "diff_logits",
+        ];
         for label in &gemm_1d_labels {
-            let op = graph.ops.iter()
+            let op = graph
+                .ops
+                .iter()
                 .find(|op| op.label == *label)
                 .unwrap_or_else(|| panic!("1D GemmBias op '{}' should exist", label));
             assert!(
-                matches!(op.kind, OpKind::GemmBias { m: SymDim::Concrete(1), .. }),
-                "'{}' should be a GemmBias with M=Concrete(1)", label
+                matches!(&op.op_v2, Op::GemmBias(spec) if matches!(spec.m, SymDim::Concrete(1))),
+                "'{}' should be a GemmBias with M=Concrete(1)",
+                label
             );
         }
     }
@@ -2688,8 +3235,10 @@ mod tests {
         // Assert
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("info_net_fc0_bias"),
-            "error should reference info_net_fc0_bias, got: {msg}");
+        assert!(
+            msg.contains("info_net_fc0_bias"),
+            "error should reference info_net_fc0_bias, got: {msg}"
+        );
     }
 
     #[test]
@@ -2703,8 +3252,10 @@ mod tests {
         // Assert
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("context_norm_bias"),
-            "error should reference context_norm_bias, got: {msg}");
+        assert!(
+            msg.contains("context_norm_bias"),
+            "error should reference context_norm_bias, got: {msg}"
+        );
     }
 
     #[test]
@@ -2714,14 +3265,38 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let q_proj = graph.ops.iter().find(|op| op.label == "q_proj").expect("q_proj should exist");
-        let k_proj = graph.ops.iter().find(|op| op.label == "k_proj").expect("k_proj should exist");
-        let v_raw = graph.ops.iter().find(|op| op.label == "v_raw").expect("v_raw should exist");
+        let q_proj = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "q_proj")
+            .expect("q_proj should exist");
+        let k_proj = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "k_proj")
+            .expect("k_proj should exist");
+        let v_raw = graph
+            .ops
+            .iter()
+            .find(|op| op.label == "v_raw")
+            .expect("v_raw should exist");
         // Assert: Q/K/V use different weight tensors (index 1) and bias tensors (index 2)
-        assert_ne!(q_proj.inputs[1], k_proj.inputs[1], "q_proj and k_proj should use different weight tensors");
-        assert_ne!(k_proj.inputs[1], v_raw.inputs[1], "k_proj and v_raw should use different weight tensors");
-        assert_ne!(q_proj.inputs[2], k_proj.inputs[2], "q_proj and k_proj should use different bias tensors");
-        assert_ne!(k_proj.inputs[2], v_raw.inputs[2], "k_proj and v_raw should use different bias tensors");
+        assert_ne!(
+            q_proj.inputs[1], k_proj.inputs[1],
+            "q_proj and k_proj should use different weight tensors"
+        );
+        assert_ne!(
+            k_proj.inputs[1], v_raw.inputs[1],
+            "k_proj and v_raw should use different weight tensors"
+        );
+        assert_ne!(
+            q_proj.inputs[2], k_proj.inputs[2],
+            "q_proj and k_proj should use different bias tensors"
+        );
+        assert_ne!(
+            k_proj.inputs[2], v_raw.inputs[2],
+            "k_proj and v_raw should use different bias tensors"
+        );
     }
 
     #[test]
@@ -2731,15 +3306,20 @@ mod tests {
         let weights = default_weight_shapes();
         // Act
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
-        let diff_fc0 = graph.ops.iter()
+        let diff_fc0 = graph
+            .ops
+            .iter()
             .find(|op| op.label == "diff_h0")
             .expect("diff_h0 should exist");
-        let task_fc0 = graph.ops.iter()
+        let task_fc0 = graph
+            .ops
+            .iter()
             .find(|op| op.label == "task_h0")
             .expect("task_h0 should exist");
         // Assert: diff classifier also starts from context_normed (same as task classifier)
-        assert_eq!(diff_fc0.inputs[0], task_fc0.inputs[0],
-            "diff_h0 and task_h0 should share the same context_normed input tensor");
+        assert_eq!(
+            diff_fc0.inputs[0], task_fc0.inputs[0],
+            "diff_h0 and task_h0 should share the same context_normed input tensor"
+        );
     }
-
 }
