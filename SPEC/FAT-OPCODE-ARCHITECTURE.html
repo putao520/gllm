@@ -575,8 +575,8 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "@context": "https://spec.example.com/dataflow",
   "@type": "Dataflow",
   "id": "DF-FATOP-001",
-  "from": "api-weight-loader",
-  "to": "api-umk-compile"
+  "from": "API-WEIGHT-LOADER",
+  "to": "API-UMK-COMPILE"
 }</script></section>
 
 <section id="df-fatop-002" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-FATOP-002" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-002: Op → lower_op（lowering 入口，唯一 IR）</h3>
@@ -594,8 +594,8 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "@context": "https://spec.example.com/dataflow",
   "@type": "Dataflow",
   "id": "DF-FATOP-002",
-  "from": "api-umk-compile",
-  "to": "api-vminstr"
+  "from": "API-UMK-COMPILE",
+  "to": "API-VMINSTR"
 }</script></section>
 
 <section id="df-fatop-003" data-flow-from="API-VMINSTR" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-FATOP-003" data-dataflow-dimension="technical" data-dataflow-direction="sync">
@@ -614,36 +614,36 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "@context": "https://spec.example.com/dataflow",
   "@type": "Dataflow",
   "id": "DF-FATOP-003",
-  "from": "api-vminstr",
-  "to": "api-executor-forward"
+  "from": "API-VMINSTR",
+  "to": "API-EXECUTOR-FORWARD"
 }</script><section id="df-tech-004" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-CLIENT-BUILD" data-dataflow="DF-TECH-004" data-dataflow-dimension="technical"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-TECH-004",
   "title": "Weight Loading → Client Build (Technical)",
   "dimension": "technical",
-  "from": "api-weight-loader",
-  "to": "api-client-build"
+  "from": "API-WEIGHT-LOADER",
+  "to": "API-CLIENT-BUILD"
 }</script></section><section id="df-tech-005" data-flow-from="API-CLIENT-GENERATE" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-005" data-dataflow-dimension="technical"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-TECH-005",
   "title": "Client Generate → Executor Forward (Technical)",
   "dimension": "technical",
-  "from": "api-client-generate",
-  "to": "api-executor-forward"
+  "from": "API-CLIENT-GENERATE",
+  "to": "API-EXECUTOR-FORWARD"
 }</script></section><section id="df-tech-006" data-flow-from="API-CLIENT-EMBED" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-006" data-dataflow-dimension="technical"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-TECH-006",
   "title": "Client Embed → Executor Forward (Technical)",
   "dimension": "technical",
-  "from": "api-client-embed",
-  "to": "api-executor-forward"
+  "from": "API-CLIENT-EMBED",
+  "to": "API-EXECUTOR-FORWARD"
 }</script></section><section id="df-tech-007" data-flow-from="API-CLIENT-RERANK" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-007" data-dataflow-dimension="technical"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-TECH-007",
   "title": "Client Rerank → Executor Forward (Technical)",
   "dimension": "technical",
-  "from": "api-client-rerank",
-  "to": "api-executor-forward"
+  "from": "API-CLIENT-RERANK",
+  "to": "API-EXECUTOR-FORWARD"
 }</script></section></section>
 
 </section>
@@ -738,26 +738,26 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "id": "DEC-FATOP-002",
   "context": "FAT-OPCODE Phase 1-8 建立了双 IR (OpKind + Op)，from_op_kind 作为翻译桥。Phase 9 将 Op 物理删除 OpKind，收敛到单一 IR。",
   "rationale": "1. from_op_kind 翻译层是临时基础设施，完成使命后应删除\n2. 双 IR 增加维护成本，每次新增 Op 需同步维护 OpKind + from_op_kind\n3. 兼容层违反用户 \"不需要向后兼容\" 的明确决策\n4. add_op_with_op 双参数 API 比单参数更复杂，迁移后简化"
-}</script></section><section id="cf-fatop-001" data-controlflow="CF-FATOP-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-weight-loader" data-controlflow-target="api-umk-compile"><script type="application/ld+json">{
+}</script></section><section id="cf-fatop-001" data-controlflow="CF-FATOP-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="API-WEIGHT-LOADER" data-controlflow-target="API-UMK-COMPILE"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-FATOP-001",
   "title": "Load → Op Construction Control",
   "dimension": "technical",
-  "from": "api-weight-loader",
-  "to": "api-umk-compile"
-}</script></section><section id="cf-fatop-002" data-controlflow="CF-FATOP-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-umk-compile" data-controlflow-target="api-vminstr"><script type="application/ld+json">{
+  "from": "API-WEIGHT-LOADER",
+  "to": "API-UMK-COMPILE"
+}</script></section><section id="cf-fatop-002" data-controlflow="CF-FATOP-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="API-UMK-COMPILE" data-controlflow-target="API-VMINSTR"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-FATOP-002",
   "title": "Compile → VmInstr Lowering Control",
   "dimension": "technical",
-  "from": "api-umk-compile",
-  "to": "api-vminstr"
-}</script></section><section id="cf-fatop-003" data-controlflow="CF-FATOP-003" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-vminstr" data-controlflow-target="api-executor-forward"><script type="application/ld+json">{
+  "from": "API-UMK-COMPILE",
+  "to": "API-VMINSTR"
+}</script></section><section id="cf-fatop-003" data-controlflow="CF-FATOP-003" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="API-VMINSTR" data-controlflow-target="API-EXECUTOR-FORWARD"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-FATOP-003",
   "title": "VmInstr → ISA Lowering → Executor Control",
   "dimension": "technical",
-  "from": "api-vminstr",
-  "to": "api-executor-forward"
+  "from": "API-VMINSTR",
+  "to": "API-EXECUTOR-FORWARD"
 }</script></section><section id="ent-predicate" data-entity="ENT-PREDICATE" data-req-ref="REQ-FATOP-010 REQ-FATOP-011" data-entity-model-type="relational" data-entity-ref="ENT-VM-INSTR" data-xref="REQ-FATOP-010 REQ-FATOP-011"><h3>undefined Predicate（基于 GprCondition 的掩码谓词）</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="condition" data-type="string" data-required="true"><td>condition</td><td>string</td><td>是</td><td></td><td>底层 GPR 条件码，控制 mask 生效范围</td></tr><tr data-field="num_vregs" data-type="number" data-required="true"><td>num_vregs</td><td>number</td><td>是</td><td></td><td>谓词引用的 VRegId 数量（用于寄存器分配追踪）</td></tr></table></section><section id="ent-mem-effect" data-entity="ENT-MEM-EFFECT" data-req-ref="REQ-FATOP-012" data-entity-model-type="relational" data-xref="REQ-FATOP-012"><h3>undefined MemEffect（内存依赖效果类型）</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="effect_kind" data-type="string" data-required="true"><td>effect_kind</td><td>string</td><td>是</td><td></td><td>内存效果变体：Read=读取、Write=写入、ReadWrite=读写</td></tr><tr data-field="reads" data-type="boolean" data-required="true"><td>reads</td><td>boolean</td><td>是</td><td></td><td>是否包含读操作（Read 和 ReadWrite 为 true）</td></tr><tr data-field="writes" data-type="boolean" data-required="true"><td>writes</td><td>boolean</td><td>是</td><td></td><td>是否包含写操作（Write 和 ReadWrite 为 true）</td></tr></table></section></main><section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-fatop-006" data-test="TEST-FATOP-006" data-req-ref="REQ-FATOP-006" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-006: REQ-FATOP-006 单元测试</h4><p>验证 REQ-FATOP-006 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-007" data-test="TEST-FATOP-007" data-req-ref="REQ-FATOP-007" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-007: REQ-FATOP-007 单元测试</h4><p>验证 REQ-FATOP-007 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-008" data-test="TEST-FATOP-008" data-req-ref="REQ-FATOP-008" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-008: REQ-FATOP-008 单元测试</h4><p>验证 REQ-FATOP-008 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-009" data-test="TEST-FATOP-009" data-req-ref="REQ-FATOP-009" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-009: REQ-FATOP-009 单元测试</h4><p>验证 REQ-FATOP-009 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-010" data-test="TEST-FATOP-010" data-req-ref="REQ-FATOP-010" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-010: REQ-FATOP-010 单元测试</h4><p>验证 REQ-FATOP-010 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-011" data-test="TEST-FATOP-011" data-req-ref="REQ-FATOP-011" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-011: REQ-FATOP-011 单元测试</h4><p>验证 REQ-FATOP-011 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-012" data-test="TEST-FATOP-012" data-req-ref="REQ-FATOP-012" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-012: REQ-FATOP-012 单元测试</h4><p>验证 REQ-FATOP-012 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-013" data-test="TEST-FATOP-013" data-req-ref="REQ-FATOP-013" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-013: from_op_kind 物理删除反向断言</h4><p>反向断言测试（对应 deprecated REQ-FATOP-013）：grep 全仓零 from_op_kind 符号引用；编译期断言 OpKind enum 类型不存在（uncompilable reference test）；CompilerOp 无 .kind 字段。验证 OpKind→Op 翻译器已物理删除、零向后兼容层残留。</p></div><div id="test-fatop-014" data-test="TEST-FATOP-014" data-req-ref="REQ-FATOP-014" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-014: REQ-FATOP-014 单元测试</h4><p>验证 REQ-FATOP-014 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-015" data-test="TEST-FATOP-015" data-req-ref="REQ-FATOP-015" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-015: REQ-FATOP-015 单元测试</h4><p>验证 REQ-FATOP-015 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-016" data-test="TEST-FATOP-016" data-req-ref="REQ-FATOP-016" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-016: REQ-FATOP-016 单元测试</h4><p>验证 REQ-FATOP-016 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-017" data-test="TEST-FATOP-017" data-req-ref="REQ-FATOP-017" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-017: REQ-FATOP-017 单元测试</h4><p>验证 REQ-FATOP-017 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-018" data-test="TEST-FATOP-018" data-req-ref="REQ-FATOP-018" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-018: REQ-FATOP-018 单元测试</h4><p>验证 REQ-FATOP-018 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-019" data-test="TEST-FATOP-019" data-req-ref="REQ-FATOP-019" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-019: REQ-FATOP-019 单元测试</h4><p>验证 REQ-FATOP-019 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-020" data-test="TEST-FATOP-020" data-req-ref="REQ-FATOP-020" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-020: REQ-FATOP-020 单元测试</h4><p>验证 REQ-FATOP-020 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-021" data-test="TEST-FATOP-021" data-req-ref="REQ-FATOP-021" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-021: REQ-FATOP-021 单元测试</h4><p>验证 REQ-FATOP-021 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-022" data-test="TEST-FATOP-022" data-req-ref="REQ-FATOP-022" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-022: REQ-FATOP-022 单元测试</h4><p>验证 REQ-FATOP-022 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-023" data-test="TEST-FATOP-023" data-req-ref="REQ-FATOP-023" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-023: REQ-FATOP-023 单元测试</h4><p>验证 REQ-FATOP-023 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-024" data-test="TEST-FATOP-024" data-req-ref="REQ-FATOP-024" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-024: REQ-FATOP-024 单元测试</h4><p>验证 REQ-FATOP-024 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-025" data-test="TEST-FATOP-025" data-req-ref="REQ-FATOP-025" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-025: REQ-FATOP-025 单元测试</h4><p>验证 REQ-FATOP-025 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-026" data-test="TEST-FATOP-026" data-req-ref="REQ-FATOP-026" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-026: REQ-FATOP-026 单元测试</h4><p>验证 REQ-FATOP-026 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-027" data-test="TEST-FATOP-027" data-req-ref="REQ-FATOP-027" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-027: REQ-FATOP-027 单元测试</h4><p>验证 REQ-FATOP-027 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-028" data-test="TEST-FATOP-028" data-req-ref="REQ-FATOP-028" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-028: REQ-FATOP-028 单元测试</h4><p>验证 REQ-FATOP-028 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-029" data-test="TEST-FATOP-029" data-req-ref="REQ-FATOP-029" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-029: REQ-FATOP-029 单元测试</h4><p>验证 REQ-FATOP-029 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-030" data-test="TEST-FATOP-030" data-req-ref="REQ-FATOP-030" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-030: REQ-FATOP-030 单元测试</h4><p>验证 REQ-FATOP-030 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-031" data-test="TEST-FATOP-031" data-req-ref="REQ-FATOP-031" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-031: REQ-FATOP-031 单元测试</h4><p>验证 REQ-FATOP-031 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-032" data-test="TEST-FATOP-032" data-req-ref="REQ-FATOP-032" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-032: REQ-FATOP-032 单元测试</h4><p>验证 REQ-FATOP-032 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-001" data-test="TEST-FATOP-001" data-req-ref="REQ-FATOP-001" data-test-categories="unit"><h4>TEST-FATOP-001: REQ-FATOP-001 单元测试</h4><p>验证 REQ-FATOP-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-002" data-test="TEST-FATOP-002" data-req-ref="REQ-FATOP-002" data-test-categories="unit"><h4>TEST-FATOP-002: REQ-FATOP-002 单元测试</h4><p>验证 REQ-FATOP-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-003" data-test="TEST-FATOP-003" data-req-ref="REQ-FATOP-003" data-test-categories="unit"><h4>TEST-FATOP-003: REQ-FATOP-003 单元测试</h4><p>验证 REQ-FATOP-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-004" data-test="TEST-FATOP-004" data-req-ref="REQ-FATOP-004" data-test-categories="unit"><h4>TEST-FATOP-004: REQ-FATOP-004 单元测试</h4><p>验证 REQ-FATOP-004 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-005" data-test="TEST-FATOP-005" data-req-ref="REQ-FATOP-005" data-test-categories="unit"><h4>TEST-FATOP-005: REQ-FATOP-005 单元测试</h4><p>验证 REQ-FATOP-005 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
 </html>

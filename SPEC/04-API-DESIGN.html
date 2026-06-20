@@ -1623,50 +1623,50 @@ MTP预测深度 (0=禁用)</td></tr></table>
   "id": "DF-BIZ-001",
   "title": "Client Generate Flow",
   "dimension": "business",
-  "from": "api-client-build",
-  "to": "api-client-generate"
+  "from": "API-CLIENT-BUILD",
+  "to": "API-CLIENT-GENERATE"
 }</script></section><section id="df-biz-002" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-CLIENT-EMBED" data-dataflow="DF-BIZ-002" data-dataflow-dimension="business"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-BIZ-002",
   "title": "Client Embed Flow",
   "dimension": "business",
-  "from": "api-client-build",
-  "to": "api-client-embed"
+  "from": "API-CLIENT-BUILD",
+  "to": "API-CLIENT-EMBED"
 }</script></section><section id="df-biz-003" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-CLIENT-RERANK" data-dataflow="DF-BIZ-003" data-dataflow-dimension="business"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-BIZ-003",
   "title": "Client Rerank Flow",
   "dimension": "business",
-  "from": "api-client-build",
-  "to": "api-client-rerank"
+  "from": "API-CLIENT-BUILD",
+  "to": "API-CLIENT-RERANK"
 }</script><section id="df-biz-004" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-BIZ-004" data-dataflow-dimension="business"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-BIZ-004",
   "title": "Compilation → VmInstr Dispatch (Business)",
   "dimension": "business",
-  "from": "api-umk-compile",
-  "to": "api-vminstr"
-}</script></section></section><section id="cf-biz-001" data-controlflow="CF-BIZ-001" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="api-client-build" data-controlflow-target="api-client-generate"><script type="application/ld+json">{
+  "from": "API-UMK-COMPILE",
+  "to": "API-VMINSTR"
+}</script></section></section><section id="cf-biz-001" data-controlflow="CF-BIZ-001" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="API-CLIENT-BUILD" data-controlflow-target="API-CLIENT-GENERATE"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-BIZ-001",
   "title": "Client Build → Inference Dispatch",
   "dimension": "business",
-  "from": "api-client-build",
-  "to": "api-client-generate"
-}</script></section><section id="cf-biz-002" data-controlflow="CF-BIZ-002" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="api-client-build" data-controlflow-target="api-client-embed"><script type="application/ld+json">{
+  "from": "API-CLIENT-BUILD",
+  "to": "API-CLIENT-GENERATE"
+}</script></section><section id="cf-biz-002" data-controlflow="CF-BIZ-002" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="API-CLIENT-BUILD" data-controlflow-target="API-CLIENT-EMBED"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-BIZ-002",
   "title": "Client Build → Embed Dispatch",
   "dimension": "business",
-  "from": "api-client-build",
-  "to": "api-client-embed"
-}</script></section><section id="cf-biz-003" data-controlflow="CF-BIZ-003" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="api-client-build" data-controlflow-target="api-client-rerank"><script type="application/ld+json">{
+  "from": "API-CLIENT-BUILD",
+  "to": "API-CLIENT-EMBED"
+}</script></section><section id="cf-biz-003" data-controlflow="CF-BIZ-003" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="API-CLIENT-BUILD" data-controlflow-target="API-CLIENT-RERANK"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-BIZ-003",
   "title": "Client Build → Rerank Dispatch",
   "dimension": "business",
-  "from": "api-client-build",
-  "to": "api-client-rerank"
+  "from": "API-CLIENT-BUILD",
+  "to": "API-CLIENT-RERANK"
 }</script></section><section id="df-biz-005" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-BIZ-005" data-dataflow-dimension="business"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-BIZ-005",

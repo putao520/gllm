@@ -5379,95 +5379,96 @@ num_tensor_roles<td>number</td><td>否</td><td>HashMap 大小</td><td>张量角�
   "id": "DF-DATA-001",
   "title": "KV Cache Data Flow",
   "dimension": "data",
-  "from": "api-scheduler-batch",
-  "to": "api-kv-optimizer"
+  "from": "API-SCHEDULER-BATCH",
+  "to": "API-KV-OPTIMIZER"
 }</script></section><section id="df-data-002" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-DATA-002" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-002",
   "title": "Weight Loading and Compilation Data Flow",
   "dimension": "data",
-  "from": "api-weight-loader",
-  "to": "api-umk-compile"
+  "from": "API-WEIGHT-LOADER",
+  "to": "API-UMK-COMPILE"
 }</script></section><section id="df-data-003" data-flow-from="API-UMK-COMPILE" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-DATA-003" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-003",
   "title": "CompilerGraph IR Data Flow",
   "dimension": "data",
-  "from": "api-umk-compile",
-  "to": "api-executor-forward"
-}</script></section><section id="cf-data-001" data-controlflow="CF-DATA-001" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="api-scheduler-batch" data-controlflow-target="api-kv-optimizer"><script type="application/ld+json">{
+  "from": "API-UMK-COMPILE",
+  "to": "API-EXECUTOR-FORWARD"
+}</script></section><section id="cf-data-001" data-controlflow="CF-DATA-001" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="API-SCHEDULER-BATCH" data-controlflow-target="API-KV-OPTIMIZER"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-DATA-001",
   "title": "Schedule → KV Cache Optimization",
   "dimension": "data",
-  "from": "api-scheduler-batch",
-  "to": "api-kv-optimizer"
-}</script></section><section id="cf-data-002" data-controlflow="CF-DATA-002" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="api-weight-loader" data-controlflow-target="api-umk-compile"><script type="application/ld+json">{
+  "from": "API-SCHEDULER-BATCH",
+  "to": "API-KV-OPTIMIZER"
+}</script></section><section id="cf-data-002" data-controlflow="CF-DATA-002" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="API-WEIGHT-LOADER" data-controlflow-target="API-UMK-COMPILE"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-DATA-002",
   "title": "Load → Compile Data Control",
   "dimension": "data",
-  "from": "api-weight-loader",
-  "to": "api-umk-compile"
-}</script></section><section id="cf-data-003" data-controlflow="CF-DATA-003" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="api-umk-compile" data-controlflow-target="api-executor-forward"><script type="application/ld+json">{
+  "from": "API-WEIGHT-LOADER",
+  "to": "API-UMK-COMPILE"
+}</script></section><section id="cf-data-003" data-controlflow="CF-DATA-003" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="API-UMK-COMPILE" data-controlflow-target="API-EXECUTOR-FORWARD"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-DATA-003",
   "title": "Compile → Executor Data Control",
   "dimension": "data",
-  "from": "api-umk-compile",
-  "to": "api-executor-forward"
+  "from": "API-UMK-COMPILE",
+  "to": "API-EXECUTOR-FORWARD"
 }</script></section><section id="df-data-004" data-flow-from="API-EXECUTOR-FORWARD" data-flow-to="API-SCHEDULER-BATCH" data-dataflow="DF-DATA-004" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-004",
   "title": "Executor Forward → PagedScheduler KV 状态驱动",
   "dimension": "data",
   "from": {
-    "element": "api-executor-forward"
+    "element": "API-EXECUTOR-FORWARD"
   },
   "to": {
-    "element": "api-scheduler-batch"
+    "element": "API-SCHEDULER-BATCH"
   }
 }</script><section id="df-data-005" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-CLIENT-BUILD" data-dataflow="DF-DATA-005" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-005",
   "title": "Weight Loading → Client Build (Data)",
   "dimension": "data",
-  "from": "api-weight-loader",
-  "to": "api-client-build"
+  "from": "API-WEIGHT-LOADER",
+  "to": "API-CLIENT-BUILD"
 }</script></section><section id="df-data-006" data-flow-from="API-UMK-COMPILE" data-flow-to="API-CLIENT-GENERATE" data-dataflow="DF-DATA-006" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-006",
   "title": "Compilation → Client Generate (Data)",
   "dimension": "data",
-  "from": "api-umk-compile",
-  "to": "api-client-generate"
+  "from": "API-UMK-COMPILE",
+  "to": "API-CLIENT-GENERATE"
 }</script></section><section id="df-data-007" data-flow-from="API-UMK-COMPILE" data-flow-to="API-CLIENT-EMBED" data-dataflow="DF-DATA-007" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-007",
   "title": "Compilation → Client Embed (Data)",
   "dimension": "data",
-  "from": "api-umk-compile",
-  "to": "api-client-embed"
+  "from": "API-UMK-COMPILE",
+  "to": "API-CLIENT-EMBED"
 }</script></section><section id="df-data-008" data-flow-from="API-UMK-COMPILE" data-flow-to="API-CLIENT-RERANK" data-dataflow="DF-DATA-008" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-008",
   "title": "Compilation → Client Rerank (Data)",
   "dimension": "data",
-  "from": "api-umk-compile",
-  "to": "api-client-rerank"
+  "from": "API-UMK-COMPILE",
+  "to": "API-CLIENT-RERANK"
 }</script></section><section id="df-data-009" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-DATA-009" data-dataflow-dimension="data"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-DATA-009",
   "title": "Compilation → VmInstr Dispatch (Data)",
   "dimension": "data",
-  "from": "api-umk-compile",
-  "to": "api-vminstr"
-}</script></section></section><section id="cf-data-004" data-controlflow="CF-DATA-004" data-controlflow-relation="precedes" data-controlflow-dimension="data"><script type="application/ld+json">{
+  "from": "API-UMK-COMPILE",
+  "to": "API-VMINSTR"
+}</script></section></section><section id="cf-data-004" data-controlflow="CF-DATA-004" data-controlflow-relation="precedes" data-controlflow-dimension="data" data-controlflow-source="API-EXECUTOR-FORWARD" data-controlflow-target="API-SCHEDULER-BATCH"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-DATA-004",
   "title": "Executor Forward precedes PagedScheduler",
   "dimension": "data",
-  "from": "api-executor-forward",
+  "from": "API-EXECUTOR-FORWARD",
+  "to": "API-SCHEDULER-BATCH",
   "relation": "precedes"
 }</script></section></main>
   <footer data-spec-footer="">
