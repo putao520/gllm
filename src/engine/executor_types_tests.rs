@@ -166,6 +166,7 @@ mod tests {
                 precompute: false,
             },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -1782,7 +1783,7 @@ mod tests {
 
     #[test]
     fn executor_error_graph_expansion_with_details() {
-        let err = ExecutorError::GraphExpansion("unsupported OpKind::MoERouter".into());
+        let err = ExecutorError::GraphExpansion("unsupported Op::MoERouter".into());
         assert!(format!("{err}").contains("graph expansion failed"));
         assert!(format!("{err}").contains("MoERouter"));
     }
@@ -1793,6 +1794,7 @@ mod tests {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: Some(crate::manifest::MoEConfig {
@@ -1814,6 +1816,7 @@ mod tests {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -1831,6 +1834,7 @@ mod tests {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Encoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -2040,6 +2044,7 @@ mod tests {
             geometry: geo,
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -2057,6 +2062,7 @@ mod tests {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: Some(crate::manifest::MoEConfig {
@@ -2078,6 +2084,7 @@ mod tests {
             geometry: Arc::new(make_geometry()),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: Some(crate::manifest::MoEConfig {
@@ -3229,6 +3236,7 @@ mod tests {
             geometry: geo,
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,

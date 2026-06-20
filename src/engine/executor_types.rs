@@ -1,6 +1,9 @@
 //! Executor configuration types.
 //!
 //! Extracted from `executor.rs` for CLAUDE.md file size compliance (≤2000 lines).
+// @trace REQ-FATOP-010 [entity:ENT-VM-INSTR] VmInstr 复合指令 dtype/guard/effect 自描述
+// @trace REQ-FATOP-011 [entity:ENT-PREDICATE] Predicate 类型（基于 GprCondition）
+// @trace REQ-FATOP-012 [entity:ENT-MEM-EFFECT] MemEffect 类型（Read/Write/ReadWrite）
 
 use std::fmt;
 use std::sync::Arc;
@@ -90,8 +93,14 @@ pub struct GeneratorForwardConfig {
     pub rope: RoPEConfig,
     /// BUILD-stage constant: used only for rerank is_generative decision at model load time.
     /// ARCH-BUILD-COMPILE-BOUNDARY: this is a BUILD-stage strategy decision, not a compiler branch.
-    /// TODO(I-6-2): derive from graph topology (has Argmax → generative rerank).
+    /// Future(I-6-2): derive from graph topology (has Argmax → generative rerank).
     pub arch_family: crate::manifest::ArchFamily,
+    /// BUILD-stage constant: true when model has a classification head
+    /// (ClassifierDense or ClassifierOutProj tensor role present).
+    /// ARCH-RERANKER-CLASSIFY: When true, rerank uses the classification path
+    /// (MeanPool → Gemm(classifier) → [num_labels] output) instead of the
+    /// generative path (lm_head → Argmax → yes/no token scoring).
+    pub has_classifier: bool,
     /// Token ID for "yes" (used by decoder-based rerankers without a score head).
     pub rerank_yes_token_id: Option<u32>,
     /// Token ID for "no" (used by decoder-based rerankers without a score head).
@@ -211,6 +220,7 @@ impl GeneratorForwardConfig {
                 precompute: false,
             },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,

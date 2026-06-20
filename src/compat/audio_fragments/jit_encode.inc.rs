@@ -1,5 +1,6 @@
 // JIT Conformer Block — 单块 CompilerGraph builder
 // ============================================================================
+// @trace REQ-FATOP-020 conformer audio SIGSEGV 修复 — scratch_block 层间重置 + KvSource::FromTensor
 
 /// 构造单 Conformer block 的 `CompilerGraph`。
 ///
@@ -84,7 +85,7 @@ fn build_conformer_block_graph(
 
     // ── FF1 half-step ──
     // LayerNorm → Linear → SiLU → Linear → Residual
-    // 注: gllm_kernels 的 LayerNorm OpKind 只带 eps 字段, bias 仍由
+    // 注: gllm_kernels 的 LayerNorm Op 只带 eps 字段, bias 仍由
     // graph 层显式提供。当前 lower 把 [norm_w, norm_b] 合并进 norm pattern,
     // 已对齐 BERT encoder 用法(见 compiler/codegen/vm/lower.rs lower_layernorm)。
     let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq_len, hidden], ft);

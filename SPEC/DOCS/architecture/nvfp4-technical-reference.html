@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="nvfp4-technical-reference">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"nvfp4-technical-reference", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>NVFP 技术参考 (NVIDIA Microscaling FP4/FP8)</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>nvfp4-technical-reference</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s4" data-section="4">
+      <h2>NVFP 技术参考 (NVIDIA Microscaling FP4/FP8)</h2>
+      <p>&gt; <strong>用途</strong>: 本文档为 gllm NVFP 量化格式家族实现提供底层技术参考。</p>
+      <p>&gt; 涵盖 NVFP 家族全景 (NVFP4 + NVFP8)、与传统量化格式硬件实现对比、E2M1 编码、UE4M3 子块缩放、硬件 bit-packing 规约、Scale 对齐约束、CUDA intrinsics、PTX 指令等。</p>
+      <p>&gt; 实现规范见 <code>SPEC/23-QUANT-CODEGEN-ALGO.md</code>。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 NVFP 家族全景</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 定义</h4>
+      <p>NVFP 是 NVIDIA 专门为 Blackwell 架构 (SM100) 定制的、绑定微块缩放 (Microscaling) 技术的专用浮点量化格式群。</p>
+      <p>核心二进制结构只有 4-bit 和 8-bit 两种 — 因为 4 位 (1 Nibble/半字节) 和 8 位 (1 Byte) 可以完美对齐到 32 位或 64 位寄存器, 而 3 位、6 位会导致严重的硬件移位对齐开销。</p>
+      <table>
+        <tr>
+          <th>格式</th>
+        </tr>
+        <tr>
+          <td>核心二进制</td>
+        </tr>
+        <tr>
+          <td>微块缩放</td>
+        </tr>
+        <tr>
+          <td>硬件支持</td>
+        </tr>
+        <tr>
+          <td>引擎实操意义</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>NVFP4</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>E2M1 (4-bit)</td>
+        </tr>
+        <tr>
+          <td>每 16 元素共享 1 个 UE4M3 Scale + 全局 F32 Scale</td>
+        </tr>
+        <tr>
+          <td>Blackwell (SM100) 独占硬件原生加速</td>
+        </tr>
+        <tr>
+          <td>吞吐量 FP16 的 4x, 大模型权重极限压缩首选</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>NVFP8</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>E4M3 或 E5M2 (8-bit)</td>
+        </tr>
+        <tr>
+          <td>每 32 元素共享 1 个 Scale (OCP MX 开放标准变体)</td>
+        </tr>
+        <tr>
+          <td>Hopper (SM90) 开始支持, Blackwell 完美优化</td>
+        </tr>
+        <tr>
+          <td>吞吐量 FP16 的 2x, 计算密集型 Activation 或部分权重</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 NVFP4 与传统 4-bit 量化在机器码层面的本质区别</h4>
+      <p>这是推理引擎开发者最需要理解的关键差异:</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h5>传统 4-bit 量化 (INT4 / AWQ / GPTQ / GGML Q4_*) — 软件反量化</h5>
+      <p>GPU 没有 <code>MMA.INT4</code> 浮点计算核心。机器码指令流:</p>
+      <p>```</p>
+      <p>1. LDG — 把打包 INT4 权重从显存加载到寄存器</p>
+      <p>2. SHL/SHR + AND — 在寄存器中拆解 4-bit nibble</p>
+      <p>3. 多条算术指令 — 乘以 Scale、减去 Zero-Point → 强行转换为 FP16/BF16</p>
+      <p>4. mma.sync (FP16) — 最终发射 FP16 矩阵乘法</p>
+      <p>```</p>
+      <p>缺点: 大量发射时钟周期 (Issue Cycles) + 高寄存器压力 (Register Pressure)。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h5>NVIDIA NVFP4 — 硬件原生硬解 (Blackwell 独占)</h5>
+      <p>Blackwell Tensor Core 内部集成了硬件级 E2M1 解码器:</p>
+      <p>```</p>
+      <p>1. 直接发射 mma.sync.aligned.m16n8k32 (FP4 操作数)</p>
+      <li>srcA 寄存器: 存放未经拆解的连续打包 4-bit 原始流</li>
+      <li>srcB 寄存器: 按硬件要求的布局存放 FP8 Block Scale</li>
+      <p>2. Tensor Core 在计算流水线上同步完成乘加与反量化</p>
+      <p>3. 零软件位移指令</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 E2M1 浮点编码 (NVFP4/MXFP4 共用)</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 位布局</h4>
+      <p>```</p>
+      <p>FP4 E2M1 (4 bits):</p>
+      <p>┌───┬───────┬───────┐</p>
+      <p>│ S │ E[1:0]│  M    │</p>
+      <p>├───┼───────┼───────┤</p>
+      <p>│ 3 │  2–1  │   0   │</p>
+      <p>└───┴───────┴───────┘</p>
+      <p>S = Sign bit (1 bit)</p>
+      <p>E = Exponent (2 bits)</p>
+      <p>M = Mantissa (1 bit)</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 解码规则</h4>
+      <li><strong>Normal</strong> (E != 0): <code>value = (-1)^S × 2^(E-1) × (1 + M×0.5)</code></li>
+      <li><strong>Subnormal</strong> (E == 0): <code>value = (-1)^S × 2^(-2) × (M×0.5)</code></li>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 完整真值表 (16 个值)</h4>
+      <strong>LUT (无符号索引)</strong>: <code>[0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]</code>
+      <p>与 MXFP4 共用同一 LUT (<code>kvalues_mxfp4</code> / <code>ggml_table_f32_e4</code>), 参见 llama.cpp。</p>
+      <table>
+        <tr>
+          <th>Index</th>
+        </tr>
+        <tr>
+          <td>[S,E,M]</td>
+        </tr>
+        <tr>
+          <td>计算</td>
+        </tr>
+        <tr>
+          <td>值</td>
+        </tr>
+        <tr>
+          <td>0b0000</td>
+        </tr>
+        <tr>
+          <td>[0,00,0]</td>
+        </tr>
+        <tr>
+          <td>+2^(-2)×0</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>0</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0001</td>
+        </tr>
+        <tr>
+          <td>[0,00,1]</td>
+        </tr>
+        <tr>
+          <td>+2^(-2)×0.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+0.5</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0010</td>
+        </tr>
+        <tr>
+          <td>[0,01,0]</td>
+        </tr>
+        <tr>
+          <td>+2^0×1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+1</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0011</td>
+        </tr>
+        <tr>
+          <td>[0,01,1]</td>
+        </tr>
+        <tr>
+          <td>+2^0×1.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+1.5</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0100</td>
+        </tr>
+        <tr>
+          <td>[0,10,0]</td>
+        </tr>
+        <tr>
+          <td>+2^1×1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0101</td>
+        </tr>
+        <tr>
+          <td>[0,10,1]</td>
+        </tr>
+        <tr>
+          <td>+2^1×1.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+3</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0110</td>
+        </tr>
+        <tr>
+          <td>[0,11,0]</td>
+        </tr>
+        <tr>
+          <td>+2^2×1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+4</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b0111</td>
+        </tr>
+        <tr>
+          <td>[0,11,1]</td>
+        </tr>
+        <tr>
+          <td>+2^2×1.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>+6</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1000</td>
+        </tr>
+        <tr>
+          <td>[1,00,0]</td>
+        </tr>
+        <tr>
+          <td>-2^(-2)×0</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-0</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1001</td>
+        </tr>
+        <tr>
+          <td>[1,00,1]</td>
+        </tr>
+        <tr>
+          <td>-2^(-2)×0.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-0.5</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1010</td>
+        </tr>
+        <tr>
+          <td>[1,01,0]</td>
+        </tr>
+        <tr>
+          <td>-2^0×1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-1</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1011</td>
+        </tr>
+        <tr>
+          <td>[1,01,1]</td>
+        </tr>
+        <tr>
+          <td>-2^0×1.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-1.5</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1100</td>
+        </tr>
+        <tr>
+          <td>[1,10,0]</td>
+        </tr>
+        <tr>
+          <td>-2^1×1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1101</td>
+        </tr>
+        <tr>
+          <td>[1,10,1]</td>
+        </tr>
+        <tr>
+          <td>-2^1×1.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-3</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1110</td>
+        </tr>
+        <tr>
+          <td>[1,11,0]</td>
+        </tr>
+        <tr>
+          <td>-2^2×1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-4</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>0b1111</td>
+        </tr>
+        <tr>
+          <td>[1,11,1]</td>
+        </tr>
+        <tr>
+          <td>-2^2×1.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>-6</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 NVFP8 浮点编码 (E4M3 / E5M2)</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 概述</h4>
+      <p>NVFP8 使用 OCP (Open Compute Project) 标准的 FP8 编码, 与 NVFP4 的 E2M1 不同:</p>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>符号</td>
+        </tr>
+        <tr>
+          <td>指数</td>
+        </tr>
+        <tr>
+          <td>尾数</td>
+        </tr>
+        <tr>
+          <td>Bias</td>
+        </tr>
+        <tr>
+          <td>动态范围</td>
+        </tr>
+        <tr>
+          <td>典型用途</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>E4M3</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>1 bit</td>
+        </tr>
+        <tr>
+          <td>4 bits</td>
+        </tr>
+        <tr>
+          <td>3 bits</td>
+        </tr>
+        <tr>
+          <td>7</td>
+        </tr>
+        <tr>
+          <td>±448</td>
+        </tr>
+        <tr>
+          <td>前向权重 + Activation (更高精度)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>E5M2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>1 bit</td>
+        </tr>
+        <tr>
+          <td>5 bits</td>
+        </tr>
+        <tr>
+          <td>2 bits</td>
+        </tr>
+        <tr>
+          <td>15</td>
+        </tr>
+        <tr>
+          <td>±57344</td>
+        </tr>
+        <tr>
+          <td>反向梯度 (更大动态范围)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 E4M3 位布局</h4>
+      <p>```</p>
+      <p>FP8 E4M3 (8 bits):</p>
+      <p>┌───┬───────────┬───────────┐</p>
+      <p>│ S │  E[3:0]   │   M[2:0]  │</p>
+      <p>├───┼───────────┼───────────┤</p>
+      <p>│ 7 │   6–3     │    2–0    │</p>
+      <p>└───┴───────────┴───────────┘</p>
+      <p>Bias = 7</p>
+      <p>Normal: (-1)^S × 2^(E-7) × (1 + M/8)   (E: 1..14, 不含 15)</p>
+      <p>Subnormal: (-1)^S × 2^(-6) × (M/8)      (E = 0)</p>
+      <p>NaN: E=15, M != 0</p>
+      <p>Inf: 不存在 (E4M3 没有 Inf 编码)</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 E5M2 位布局</h4>
+      <p>```</p>
+      <p>FP8 E5M2 (8 bits):</p>
+      <p>┌───┬───────────┬───────────┐</p>
+      <p>│ S │  E[4:0]   │   M[1:0]  │</p>
+      <p>├───┼───────────┼───────────┤</p>
+      <p>│ 7 │   6–2     │    1–0    │</p>
+      <p>└───┴───────────┴───────────┘</p>
+      <p>Bias = 15</p>
+      <p>Normal: (-1)^S × 2^(E-15) × (1 + M/4)   (E: 1..30)</p>
+      <p>Subnormal: (-1)^S × 2^(-14) × (M/4)      (E = 0)</p>
+      <p>Inf: E=31, M=0</p>
+      <p>NaN: E=31, M != 0</p>
+      <p>```</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 NVFP8 与 NVFP4 的关系</h4>
+      <p>NVFP8 不是 NVFP4 的简单扩展。两者在硬件集成中的角色不同:</p>
+      <li><strong>NVFP8</strong>: Hopper (SM90) 起支持, 主要用于 Activation 和混合精度计算</li>
+      <li><strong>NVFP4</strong>: Blackwell (SM100) 独占, 主要用于权重极限压缩</li>
+      <li>两者共享 Microscaling 思想 (微块共享缩放因子), 但缩放粒度和格式不同</li>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 两级缩放模型 (NVFP4 专用)</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 公式</h4>
+      <p>```</p>
+      <p>Final_value_FP32 = E2M1_value(nibble) × UE4M3_scale(sub_block_idx) × F32_global_tensor_scale</p>
+      <p>```</p>
+      <li><strong>E2M1_value</strong>: §2.3 真值表中的值 (4-bit lookup)</li>
+      <li><strong>UE4M3_scale</strong>: 子块级缩放因子 (8-bit unsigned FP8 E4M3, 每子块一个)</li>
+      <li><strong>F32_global_tensor_scale</strong>: 全局张量级缩放因子 (FP32, 独立于 block 存储)</li>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 与 MXFP4 对比</h4>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>NVFP4</td>
+        </tr>
+        <tr>
+          <td>MXFP4</td>
+        </tr>
+        <tr>
+          <td>子块大小</td>
+        </tr>
+        <tr>
+          <td>16 elements</td>
+        </tr>
+        <tr>
+          <td>32 elements (= block)</td>
+        </tr>
+        <tr>
+          <td>子块缩放</td>
+        </tr>
+        <tr>
+          <td>UE4M3 (FP8 E4M3, 无符号)</td>
+        </tr>
+        <tr>
+          <td>E8M0 (power-of-2 only)</td>
+        </tr>
+        <tr>
+          <td>缩放范围</td>
+        </tr>
+        <tr>
+          <td>~2^(-6) 到 ~2^(8.875)</td>
+        </tr>
+        <tr>
+          <td>仅 2 的整数次幂</td>
+        </tr>
+        <tr>
+          <td>全局缩放</td>
+        </tr>
+        <tr>
+          <td>有 (F32 tensor scale)</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>动态范围</td>
+        </tr>
+        <tr>
+          <td>更宽 (UE4M3 非线性)</td>
+        </tr>
+        <tr>
+          <td>更窄 (纯幂次)</td>
+        </tr>
+        <tr>
+          <td>GGML type</td>
+        </tr>
+        <tr>
+          <td>40</td>
+        </tr>
+        <tr>
+          <td>39</td>
+        </tr>
+        <tr>
+          <td>Block size</td>
+        </tr>
+        <tr>
+          <td>64 elements / 36 bytes</td>
+        </tr>
+        <tr>
+          <td>32 elements / 17 bytes</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 UE4M3 (Unsigned FP8 E4M3) 编码</h3>
+      <p>NVFP4 子块缩放使用 UE4M3 格式 (无符号 FP8):</p>
+      <p>```</p>
+      <p>┌───────────┬───────────────────┐</p>
+      <p>│ E[3:0]    │      M[2:0]       │</p>
+      <p>├───────────┼───────────────────┤</p>
+      <p>│  7–4      │       3–1         │</p>
+      <p>└───────────┴───────────────────┘</p>
+      <p>Bias = 7</p>
+      <p>4 exponent bits, 3 mantissa bits</p>
+      <p>No sign bit (unsigned)</p>
+      <p>```</p>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 解码规则</h4>
+      <li><strong>Normal</strong> (1 ≤ E ≤ 15): <code>scale = 2^(E-7) × (1 + M/8)</code></li>
+      <li><strong>Subnormal</strong> (E = 0): <code>scale = 2^(-6) × (M/8)</code></li>
+      <li><strong>范围</strong>: 0 (when M=0,E=0) ~ 2^(8.875) ≈ 480.0</li>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 软件解码伪码</h4>
+      <p>```c</p>
+      <p>float ue4m3_to_f32(uint8_t raw) {</p>
+      <p>    uint32_t exp = (raw &gt;&gt; 3) &amp; 0xF;</p>
+      <p>    uint32_t mant = raw &amp; 0x7;</p>
+      <p>    if (exp == 0) {</p>
+      <p>        // subnormal: 2^(-6) * (mant / 8)</p>
+      <p>        return (float)mant / 8.0f * 0.015625f;</p>
+      <p>    }</p>
+      <p>    // normal: 2^(exp-7) * (1 + mant/8)</p>
+      <p>    float sign_val = 1.0f + (float)mant / 8.0f;</p>
+      <p>    return sign_val * exp2f((float)exp - 7.0f);</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 硬件 Bit-Packing 规约 (NVFP4)</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 小端序 Nibble 填充</h4>
+      <p>NVFP4 采用小端序 (Little-Endian) 逐个 Nibble 填充。一个 32 位寄存器 (uint32_t) 正好容纳 8 个 NVFP4 元素:</p>
+      <p>```</p>
+      <p>32 位寄存器 / 内存单元:</p>
+      <p>+-----------+-----------+-----------+-----------+-----------+-----------+-----------+-----------+</p>
+      <p>+-----------+-----------+-----------+-----------+-----------+-----------+-----------+-----------+</p>
+      <p>[31      28] [27      24] [23      20] [19      16] [15      12] [11       8] [7        4] [3        0]</p>
+      <p>每个 Element 内部 4-bit 结构:</p>
+      <p>  Bit 3: Sign</p>
+      <p>  Bit 2-1: Exponent</p>
+      <p>  Bit 0: Mantissa</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 Byte 级视图</h4>
+      <p>```</p>
+      <p>Byte [n]:</p>
+      <p>  Low nibble (bits 3:0)  = 偶数索引元素 (element 2n)</p>
+      <p>  High nibble (bits 7:4) = 奇数索引元素 (element 2n+1)</p>
+      <p>```</p>
+      <p>与 GGML/llama.cpp 的 <code>block_nvfp4.qs</code> 布局完全一致。</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>§6.3 ⚠️ 微块缩放因子对齐约束 (最致命的陷阱)</h4>
+      <p>当发射 Blackwell FP4 MMA 指令时, 硬件在 <strong>K 维度</strong> 上要求:</p>
+      <strong>每 16 个连续的 K 维元素 (共 64 bits = 8 字节) 必须共享一个 FP8 缩放因子 (E4M3 格式)。</strong>
+      <p>关键约束:</p>
+      <p>1. <strong>禁止 Scale 与 4-bit 交织存储</strong> — 交织布局会导致硬件寻址极其低效</p>
+      <p>2. <strong>必须采用 Split-Plane (分离平面) 或 Structure of Arrays (SoA) 布局</strong></p>
+      <p>3. <strong>Weight Loading 阶段需要开辟两块独立指针</strong>:</p>
+      <li><code>uint32_t* weights</code> — 纯权重矩阵 (打包 FP4 数据)</li>
+      <li><code>__nv_fp8_e4m3* scales</code> — Scale 矩阵 (每 16 元素一个 FP8)</li>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>§6.4 GGML/llama.cpp 的 Split-Plane 布局</h4>
+      <p>```</p>
+      <p>block_nvfp4 (64 elements, 36 bytes):</p>
+      <p>Offset  Size   Content</p>
+      <p>0       4B     d[4] — 4 个 UE4M3 子块缩放 (Split-Plane: Scale 区)</p>
+      <p>               d[0] = sub-block 0 (elements 0-15)   ← K 维度每 16 元素</p>
+      <p>               d[1] = sub-block 1 (elements 16-31)</p>
+      <p>               d[2] = sub-block 2 (elements 32-47)</p>
+      <p>               d[3] = sub-block 3 (elements 48-63)</p>
+      <p>4       32B    qs[32] — 32 字节打包 E2M1 (Split-Plane: Data 区)</p>
+      <p>               byte[0].lo = element 0, byte[0].hi = element 1</p>
+      <p>               ...</p>
+      <p>               byte[31].lo = element 62, byte[31].hi = element 63</p>
+      <p>```</p>
+      <p>Scale (4B) 与 Data (32B) 分离存储, 不交织。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 内存布局</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>§7.1 Rust 结构体 (`gllm-kernels`)</h4>
+      <p>```rust</p>
+      <p>const QK_NVFP4: usize = 64;</p>
+      <p>const QK_NVFP4_SUB: usize = 16;</p>
+      <p>#[repr(C)]</p>
+      <p>pub struct BlockNvfp4 {</p>
+      <p>    pub d: [u8; QK_NVFP4 / QK_NVFP4_SUB],  // 4 UE4M3 scales (Split-Plane)</p>
+      <p>    pub qs: [u8; QK_NVFP4 / 2],             // 32 packed E2M1 (Split-Plane)</p>
+      <p>}</p>
+      <p>// assert!(size_of::<blocknvfp4>() == 36)</blocknvfp4></p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>§7.2 全局张量缩放</h4>
+      <code>F32_global_tensor_scale</code> 存储在 GGUF 张量元数据中, 独立于 block 数据:
+      <li>GGUF key: <code>tensor_name.scale</code> 或模型级 metadata</li>
+      <li>gllm-kernels 传入方式: 作为 GEMM 的 A 矩阵全局缩放 (arg parameter)</li>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>§7.3 Weight Loading 阶段的指针布局</h4>
+      <p>```c</p>
+      <p>// 推理引擎加载 NVFP4 权重时, 需要为 MMA 指令准备两块内存:</p>
+      <p>uint32_t* weight_ptr;        // 纯 FP4 打包权重 (每 uint32 = 8 elements)</p>
+      <p>__nv_fp8_e4m3* scale_ptr;    // 子块缩放矩阵 (每 16 elements 一个 FP8)</p>
+      <p>// MMA 指令发射时:</p>
+      <p>// srcA = weight_ptr + tile_offset</p>
+      <p>// srcB = scale_ptr + (tile_k / 16)   // K 维度每 16 元素取一个 scale</p>
+      <p>```</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 CUDA Intrinsics (SM100 Blackwell)</h3>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>§8.1 头文件</h4>
+      <p>```c</p>
+      <p>#include &lt;cuda_fp4.h&gt;    // SM100+ Blackwell</p>
+      <p>```</p>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>§8.2 数据类型</h4>
+      <table>
+        <tr>
+          <th>类型</th>
+        </tr>
+        <tr>
+          <td>大小</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>__nv_fp4_e2m1</td>
+        </tr>
+        <tr>
+          <td>1 byte (2 elements)</td>
+        </tr>
+        <tr>
+          <td>2 个 E2M1 值打包</td>
+        </tr>
+        <tr>
+          <td>__nv_fp4x2_e2m1</td>
+        </tr>
+        <tr>
+          <td>1 word (4 elements)</td>
+        </tr>
+        <tr>
+          <td>4 个 E2M1 值打包</td>
+        </tr>
+        <tr>
+          <td>__nv_fp4x4_e2m1</td>
+        </tr>
+        <tr>
+          <td>1 dword (8 elements)</td>
+        </tr>
+        <tr>
+          <td>8 个 E2M1 值打包</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>§8.3 缩放类型</h4>
+      <table>
+        <tr>
+          <th>类型</th>
+        </tr>
+        <tr>
+          <td>大小</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>__nv_fp8_e4m3</td>
+        </tr>
+        <tr>
+          <td>1 byte</td>
+        </tr>
+        <tr>
+          <td>FP8 E4M3 (有符号)</td>
+        </tr>
+        <tr>
+          <td>UE4M3 (unsigned)</td>
+        </tr>
+        <tr>
+          <td>1 byte</td>
+        </tr>
+        <tr>
+          <td>子块缩放用; 无符号变体, 通过 bit reinterpret</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>§8.4 转换函数</h4>
+      <p>```c</p>
+      <p>// FP32 → FP4</p>
+      <p>__nv_fp4_e2m1 __nv_float_to_fp4_e2m1(float val, __nv_saturation_t saturate);</p>
+      <p>__nv_fp4x2_e2m1 __nv_floatx2_to_fp4x2_e2m1(float2 val, __nv_saturation_t saturate);</p>
+      <p>// FP4 → FP32</p>
+      <p>float __nv_fp4_e2m1_to_float(__nv_fp4_e2m1 val);</p>
+      <p>float2 __nv_fp4x2_e2m1_to_float2(__nv_fp4x2_e2m1 val);</p>
+      <p>```</p>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>§9 PTX 指令 (SM100 Tensor Core FP4)</h3>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>§9.1 MMA 指令</h4>
+      <p>```</p>
+      <p>mma.sync.aligned.m16n8k32.row.col.f32.f4.f4.f32</p>
+      <p>    { %d0, %d1, %d2, %d3 },</p>
+      <p>    %a, %b,</p>
+      <p>    { %c0, %c1, %c2, %c3 };</p>
+      <p>```</p>
+      <li><strong>m16n8k32</strong>: M=16, N=8, K=32 (FP4 每 element 4-bit, 32×4/8 = 16 bytes per row)</li>
+      <li><strong>.f4</strong>: FP4 E2M1 operand type</li>
+      <li><strong>accumulator</strong>: FP32</li>
+      <li><strong>throughput</strong>: 1 MMA per clock per TC (SM100)</li>
+      <li><strong>Scale 对齐</strong>: K=32 = 2 个 sub-block, 硬件自动从 scale 矩阵取 2 个 FP8 缩放因子</li>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>§9.2 WGMMA (Warp-level MMA)</h4>
+      <p>```</p>
+      <p>wgmma.mma_async.sync.aligned.m64nNk256.f32.f4.f4.f32</p>
+      <p>    {%d0...%d7}, %a, %b, {%c0...%c7};</p>
+      <p>```</p>
+      <li><strong>m64nNk256</strong>: M=64 warps, K=256 FP4 elements (256×4/8 = 128 bytes)</li>
+      <li>N 可选: 8~256 (步长 8)</li>
+      <li>需要 TMA (Tensor Memory Accelerator) 加载</li>
+      <li><strong>Scale 对齐</strong>: K=256 = 16 个 sub-block, 需要 16 个 FP8 缩放因子</li>
+    </section>
+    <section id="s9.3" data-section="9.3">
+      <h4>§9.3 TCGEN05 (Threadblock-level GEMM)</h4>
+      <p>```</p>
+      <p>tcgen05.mma.cta_group::1.m64nNk256.Kind.f4.f4.accum</p>
+      <p>```</p>
+      <li>CTAGROUP=1: 单 CTA group</li>
+      <li>自动管理 shared memory → register 数据流</li>
+      <li>最高吞吐: 整个 threadblock 协作完成大规模 FP4 GEMM</li>
+    </section>
+    <section id="s9.4" data-section="9.4">
+      <h4>§9.4 PTX ISA 版本</h4>
+      <li>PTX ISA 12.x / 13.x 对 <code>.f4</code> 类型的 MMA 语法和寄存器分配进行了细化</li>
+      <li>需要 <code>--gpu-architecture=sm_100</code> 或更高编译目标</li>
+      <li>Scale 寄存器布局: 按 sub-block 顺序排列在独立的 register group 中</li>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>§10 gllm JIT Codegen 集成</h3>
+    </section>
+    <section id="s10.1" data-section="10.1">
+      <h4>§10.1 VmInstr 映射</h4>
+      <table>
+        <tr>
+          <th>操作</th>
+        </tr>
+        <tr>
+          <td>VmInstr</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>加载 UE4M3 子块缩放</td>
+        </tr>
+        <tr>
+          <td>ScalarByteLoad</td>
+        </tr>
+        <tr>
+          <td>加载 1 字节 UE4M3 值</td>
+        </tr>
+        <tr>
+          <td>解码 E2M1 nibble × UE4M3 → FP32</td>
+        </tr>
+        <tr>
+          <td>Nvfp4SubBlockDequant</td>
+        </tr>
+        <tr>
+          <td>16 元素子块内解码</td>
+        </tr>
+        <tr>
+          <td>累加</td>
+        </tr>
+        <tr>
+          <td>Fma</td>
+        </tr>
+        <tr>
+          <td>FP32 乘加</td>
+        </tr>
+        <tr>
+          <td>全局缩放</td>
+        </tr>
+        <tr>
+          <td>外层 </td>
+          <td>VecMulScalar</td>
+        </tr>
+        <tr>
+          <td>F32 global tensor scale</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10.2" data-section="10.2">
+      <h4>§10.2 x86 实现 (AVX-512)</h4>
+      <p>UE4M3 解码: GPR 整数运算 (extract exp/mant → 整数计算 power → XMM 转换)</p>
+      <p>E2M1 nibble 解码: VPBROADCASTD 加载 16 元素 LUT → VPSHUFB 查表</p>
+      <p>乘法: VMULPS (E2M1 × UE4M3 scale)</p>
+    </section>
+    <section id="s10.3" data-section="10.3">
+      <h4>§10.3 AArch64 实现 (NEON/SVE)</h4>
+      <p>UE4M3 解码: UBFM/ADD/LSL/ORR 提取 exp/mant → 整数乘加</p>
+      <p>E2M1 nibble 解码: 复用 MXFP4 的 <code>emit_mxfp4_dequant_4nibbles</code></p>
+      <p>零值检查: CBZ + label patch</p>
+    </section>
+    <section id="s10.4" data-section="10.4">
+      <h4>§10.4 GPU 实现 — 双路径 (DeviceProfile 驱动)</h4>
+      <p>GPU PTX codegen 必须根据 <code>DeviceProfile.tensor_cores_gen</code> 选择路径:</p>
+    </section>
+    <section id="s100" data-section="100">
+      <h5>路径 A: SM100+ 原生 FP4 Tensor Core (硬件原生, 零软件解码)</h5>
+      <p>当 <code>DeviceProfile</code> 检测到 SM100+ 时, 必须直接使用 PTX MMA .f4 指令:</p>
+      <li>Weight Loading 阶段按 §6.3 的 Split-Plane 布局准备两块独立内存:</li>
+      <li><code>uint32_t* weight_ptr</code> — 纯 FP4 打包权重</li>
+      <li><code>__nv_fp8_e4m3* scale_ptr</code> — 子块缩放矩阵</li>
+      <li>16 元素子块 → 1 次 <code>mma.sync.m16n8k32.f32.f4.f4.f32</code></li>
+      <li>Tensor Core 内部在计算流水线上同步完成 E2M1 解码 × UE4M3 缩放 × 乘加, 零软件位移</li>
+      <li>全局 F32 tensor scale 在 Epilogue 阶段应用 (<code>VecMulScalar</code>)</li>
+      <li>需要 <code>cuda_fp4.h</code> 头文件 + <code>--gpu-architecture=sm_100</code> 编译目标 + PTX ISA 12.x/13.x</li>
+      <strong>禁止</strong>: SM100+ 硬件上走软件解码路径 — 这是性能浪费, 违反原生量化铁律 (SPEC/23 §1.1)
+    </section>
+    <section id="s100" data-section="100">
+      <h5>路径 B: SM&lt;100 软件解码 (兼容路径)</h5>
+      <li><strong>PTX</strong>: 位操作提取 exp/mant → <code>ex2.approx.ftz.f32</code> 计算 2^(exp-7) → 软件 E2M1 LUT + UE4M3 解码 → <code>mma.sync</code> FP16/BF16</li>
+      <li><strong>HIP</strong>: union 位 reinterpret + 标量浮点运算</li>
+      <li><strong>Metal</strong>: <code>as_type&lt;float&gt;()</code> 位转换</li>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>§11 参考</h3>
+      <li>NVIDIA Blackwell Architecture Guide: FP4 Tensor Core 规格</li>
+      <li>GGML type 40: <code>ggml.h</code> <code>GGML_TYPE_NVFP4 = 40</code></li>
+      <li>llama.cpp <code>ggml/src/ggml.c</code>: <code>block_nvfp4</code> 结构体 + 解量化实现</li>
+      <li>OCP Microscaling Formats (MX) Specification: E2M1 编码定义</li>
+      <li>OCP FP8 Specification (OCP-OFP8): E4M3/E5M2 编码定义</li>
+      <li>CUDA Toolkit 13.0+: <code>cuda_fp4.h</code> intrinsics</li>
+      <li>PTX ISA 12.x/13.x: <code>.f4</code> MMA 指令语法与寄存器分配</li>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：nvfp4-technical-reference.html</address>
+  </footer>
+</body>
+</html>

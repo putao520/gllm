@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="18-SYMDIM-PAGED-KV">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"18-SYMDIM-PAGED-KV", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>SYMDIM 动态维度 + PagedAttention 集成 (ARCH-SYMDIM-PAGED-KV)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>18-SYMDIM-PAGED-KV</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-symdim-动态维度-pagedattention-集成-arch-symdim-paged-kv" data-section="null">
+      <h2>SYMDIM 动态维度 + PagedAttention 集成 (ARCH-SYMDIM-PAGED-KV)</h2>
+    </section>
+    <section id="s-定位" data-section="null">
+      <h3>定位</h3>
+      <p>修复 <code>SYMDIM_MAX_SEQ_LEN = 2048</code> 硬编码 bug，并将已实现的 PagedAttention 调度层接通到 mega-kernel 推理路径。两个问题紧密耦合——修 SYMDIM 不修 PA，大上下文模型会 OOM；修 PA 不修 SYMDIM，PA 没有 page table 传入 JIT。</p>
+    </section>
+    <section id="s-前置原则" data-section="null">
+      <h3>前置原则</h3>
+      <li><strong>ARCH-SYMDIM-NO-CONST-DEGRADE</strong>: SymDim::Symbolic 的 max_value 必须从模型配置 <code>max_position_embeddings</code> 来，不是引擎硬编码</li>
+      <li><strong>ARCH-PA-END-TO-END</strong>: PagedAttention 必须端到端接通：PagedScheduler → page table → mega-kernel JIT attention</li>
+      <li><strong>ARCH-PA-BACKWARD-COMPAT</strong>: <code>page_table_ptr == NULL</code> 时使用连续 stride 寻址（向后兼容小上下文模型）</li>
+      <li><strong>NO_SILENT_FALLBACK</strong>: 请求 seq_len &gt; model max_position_embeddings 时返回错误，不截断</li>
+    </section>
+    <section id="s-根因链条" data-section="null">
+      <h3>根因链条</h3>
+      <p>```</p>
+      <p>SYMDIM_MAX_SEQ_LEN = 2048 (硬编码在 gllm-kernels/src/compiler/graph.rs:19)</p>
+      <p>  → SymDim::Symbolic { max_value: 2048 } (所有 graph builder)</p>
+      <p>    → scratchpad activation buffer = 2048 × hidden × 4 bytes</p>
+      <p>    → KV cache stride = 2048 × kv_dim × 4 bytes</p>
+      <p>    → effective_kv_max_seq_len() = min(geom, 2048) (<a href="http://executor.rs:38">executor.rs:38</a>)</p>
+      <p>    → 请求 &gt; 2048 tokens → 内存越界</p>
+      <p>```</p>
+    </section>
+    <section id="s-架构现状" data-section="null">
+      <h3>架构现状</h3>
+    </section>
+    <section id="s-mega-kernel-kv-管理-decode-阶段" data-section="null">
+      <h4>Mega-kernel KV 管理（decode 阶段）</h4>
+      <p>```</p>
+      <p>Generate Loop:</p>
+      <p>  seq_len = prompt_len + gen_counter (每步 +1)</p>
+      <p>  融合组序列由图拓扑推导 (SPEC/39 §1.3.2)，典型 decoder 图为: embed融合组 → 层循环融合组 → lm_head融合组 → argmax → store token</p>
+      <p>Attention K/V 来源:</p>
+      <p>  prefill: K/V = QKV GEMM 输出 → 写入 scratchpad activation buffer</p>
+      <p>  decode:  K/V = QKV GEMM 输出（仅 1 行）+ 历史 K/V（从 scratchpad 读取）</p>
+      <p>问题: 所有上下文的 K/V 都在 scratchpad → 超过 2048 就越界</p>
+      <p>解决: PagedAttention — 历史 K/V 从 page pool 读取，不占 scratchpad</p>
+      <p>```</p>
+    </section>
+    <section id="s-pagedattention-半成品现状" data-section="null">
+      <h4>PagedAttention 半成品现状</h4>
+      <table>
+        <tr>
+          <th>层</th>
+        </tr>
+        <tr>
+          <td>组件</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>连接到推理</td>
+        </tr>
+        <tr>
+          <td>调度层</td>
+        </tr>
+        <tr>
+          <td>PagedScheduler</td>
+        </tr>
+        <tr>
+          <td>✅ 实现了</td>
+        </tr>
+        <tr>
+          <td>❌ 只做记账</td>
+        </tr>
+        <tr>
+          <td>内存层</td>
+        </tr>
+        <tr>
+          <td>CpuKvCacheBuffer</td>
+        </tr>
+        <tr>
+          <td>✅ 实际使用</td>
+        </tr>
+        <tr>
+          <td>✅ 连续分配</td>
+        </tr>
+        <tr>
+          <td>GPU 层</td>
+        </tr>
+        <tr>
+          <td>GpuPagedKvMeta</td>
+        </tr>
+        <tr>
+          <td>✅ 代码写了</td>
+        </tr>
+        <tr>
+          <td>❌ 从未调用</td>
+        </tr>
+        <tr>
+          <td>JIT 层</td>
+        </tr>
+        <tr>
+          <td>mega-kernel attention</td>
+        </tr>
+        <tr>
+          <td>✅ 实际运行</td>
+        </tr>
+        <tr>
+          <td>✅ 连续 stride</td>
+        </tr>
+      </table>
+    </section>
+    <section <h3="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="001" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-001" id="req-symdim-001">Part A: SYMDIM 修复 — REQ-SYMDIM-001~009
+      <p>消除 <code>SYMDIM_MAX_SEQ_LEN = 2048</code> 硬编码，将 max_seq_len 从模型配置 <code>max_position_embeddings</code> 正向传播到编译图、buffer 分配、graph builder、ONNX 转换、Semantic Gatekeeper 及 mega-kernel output buffer，使不同上下文长度的模型获得正确的内存分配和 KV cache stride。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="001" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-010" id="req-symdim-010">REQ-SYMDIM-010: CompilerGraph 携带 max_seq_len
+      <p>在 <code>CompilerGraph</code> 结构体中新增 <code>max_seq_len</code> 字段作为序列长度上界的唯一来源，替代全局常量 <code>SYMDIM_MAX_SEQ_LEN</code>，并将旧常量标记为 deprecated。</p>
+      <code>CompilerGraph</code> 新增 <code>pub max_seq_len: usize</code> 字段。<code>new()</code> 默认 2048（向后兼容）。<code>weight_layout()</code> 使用 <code>self.max_seq_len</code> 替代 <code>SYMDIM_MAX_SEQ_LEN</code>。<code>SYMDIM_MAX_SEQ_LEN</code> 标记 <code>#[deprecated]</code>。
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/graph.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-010" data-test="TEST-SYMDIM-010" id="test-symdim-010">TEST-SYMDIM-010: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-010相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="002" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-009" id="req-symdim-009">REQ-SYMDIM-9: buffer_alloc 使用 graph.max_seq_len
+      <p>将 <code>buffer_alloc.rs</code> 中两处对 <code>SYMDIM_MAX_SEQ_LEN</code> 的引用替换为从 <code>CompilerGraph.max_seq_len</code> 读取，使 scratchpad 和 KV cache buffer 分配大小跟随模型实际上下文长度。</p>
+      <code>buffer_alloc.rs</code> L260, L521: <code>SYMDIM_MAX_SEQ_LEN</code> → <code>graph.max_seq_len</code>。
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/buffer_alloc.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-009" data-test="TEST-SYMDIM-9" id="test-symdim-9">TEST-SYMDIM-9: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-001相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="003" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-002" id="req-symdim-002">REQ-SYMDIM-002: gllm-kernels graph_builders 参数化
+      <p>3 个 graph builder 函数新增 <code>max_seq_len: usize</code> 参数。<code>SymDim::Symbolic { max_value: Some(max_seq_len) }</code>。返回前设置 <code>g.max_seq_len = max_seq_len</code>。</p>
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/graph_builders.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-002" data-test="TEST-SYMDIM-002" id="test-symdim-002">TEST-SYMDIM-002: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-002相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="004" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-003" id="req-symdim-003">REQ-SYMDIM-003: gllm compat graph_builders 传入模型值
+      <p>3 个 builder 从 <code>config.geometry.max_seq_len</code> 取值替代 <code>SYMDIM_MAX_SEQ_LEN</code>。</p>
+      <strong>文件</strong>: <code>gllm/src/compat/graph_builders.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-003" data-test="TEST-SYMDIM-003" id="test-symdim-003">TEST-SYMDIM-003: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-003相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="005" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-004" id="req-symdim-004">REQ-SYMDIM-004: auto_graph 传入模型值
+      <p>在 <code>ResolvedConfig</code> 中新增 <code>max_position_embeddings</code> 字段，从模型 geometry 填充并传递给 <code>build_compiler_graph()</code>，使自动图构建器生成的 SymDim 符号维度和 MoE/TopK 的 seq_len 均使用模型配置值。</p>
+      <code>ResolvedConfig</code> 新增 <code>pub max_position_embeddings: usize</code>。<code>from_geometry()</code> 从 <code>g.max_seq_len</code> 填充。<code>build_compiler_graph()</code> 使用配置值。MoEGate/TopK 的 <code>seq_len</code> 字段也从配置取。
+      <strong>文件</strong>: <code>gllm/src/arch/auto_graph.rs</code>, <code>gllm/src/arch/resolve.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-004" data-test="TEST-SYMDIM-004" id="test-symdim-004">TEST-SYMDIM-004: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-004相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="006" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-005" id="req-symdim-005">REQ-SYMDIM-005: ONNX graph_convert 传入 max_seq_len
+      <p>为 <code>onnx_to_compiler_graph()</code> 函数新增 <code>max_seq_len</code> 参数，在 <code>ConvertContext</code> 构造时使用该参数替代硬编码常量，确保 ONNX 加载路径也能正确设置编译图的序列长度上界。</p>
+      <code>onnx_to_compiler_graph()</code> 新增 <code>max_seq_len: usize</code> 参数。<code>ConvertContext::new()</code> 用参数替代 <code>SYMDIM_MAX_SEQ_LEN</code>。
+      <strong>文件</strong>: <code>gllm/src/loader/onnx/graph_convert.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-005" data-test="TEST-SYMDIM-005" id="test-symdim-005">TEST-SYMDIM-005: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-005相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="007" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-006" id="req-symdim-006">REQ-SYMDIM-006: Semantic Gatekeeper 使用模型值
+      <p>在 <code>SmallGraphCompiler</code> 中新增 <code>max_seq_len</code> 字段，构造时从模型配置传入，用于 <code>sym_seq()</code> 符号维度和运行时 token 长度校验，替代原来硬编码的 2048 上限。</p>
+      <code>SmallGraphCompiler</code> 新增 <code>max_seq_len: usize</code> 字段。构造时从模型配置传入。<code>sym_seq()</code> 用 <code>self.max_seq_len</code>。运行时检查 <code>tokens.len() &gt; self.max_seq_len</code> 替代硬编码 2048。
+      <strong>文件</strong>: <code>gllm/src/semantic_gatekeeper/small_graph.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-006" data-test="TEST-SYMDIM-006" id="test-symdim-006">TEST-SYMDIM-006: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-006相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="008" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-007" id="req-symdim-007">REQ-SYMDIM-007: 移除 effective_kv_max_seq_len 截断
+      <p>删除 <code>effective_kv_max_seq_len()</code> 函数。所有调用方直接使用 <code>self.geometry.max_seq_len</code>。</p>
+      <strong>文件</strong>: <code>gllm/src/engine/executor.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-007" data-test="TEST-SYMDIM-007" id="test-symdim-007">TEST-SYMDIM-007: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-007相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" data-section="009" data-req-api="POST /internal/symdim/bind" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="symdim" data-req-status="implemented" data-req="REQ-SYMDIM-008" id="req-symdim-008">REQ-SYMDIM-008: mega_kernel output buffer 使用模型值
+      <p>将 <code>compile()</code> 函数中对 <code>SYMDIM_MAX_SEQ_LEN</code> 的引用替换为已有的 <code>max_seq_len</code> 参数（来自 <code>geometry.max_seq_len</code>），确保 mega-kernel 的 output buffer 大小与模型上下文长度一致。</p>
+      <code>compile()</code> 中 <code>SYMDIM_MAX_SEQ_LEN</code> → 已有的 <code>max_seq_len</code> 参数（从 <code>geometry.max_seq_len</code> 传入，SPEC/39 统一编译入口）。
+      <strong>文件</strong>: <code>gllm/src/engine/mega_kernel.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</li>
+        <li id="id-2" data-criterion="2">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</li>
+        <li id="id-3" data-criterion="3">buffer_alloc 使用 graph.max_seq_len 替代常量</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      
+      
+      </a></a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-SYMDIM-008" data-test="TEST-SYMDIM-008" id="test-symdim-008">TEST-SYMDIM-008: SYMDIM动态维度+PagedAttention集成测试<p>验证REQ-SYMDIM-008相关功能正确性</p>
+      <div id="symdim-max-seq-len-硬编码替换为模型配置值" data-criterion="SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值">SYMDIM_MAX_SEQ_LEN 硬编码替换为模型配置值</div>
+      <div id="symdim-symbolic-max-value-从-geometry.max-seq-len-读取" data-criterion="SymDim::Symbolic max_value 从 geometry.max_seq_len 读取">SymDim::Symbolic max_value 从 geometry.max_seq_len 读取</div>
+      <div id="buffer-alloc-使用-graph.max-seq-len-替代常量" data-criterion="buffer_alloc 使用 graph.max_seq_len 替代常量">buffer_alloc 使用 graph.max_seq_len 替代常量</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h3="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="001" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-001" id="req-pa-001">Part B: PagedAttention 接通 — REQ-PA-001~007
+      <p>将已实现的 PagedScheduler 调度层接通到 mega-kernel 推理路径，包括 JIT attention 支持 page table 间接寻址、KV cache 写入 page pool、ABI 参数传递、PagedScheduler 构建 page table、Paged KV pool 分配管理以及内存安全护栏。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="001" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-008" id="req-pa-008">REQ-PA-008: Mega-kernel ABI 新增 page_table_ptr 参数
+      <p>ABI 新增 <code>page_table_ptr</code> 参数（当前 23 参数 ABI 中的 arg 21）。<code>page_table_ptr</code> 指向 <code>u32[]</code> page table（<code>page_table[seq_pos] = physical_page_id</code>）。当 <code>NULL</code> 时使用连续 stride（向后兼容）。</p>
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/mega_kernel_abi.rs</code>, <code>gllm/src/engine/mega_kernel.rs</code>, <code>gllm/src/compat/gpu_backend_macro.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-008" data-test="TEST-PA-008" id="test-pa-008">TEST-PA-008: PagedAttention寻址测试<p>验证REQ-PA-008相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="002" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-007" id="req-pa-007">REQ-PA-7: JIT attention 支持 page table 间接寻址
+      <p>新增 VmInstr:</p>
+      <li><code>PageTableLookup { dst, page_table_ptr, seq_index, page_size, head_dim, kv_half, layer, num_kv_heads }</code> — 从 page table 读取物理 page id → 计算物理偏移</li>
+      <li><code>PageTableWrite { src, page_table_ptr, seq_index, page_size, head_dim, kv_half, layer, num_kv_heads }</code> — 写入 page pool</li>
+      <p>ISA Lowering:</p>
+      <li>x86: <code>mov eax, [page_table + seq_index*4]; imul rax, page_stride; add rax, pool_base; add rax, offset_in_page</code></li>
+      <li>GPU PTX: <code>ld.global.u32 %r, [page_table + %seq*4]; mul.wide.u64 %addr, %r, page_stride; add.u64 %addr, pool_base</code></li>
+      <li>AArch64: LDR + UMADDL + ADD</li>
+      <p>修改 <code>emit_tiled_attention_inline</code> ki loop：当有 page table 时用 <code>PageTableLookup</code> 替代 <code>k_head + ki_off</code>。</p>
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/instr.rs</code>, <code>plan_lower.rs</code>, <code>x86_lower.rs</code>, <code>gpu_lower.rs</code>, <code>aarch64_lower.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-007" data-test="TEST-PA-7" id="test-pa-7">TEST-PA-7: PagedAttention寻址测试<p>验证REQ-PA-001相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="003" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-002" id="req-pa-002">REQ-PA-002: KV cache 写入支持 page table
+      <p>decode 步骤的 K/V projection 结果写回 page pool（不是 scratchpad）。只写当前 token 的 K/V 行（<code>seq_index = total_seq - 1</code>）。写入位置 = <code>pool_base + phys_page_id * page_stride + offset_in_page</code>。</p>
+      <strong>文件</strong>: 同 REQ-PA-002
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-002" data-test="TEST-PA-002" id="test-pa-002">TEST-PA-002: PagedAttention寻址测试<p>验证REQ-PA-002相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="004" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-003" id="req-pa-003">REQ-PA-003: Executor 接通 PagedScheduler → Mega-kernel
+      <p>在 <code>generate_single_sequence()</code> 中从 PagedScheduler 获取当前序列的 page table，CPU 路径传递 native 指针（或 NULL），GPU 路径上传到设备后传递 device 指针，实现调度层到 JIT 执行层的端到端 page table 传递。</p>
+      <code>generate_single_sequence()</code> 新增 <code>page_table: Option&lt;Vec&lt;u32&gt;&gt;</code> 参数。从 <code>PagedScheduler</code> 获取当前 sequence 的 page table。CPU 路径: <code>page_table.as_ptr()</code> 或 <code>null</code>。GPU 路径: <code>upload_to_gpu(&amp;page_table)</code> 然后 device ptr。
+      <strong>文件</strong>: <code>gllm/src/engine/executor.rs</code>, <code>gllm/src/engine/mega_kernel.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-003" data-test="TEST-PA-003" id="test-pa-003">TEST-PA-003: PagedAttention寻址测试<p>验证REQ-PA-003相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="005" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-004" id="req-pa-004">REQ-PA-004: PagedScheduler 构建 page table
+      <p>在 <code>PagedScheduler</code> 中新增 <code>get_page_table()</code> 方法，遍历序列的 block table 构建 1D 扁平页表（<code>page_table[i] = blocks[i / page_size]</code>），供 mega-kernel ABI 消费。</p>
+      <code>PagedScheduler</code> 新增 <code>fn get_page_table(&amp;self, seq_id: u64) -&gt; Vec&lt;u32&gt;</code> 方法。遍历 sequence 的 block table: <code>page_table[i] = blocks[i / page_size]</code>。
+      <strong>文件</strong>: <code>gllm/src/scheduler/paged_scheduler.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-004" data-test="TEST-PA-004" id="test-pa-004">TEST-PA-004: PagedAttention寻址测试<p>验证REQ-PA-004相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="006" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-005" id="req-pa-005">REQ-PA-005: Paged KV pool 分配和管理
+      <p>新增 <code>PagedKvPool</code> 结构体: <code>pool_ptr</code>, <code>page_stride</code>, <code>num_pages</code>。CPU 用 <code>vec![0u8; num_pages * page_stride]</code>。GPU 用 <code>device.alloc()</code>。替代 <code>CpuKvCacheBuffer</code>（当启用 PagedAttention 时）。内存计算: <code>page_stride = num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes</code>。</p>
+      <strong>文件</strong>: <code>gllm/src/compat/cpu_backend.rs</code>, <code>gllm/src/compat/gpu_helpers.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-005" data-test="TEST-PA-005" id="test-pa-005">TEST-PA-005: PagedAttention寻址测试<p>验证REQ-PA-005相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section <h4="" data-entity-ref="ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-BATCH-CONTEXT" data-section="007" data-req-api="POST /internal/paged_attention" data-req-entity="ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="pa" data-req-status="implemented" data-req="REQ-PA-006" id="req-pa-006">REQ-PA-006: 内存安全护栏
+      <p>启动时: 计算连续模式和 Paged 模式的内存需求，如果连续模式 &gt; 可用内存 80% 则强制 Paged。运行时: <code>prompt_tokens.len() + max_new_tokens &lt;= geometry.max_seq_len</code>。</p>
+      <strong>文件</strong>: <code>gllm/src/engine/executor.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">page_table_ptr ABI 参数正确传递</li>
+        <li id="id-2" data-criterion="2">page_table_ptr==NULL 时连续 stride 寻址向后兼容</li>
+        <li id="id-3" data-criterion="3">PagedScheduler 构建 page table 正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      
+      
+      
+      </a></div>
+    </section>
+    <section <h3="" data-level="unit" data-test-categories="unit" data-req-ref="REQ-PA-006" data-test="TEST-PA-006" id="test-pa-006">TEST-PA-006: PagedAttention寻址测试<p>验证REQ-PA-006相关功能正确性</p>
+      <div id="page-table-ptr-abi-参数正确传递" data-criterion="page_table_ptr ABI 参数正确传递">page_table_ptr ABI 参数正确传递</div>
+      <div id="page-table-ptr-null-时连续-stride-寻址向后兼容" data-criterion="page_table_ptr==NULL 时连续 stride 寻址向后兼容">page_table_ptr==NULL 时连续 stride 寻址向后兼容</div>
+      <div id="pagedscheduler-构建-page-table-正确" data-criterion="PagedScheduler 构建 page table 正确">PagedScheduler 构建 page table 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s-实施顺序" data-section="null">
+      <h3>实施顺序</h3>
+      <p>```</p>
+      <p>Phase 1 (gllm-kernels): REQ-SYMDIM-001~003</p>
+      <p>Phase 2 (gllm):         REQ-SYMDIM-004~009</p>
+      <p>Phase 3 (VmInstr):      REQ-PA-002~003</p>
+      <p>Phase 4 (ABI):          REQ-PA-001</p>
+      <p>Phase 5 (Scheduler):    REQ-PA-004~006</p>
+      <p>Phase 6 (验证):         REQ-PA-007</p>
+      <p>```</p>
+    </section>
+    <section id="s-验证" data-section="null">
+      <h3>验证</h3>
+      <p>```bash</p>
+      <p>cargo check &amp;&amp; cargo test --lib</p>
+      <p>cargo test --test test_e2e_generator -- --test-threads=1</p>
+      <p>```</p>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-batch-context" data-entity="ENT-BATCH-CONTEXT" data-req-ref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002" data-entity-model-type="relational" data-entity-ref="ENT-CALLBACK-CHAIN ENT-COMPILER-GRAPH ENT-COORDINATOR ENT-DEVICE-PROFILE ENT-EXECUTOR ENT-ISA-PROFILE ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-xref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002"><h4>ENT-BATCH-CONTEXT</h4><p>BatchContext — 批量并发推理上下文（struct BatchContext in gllm/src/engine/batch_context.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_seqs" data-type="number" data-required="true" <td="">num_seqs<td>number</td><td>是</td><td>usize, 当前序列数</td><td>当前批次中的活跃序列数</td></tr>
+<tr data-field="max_batch_size" data-type="number" data-required="true" <td="">max_batch_size<td>number</td><td>是</td><td>usize, &gt;= num_seqs</td><td>最大批次容量（SPEC 32 扩展区大小依据）</td></tr><tr data-field="has_v2_extension" data-type="boolean" data-required="true" <td="">has_v2_extension<td>boolean</td><td>是</td><td>SPEC 32 扩展区是否存在</td><td>是否包含 SPEC 32 扩展区</td></tr><tr data-field="data_size" data-type="number" data-required="true" <td="">data_size<td>number</td><td>是</td><td>字节</td><td>
+flat memory buffer 总大小</td></tr><tr data-field="seq_mapping_len" data-type="number" data-required="false" <td="">seq_mapping_len<td>number</td><td>否</td><td>Vec&lt;u32&gt; 长度</td><td>per-token seq_mapping 长度</td></tr><tr data-field="header_size" data-type="number" data-required="false" <td="">header_size<td>number</td><td>否</td><td>96 字节</td><td>固定头大小</td></tr><tr data-field="seq_meta_stride" data-type="number" data-required="false" <td="">seq_meta_stride<td>number</td><td>否</td><td>
+64 字节</td><td>per-seq 元数据步长</td></tr><tr data-field="extension_size" data-type="number" data-required="false" <td="">extension_size<td>number</td><td>否</td><td>96 字节</td><td>SPEC 32 扩展区大小</td></tr></table></section>
+      <section id="ent-compiler-graph" data-entity="ENT-COMPILER-GRAPH" data-req-ref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-BUFFER-LAYOUT ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-FUSION-PLAN ENT-GRAPH-RESOURCE-PLAN" data-xref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-kv-cache" data-entity="ENT-KV-CACHE" data-req-ref="REQ-KV-001 REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-SYMDIM-001" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-EMA-TRACKER ENT-EPILOGUE-POLICY ENT-EXPERT-WEIGHT-PREFETCHER ENT-KV-PAGE-HEADER ENT-MEGA-KERNEL-FN ENT-MLA-CONFIG" data-xref="REQ-KV-001 REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-SYMDIM-001">
+        <h4>ENT-KV-CACHE</h4>
+        <p>KvCache — KV缓存数据结构</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="num_kv_heads" data-type="number" data-required="true" <td="">num_kv_heads<td>number</td><td>是</td><td>usize</td><td>KV注意力头数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">
+head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度</td></tr><tr data-field="kv_dtype" data-type="string" data-required="true" <td="">kv_dtype<td>string</td><td>是</td><td>DType</td><td>KV cache元素dtype</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>usize</td><td>
+页大小 (tokens per page)</td></tr><tr data-field="num_kv_shared_layers" data-type="number" data-required="true" <td="">num_kv_shared_layers<td>number</td><td>是</td><td>usize</td><td>SharedKvRef共享KV层数</td></tr><tr data-field="is_mla" data-type="boolean" data-required="true" <td="">is_mla<td>boolean</td><td>是</td><td></td><td>是否为MLA模型</td></tr></table>
+      </section>
+      <section id="ent-model-config" data-entity="ENT-MODEL-CONFIG" data-req-ref="REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002 REQ-ARCH-001" data-entity-model-type="relational" data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-HEAD-ROUTING ENT-INTENT-TRACKER ENT-KV-CACHE ENT-MODEL-ARCH-KEY" data-xref="REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002 REQ-ARCH-001">
+        <h4>ENT-MODEL-CONFIG</h4>
+        <p>ModelConfig — 模型配置 (tensor-driven Ω1)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hidden_size" data-type="number" data-required="true" <td="">hidden_size<td>number</td><td>是</td><td>usize</td><td>隐藏层维度</td></tr><tr data-field="num_attention_heads" data-type="number" data-required="true" <td="">num_attention_heads<td>number</td><td>是</td><td>usize</td><td>注意力头数</td></tr>
+<tr data-field="num_key_value_heads" data-type="number" data-required="true" <td="">num_key_value_heads<td>number</td><td>是</td><td>usize</td><td>KV头数 (GQA)</td></tr><tr data-field="num_hidden_layers" data-type="number" data-required="true" <td="">num_hidden_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小</td></tr>
+<tr data-field="max_position_embeddings" data-type="number" data-required="true" <td="">max_position_embeddings<td>number</td><td>是</td><td>usize</td><td>最大位置编码数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>模型权重dtype (F32/F16/BF16)</td></tr><tr data-field="qk_norm" data-type="boolean" data-required="false"><td>qk_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="value_norm" data-type="boolean" data-required="false"><td>value_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="embedding_scale_factor" data-type="number" data-required="false"><td>embedding_scale_factor</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="rope_partial_ratio_global" data-type="number" data-required="false"><td>rope_partial_ratio_global</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="mla_use_unabsorbed" data-type="boolean" data-required="false"><td>mla_use_unabsorbed</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="unabsorbed_threshold" data-type="number" data-required="false"><td>unabsorbed_threshold</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="hidden_act" data-type="string" data-required="false"><td>hidden_act</td><td>string</td><td>否</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-page-table" data-entity="ENT-PAGE-TABLE" data-req-ref="REQ-KV-001 REQ-SYMDIM-001 REQ-SYMDIM-010 REQ-SYMDIM-009 REQ-SYMDIM-002" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-MLA-CONFIG ENT-MODEL-CONFIG ENT-PAGED-SCHEDULER" data-xref="REQ-KV-001 REQ-SYMDIM-001 REQ-SYMDIM-010 REQ-SYMDIM-009 REQ-SYMDIM-002"><h4>ENT-PAGE-TABLE</h4><p>PageTable — 虚拟→物理页映射表（struct PageTable in gllm/src/scheduler/memory_manager.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_mappings" data-type="number" data-required="true" <td="">num_mappings<td>number</td><td>是</td><td>HashMap 大小</td><td>虚拟页→物理页映射数量</td></tr>
+<tr data-field="virtual_page_id" data-type="number" data-required="true" <td="">
+virtual_page_id<td>number</td><td>是</td><td>VirtualPageId key</td><td>虚拟页标识</td></tr><tr data-field="physical_id" data-type="number" data-required="true" <td="">physical_id<td>number</td><td>是</td><td>PhysicalId</td><td>物理页标识</td></tr><tr data-field="tier" data-type="string" data-required="true" <td="">tier<td>string</td><td>是</td><td>L1|L2|L3</td><td>存储层级</td></tr><tr data-field="sequence_id" data-type="number" data-required="false" <td="">sequence_id<td>number</td><td>否</td><td>
+RequestId</td><td>所属序列 ID</td></tr><tr data-field="logical_index" data-type="number" data-required="false" <td="">logical_index<td>number</td><td>否</td><td>usize</td><td>逻辑页索引</td></tr></table></section>
+      <section id="ent-paged-scheduler" data-entity="ENT-PAGED-SCHEDULER" data-req-ref="REQ-KV-001 REQ-PA-001 REQ-PA-008 REQ-PA-007 REQ-PA-002" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-EPILOGUE-POLICY ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-MEGA-KERNEL-FN ENT-MLA-CONFIG" data-xref="REQ-KV-001 REQ-PA-001 REQ-PA-008 REQ-PA-007 REQ-PA-002">
+        <h4>ENT-PAGED-SCHEDULER</h4>
+        <p>PagedScheduler — PagedAttention调度器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>usize</td><td>页大小 (tokens per block)</td></tr><tr data-field="total_blocks" data-type="number" data-required="true" <td="">total_blocks<td>number</td><td>是</td><td>usize</td><td>总物理页数</td></tr>
+<tr data-field="used_blocks" data-type="number" data-required="true" <td="">used_blocks<td>number</td><td>是</td><td>usize</td><td>已使用页数</td></tr><tr data-field="num_block_tables" data-type="number" data-required="true" <td="">num_block_tables<td>number</td><td>是</td><td>usize</td><td>活跃请求块表数量</td></tr><tr data-field="hgal" data-type="string" data-required="true" <td="">hgal<td>string</td><td>是</td><td>HGALScheduler</td><td>HGAL调度器实例</td></tr>
+<tr data-field="prefix_index" data-type="string" data-required="true" <td="">prefix_index<td>string</td><td>是</td><td>KvPrefixIndex</td><td>KV前缀索引 (trie)</td></tr><tr data-field="memory_manager" data-type="string" data-required="true" <td="">memory_manager<td>string</td><td>是</td><td>GlobalMemoryManager</td><td>三级内存管理器 (L1 GPU/L2 CPU/L3 NVMe)</td></tr><tr data-field="vllm_state" data-type="string" data-required="false" <td="">vllm_state<td>string</td><td>否</td><td>
+Option&lt;Scheduler2024State&gt;</td><td>vLLM 2024调度器状态</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+      
+      
+    </section>
+<section id="api-symdim" data-api="POST /internal/symdim/bind" data-req-ref="REQ-SYMDIM-RUNTIME-001 REQ-SYMDIM-RUNTIME-002 REQ-SYMDIM-RUNTIME-003 REQ-ABI-BIND-001 REQ-ABI-BIND-002" data-api-type="internal" data-api-name="API-SYMDIM" data-xref="REQ-SYMDIM-RUNTIME-001 REQ-SYMDIM-RUNTIME-002 REQ-SYMDIM-RUNTIME-003 REQ-ABI-BIND-001 REQ-ABI-BIND-002"><h4>POST /internal/symdim/bind — SymDim dynamic dimension bind</h4><p>SymDim 动态维度接口，Symbolic 维度在编译时保持 Symbolic 语义，运行时通过 ShapeBinding 绑定实际值。禁止降级为编译时常量，SymDim 穿透整个 JIT 管线。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="ShapeBinding"><td>200</td><td>成功</td><td>ShapeBinding</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section>
+<section id="api-paged-attention" data-api="POST /internal/paged_attention" data-req-ref="REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-PA-001 REQ-PA-008" data-api-type="internal" data-api-name="API-PAGED-ATTENTION" data-xref="REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-PA-001 REQ-PA-008"><h4>POST /internal/paged_attention — PagedAttention execute</h4><p>PagedAttention 执行接口，KV cache 按页管理，支持跨序列前缀共享、动态页分配/释放。FlashAttention 融合时页表驱导寻址，非 Flash 硬件走 cache-friendly tiled path。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="PagedAttentionContext"><td>200</td><td>成功</td><td>PagedAttentionContext</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section><section id="req-symdim-nodegrade-001" data-req="REQ-SYMDIM-NODEGRADE-001" data-req-status="approved" data-req-domain="symdim-nodegrade" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /internal/symdim/bind"><h3>REQ-SYMDIM-NODEGRADE-001 SymDim 禁止降级编译时门控</h3><p>SymDim 禁止降级标准（ARCH-SYMDIM-NO-CONST-DEGRADE 的 criterion 级规范）：
+1. SymDim::Symbolic 维度在整个管线中必须保持 Symbolic 语义
+2. 禁止 max_for_allocation() 作为运算参数
+3. 禁止 BoundExpr::Const 处理 Symbolic 维度
+4. 禁止 infer_elem_count 返回固定值
+5. 禁止 executor 层手动计算 seq_len
+6. 禁止编译时固定 compile_seq_len
+7. SYMDIM_MAX_SEQ_LEN 仅用于 buffer 分配上界
+
+验证方法：grep 代码中 SymDim 降级模式
+交叉引用：REQ-SHAPE-CONSTR-001 / REQ-SHAPE-CONSTR-003 / REQ-SYMDIM-RUNTIME-001</p><div data-criteria=""><strong>验收标准：</strong><ol><li>SymDim::Symbolic 维度在整个管线中必须保持 Symbolic 语义</li><li>禁止 max_for_allocation() 作为运算参数</li><li>禁止 BoundExpr::Const 处理 Symbolic 维度</li><li>禁止 infer_elem_count 返回固定值</li><li>禁止 executor 层手动计算 seq_len</li><li>禁止编译时固定 compile_seq_len</li><li>SYMDIM_MAX_SEQ_LEN 仅用于 buffer 分配上界
+
+验证方法：grep 代码中 SymDim 降级模式
+交叉引用：REQ-SHAPE-CONSTR-001 / REQ-SHAPE-CONSTR-003 / REQ-SYMDIM-RUNTIME-001</li></ol></div></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：18-SYMDIM-PAGED-KV.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-symdim-001" data-test="TEST-SYMDIM-001" data-req-ref="REQ-SYMDIM-001" data-test-categories="unit"><h4>TEST-SYMDIM-001: REQ-SYMDIM-001 单元测试</h4><p>验证 REQ-SYMDIM-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-pa-001" data-test="TEST-PA-001" data-req-ref="REQ-PA-001" data-test-categories="unit"><h4>TEST-PA-001: REQ-PA-001 单元测试</h4><p>验证 REQ-PA-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-symdim-nodegrade-001" data-test="TEST-SYMDIM-NODEGRADE-001" data-req-ref="REQ-SYMDIM-NODEGRADE-001" data-test-categories="unit"><h4>TEST-SYMDIM-NODEGRADE-001: REQ-SYMDIM-NODEGRADE-001 单元测试</h4><p>验证 REQ-SYMDIM-NODEGRADE-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

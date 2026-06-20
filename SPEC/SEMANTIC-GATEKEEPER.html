@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="SEMANTIC-GATEKEEPER">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"SEMANTIC-GATEKEEPER", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>Semantic Gatekeeper 技术协议 (ARCH-SEMANTIC-GATEKEEPER)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>SEMANTIC-GATEKEEPER</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-semantic-gatekeeper-技术协议-arch-semantic-gatekeeper" data-section="null">
+      <h2>Semantic Gatekeeper 技术协议 (ARCH-SEMANTIC-GATEKEEPER)</h2>
+      <p>&gt; <strong>执行模型</strong>: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 <code>08-EXECUTOR.md</code> §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。</p>
+      <p>&gt; <strong>SSOT</strong>: 本文档是 gllm 隐藏状态驱动的免训练知识调度与注入架构的唯一真源。</p>
+      <p>&gt; <strong>关联需求</strong>: <code>SPEC/01-REQUIREMENTS.md §12</code> REQ-SG-001..008</p>
+      <p>&gt; <strong>关联上层 API</strong>: <code>SPEC/04-API-DESIGN.md §7</code> 用户接口、<code>§8</code> 内部实现架构</p>
+      <p>&gt; <strong>关联运行时接入</strong>: <code>SPEC/05-OPTIMIZATIONS.md §2.9</code> Callback 集成、<code>SPEC/08-EXECUTOR.md §4.2</code> FusedAttentionLayer Q-tap</p>
+      <p>&gt; <strong>遵守铁律</strong>: ARCH-FULL-JIT、ARCH-CPU-GPU-UNIFIED、NO_SILENT_FALLBACK、NO_ISLAND_MODULE</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 动机与定位</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 问题域</h4>
+      <p>Transformer 语言模型在结构化知识依赖任务（代码补全、架构规划、领域推理）中存在三类固有缺陷：</p>
+      <p>1. <strong>RAG（检索增强生成）</strong> 将知识置入 Prompt，模型可通过注意力权重选择性忽略；长文档侵占上下文窗口；检索-生成割裂，无法感知动态需求。</p>
+      <p>2. <strong>约束解码（Logits 钳制）</strong> 强制合法输出集合，剥夺模型对别名、新符号的泛化能力（如 <code>import pandas as pd</code> 后 <code>pd.read_csv</code> 别名场景失效）。</p>
+      <p>3. <strong>工具调用（Function Calling）</strong> 显式中断生成流程，依赖模型自身决策调用时机，延迟高、粒度粗。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 核心论断</h4>
+      <p>&gt; <strong>结构化知识的注入应是模型推理过程中"认知流"的自然延伸，既非外挂 Prompt，也非生硬输出过滤，而是在隐藏状态流中的软偏置注入。</strong></p>
+      <p>两个支撑事实：</p>
+      <li>Transformer 自注意力 Query 向量蕴含当前位置对上下文的<strong>信息检索意图</strong>。通过与外部结构化层级键比对，模型可在不修改参数的前提下<strong>主动表达所需知识的层级</strong>。</li>
+      <li>AST 提供语法骨架，LSP 赋予语义灵魂。Tree-sitter 实时捕捉语法状态；LSP 提供跨文件精确类型/符号/架构关系。两者协同构成完整的认知触发与知识供给链路。</li>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 定位</h4>
+      <p>Semantic Gatekeeper（以下简称 <strong>SG</strong>）是 gllm 的<strong>运行时可插拔 Callback 模块</strong>，通过 Mega-Kernel callback table（<code>SgDetect</code> / <code>SgInject</code> 共享内存 + <code>NativeCall</code> VmInstr）在 JIT 机器码内部执行，对模型参数、算子图结构、权重布局<strong>完全零修改</strong>。</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 架构总览</h3>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="2.1">
+      <h4>2.1 数据流</h4>
+      <p>```</p>
+      <p>┌────────────────────────── 模型加载阶段（一次性） ─────────────────────────┐</p>
+      <p>│                                                                              │</p>
+      <p>│  SemanticGatekeeperConfig                                                    │</p>
+      <p>│    ├─ level_descriptors: [String; 3]  (默认 L1/L2/L3 文本，可覆写)           │</p>
+      <p>│    ├─ detection_depths: Vec&lt;f32&gt;      (相对深度列表，如 [0.5, 0.75, 0.9])    │</p>
+      <p>│    ├─ gate_threshold: f32             (门控 τ)                               │</p>
+      <p>│    ├─ stability_threshold: f32        (锚点复用阈值)                         │</p>
+      <p>│    ├─ alpha: f32                      (注入强度基础值)                       │</p>
+      <p>│    ├─ knowledge_provider: Arc&lt;dyn KnowledgeProvider&gt;                         │</p>
+      <p>│    └─ ast_sentinel: Option&lt;Arc&lt;dyn AstSentinel&gt;&gt;                             │</p>
+      <p>│                                                                              │</p>
+      <p>│  预计算 Level Keys (§3):                                                     │</p>
+      <p>│    for each detection_depth d:                                               │</p>
+      <p>│      layer_L = floor(d × num_layers)                                         │</p>
+      <p>│      for each level_desc text in level_descriptors:                          │</p>
+      <p>│        tokens   = tokenizer(text)                                            │</p>
+      <p>│        embed    = execute_small_graph(EmbedLookupOnlyGraph, tokens)          │</p>
+      <p>│        K_layer  = execute_small_graph(                                       │</p>
+      <p>│                     KProjOnlyGraph { layer: layer_L },                       │</p>
+      <p>│                     embed)                                                   │</p>
+      <p>│        mean_K   = mean_pool(K_layer, axis=seq)                               │</p>
+      <p>│      LevelKeysAtLayer[layer_L] = [mean_K_L1, mean_K_L2, mean_K_L3]           │</p>
+      <p>│                                                                              │</p>
+      <p>│  结果：HashMap&lt;layer_idx, [Vec&lt;f32&gt;; 3]&gt; 常驻（总计 &lt;3 KB × detection count）│</p>
+      <p>└──────────────────────────────────────────────────────────────────────────────┘</p>
+      <p>┌────────────────────────── 推理阶段（每 decode step） ─────────────────────┐</p>
+      <p>│                                                                              │</p>
+      <p>│  Mega-Kernel 单次 CALL（JIT 机器码内部）:                                     │</p>
+      <p>│  SgDetect 检测到 detection layer → callback table NativeCall:                │</p>
+      <p>│    ┌─ is_detection_layer(layer_idx)?                                         │</p>
+      <p>│    │    ├─ NO  → 正常执行，不触发 SG                                         │</p>
+      <p>│    │    └─ YES → SemanticGatekeeperCallback.pre_node(ctx, node_idx)          │</p>
+      <p>│    │              ├─ 1. 稳定性追踪 (§5):                                    │</p>
+      <p>│    │              │    sim = cosine(ctx.hidden_state[-1], anchor_hidden)    │</p>
+      <p>│    │              │    if sim &gt; stability_threshold &amp;&amp; !node_changed:       │</p>
+      <p>│    │              │      → 复用 v_knowledge, 跳过步骤 2-6                    │</p>
+      <p>│    │              │                                                         │</p>
+      <p>│    │              ├─ 2. 从 Q-tap 读 Q (§4):                                 │</p>
+      <p>│    │              │    JIT 内 Q-tap variant 将                               │</p>
+      <p>│    │              │    q_proj(hidden)[-1] 写入 gatekeeper_ring_buffer       │</p>
+      <p>│    │              │    Q = gatekeeper_ring_buffer.read()                    │</p>
+      <p>│    │              │                                                         │</p>
+      <p>│    │              ├─ 3. 层级路由:                                           │</p>
+      <p>│    │              │    K_L1, K_L2, K_L3 = LevelKeysAtLayer[node.layer_idx]  │</p>
+      <p>│    │              │    scores = [cosine(Q, K_Lx) for x in 1..=3]            │</p>
+      <p>│    │              │    (best_idx, best_score) = argmax(scores)               │</p>
+      <p>│    │              │    if best_score &lt; gate_threshold: return Continue       │</p>
+      <p>│    │              │                                                         │</p>
+      <p>│    │              ├─ 4. 知识检索:                                           │</p>
+      <p>│    │              │    level = SemanticLevel::from_idx(best_idx)             │</p>
+      <p>│    │              │    ast_ctx = ast_sentinel?.current_context(..)?          │</p>
+      <p>│    │              │    entry = knowledge_provider.retrieve(                  │</p>
+      <p>│    │              │             Q, level, &amp;RetrieveContext { ast_ctx, .. })  │</p>
+      <p>│    │              │    if entry.is_none(): return Continue                   │</p>
+      <p>│    │              │                                                         │</p>
+      <p>│    │              ├─ 5. 文本编码:                                           │</p>
+      <p>│    │              │    tokens = tokenizer(entry.text)                        │</p>
+      <p>│    │              │    v_raw  = execute_small_graph(                         │</p>
+      <p>│    │              │               EmbedLookupOnlyGraph, tokens)              │</p>
+      <p>│    │              │    v_knowledge = mean_pool(v_raw, axis=seq)              │</p>
+      <p>│    │              │    (v_knowledge 与 hidden_state 最后 token 维度一致)     │</p>
+      <p>│    │              │                                                         │</p>
+      <p>│    │              ├─ 6. 残差相加注入:                                       │</p>
+      <p>│    │              │    effective_alpha = alpha × entry.confidence            │</p>
+      <p>│    │              │    new_hidden_last = hidden_state[-1]                    │</p>
+      <p>│    │              │                   + effective_alpha × v_knowledge        │</p>
+      <p>│    │              │    data = hidden_state.clone_with_last_replaced(..)      │</p>
+      <p>│    │              │    return InjectHidden { data }                          │</p>
+      <p>│    │              │                                                         │</p>
+      <p>│    │              └─ 7. 更新 active_state:                                  │</p>
+      <p>│    │                    anchor_hidden  = new_hidden_last                    │</p>
+      <p>│    │                    v_knowledge    = v_knowledge                         │</p>
+      <p>│    │                    level          = level                               │</p>
+      <p>│    │                    key_hash       = hash(entry.text)                    │</p>
+      <p>│    │                    ast_node_kind  = ast_ctx?.node_kind                  │</p>
+      <p>│    │                                                                          │</p>
+      <p>│    └─ 正常 execute_fused_op(node, hidden_state, ...)                         │</p>
+      <p>└──────────────────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 五大组件</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>位置</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>LevelKeysCache</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>模型加载时预计算的层级键向量表 </td>
+          <td>HashMap&lt;layer_idx, [Vec&lt;f32&gt;; 3]&gt;</td>
+        </tr>
+        <tr>
+          <td>src/semantic_gatekeeper/level_keys.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SmallGraphExecutor</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>为 Level Keys 预计算 / runtime 文本编码构造并执行小 CompilerGraph（EmbedLookupOnly / KProjOnly）</td>
+        </tr>
+        <tr>
+          <td>src/semantic_gatekeeper/small_graph.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SemanticGatekeeperCallback</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>实现 </td>
+          <td>LayerCallback</td>
+          <td> trait，在 </td>
+          <td>pre_node</td>
+          <td> 执行路由/检索/注入</td>
+        </tr>
+        <tr>
+          <td>src/semantic_gatekeeper/callback.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AstSentinel trait</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>用户实现：根据生成的 token 序列返回当前语法上下文</td>
+        </tr>
+        <tr>
+          <td>用户实现（lib 提供 trait）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KnowledgeProvider trait</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>用户实现：根据 Query 向量 + 层级 + AST 上下文检索知识文本</td>
+        </tr>
+        <tr>
+          <td>用户实现（lib 提供 trait）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Level Keys 预计算协议</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 数学定义</h4>
+      <p>对每个检测层深度 <code>d ∈ detection_depths</code>（如 <code>0.5, 0.75, 0.9</code>）：</p>
+      <p>```</p>
+      <p>layer_L := floor(d × num_hidden_layers)</p>
+      <p>对每个层级描述文本 desc_x（x ∈ {L1, L2, L3}）：</p>
+      <p>  tokens_x   := tokenizer.encode(desc_x)               形状 (T_x,)</p>
+      <p>  embed_x    := embed_layer(tokens_x)                  形状 (T_x, hidden_size)</p>
+      <p>  k_proj_out := k_proj_at_layer(layer_L, embed_x)      形状 (T_x, kv_dim)</p>
+      <p>  K_Lx       := mean_over_axis0(k_proj_out)            形状 (kv_dim,)</p>
+      <p>LevelKeysAtLayer[layer_L] := [K_L1, K_L2, K_L3]</p>
+      <p>```</p>
+      <p>其中 <code>kv_dim = num_kv_heads × head_dim</code>（GQA 时小于 <code>hidden_size</code>）。</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 默认层级描述文本</h4>
+      <p>用户可通过 <code>SemanticGatekeeperConfig.level_descriptors: [String; 3]</code> 覆写。</p>
+      <table>
+        <tr>
+          <th>层级</th>
+        </tr>
+        <tr>
+          <td>默认描述</td>
+        </tr>
+        <tr>
+          <td>语义</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>"struct fields and method signatures"</td>
+        </tr>
+        <tr>
+          <td>符号签名、类型成员</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>"validation rules and invariants"</td>
+        </tr>
+        <tr>
+          <td>接口约束、业务规则</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>"module dependencies and design patterns"</td>
+        </tr>
+        <tr>
+          <td>架构分层、模块职责</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 执行机制（ARCH-FULL-JIT 合规）</h4>
+      <p>预计算阶段构造两个小 <code>CompilerGraph</code>（全 JIT 管线编译，无手写前向）：</p>
+      <strong>EmbedLookupOnlyGraph</strong>（挑战 3 决策 B）：
+      <p>```</p>
+      <p>节点: Gather(embed_table_weight)</p>
+      <p>输入: token_ids (Symbolic seq_len)</p>
+      <p>输出: embed (seq_len × hidden_size)</p>
+      <p>```</p>
+      <strong>KProjOnlyGraph@layer_L</strong>（挑战 2 决策 B）：
+      <p>```</p>
+      <p>节点: RmsNorm(input_layernorm_weight_@L, eps) → Gemm(k_proj_weight_@L)</p>
+      <p>输入: hidden (Symbolic seq_len × hidden_size)</p>
+      <p>输出: k_out (seq_len × kv_dim)</p>
+      <p>```</p>
+      <p>两个图在模型加载期通过 <code>compile()</code> 编译一次，其 <code>CompiledLayer</code> 与主模型 <code>CompiledLayer</code> 并列常驻 <code>SemanticGatekeeperState</code>。</p>
+      <p>&gt; <strong>ARCH-CPU-GPU-UNIFIED 合规</strong>: 两个小图与主推理图共享同一 <code>CompilerGraph</code> IR，Phase 3 codegen 按 <code>DeviceProfile</code> 生成 CPU/PTX/HIP/MSL 原生代码。禁止后端分叉实现。</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 SymDim 策略</h4>
+      <li><code>seq_len</code> 维度 = <code>SymDim::Symbolic("sg_desc_seq")</code>（描述文本 token 数，运行时 binding）</li>
+      <li><code>hidden_size</code> / <code>kv_dim</code> 维度 = <code>SymDim::Concrete(value)</code>（模型加载后已知）</li>
+    </section>
+    <section id="s3.5" data-section="3.5">
+      <h4>3.5 缓存格式</h4>
+      <p>```rust</p>
+      <p>pub struct LevelKeysCache {</p>
+      <p>    /// layer_idx → [K_L1, K_L2, K_L3]</p>
+      <p>    keys: HashMap&lt;usize, [Vec&lt;f32&gt;; 3]&gt;,</p>
+      <p>    /// 预计算的检测层集合（与 config.detection_depths 一一映射）</p>
+      <p>    detection_layers: Vec&lt;usize&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>一致性不变量</strong>：
+      <li><code>keys.keys()</code> ⊆ <code>detection_layers</code> 集合</li>
+      <li>每个 <code>Vec&lt;f32&gt;.len() == kv_dim</code></li>
+      <li>所有向量 finite（不含 NaN/Inf）</li>
+      <li>每个向量 L2 范数 &gt; 0（非全零）</li>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Q 截获协议：FusedAttentionLayer Q-Tap</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 决策依据（挑战 1 选项 B）</h4>
+      <li>选项 A（通用中间量钩子）破坏融合完整性</li>
+      <li>选项 C（拆子算子）违反 ARCH-CPU-GPU-UNIFIED</li>
+      <li><strong>选项 B（Q-tap epilogue）</strong> 复用已有 Epilogue 白嫖网络（<code>SPEC/05-OPTIMIZATIONS.md §5</code>），在 <code>q_proj</code> 后尾段插入 STG 指令写入共享 ring buffer，不拆融合、不增 API、不增后端分叉</li>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 Q-Tap 变体定义</h4>
+      <code>FusedAttentionLayer</code> 扩展一个可选配置字段：
+      <p>```rust</p>
+      <p>pub struct FusedAttentionLayerConfig {</p>
+      <p>    // ... 现有字段（head_dim/num_heads/num_kv_heads/rope_config/...）...</p>
+      <p>    /// 若 Some，编译期在 q_proj 后尾段插入 Q-tap STG。</p>
+      <p>    pub q_tap: Option<qtapconfig>,</qtapconfig></p>
+      <p>}</p>
+      <p>pub struct QTapConfig {</p>
+      <p>    /// 写出目标：gatekeeper_ring_buffer 的设备可见指针</p>
+      <p>    pub sink_ptr: u64,</p>
+      <p>    /// 要写出的 token 位置（默认仅最后一个 token）</p>
+      <p>    pub tap_position: QTapPosition,</p>
+      <p>    /// 写出 dtype（默认 = k_proj 输出 dtype）</p>
+      <p>    pub dtype: DType,</p>
+      <p>}</p>
+      <p>pub enum QTapPosition {</p>
+      <p>    /// 仅最后一个 token（decode step 场景）</p>
+      <p>    LastToken,</p>
+      <p>    /// 全序列（prefill 场景，ring buffer 需要 seq_len × q_dim 容量）</p>
+      <p>    AllTokens,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 CompilerGraph 扩展</h4>
+      <code>Op::GemmBias</code>（或等价的 <code>q_proj</code> GEMM 节点）在存在 <code>q_tap</code> 时新增 <code>tap_sink_ptr</code> 属性，JIT codegen 生成"主 GEMM 结果 → 寄存器 → 残差流 / 下游 RoPE"路径的同时，同一尾段追加 STG 指令写 <code>tap_sink_ptr</code>。
+      <p>&gt; <strong>详述</strong>: <code>SPEC/08-EXECUTOR.md §4.2</code> FusedAttentionLayer 扩展描述。</p>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 Ring Buffer 布局</h4>
+      <p>```</p>
+      <p>GatekeeperRingBuffer (per-session):</p>
+      <p>  ├─ header: {</p>
+      <p>  │    write_cursor: AtomicU64,</p>
+      <p>  │    buffer_bytes: u64,</p>
+      <p>  │    q_dim: u32,</p>
+      <p>  │    step_index: AtomicU64,</p>
+      <p>  │  }</p>
+      <p>  └─ data: [u8; N × q_dim × dtype_size]</p>
+      <p>           (N = 双缓冲至少 2，防止 pre_node 读到未完成写入)</p>
+      <p>```</p>
+      <strong>同步协议</strong>：
+      <li>JIT 的 STG 指令使用 <code>release</code> 内存序完成写入后 bump <code>step_index</code></li>
+      <li><code>SemanticGatekeeperCallback.pre_node</code> 读取时 <code>acquire</code> 内存序载入 <code>step_index</code> 确认 step 匹配</li>
+      <li>当前 decode step 与 ring buffer 记录的 step_index 不一致 → 返回 <code>Err(StaleQTap)</code></li>
+    </section>
+    <section id="s4.5" data-section="4.5">
+      <h4>4.5 仅检测层携带 Q-tap</h4>
+      <code>auto_graph</code> 构建期，<code>is_detection_layer(layer_idx)</code> 的 <code>MultiHeadAttention</code> OpKind 节点才携带 <code>q_tap: Some(...)</code>。其他层 <code>q_tap: None</code>，完全零额外指令开销。
+      <p>&gt; <strong>NO_ISLAND_MODULE 合规</strong>: <code>q_tap</code> 字段必须在主推理路径（非测试代码）被 <code>auto_graph</code> 构建函数真实写入，且 Mega-Kernel <code>SgDetect</code> 必须真实读取 ring buffer。集成测试验证 Q 向量与 CPU 参考实现数值一致。</p>
+    </section>
+    <section id="artifact-state-machine" data-artifact-type="state-machine" data-section="5">
+      <h3>5. 稳定性追踪状态机</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 ActiveState 定义</h4>
+      <p>```rust</p>
+      <p>pub struct ActiveState {</p>
+      <p>    /// 当前活跃的知识层级（None 表示未命中）</p>
+      <p>    pub level: Option<semanticlevel>,</semanticlevel></p>
+      <p>    /// 当前知识条目的文本 hash（避免重复检索同一条目）</p>
+      <p>    pub key_hash: Option&lt;u64&gt;,</p>
+      <p>    /// 注入时的 hidden_state 最后 token 向量（锚点）</p>
+      <p>    pub anchor_hidden: Option&lt;Vec&lt;f32&gt;&gt;,</p>
+      <p>    /// 当前注入的知识向量（complexity 追踪）</p>
+      <p>    pub v_knowledge: Option&lt;Vec&lt;f32&gt;&gt;,</p>
+      <p>    /// 注入时的 AST 节点 kind（AST 变化强制刷新）</p>
+      <p>    pub ast_node_kind: Option&lt;String&gt;,</p>
+      <p>    /// 最近一次更新的 decode step 号</p>
+      <p>    pub last_step: u64,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 状态转移</h4>
+      <p>每个 <code>pre_node</code> 触发时：</p>
+      <p>```</p>
+      <p>输入: ctx.hidden_state (当前), ast_ctx (当前), step (当前)</p>
+      <p>Decision =</p>
+      <p>  if active.anchor_hidden is None or active.ast_node_kind != ast_ctx.node_kind:</p>
+      <p>    → FullCompute  (走完 §2.1 步骤 2-7)</p>
+      <p>  elif cosine(ctx.hidden_state[-1], active.anchor_hidden) &gt; stability_threshold:</p>
+      <p>    → ReuseCache   (复用 active.v_knowledge，跳过步骤 2-6，更新 last_step)</p>
+      <p>  else:</p>
+      <p>    → FullCompute  (走完 §2.1 步骤 2-7)</p>
+      <p>```</p>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 刷新触发器</h4>
+      <strong>强制刷新</strong>（清空 ActiveState）：
+      <p>1. AST 哨兵报告节点 kind 变更（如 <code>member_expression</code> → <code>call_expression</code>）</p>
+      <p>2. Decode step 跨越请求边界（new request id）</p>
+      <p>3. 用户显式调用 <code>Client::reset_gatekeeper_state()</code></p>
+    </section>
+    <section id="s5.4" data-section="5.4">
+      <h4>5.4 开销估计</h4>
+      <p>论文声称 95% 以上步骤复用 <code>v_knowledge</code>，实际效率取决于：</p>
+      <li><code>stability_threshold</code> 偏高（0.98） → 更保守，更多 FullCompute</li>
+      <li>偏低（0.90） → 更激进，可能错过应注入的新语义</li>
+      <p>默认 <code>0.95</code>，可用户调节。</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. KnowledgeProvider Trait 契约</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 Trait 定义</h4>
+      <p>```rust</p>
+      <p>pub trait KnowledgeProvider: Send + Sync {</p>
+      <p>    /// 根据 Query 向量、层级、上下文检索知识条目。</p>
+      <p>    ///</p>
+      <p>    /// 返回 None 表示无匹配（SG 不注入，返回 Continue）。</p>
+      <p>    fn retrieve(</p>
+      <p>        &amp;self,</p>
+      <p>        query: &amp;[f32],</p>
+      <p>        level: SemanticLevel,</p>
+      <p>        ctx: &amp;RetrieveContext&lt;'_&gt;,</p>
+      <p>    ) -&gt; Option<knowledgeentry>;</knowledgeentry></p>
+      <p>}</p>
+      <p>pub struct KnowledgeEntry {</p>
+      <p>    /// 将被 tokenizer + embed 层编码的文本</p>
+      <p>    pub text: String,</p>
+      <p>    /// 置信度，用于动态调节 α_effective = α × confidence</p>
+      <p>    /// 取值范围 [0.0, 1.0]</p>
+      <p>    pub confidence: f32,</p>
+      <p>}</p>
+      <p>pub struct RetrieveContext&lt;'a&gt; {</p>
+      <p>    /// 最近生成的 token 序列（解码成字符串由 Provider 负责）</p>
+      <p>    pub generated_tokens: &amp;'a [u32],</p>
+      <p>    /// AST 哨兵返回的语法上下文（可能为 None）</p>
+      <p>    pub ast: Option&lt;AstContext&lt;'a&gt;&gt;,</p>
+      <p>    /// 当前 decode step 号</p>
+      <p>    pub step: u64,</p>
+      <p>    /// 请求 ID</p>
+      <p>    pub request_id: RequestId,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 AstSentinel Trait 定义</h4>
+      <p>```rust</p>
+      <p>pub trait AstSentinel: Send + Sync {</p>
+      <p>    /// 根据最近生成的 token 序列返回当前语法上下文。</p>
+      <p>    ///</p>
+      <p>    /// 返回 None 表示无法解析（SG 仍可基于 Query 向量路由）。</p>
+      <p>    fn current_context&lt;'a&gt;(</p>
+      <p>        &amp;self,</p>
+      <p>        generated_tokens: &amp;'a [u32],</p>
+      <p>        tokenizer: &amp;dyn TokenizerLookup,</p>
+      <p>    ) -&gt; Option&lt;AstContext&lt;'a&gt;&gt;;</p>
+      <p>}</p>
+      <p>pub struct AstContext&lt;'a&gt; {</p>
+      <p>    /// Tree-sitter 节点 kind（如 "member_expression" / "call_expression"）</p>
+      <p>    pub node_kind: &amp;'a str,</p>
+      <p>    /// 光标所在的文本范围（用于 LSP 符号检索）</p>
+      <p>    pub cursor_line: u32,</p>
+      <p>    pub cursor_column: u32,</p>
+      <p>    /// 光标前已输入的字符串（用于补全匹配）</p>
+      <p>    pub prefix: &amp;'a str,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 实现者职责</h4>
+      <strong>gllm 不实现任何具体的 KnowledgeProvider / AstSentinel</strong>。开发者实现时可参考论文 §3.2 部署形态：
+      <li><strong>完全本地模式</strong>：LSP 客户端 + LSH 索引 + 向量查询，均在进程内</li>
+      <li><strong>云推理 + 本地知识库模式</strong>：KnowledgeProvider 通过 HTTP/gRPC 回调到用户本地服务</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. CallbackChain 集成（挑战 4 决策 B）</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 利用现有 LayerContext</h4>
+      <code>SPEC/05-OPTIMIZATIONS.md §1.2</code> 定义的 <code>LayerContext</code> 已包含 <code>hidden_state: &amp;'a mut [f32]</code>，SG Callback 直接在其上执行残差相加：
+      <p>```rust</p>
+      <p>impl LayerCallback for SemanticGatekeeperCallback {</p>
+      <p>    fn pre_node(&amp;mut self, ctx: &amp;LayerContext, node_idx: usize) -&gt; CallbackAction {</p>
+      <p>        if !self.is_detection_layer(node_idx) {</p>
+      <p>            return CallbackAction::Continue;</p>
+      <p>        }</p>
+      <p>        // 1. 稳定性追踪 (§5)</p>
+      <p>        let state = self.active_state.read();</p>
+      <p>        let last_token_hidden = &amp;ctx.hidden_state[ctx.hidden_state.len() - self.hidden_size..];</p>
+      <p>        let action = match &amp;state.anchor_hidden {</p>
+      <p>            Some(anchor) if self.cosine(last_token_hidden, anchor) &gt; self.stability_threshold</p>
+      <p>                &amp;&amp; self.ast_unchanged() =&gt;</p>
+      <p>            {</p>
+      <p>                Action::ReuseCache(state.v_knowledge.clone().unwrap())</p>
+      <p>            }</p>
+      <p>            _ =&gt; Action::FullCompute,</p>
+      <p>        };</p>
+      <p>        drop(state);</p>
+      <p>        let v_knowledge = match action {</p>
+      <p>            Action::ReuseCache(v) =&gt; v,</p>
+      <p>            Action::FullCompute =&gt; {</p>
+      <p>                // 2. 读 Q-tap (§4)</p>
+      <p>                let q = match self.q_tap_sink.read_last_q(ctx.layer_idx, ctx.step) {</p>
+      <p>                    Ok(q) =&gt; q,</p>
+      <p>                    Err(_) =&gt; return CallbackAction::Continue, // 陈旧 → 跳过</p>
+      <p>                };</p>
+      <p>                // 3. 层级路由</p>
+      <p>                let keys = &amp;self.level_keys_cache.keys[&amp;ctx.layer_idx];</p>
+      <p>                let scores = [self.cosine(&amp;q, &amp;keys[0]),</p>
+      <p>                              self.cosine(&amp;q, &amp;keys[1]),</p>
+      <p>                              self.cosine(&amp;q, &amp;keys[2])];</p>
+      <p>                let (best_idx, best_score) = argmax(&amp;scores);</p>
+      <p>                if best_score &lt; self.gate_threshold {</p>
+      <p>                    return CallbackAction::Continue;</p>
+      <p>                }</p>
+      <p>                // 4. 知识检索</p>
+      <p>                let level = SemanticLevel::from_idx(best_idx);</p>
+      <p>                let ast_ctx = self.ast_sentinel.as_ref()</p>
+      <p>                    .and_then(|s| s.current_context(&amp;ctx.generated_tokens, &amp;self.tokenizer));</p>
+      <p>                let entry = match self.knowledge_provider.retrieve(</p>
+      <p>                    &amp;q, level, &amp;RetrieveContext { /* ... */ }</p>
+      <p>                ) {</p>
+      <p>                    Some(e) =&gt; e,</p>
+      <p>                    None =&gt; return CallbackAction::Continue,</p>
+      <p>                };</p>
+      <p>                // 5. 文本编码</p>
+      <p>                let tokens = self.tokenizer.encode(&amp;entry.text);</p>
+      <p>                let embed = self.small_graph_exec.run_embed_lookup(&amp;tokens)?;</p>
+      <p>                let v_k = mean_pool(&amp;embed, self.hidden_size);</p>
+      <p>                // 更新 active_state</p>
+      <p>                let mut state = self.active_state.write();</p>
+      <p>                state.level = Some(level);</p>
+      <p>                state.key_hash = Some(hash(&amp;entry.text));</p>
+      <p>                state.anchor_hidden = Some(last_token_hidden.to_vec());</p>
+      <p>                state.v_knowledge = Some(v_k.clone());</p>
+      <p>                state.ast_node_kind = ast_ctx.map(|c| c.node_kind.to_string());</p>
+      <p>                state.last_step = ctx.step;</p>
+      <p>                v_k * entry.confidence  // 置信度调节</p>
+      <p>            }</p>
+      <p>        };</p>
+      <p>        // 6. 残差相加 → 现有 InjectHidden</p>
+      <p>        let effective_alpha = self.alpha;  // 如果 ReuseCache 则 confidence 已编码在 v_knowledge</p>
+      <p>        let mut new_hidden = ctx.hidden_state.to_vec();</p>
+      <p>        let last_start = new_hidden.len() - self.hidden_size;</p>
+      <p>        for i in 0..self.hidden_size {</p>
+      <p>            new_hidden[last_start + i] += effective_alpha * v_knowledge[i];</p>
+      <p>        }</p>
+      <p>        CallbackAction::InjectHidden { data: new_hidden }</p>
+      <p>    }</p>
+      <p>    fn post_node(&amp;mut self, _ctx: &amp;LayerContext, _node_idx: usize, _output: &amp;[f32]) {}</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 不修改 CallbackAction</h4>
+      <p>复用现有 <code>CallbackAction::InjectHidden { data }</code>。零 API 扩展。</p>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 CallbackChain 优先级</h4>
+      <p>注册到 <code>SPEC/05-OPTIMIZATIONS.md §8</code> 执行优先级表，优先级 <strong>90</strong>（替代原 "Knowledge Inject"），理由：</p>
+      <li>高于 RAG Inject（80），因 SG 是精细化层级注入，RAG 是粗粒度 Prompt 融合，两者并存时 SG 先执行</li>
+      <li>低于 Prefetch（100），因 Prefetch 是内存调度，与 SG 语义正交</li>
+    </section>
+    <section id="s7.4" data-section="7.4">
+      <h4>7.4 Mega-Kernel 路径集成 (ARCH-RUST-IS-CODEGEN 合规)</h4>
+      <p>&gt; <strong>铁律</strong>: mega-kernel 路径中 Rust 不参与推理循环。SG 的路由/检索/注入</p>
+      <p>&gt; 全部编译为 JIT 机器码，通过 <code>hook_ctx_ptr</code> 共享内存通信。</p>
+    </section>
+    <section id="s7.4.1" data-section="7.4.1">
+      <h5>7.4.1 架构差异</h5>
+      <p>非 mega-kernel 路径中，executor 的 <code>run_batch_forward()</code> 将 <code>SemanticGatekeeperCallbackShim</code> 注册到 <code>CallbackChain</code>，JIT 层循环通过 FFI 回调到 Rust 的 <code>dispatch_pre_node()</code>。</p>
+      <p>Mega-kernel 路径中，JIT 编译期根据 <code>MegaKernelBusinessConfig.semantic_gatekeeper</code> 配置，在 CompilerGraph 中插入 <code>SgDetect</code>/<code>SgInject</code> Op，这些 OpKind 被 JIT codegen 编译为直接操作共享内存的机器码 — 无 Rust 回调。</p>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>SG 实现</td>
+        </tr>
+        <tr>
+          <td>通信机制</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>batch_forward_gpu_pure</td>
+          <td> (仅 GPU macro 路径,Executor 已绕过)</td>
+        </tr>
+        <tr>
+          <td>Rust </td>
+          <td>LayerCallback::pre_node()</td>
+        </tr>
+        <tr>
+          <td>Rust </td>
+          <td>CallbackChain::dispatch_pre_node()</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>mega-kernel generate_single_sequence</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>JIT 内嵌 </td>
+          <td>SgDetect</td>
+          <td> + </td>
+          <td>SgInject</td>
+          <td> Op</td>
+        </tr>
+        <tr>
+          <td>hook_ctx_ptr</td>
+          <td> 共享内存</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.4.2" data-section="7.4.2">
+      <h5>7.4.2 共享内存布局 (hook_ctx_ptr)</h5>
+      <code>hook_ctx_ptr</code>（ABI arg 15）指向以下结构体，由 Rust 侧在每次 <code>generate_single_sequence</code> 调用前填充：
+      <p>```rust</p>
+      <p>#[repr(C)]</p>
+      <p>pub struct SgSharedMemory {</p>
+      <p>    /// SG 控制标志</p>
+      <p>    /// bit 0: sg_enabled (1=激活, 0=不注入, SgDetect/SgInject 编译为 NOP)</p>
+      <p>    /// bit 1-31: reserved</p>
+      <p>    pub control: u32,</p>
+      <p>    /// 当前检测层的检测偏移 (由 Rust 侧 KnowledgeProvider 写入)</p>
+      <p>    pub knowledge_offset: u32,</p>
+      <p>    /// 知识向量维度 (= hidden_size)</p>
+      <p>    pub knowledge_dim: u32,</p>
+      <p>    /// 知识置信度 (IEEE 754 f32 位模式, 0.0 表示无注入)</p>
+      <p>    pub confidence: u32,</p>
+      <p>    /// 检测层提取的 hidden state (由 JIT SgDetect 写入, 回调函数读)</p>
+      <p>    pub detect_hidden: [f32; 0], // 动态长度 = hidden_size</p>
+      <p>    /// 知识残差向量 (由回调函数写入, JIT SgInject 读取)</p>
+      <p>    pub knowledge_vector: [f32; 0], // 动态长度 = hidden_size</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.4.2.1" data-section="7.4.2.1">
+      <h5>7.4.2.1 Mega-Kernel Callback Table (ABI arg 20)</h5>
+      <p>Mega-kernel 新增 <code>callback_table_ptr</code>（ABI arg 20）传递一个 C 风格函数指针表。JIT 在 SgDetect 完成后通过 <code>CALL [table[slot].fn_ptr](table[slot].ctx)</code> 回调外部函数，外部函数读 <code>SgSharedMemory.detect_hidden</code>，写 <code>knowledge_vector</code> + <code>confidence</code>，JIT 返回后执行 SgInject。</p>
+      <p>```c</p>
+      <p>// 统一回调签名：纯 C ABI</p>
+      <p>typedef u32 (<em>mega_kernel_callback_fn)(const void</em> ctx);</p>
+      <p>// 一个 slot = 16 字节 (fn_ptr + ctx)</p>
+      <p>struct callback_entry {</p>
+      <p>    mega_kernel_callback_fn fn_ptr;  // NULL = 未注册，JIT 跳过 (零开销)</p>
+      <p>    const void* ctx;                 // 回调专属数据</p>
+      <p>};</p>
+      <p>// callback table = 扁平指针数组</p>
+      <p>struct mega_kernel_callback_table {</p>
+      <p>    struct callback_entry entries[8]; // 8 slots，每 slot 16B，共 128B</p>
+      <p>};</p>
+      <p>```</p>
+      <strong>Slot 分配</strong>：
+      <strong>Slot 0 (SG) ctx 布局</strong>：
+      <p>```c</p>
+      <p>struct sg_callback_ctx {</p>
+      <p>    void* sg_shared_memory;  // SgSharedMemory 指针（detect_hidden + knowledge_vector）</p>
+      <p>    void* provider_state;    // KnowledgeProvider 的具体实现状态（由注册者提供）</p>
+      <p>    u32   hidden_size;</p>
+      <p>    float alpha;</p>
+      <p>};</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>Slot ID</th>
+        </tr>
+        <tr>
+          <td>名称</td>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>SPEC</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>SG_KNOWLEDGE_RETRIEVE</td>
+        </tr>
+        <tr>
+          <td>SG 知识检索回调</td>
+        </tr>
+        <tr>
+          <td>§7.4</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>GUARDRAIL_CHECK</td>
+        </tr>
+        <tr>
+          <td>Guardrail veto 探针</td>
+        </tr>
+        <tr>
+          <td>§14</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>Reserved</td>
+        </tr>
+        <tr>
+          <td>—（CoT 不使用 mega-kernel callback，纯 Client 编排）</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>EARLY_EXIT_QUERY</td>
+        </tr>
+        <tr>
+          <td>Early Exit 层查询</td>
+        </tr>
+        <tr>
+          <td>§16</td>
+        </tr>
+        <tr>
+          <td>4..7</td>
+        </tr>
+        <tr>
+          <td>保留</td>
+        </tr>
+        <tr>
+          <td>未来扩展</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+      </table>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="7.4.3">
+      <h5>7.4.3 Mega-Kernel SG 数据流（Callback Table 架构）</h5>
+      <p>```</p>
+      <p>每次 generate_single_sequence 调用:</p>
+      <p>1. Rust 侧 (generate 前准备):</p>
+      <p>   a. Client 调用 register_semantic_gatekeeper() → 设置 sg_config</p>
+      <p>   b. Executor 准备:</p>
+      <li>SgSharedMemory: sg_enabled=1, knowledge_dim=hidden_size</li>
+      <li>MegaKernelCallbackTable: slot[0] = {sg_knowledge_retrieve_callback, &amp;sg_callback_ctx}</li>
+      <p>2. Mega-Kernel JIT 层循环 (每 decode step):</p>
+      <p>   a. [if SgDetect layer] SgDetect Op:</p>
+      <li>从当前 activation 提取最后 token hidden → 写入 SgSharedMemory.detect_hidden</li>
+      <li>MemFence(Release) — 保证 detect_hidden 对回调可见</li>
+      <p>   b. [if callback_table_ptr != NULL &amp;&amp; slot[0].fn_ptr != NULL]:</p>
+      <li>LoadCallbackEntry(table, 0, fn_ptr, ctx)</li>
+      <li>GprSkipIfNull(fn_ptr) — 零开销快速路径</li>
+      <li>NativeCall(ret_val, fn_ptr, ctx) — CALL sg_knowledge_retrieve_callback</li>
+      <p>        回调内部: 读 detect_hidden → KnowledgeProvider.retrieve() → 写 knowledge_vector + confidence</p>
+      <li>MemFence(Acquire) — 保证 JIT 读到最新 knowledge_vector</li>
+      <p>   c. [if SgInject layer] SgInject Op:</p>
+      <li>读 SgSharedMemory.confidence → CMP 0.0 → JE skip (无注入)</li>
+      <li>读 SgSharedMemory.knowledge_vector</li>
+      <li>hidden[-1] += alpha * confidence * knowledge_vector (SIMD FMA)</li>
+      <li>MemFence(Release)</li>
+      <p>3. Rust 侧 (generate 后清理):</p>
+      <li>callback_table slot[0].fn_ptr = NULL (注销)</li>
+      <li>SgSharedMemory 随 scratchpad 生命周期结束</li>
+      <p>```</p>
+      <strong>零开销保证</strong>：
+      <li><code>callback_table_ptr</code> 为 NULL → <code>GprSkipIfNull</code> 跳过全部 callback + SG 代码（1 条 TEST + 1 条 JZ）</li>
+      <li><code>slot[0].fn_ptr</code> 为 NULL → 同样跳过（未注册 SG 时）</li>
+      <li>符合 ARCH-FULL-JIT：回调是 JIT 发出的 CALL 指令，不经过 Rust 调度</li>
+    </section>
+    <section id="artifact-module" data-artifact-type="module" data-section="7.4.4">
+      <h5>7.4.4 NO_ISLAND_MODULE 验证</h5>
+      <p>Mega-kernel 路径的 NO_ISLAND_MODULE 验证通过 <code>pre_node_detection_layer_count</code> 原子计数器实现：</p>
+      <p>1. <strong>非 mega-kernel 路径</strong>: <code>SemanticGatekeeperCallback.pre_node()</code> 中的 <code>AtomicUsize</code> 递增</p>
+      <p>2. <strong>Mega-kernel 路径</strong>: SgDetect Op 在 JIT 编译期静态存在（由 CompilerGraph 拓扑决定），运行时不需要动态计数器</p>
+      <p>E2E 测试通过以下方式验证 mega-kernel 路径:</p>
+      <li>验证 <code>hook_ctx_ptr</code> 非空（SG 配置传递到 mega-kernel ABI）</li>
+      <li>验证 JIT 编译的 CompilerGraph 包含 <code>SgDetect</code>/<code>SgInject</code> Op</li>
+      <li>验证 generate 输出在有 SG 时产生可测量差异</li>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. E2E 行为差异验证协议</h3>
+    </section>
+    <section id="artifact-module" data-artifact-type="module" data-section="8.1">
+      <h4>8.1 NO_ISLAND_MODULE 合规</h4>
+      <p>SG 是公开 SDK API，零非测试调用方是可接受的。但必须有 E2E 测试证明：</p>
+      <p>1. 注册 SG + 调用 <code>generate()</code> 真实走过 <code>SemanticGatekeeperCallback.pre_node</code>（至少一次命中）</p>
+      <p>2. <strong>行为差异</strong>：相同 query 在「注册了返回特定知识的 Provider」vs「未注册」下生成的 token 有可测量差异，且差异方向符合知识内容</p>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 E2E 测试用例（关联 `SPEC/01-REQUIREMENTS.md §12`）</h4>
+      <table>
+        <tr>
+          <th>TEST ID</th>
+        </tr>
+        <tr>
+          <td>场景</td>
+        </tr>
+        <tr>
+          <td>验收</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-001</td>
+        </tr>
+        <tr>
+          <td>Level Keys 预计算</td>
+        </tr>
+        <tr>
+          <td>加载 SmolLM2-135M + SG config，验证 </td>
+          <td>LevelKeysCache</td>
+          <td> 对每个 detection layer 填充 3 个非全零向量</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-002</td>
+        </tr>
+        <tr>
+          <td>Q-tap 读写</td>
+        </tr>
+        <tr>
+          <td>注册 SG（无 Provider），调用 </td>
+          <td>generate</td>
+          <td>，验证 ring buffer 读出的 Q 与 CPU 参考 </td>
+          <td>q_proj(hidden)[-1]</td>
+          <td> 数值一致（L2 误差 &lt; 1e-4）</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-003</td>
+        </tr>
+        <tr>
+          <td>层级路由门控</td>
+        </tr>
+        <tr>
+          <td>Mock Provider 始终返回 None；调用生成，验证 SG pre_node 被触发 ≥1 次，hidden_state 未被修改（cosine 相似度 = 1.0）</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-004</td>
+        </tr>
+        <tr>
+          <td>残差注入行为差异</td>
+        </tr>
+        <tr>
+          <td>Provider 返回固定文本 </td>
+          <td>"Paris"</td>
+          <td>；询问 </td>
+          <td>"Capital of France is"</td>
+          <td>；对比无 SG 与有 SG 输出 token 分布，验证 </td>
+          <td>"Paris"</td>
+          <td> logit 明显提升</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-005</td>
+        </tr>
+        <tr>
+          <td>稳定性追踪命中率</td>
+        </tr>
+        <tr>
+          <td>连续 decode 20 步相同语义上下文；验证 </td>
+          <td>active_state</td>
+          <td> 复用次数 ≥ 15（&gt;75%）</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-006</td>
+        </tr>
+        <tr>
+          <td>AST 节点变更强制刷新</td>
+        </tr>
+        <tr>
+          <td>注册 Mock AstSentinel，第 10 步切换 node_kind；验证 state 刷新、FullCompute 重新触发</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-007</td>
+        </tr>
+        <tr>
+          <td>KnowledgeProvider 置信度</td>
+        </tr>
+        <tr>
+          <td>Provider 返回 confidence=0.0 的 entry；验证 </td>
+          <td>effective_alpha = 0</td>
+          <td>，hidden_state 未修改</td>
+        </tr>
+        <tr>
+          <td>TEST-SG-008</td>
+        </tr>
+        <tr>
+          <td>多检测层</td>
+        </tr>
+        <tr>
+          <td>detection_depths=[0.5, 0.75]；验证两个检测层都能独立触发注入</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 禁止的测试反模式</h4>
+      <li>❌ 只验证"API 可调用"而不验证行为差异（违反 NO_ISLAND_MODULE 铁律）</li>
+      <li>❌ 用 mock Callback 替代真实 SemanticGatekeeperCallback</li>
+      <li>❌ 跳过 Q-tap 真实读取，用 Rust 手写 <code>q_proj</code> 替代</li>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 部署形态</h3>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>9.1 完全本地模式</h4>
+      <p>所有组件驻留开发者本地机器：</p>
+      <li>gllm 推理引擎（Rust binary）</li>
+      <li>SG Callback（同进程）</li>
+      <li>KnowledgeProvider 实现（同进程 LSP/LSH）</li>
+      <p>零网络延迟。适合离线、高隐私场景。</p>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2 云端推理 + 本地知识库模式（推荐）</h4>
+      <p>```</p>
+      <p>用户侧:</p>
+      <p>  LSP 扫描器 + LSH 索引 + 向量化（CPU） + 本地 HTTP/gRPC 服务</p>
+      <p>云端:</p>
+      <p>  gllm 推理引擎</p>
+      <p>  SemanticGatekeeperCallback 注册 HttpKnowledgeProvider</p>
+      <p>  → HttpKnowledgeProvider.retrieve() 发起回调到用户本地服务</p>
+      <p>```</p>
+      <strong>优势</strong>：
+      <li><strong>零隐私风险</strong>：代码与符号签名完全本地，云端无数据落地</li>
+      <li><strong>零 GPU 显存压力</strong>：向量库在用户机器</li>
+      <li><strong>延迟容忍</strong>：任务级代码生成本来就耗时分钟级，100-500ms 网络往返无显著影响</li>
+      <li><strong>成本极低</strong>：云端仅标准推理实例</li>
+    </section>
+    <section id="s9.3" data-section="9.3">
+      <h4>9.3 SG Callback 对部署模式无感</h4>
+      <code>KnowledgeProvider</code> trait 是抽象接口。Provider 实现者自由选择本地 / 远程。SG 内核路由、路由、注入逻辑不变。
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 与现有方法的对比</h3>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>RAG</td>
+        </tr>
+        <tr>
+          <td>Constrained Decoding</td>
+        </tr>
+        <tr>
+          <td>Function Calling</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Semantic Gatekeeper</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>知识注入位置</td>
+        </tr>
+        <tr>
+          <td>Prompt（输入端）</td>
+        </tr>
+        <tr>
+          <td>Logits（输出端）</td>
+        </tr>
+        <tr>
+          <td>显式工具调用</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Hidden States（推理中）</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>模型是否可忽略</td>
+        </tr>
+        <tr>
+          <td>是</td>
+        </tr>
+        <tr>
+          <td>否（强制）</td>
+        </tr>
+        <tr>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>否（软偏置）</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>泛化能力</td>
+        </tr>
+        <tr>
+          <td>依赖检索</td>
+        </tr>
+        <tr>
+          <td>刚性无泛化</td>
+        </tr>
+        <tr>
+          <td>依赖工具描述</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>保留别名/新符号泛化</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>训练需求</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>可能微调</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>无</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>检索时机</td>
+        </tr>
+        <tr>
+          <td>生成前单次</td>
+        </tr>
+        <tr>
+          <td>每 Token</td>
+        </tr>
+        <tr>
+          <td>模型决定</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>按需，隐藏状态主动触发</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>知识层级区分</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>工具级</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>L1/L2/L3 自适应</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>延迟开销</td>
+        </tr>
+        <tr>
+          <td>检索延迟</td>
+        </tr>
+        <tr>
+          <td>钳制计算</td>
+        </tr>
+        <tr>
+          <td>API 调用</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>稳定性追踪下 &lt;0.1%</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>11. 交叉引用</h3>
+      <table>
+        <tr>
+          <th>主题</th>
+        </tr>
+        <tr>
+          <td>位置</td>
+        </tr>
+        <tr>
+          <td>用户 API 定义</td>
+        </tr>
+        <tr>
+          <td>SPEC/04-API-DESIGN.md §7</td>
+        </tr>
+        <tr>
+          <td>内部实现架构</td>
+        </tr>
+        <tr>
+          <td>SPEC/04-API-DESIGN.md §8</td>
+        </tr>
+        <tr>
+          <td>FusedAttentionLayer Q-tap 扩展</td>
+        </tr>
+        <tr>
+          <td>SPEC/08-EXECUTOR.md §4.2</td>
+        </tr>
+        <tr>
+          <td>CallbackChain + InjectHidden</td>
+        </tr>
+        <tr>
+          <td>SPEC/05-OPTIMIZATIONS.md §1 §2.9 §7 §8</td>
+        </tr>
+        <tr>
+          <td>Epilogue 白嫖网络（Q-tap 基础设施）</td>
+        </tr>
+        <tr>
+          <td>SPEC/05-OPTIMIZATIONS.md §5</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel 执行模型</td>
+        </tr>
+        <tr>
+          <td>SPEC/03-GRAPH-IR.md §4</td>
+        </tr>
+        <tr>
+          <td>SymDim 穿透协议</td>
+        </tr>
+        <tr>
+          <td>SPEC/DOCS/scheduling/symdim-threading-protocol.md</td>
+        </tr>
+        <tr>
+          <td>JIT 编译缓存（小图编译一次常驻）</td>
+        </tr>
+        <tr>
+          <td>SPEC/DOCS/scheduling/jit-cache-protocol.md</td>
+        </tr>
+        <tr>
+          <td>核心铁律</td>
+        </tr>
+        <tr>
+          <td>SPEC/00-PHILOSOPHY.md</td>
+        </tr>
+        <tr>
+          <td>需求清单</td>
+        </tr>
+        <tr>
+          <td>SPEC/01-REQUIREMENTS.md §12</td>
+          <td> REQ-SG-001..008</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-entity-ref="ENT-SG-SHARED-MEMORY ENT-KNOWLEDGE-PROVIDER" <h2="" data-req-api="POST /internal/sg/callback" data-req-entity="ENT-SEMANTIC-GATEKEEPER" data-req-category="business" data-req-domain="sg" data-req-status="implemented" data-req="REQ-SG-001" id="req-sg-001">Semantic Gatekeeper 核心 (REQ-SG-001)
+      
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Semantic Gatekeeper Level Keys 预计算正确</li>
+        <li id="id-2" data-criterion="2">Q-tap 截获机制实现完整</li>
+        <li id="id-3" data-criterion="3">Mega-Kernel SgDetect/SgInject 共享内存正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SG-001" data-test="TEST-SG-001" id="test-sg-001">TEST-SG-001: Semantic Gatekeeper核心测试<p>验证REQ-SG-001相关功能正确性</p>
+      <div id="semantic-gatekeeper-level-keys-预计算正确" data-criterion="Semantic Gatekeeper Level Keys 预计算正确">Semantic Gatekeeper Level Keys 预计算正确</div>
+      <div id="q-tap-截获机制实现完整" data-criterion="Q-tap 截获机制实现完整">Q-tap 截获机制实现完整</div>
+      <div id="mega-kernel-sgdetect-sginject-共享内存正确" data-criterion="Mega-Kernel SgDetect/SgInject 共享内存正确">Mega-Kernel SgDetect/SgInject 共享内存正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+<section id="ent-semantic-gatekeeper" data-entity="ENT-SEMANTIC-GATEKEEPER" data-req-ref="REQ-SG-001" data-entity-model-type="relational" data-xref="REQ-SG-001"><h3>ENT-SEMANTIC-GATEKEEPER Semantic Gatekeeper</h3><table data-entity-table="ENT-SEMANTIC-GATEKEEPER"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="gate_mode" data-type="string" data-required="true"><td>gate_mode</td><td>string</td><td>是</td><td></td><td>Gate 模式（allow/deny/modify/defer）</td></tr><tr data-field="max_match_tokens" data-type="number" data-required="true"><td>max_match_tokens</td><td>number</td><td>是</td><td></td><td>最大匹配 token 数</td></tr><tr data-field="num_rules" data-type="number" data-required="true"><td>num_rules</td><td>number</td><td>是</td><td></td><td>规则数量</td></tr><tr data-field="jit_compiled" data-type="boolean" data-required="false"><td>jit_compiled</td><td>boolean</td><td>否</td><td></td><td>是否启用 JIT 编译 Gate 逻辑</td></tr><tr data-field="hook_slot" data-type="string" data-required="false"><td>hook_slot</td><td>string</td><td>否</td><td></td><td>关联 Hook ABI slot 名称</td></tr></table></section><section id="api-sg-callback" data-api="POST /internal/sg/callback" data-req-ref="REQ-CALLBACK-001 REQ-CALLBACK-002 REQ-CALLBACK-003 REQ-SG-001" data-api-type="internal" data-api-name="API-SG-CALLBACK" data-xref="REQ-CALLBACK-001 REQ-CALLBACK-002 REQ-CALLBACK-003 REQ-SG-001"><h4>POST /internal/sg/callback — SemanticGatekeeperCallback</h4><p>语义守门人回调注入 API，在生成过程中注入语义检查回调</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="SGCallback" data-required="true" data-param="callback"><td>callback</td><td>SGCallback</td><td>是</td><td>语义守门人回调函数</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="CallbackHandle"><td>200</td><td>成功</td><td>CallbackHandle</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"CallbackHandle"}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：SEMANTIC-GATEKEEPER.html</address>
+  </footer>
+</body>
+</html>

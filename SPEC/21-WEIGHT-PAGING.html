@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
   <meta charset="utf-8">
-  <meta content="21-WEIGHT-PAGING" name="spec-file">
-  <meta content="other" name="spec-category">
+  <meta name="spec-file" content="21-WEIGHT-PAGING">
+  <meta name="spec-category" content="other">
 
   <script type="application/ld+json">
   { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"21-WEIGHT-PAGING", "dependencies":[], "children":[] }
@@ -689,7 +689,7 @@
       <p>}</p>
       <p>```</p>
     </section>
-    <section id="s4" data-section="4">
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="4">
       <h3>§4 数据流</h3>
     </section>
     <section id="s4.1" data-section="4.1">
@@ -752,7 +752,7 @@
     <section id="s5" data-section="5">
       <h3>§5 REQ 清单</h3>
     </section>
-    <section id="req-wp-001" data-req="REQ-WP-001" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="001" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-001: WeightTierManager 新增 decide_via_gmm
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="001" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-001" id="req-wp-001">REQ-WP-001: WeightTierManager 新增 decide_via_gmm
       <strong>描述</strong>: <code>WeightTierManager</code> 新增 <code>decide_via_gmm()</code> 方法，查询 <code>GlobalMemoryManager</code> 的 TierUsage 做决策，而非使用独立容量计数器。保留原有 <code>decide()</code> 方法用于测试。
       <strong>验收标准</strong>:
       <p>1. <code>decide_via_gmm()</code> 正确读取 GMM 的 L1/L2/L3 可用空间</p>
@@ -762,18 +762,18 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
@@ -782,21 +782,21 @@
     
 
 
-<section id="req-wp-011" data-req="REQ-WP-011" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-WEIGHT-PAGING"><h3>REQ-WP-011</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+<section id="req-wp-011" data-req="REQ-WP-011" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="POST /internal/weight/paging"><h3>REQ-WP-011</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
 
-<section id="req-wp-013" data-req="REQ-WP-013" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="API-WEIGHT-PAGING"><h3>REQ-WP-013</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+<section id="req-wp-013" data-req="REQ-WP-013" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-PAGER" data-req-api="POST /internal/weight/paging"><h3>REQ-WP-013</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
 
 
-<section id="test-wp-001" data-test="TEST-WP-001" data-req-ref="REQ-WP-001" data-test-categories="unit"><h3="">TEST-WP-001: 权重分页管理测试<p>验证REQ-WP-001相关功能正确性</p>
+<section id="test-wp-001" data-test="TEST-WP-001" data-req-ref="REQ-WP-001" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-001: 权重分页管理测试<p>验证REQ-WP-001相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-002" data-req="REQ-WP-002" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="002" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-002: 权重页 HGAL 注册
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="002" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-002" id="req-wp-002">REQ-WP-002: 权重页 HGAL 注册
       <strong>描述</strong>: 在 executor 初始化完成后，将权重页注册到 HGAL 的 <code>page_metadata</code> 和 <code>sequence_groups</code>。MoE 专家权重 <code>is_pinned = false</code>，Dense 层权重 <code>is_pinned = true</code>。
       <strong>验收标准</strong>:
       <p>1. 权重页出现在 <code>hgal.page_metadata</code> 中</p>
@@ -808,33 +808,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-002" data-test="TEST-WP-002" data-req-ref="REQ-WP-002" data-test-categories="unit"><h3="">TEST-WP-002: 权重分页管理测试<p>验证REQ-WP-002相关功能正确性</p>
+    <section id="test-wp-002" data-test="TEST-WP-002" data-req-ref="REQ-WP-002" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-002: 权重分页管理测试<p>验证REQ-WP-002相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-003" data-req="REQ-WP-003" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="003" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-003: PagePayloadKind::DenseLayerWeight
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="003" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-003" id="req-wp-003">REQ-WP-003: PagePayloadKind::DenseLayerWeight
       <strong>描述</strong>: 新增 <code>DenseLayerWeight</code> 枚举变体，<code>is_evictable()</code> 返回 <code>false</code>。<code>UnifiedVirtualPage</code> 新增 <code>dense_layer()</code> 构造函数。
       <strong>验收标准</strong>:
       <p>1. <code>PagePayloadKind::DenseLayerWeight</code> 编译通过</p>
@@ -844,33 +844,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-003" data-test="TEST-WP-003" data-req-ref="REQ-WP-003" data-test-categories="unit"><h3="">TEST-WP-003: 权重分页管理测试<p>验证REQ-WP-003相关功能正确性</p>
+    <section id="test-wp-003" data-test="TEST-WP-003" data-req-ref="REQ-WP-003" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-003: 权重分页管理测试<p>验证REQ-WP-003相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-004" data-req="REQ-WP-004" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="004" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-004: HGAL 权重页驱逐优先级
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="004" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-004" id="req-wp-004">REQ-WP-004: HGAL 权重页驱逐优先级
       <strong>描述</strong>: <code>compute_group_priority()</code> 中增加 <code>PagePayloadKind</code> 感知。权重页驱逐优先级低于 KV 页（先驱逐权重，保护 KV）。
       <strong>验收标准</strong>:
       <p>1. Cold Expert 权重页优先级 &lt; Standby KV 页</p>
@@ -880,33 +880,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-004" data-test="TEST-WP-004" data-req-ref="REQ-WP-004" data-test-categories="unit"><h3="">TEST-WP-004: 权重分页管理测试<p>验证REQ-WP-004相关功能正确性</p>
+    <section id="test-wp-004" data-test="TEST-WP-004" data-req-ref="REQ-WP-004" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-004: 权重分页管理测试<p>验证REQ-WP-004相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-005" data-req="REQ-WP-005" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="005" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-005: Executor step 接入 ExpertWeightPrefetcher
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="005" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-005" id="req-wp-005">REQ-WP-005: Executor step 接入 ExpertWeightPrefetcher
       <strong>描述</strong>: 在 <code>step()</code> 的 MoE dispatch plan 生成后，调用 <code>prefetcher.update_location()</code> + <code>schedule_prefetch()</code> 生成预取请求。
       <strong>验收标准</strong>:
       <p>1. <code>schedule_prefetch()</code> 在每个 step 中被调用（当 MoE 模型时）</p>
@@ -916,33 +916,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-005" data-test="TEST-WP-005" data-req-ref="REQ-WP-005" data-test-categories="unit"><h3="">TEST-WP-005: 权重分页管理测试<p>验证REQ-WP-005相关功能正确性</p>
+    <section id="test-wp-005" data-test="TEST-WP-005" data-req-ref="REQ-WP-005" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-005: 权重分页管理测试<p>验证REQ-WP-005相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-006" data-req="REQ-WP-006" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="006" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-006: 权重页 Tier 迁移执行
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="006" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-006" id="req-wp-006">REQ-WP-006: 权重页 Tier 迁移执行
       <strong>描述</strong>: 将 <code>ExpertWeightPrefetcher</code> 的预取请求转化为 <code>GlobalMemoryManager::migrate_page()</code> 调用，执行实际的权重页 Tier 迁移。
       <strong>验收标准</strong>:
       <p>1. 预取请求触发 <code>GMM.migrate_page(Tier::L2 → Tier::L1)</code> 或 <code>L3 → L2</code></p>
@@ -952,33 +952,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-006" data-test="TEST-WP-006" data-req-ref="REQ-WP-006" data-test-categories="unit"><h3="">TEST-WP-006: 权重分页管理测试<p>验证REQ-WP-006相关功能正确性</p>
+    <section id="test-wp-006" data-test="TEST-WP-006" data-req-ref="REQ-WP-006" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-006: 权重分页管理测试<p>验证REQ-WP-006相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-007" data-req="REQ-WP-007" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="007" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-007: weight_page_table 权重页表
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="007" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-007" id="req-wp-007">REQ-WP-007: weight_page_table 权重页表
       <strong>描述</strong>: Executor 新增 <code>weight_page_table: HashMap&lt;usize, Vec&lt;PhysicalId&gt;&gt;</code>，记录每层的权重物理页映射。加载时填充，运行时由 Tier 迁移更新。
       <strong>验收标准</strong>:
       <p>1. 加载完成后 <code>weight_page_table</code> 包含所有层的权重页</p>
@@ -988,33 +988,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-007" data-test="TEST-WP-007" data-req-ref="REQ-WP-007" data-test-categories="unit"><h3="">TEST-WP-007: 权重分页管理测试<p>验证REQ-WP-007相关功能正确性</p>
+    <section id="test-wp-007" data-test="TEST-WP-007" data-req-ref="REQ-WP-007" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-007: 权重分页管理测试<p>验证REQ-WP-007相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-008" data-req="REQ-WP-008" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="008" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-008: 内存压力下权重页驱逐
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="008" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-008" id="req-wp-008">REQ-WP-008: 内存压力下权重页驱逐
       <strong>描述</strong>: <code>check_memory_pressure()</code> 在 KV 蒸馏和 swap 回收之前，先尝试驱逐 Cold Expert 权重页。
       <strong>验收标准</strong>:
       <p>1. <code>check_memory_pressure()</code> 查询 HGAL 的 Cold Expert 权重 group</p>
@@ -1025,33 +1025,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-008" data-test="TEST-WP-008" data-req-ref="REQ-WP-008" data-test-categories="unit"><h3="">TEST-WP-008: 权重分页管理测试<p>验证REQ-WP-008相关功能正确性</p>
+    <section id="test-wp-008" data-test="TEST-WP-008" data-req-ref="REQ-WP-008" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-008: 权重分页管理测试<p>验证REQ-WP-008相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-009" data-req="REQ-WP-009" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="009" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-009: 权重页缺页恢复
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="009" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-009" id="req-wp-009">REQ-WP-009: 权重页缺页恢复
       <strong>描述</strong>: 当推理需要已被驱逐到 L2/L3 的权重页时，通过 <code>ExpertFaultHandler</code> 路径恢复。
       <strong>验收标准</strong>:
       <p>1. 访问 L2/L3 权重页触发 fault handler</p>
@@ -1062,33 +1062,33 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
-        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>
+        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-009" data-test="TEST-WP-009" data-req-ref="REQ-WP-009" data-test-categories="unit"><h3="">TEST-WP-009: 权重分页管理测试<p>验证REQ-WP-009相关功能正确性</p>
+    <section id="test-wp-009" data-test="TEST-WP-009" data-req-ref="REQ-WP-009" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-009: 权重分页管理测试<p>验证REQ-WP-009相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </h3=""></section>
 
-    <section id="req-wp-010" data-req="REQ-WP-010" data-req-status="implemented" data-req-domain="wp" data-req-category="business" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-section="010" data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-req-api="API-WEIGHT-PAGING">REQ-WP-010: 权重页遥测
+    <section data-entity-ref="ENT-WEIGHT-TIER-MANAGER ENT-EXPERT-WEIGHT-PREFETCHER ENT-UNIFIED-VIRTUAL-PAGE ENT-KV-CACHE" <h4="" data-section="010" data-req-api="POST /internal/weight/paging" data-req-entity="ENT-WEIGHT-TIER-MANAGER,ENT-EXPERT-WEIGHT-PREFETCHER,ENT-UNIFIED-VIRTUAL-PAGE,ENT-KV-CACHE" data-req-category="business" data-req-domain="wp" data-req-status="implemented" data-req="REQ-WP-010" id="req-wp-010">REQ-WP-010: 权重页遥测
       <strong>描述</strong>: Observer 新增权重页遥测指标：权重页总数、各 Tier 分布、驱逐/恢复次数、平均恢复延迟。
       <strong>验收标准</strong>:
       <p>1. <code>update_weight_metrics()</code> 记录权重页 L1/L2/L3 分布</p>
@@ -1098,34 +1098,34 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">权重分页管理实现完整</li>
-        <li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>        <li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
-        <li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
-        <li id="5" data-criterion="5">编译通过: cargo check</li>
+        <li id="id-1" data-criterion="1">权重分页管理实现完整</li>
+        <li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li>        <li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li>
+        <li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li>
+        <li id="id-5" data-criterion="5">编译通过: cargo check</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
       </a></div>
     </section>
-    <section id="test-wp-010" data-test="TEST-WP-010" data-req-ref="REQ-WP-010" data-test-categories="unit"><h3="">TEST-WP-010: 权重分页管理测试<p>验证REQ-WP-010相关功能正确性</p>
+    <section id="test-wp-010" data-test="TEST-WP-010" data-req-ref="REQ-WP-010" data-test-categories="unit" data-level="unit"><h3="">TEST-WP-010: 权重分页管理测试<p>验证REQ-WP-010相关功能正确性</p>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
     <section id="test-wp-011" data-test="TEST-WP-011" data-req-ref="REQ-WP-011" data-test-categories="integration"><h3>TEST-WP-011: 权重分页管理测试</h3><p>验证REQ-WP-011相关功能正确性</p><ul><li>验证权重分页与 KV cache 分页的统一管理</li><li>验证 HGAL 注册 UnifiedVirtualPage 类型</li><li>验证跨子系统分页一致性</li></ul></section>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       REQ-WP-011
     </h3=""></section>
 ck"&gt;编译通过: cargo check
@@ -1137,18 +1137,18 @@ ck"&gt;编译通过: cargo check
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       <div id="权重分页管理实现完整" data-criterion="权重分页管理实现完整">权重分页管理实现完整</div>
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     
 a-xref-type="req" href="21-WEIGHT-PAGING.html#REQ-WP-010"&gt;REQ-WP-010
 
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
-      <a data-xref-type="req" data-xref-id="req-wp-010" href="./21-WEIGHT-PAGING#req-wp-010" REQ-WP-010<="" a="">
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <a data-xref-type="req" data-xref-id="req-wp-010" href="./21-WEIGHT-PAGING#req-wp-010">REQ-WP-010
     <section id="s6" data-section="6">
       <h3>§6 实施优先级</h3>
       <p>Phase 1（基础接通）:</p>
@@ -1163,7 +1163,7 @@ a-xref-type="req" href="21-WEIGHT-PAGING.html#REQ-WP-010"&gt;REQ-WP-010
       <div id="weighttiermanager-gmm-tier-接入正确" data-criterion="WeightTierManager GMM Tier 接入正确">WeightTierManager GMM Tier 接入正确</div>
       <div id="expertweightprefetcher-step-预取正确" data-criterion="ExpertWeightPrefetcher step 预取正确">ExpertWeightPrefetcher step 预取正确</div>
       <div id="unifiedvirtualpage-hgal-注册正确" data-criterion="UnifiedVirtualPage HGAL 注册正确">UnifiedVirtualPage HGAL 注册正确</div>
-      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 &gt;
@@ -1341,11 +1341,11 @@ a-xref-type="req" href="21-WEIGHT-PAGING.html#REQ-WP-010"&gt;REQ-WP-010
         <tr>
           <td>依赖</td>
         </tr>
-        <td data-criteria=""><ol><li id="1" data-criterion="1">权重分页管理实现完整</li><li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li><li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li><li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li><li id="5" data-criterion="5">编译通过: cargo check</li></ol></td>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">权重分页管理实现完整</li><li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li><li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li><li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li><li id="id-5" data-criterion="5">编译通过: cargo check</li></ol></td>
       <div data-entity-api-xrefs="">
-      <a data-xref-type="entity" data-xref-id="ent-weight-tier-manager" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-weight-tier-manager" ENT-WEIGHT-TIER-MANAGER<="" a="">
-      <a data-xref-type="entity" data-xref-id="ent-expert-weight-prefetcher" href="./21-WEIGHT-PAGING#ent-expert-weight-prefetcher" ENT-EXPERT-WEIGHT-PREFETCHER<="" a="">
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-weight-tier-manager" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-weight-tier-manager">ENT-WEIGHT-TIER-MANAGER
+      <a data-xref-type="entity" data-xref-id="ent-expert-weight-prefetcher" href="./21-WEIGHT-PAGING#ent-expert-weight-prefetcher">ENT-EXPERT-WEIGHT-PREFETCHER
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
@@ -1360,11 +1360,11 @@ a-xref-type="req" href="21-WEIGHT-PAGING.html#REQ-WP-010"&gt;REQ-WP-010
         <tr>
           <td>SPEC 23</td>
         </tr>
-        <td data-criteria=""><ol><li id="1" data-criterion="1">权重分页管理实现完整</li><li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li><li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li><li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li><li id="5" data-criterion="5">编译通过: cargo check</li></ol></td>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">权重分页管理实现完整</li><li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li><li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li><li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li><li id="id-5" data-criterion="5">编译通过: cargo check</li></ol></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
@@ -1379,11 +1379,11 @@ a-xref-type="req" href="21-WEIGHT-PAGING.html#REQ-WP-010"&gt;REQ-WP-010
         <tr>
           <td>SPEC 24</td>
         </tr>
-        <td data-criteria=""><ol><li id="1" data-criterion="1">权重分页管理实现完整</li><li id="2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li><li id="3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li><li id="4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li><li id="5" data-criterion="5">编译通过: cargo check</li></ol></td>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">权重分页管理实现完整</li><li id="id-2" data-criterion="2">WeightTierManager GMM Tier 接入正确</li><li id="id-3" data-criterion="3">ExpertWeightPrefetcher step 预取正确</li><li id="id-4" data-criterion="4">UnifiedVirtualPage HGAL 注册正确</li><li id="id-5" data-criterion="5">编译通过: cargo check</li></ol></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page" ENT-UNIFIED-VIRTUAL-PAGE<="" a="">
+      <a data-xref-type="entity" data-xref-id="ent-unified-virtual-page" href="./35-QUANTIZED-WEIGHT-PAGE-COMPRESSION#ent-unified-virtual-page">ENT-UNIFIED-VIRTUAL-PAGE
       
       
       
@@ -1403,48 +1403,49 @@ a-xref-type="req" href="21-WEIGHT-PAGING.html#REQ-WP-010"&gt;REQ-WP-010
   
     <section data-section="entities">
       <h3>数据结构</h3>
-      <section data-entity-model-type="relational" data-entity="ENT-EXPERT-WEIGHT-PREFETCHER" id="ent-expert-weight-prefetcher"><h4>ENT-EXPERT-WEIGHT-PREFETCHER</h4><p>ExpertWeightPrefetcher — MoE专家权重预取器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_experts" data-type="number" data-required="true" <td="">num_experts<td>number</td><td>是</td><td>usize</td><td>Number of MoE experts</td></tr>
+      <section id="ent-expert-weight-prefetcher" data-entity="ENT-EXPERT-WEIGHT-PREFETCHER" data-req-ref="REQ-WP-001 REQ-WP-002 REQ-WP-003 REQ-WP-004 REQ-WP-005" data-entity-model-type="relational" data-entity-ref="ENT-KV-CACHE ENT-UNIFIED-VIRTUAL-PAGE ENT-WEIGHT-TIER-MANAGER" data-xref="REQ-WP-001 REQ-WP-002 REQ-WP-003 REQ-WP-004 REQ-WP-005"><h4>ENT-EXPERT-WEIGHT-PREFETCHER</h4><p>ExpertWeightPrefetcher — MoE专家权重预取器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_experts" data-type="number" data-required="true" <td="">num_experts<td>number</td><td>是</td><td>usize</td><td>Number of MoE experts</td></tr>
 <tr data-field="weight_layouts" data-type="string" data-required="true" <td="">weight_layouts<td>string</td><td>是</td><td>Vec&lt;ExpertWeightLayout&gt;</td><td>Per-expert weight layout (bytes, compressed_bytes, location)</td></tr><tr data-field="pcie_bandwidth_gbs" data-type="number" data-required="true" <td="">pcie_bandwidth_gbs<td>number</td><td>是</td><td>f32</td><td>PCIe bandwidth in GB/s</td></tr><tr data-field="layer_compute_time_us" data-type="number" data-required="true" <td="">
 layer_compute_time_us<td>number</td><td>是</td><td>f32</td><td>GPU single layer compute time in microseconds</td></tr><tr data-field="prefetch_priority" data-type="number" data-required="true" <td="">prefetch_priority<td>number</td><td>是</td><td>f64, default 1.0</td><td>StrategyBias scaling factor: &gt;1.0=prefetch more, &lt;1.0=prefetch fewer</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-GLLM-HEADER" id="ent-gllm-header"><h4>ENT-GLLM-HEADER</h4><p>GllmHeader — .gllm格式头 (64B)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="version" data-type="number" data-required="true" <td="">version<td>number</td><td>是</td><td>u32, currently 1</td><td>File format version</td></tr><tr data-field="flags" data-type="number" data-required="true" <td="">flags<td>number</td><td>是</td><td>
+      <section id="ent-gllm-header" data-entity="ENT-GLLM-HEADER" data-req-ref="REQ-ORPHAN-439 REQ-ORPHAN-441" data-entity-model-type="relational" data-xref="REQ-ORPHAN-439 REQ-ORPHAN-441"><h4>ENT-GLLM-HEADER</h4><p>GllmHeader — .gllm格式头 (64B)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="version" data-type="number" data-required="true" <td="">version<td>number</td><td>是</td><td>u32, currently 1</td><td>File format version</td></tr><tr data-field="flags" data-type="number" data-required="true" <td="">flags<td>number</td><td>是</td><td>
 u32, bit 0=global quantization flag</td><td>Bit flags</td></tr><tr data-field="meta_offset" data-type="number" data-required="true" <td="">meta_offset<td>number</td><td>是</td><td>u64</td><td>Offset to MessagePack metadata section</td></tr><tr data-field="tensor_count" data-type="number" data-required="true" <td="">tensor_count<td>number</td><td>是</td><td>u32</td><td>Number of tensors in the Tensor Directory</td></tr>
 <tr data-field="tensor_dir_offset" data-type="number" data-required="true" <td="">tensor_dir_offset<td>number</td><td>是</td><td>u64</td><td>Offset to Tensor Directory (array of 64-byte entries)</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>u32, typically 4096</td><td>Page alignment size</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-KV-CACHE" id="ent-kv-cache">
+      <section id="ent-kv-cache" data-entity="ENT-KV-CACHE" data-req-ref="REQ-KV-001 REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-SYMDIM-001" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-EMA-TRACKER ENT-EPILOGUE-POLICY ENT-EXPERT-WEIGHT-PREFETCHER ENT-KV-PAGE-HEADER ENT-MEGA-KERNEL-FN ENT-MLA-CONFIG" data-xref="REQ-KV-001 REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-SYMDIM-001">
         <h4>ENT-KV-CACHE</h4>
         <p>KvCache — KV缓存数据结构</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="num_kv_heads" data-type="number" data-required="true" <td="">num_kv_heads<td>number</td><td>是</td><td>usize</td><td>KV注意力头数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">
 head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度</td></tr><tr data-field="kv_dtype" data-type="string" data-required="true" <td="">kv_dtype<td>string</td><td>是</td><td>DType</td><td>KV cache元素dtype</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>usize</td><td>
 页大小 (tokens per page)</td></tr><tr data-field="num_kv_shared_layers" data-type="number" data-required="true" <td="">num_kv_shared_layers<td>number</td><td>是</td><td>usize</td><td>SharedKvRef共享KV层数</td></tr><tr data-field="is_mla" data-type="boolean" data-required="true" <td="">is_mla<td>boolean</td><td>是</td><td></td><td>是否为MLA模型</td></tr></table>
       </section>
-      <section data-entity-model-type="relational" data-entity="ENT-MODEL-MANIFEST" id="ent-model-manifest"><h4>ENT-MODEL-MANIFEST</h4><p>ModelManifest — 模型运行时数据与可选覆盖（struct ModelManifest in gllm/src/manifest/types.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="model_id" data-type="string" data-required="true" <td="">model_id<td>string</td><td>是</td><td>HF Model ID</td><td>模型标识（HuggingFace Model ID）</td></tr>
+      <section id="ent-model-manifest" data-entity="ENT-MODEL-MANIFEST" data-req-ref="REQ-LOADER-001 REQ-LOADER-002 REQ-TOK-GGUF-001 REQ-TOK-GGUF-002 REQ-TOK-GGUF-003" data-entity-model-type="relational" data-entity-ref="ENT-DEVICE-PROFILE ENT-MODEL-CONFIG" data-xref="REQ-LOADER-001 REQ-LOADER-002 REQ-TOK-GGUF-001 REQ-TOK-GGUF-002 REQ-TOK-GGUF-003"><h4>ENT-MODEL-MANIFEST</h4><p>ModelManifest — 模型运行时数据与可选覆盖（struct ModelManifest in gllm/src/manifest/types.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="model_id" data-type="string" data-required="true" <td="">model_id<td>string</td><td>是</td><td>HF Model ID</td><td>模型标识（HuggingFace Model ID）</td></tr>
 <tr data-field="arch" data-type="string" data-required="true" <td="">arch<td>string</td><td>是</td><td>ARCH_TABLE 规范名</td><td>架构规范名（运行时由注册表校验）</td></tr><tr data-field="kind" data-type="string" data-required="true" <td="">kind<td>string</td><td>是</td><td>Chat|Embedding|Reranker|Classifier</td><td>模型类型</td></tr><tr data-field="rope_base_override" data-type="number" data-required="false" <td="">rope_base_override<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>
 RoPE theta 覆盖（None=用 config.json）</td></tr><tr data-field="max_context_override" data-type="number" data-required="false" <td="">max_context_override<td>number</td><td>否</td><td>Option&lt;usize&gt;</td><td>最大上下文覆盖（None=用 config.json）</td></tr><tr data-field="is_moe" data-type="boolean" data-required="false" <td="">is_moe<td>boolean</td><td>否</td><td>moe_config.is_some()</td><td>是否为 MoE 模型</td></tr><tr data-field="num_tensor_roles" data-type="number" data-required="false" <td="">
 num_tensor_roles<td>number</td><td>否</td><td>HashMap 大小</td><td>张量角色映射数量</td></tr><tr data-field="family" data-type="string" data-required="false" <td="">family<td>string</td><td>否</td><td>Decoder|Encoder</td><td>架构族（从别名表查询）</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-QUANT-TYPE" id="ent-quant-type"><h4>ENT-QUANT-TYPE</h4><p>QuantType — 量化格式枚举（enum QuantType in gllm-kernels/src/quant.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+      <section id="ent-quant-type" data-entity="ENT-QUANT-TYPE" data-req-ref="REQ-QCG-001 REQ-QCG-002 REQ-QCG-003 REQ-QCG-004 REQ-QCG-005" data-entity-model-type="relational" data-entity-ref="ENT-DEVICE-PROFILE ENT-QUANT-FORMAT-DESC ENT-QUANT-PRECISION ENT-VM-INSTR" data-xref="REQ-QCG-001 REQ-QCG-002 REQ-QCG-003 REQ-QCG-004 REQ-QCG-005"><h4>ENT-QUANT-TYPE</h4><p>QuantType — 量化格式枚举（enum QuantType in gllm-kernels/src/quant.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
 Bf16|F16|F32|Q2K|Q3K|Q4K|Q5K|Q6K|Q8K|IQ1S|IQ1M|IQ2XXS|IQ2XS|IQ2S|IQ3XXS|IQ3S|IQ4NL|IQ4XS|Q4_0|Q4_1|Q5_0|Q5_1|Q8_0|Q8_1|AWQ4|GPTQ4|Squeeze|Fp8E4M3|Fp8E5M2|TQ1_0|TQ2_0|Mxfp4|Nvfp4</td><td>枚举变体名</td></tr><tr data-field="bits_per_element" data-type="number" data-required="true" <td="">bits_per_element<td>number</td><td>是</td><td>2~32</td><td>每个元素占用比特数</td></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>32|256|可配置</td><td>
 量化块大小（元素数）</td></tr><tr data-field="has_scale" data-type="boolean" data-required="true" <td="">has_scale<td>boolean</td><td>是</td><td>原生浮点=Bf16/F16/F32无scale</td><td>是否有缩放因子</td></tr><tr data-field="has_zero_point" data-type="boolean" data-required="true" <td="">has_zero_point<td>boolean</td><td>是</td><td>AWQ4有FP16 zp, GPTQ4有INT4 packed zp</td><td>是否有零点</td></tr><tr data-field="is_native_float" data-type="boolean" data-required="true" <td="">is_native_float<td>boolean</td><td>是</td><td>
 Bf16/F16/F32/Fp8E4M3/Fp8E5M2</td><td>是否为硬件原生浮点格式</td></tr><tr data-field="is_weight_only" data-type="boolean" data-required="true" <td="">is_weight_only<td>boolean</td><td>是</td><td>AWQ4/GPTQ4/Squeeze</td><td>是否仅权重路径</td></tr><tr data-field="block_size_param" data-type="number" data-required="false" <td="">block_size_param<td>number</td><td>否</td><td>仅 Mxfp4 变体</td><td>可配置 block_size 参数</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-TENSOR-DIR" id="ent-tensor-dir"><h4>ENT-TENSOR-DIR</h4><p>TensorDir — .gllm 张量目录条目 (GllmTensorEntry, 64字节/条目, 自描述格式)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="name_offset" data-type="number" data-required="true" <td="">name_offset<td>number</td><td>是</td><td>u32</td><td>字符串表中张量名偏移</td></tr><tr data-field="ndim" data-type="number" data-required="true" <td="">ndim<td>number</td><td>是</td><td>
+      <section id="ent-tensor-dir" data-entity="ENT-TENSOR-DIR" data-req-ref="REQ-ORPHAN-440 REQ-ORPHAN-442" data-entity-model-type="relational" data-xref="REQ-ORPHAN-440 REQ-ORPHAN-442"><h4>ENT-TENSOR-DIR</h4><p>TensorDir — .gllm 张量目录条目 (GllmTensorEntry, 64字节/条目, 自描述格式)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="name_offset" data-type="number" data-required="true" <td="">name_offset<td>number</td><td>是</td><td>u32</td><td>字符串表中张量名偏移</td></tr><tr data-field="ndim" data-type="number" data-required="true" <td="">ndim<td>number</td><td>是</td><td>
 1-4</td><td>维度数</td></tr><tr data-field="dtype" data-type="number" data-required="true" <td="">dtype<td>number</td><td>是</td><td>DType enum</td><td>元素数据类型</td></tr><tr data-field="quant_format" data-type="number" data-required="true" <td="">quant_format<td>number</td><td>是</td><td>QuantType enum</td><td>量化格式 (0=无量化)</td></tr><tr data-field="data_offset" data-type="number" data-required="true" <td="">data_offset<td>number</td><td>是</td><td>u64</td><td>数据区域字节偏移</td></tr>
 <tr data-field="compressed_size" data-type="number" data-required="true" <td="">compressed_size<td>number</td><td>是</td><td>u64</td><td>压缩(量化)后字节数</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-UNIFIED-VIRTUAL-PAGE" id="ent-unified-virtual-page"><h4>ENT-UNIFIED-VIRTUAL-PAGE</h4><p>UnifiedVirtualPage — 统一虚拟页 (系统级物理页容器, 所有载荷类型共用, IRR LIRS 驱逐)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_id" data-type="number" data-required="true" <td="">page_id<td>number</td><td>是</td><td>PageId</td><td>物理页标识</td></tr><tr data-field="payload_kind" data-type="string" data-required="true" <td="">
+      <section id="ent-unified-virtual-page" data-entity="ENT-UNIFIED-VIRTUAL-PAGE" data-req-ref="REQ-WP-001 REQ-WP-002 REQ-WP-003 REQ-WP-004 REQ-WP-005" data-entity-model-type="relational" data-entity-ref="ENT-EXPERT-WEIGHT-PREFETCHER ENT-KV-CACHE ENT-WEIGHT-TIER-MANAGER" data-xref="REQ-WP-001 REQ-WP-002 REQ-WP-003 REQ-WP-004 REQ-WP-005"><h4>ENT-UNIFIED-VIRTUAL-PAGE</h4><p>UnifiedVirtualPage — 统一虚拟页 (系统级物理页容器, 所有载荷类型共用, IRR LIRS 驱逐)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_id" data-type="number" data-required="true" <td="">page_id<td>number</td><td>是</td><td>PageId</td><td>物理页标识</td></tr><tr data-field="payload_kind" data-type="string" data-required="true" <td="">
 payload_kind<td>string</td><td>是</td><td></td><td>页载荷类型 (KvContext/ExpertWeight/DenseLayerWeight/PromptSystem/RagFeature)</td></tr><tr data-field="residency" data-type="string" data-required="true" <td="">residency<td>string</td><td>是</td><td></td><td>物理驻留位置 (DeviceLocal/HostLocal/DiskSwap)</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>页载荷数据类型</td></tr>
 <tr data-field="codec" data-type="string" data-required="true" <td="">codec<td>string</td><td>是</td><td>CompressionCodec</td><td>压缩编解码器 (None/Lz4/BitPackRle/NvcompAns/ZstdDict)</td></tr><tr data-field="logical_index" data-type="number" data-required="true" <td="">logical_index<td>number</td><td>是</td><td></td><td>拥有者虚拟地址空间内逻辑页索引</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-WEIGHT-TIER-MANAGER" id="ent-weight-tier-manager"><h4>ENT-WEIGHT-TIER-MANAGER</h4><p>WeightTierManager — 权重张量跨异构内存层级放置管理器 (GMM Tier决策, 原子容量追踪)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="device_capacity" data-type="number" data-required="true" <td="">device_capacity<td>number</td><td>是</td><td>usize</td><td>设备内存容量 (字节)</td></tr>
+      <section id="ent-weight-tier-manager" data-entity="ENT-WEIGHT-TIER-MANAGER" data-req-ref="REQ-WP-001 REQ-WP-002 REQ-WP-003 REQ-WP-004 REQ-WP-005" data-entity-model-type="relational" data-entity-ref="ENT-EXPERT-WEIGHT-PREFETCHER ENT-KV-CACHE ENT-UNIFIED-VIRTUAL-PAGE" data-xref="REQ-WP-001 REQ-WP-002 REQ-WP-003 REQ-WP-004 REQ-WP-005"><h4>ENT-WEIGHT-TIER-MANAGER</h4><p>WeightTierManager — 权重张量跨异构内存层级放置管理器 (GMM Tier决策, 原子容量追踪)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="device_capacity" data-type="number" data-required="true" <td="">device_capacity<td>number</td><td>是</td><td>usize</td><td>设备内存容量 (字节)</td></tr>
 <tr data-field="host_capacity" data-type="number" data-required="true" <td="">host_capacity<td>number</td><td>是</td><td>usize</td><td>主机内存容量 (字节)</td></tr><tr data-field="device_used" data-type="number" data-required="true" <td="">device_used<td>number</td><td>是</td><td>AtomicUsize</td><td>设备内存已用 (原子追踪)</td></tr><tr data-field="host_used" data-type="number" data-required="true" <td="">host_used<td>number</td><td>是</td><td>AtomicUsize</td><td>主机内存已用 (原子追踪)</td></tr>
 <tr data-field="allocations" data-type="string" data-required="true" <td="">allocations<td>string</td><td>是</td><td>Mutex&lt;HashMap&gt;</td><td>每张量分配记录 (name -&gt; WeightAllocation)</td></tr></table></section>
     </section>
 
-    <section data-section="apis">
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
       <h3>接口契约</h3>
       
       
       
     </section>
-</a><section data-entity-model-type="relational" data-entity="ENT-WEIGHT-PAGER" id="ent-weight-pager"><h3>ENT-WEIGHT-PAGER Weight Pager</h3><table data-entity-table="ENT-WEIGHT-PAGER"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-required="true" data-type="number" data-field="page_size"><td>page_size</td><td>number</td><td>是</td><td></td><td>页大小（字节）</td></tr><tr data-required="true" data-type="number" data-field="num_pages"><td>num_pages</td><td>number</td><td>是</td><td></td><td>总权重页数</td></tr><tr data-required="true" data-type="number" data-field="active_pages"><td>active_pages</td><td>number</td><td>是</td><td></td><td>活跃页数</td></tr><tr data-required="true" data-type="string" data-field="swap_tier"><td>swap_tier</td><td>string</td><td>是</td><td></td><td>当前换出层级（L1/L2/L3）</td></tr><tr data-required="false" data-type="number" data-field="prefetch_window"><td>prefetch_window</td><td>number</td><td>否</td><td></td><td>预取窗口大小</td></tr><tr data-required="false" data-type="boolean" data-field="compression_enabled"><td>compression_enabled</td><td>boolean</td><td>否</td><td></td><td>是否启用压缩</td></tr><tr data-required="false" data-type="string" data-field="schedule_policy"><td>schedule_policy</td><td>string</td><td>否</td><td></td><td>页调度策略</td></tr><tr data-required="false" data-type="number" data-field="swap_latency_threshold"><td>swap_latency_threshold</td><td>number</td><td>否</td><td></td><td>换入换出延迟阈值（毫秒）</td></tr></table></section><section data-api="POST /internal/weight/paging" id="post-/internal/weight/paging" data-api-type="internal" data-api-name="API-WEIGHT-PAGING"><h4>POST /internal/weight/paging — Weight paging manage</h4><p>权重分页管理接口，统一 Dense 层和 MoE Expert 权重的分页策略。按需换入换出、Working Set 检测、Prefetch 预测，与 HGAL 协同管理物理页帧。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+</a><section id="ent-weight-pager" data-entity="ENT-WEIGHT-PAGER" data-req-ref="REQ-WP-011 REQ-WP-013 REQ-QWP-001 REQ-QWP-003 REQ-QWP-004" data-entity-model-type="relational" data-xref="REQ-WP-011 REQ-WP-013 REQ-QWP-001 REQ-QWP-003 REQ-QWP-004"><h3>ENT-WEIGHT-PAGER Weight Pager</h3><table data-entity-table="ENT-WEIGHT-PAGER"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_size" data-type="number" data-required="true"><td>page_size</td><td>number</td><td>是</td><td></td><td>页大小（字节）</td></tr><tr data-field="num_pages" data-type="number" data-required="true"><td>num_pages</td><td>number</td><td>是</td><td></td><td>总权重页数</td></tr><tr data-field="active_pages" data-type="number" data-required="true"><td>active_pages</td><td>number</td><td>是</td><td></td><td>活跃页数</td></tr><tr data-field="swap_tier" data-type="string" data-required="true"><td>swap_tier</td><td>string</td><td>是</td><td></td><td>当前换出层级（L1/L2/L3）</td></tr><tr data-field="prefetch_window" data-type="number" data-required="false"><td>prefetch_window</td><td>number</td><td>否</td><td></td><td>预取窗口大小</td></tr><tr data-field="compression_enabled" data-type="boolean" data-required="false"><td>compression_enabled</td><td>boolean</td><td>否</td><td></td><td>是否启用压缩</td></tr><tr data-field="schedule_policy" data-type="string" data-required="false"><td>schedule_policy</td><td>string</td><td>否</td><td></td><td>页调度策略</td></tr><tr data-field="swap_latency_threshold" data-type="number" data-required="false"><td>swap_latency_threshold</td><td>number</td><td>否</td><td></td><td>换入换出延迟阈值（毫秒）</td></tr></table></section><section id="api-weight-paging" data-api="POST /internal/weight/paging" data-req-ref="REQ-WP-001 REQ-WP-011 REQ-WP-013 REQ-WP-002 REQ-WP-003" data-api-type="internal" data-api-name="API-WEIGHT-PAGING" data-xref="REQ-WP-001 REQ-WP-011 REQ-WP-013 REQ-WP-002 REQ-WP-003"><h4>POST /internal/weight/paging — Weight paging manage</h4><p>权重分页管理接口，统一 Dense 层和 MoE Expert 权重的分页策略。按需换入换出、Working Set 检测、Prefetch 预测，与 HGAL 协同管理物理页帧。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="PagingResult"><td>200</td><td>成功</td><td>PagingResult</td></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+<script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script>
   <footer data-spec-footer="">
     <address data-spec-ssot="">SSOT 定义者：21-WEIGHT-PAGING.html</address>
   </footer>
-<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-wp-013" data-test="TEST-WP-013" data-req-ref="REQ-WP-013" data-test-categories="unit" <h4="">TEST-WP-013: REQ-WP-013 单元测试<p>TODO: 为 REQ-WP-013 编写测试用例</p></div></section>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div data-level="unit" <h4="" data-test-categories="unit" data-req-ref="REQ-WP-013" data-test="TEST-WP-013" id="test-wp-013">TEST-WP-013: REQ-WP-013 单元测试<p>验证 REQ-WP-013 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section>
 <section id="abi-injection-interface">
   <h3>§8.2 ABI 注入接口（KernelContext 偏移）</h3>
   <p>Mega-Kernel 权重页 JIT 注入通过 R1 <code>KernelContext</code>（详见 SPEC 40 §7.2）的 3 个字段传入。JIT 编译时根据这些字段是否非 NULL 决定是否生成页表查找代码。</p>

@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="INTENT">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"INTENT", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>Intent Recall SDK — 中间层 Hidden 抽取协议</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>INTENT</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-intent-recall-sdk-中间层-hidden-抽取协议" data-section="null">
+      <h2>Intent Recall SDK — 中间层 Hidden 抽取协议</h2>
+      <p>&gt; <strong>执行模型</strong>: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 <code>08-EXECUTOR.md</code> §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。</p>
+      <p>&gt; <strong>SSOT</strong>: 本文档定义 gllm Intent Recall SDK 的技术协议, 提供<strong>截断前向至 anchor 层后抽取 pooled hidden</strong> 用于轻量意图分类 / RAG query 理解等下游任务。</p>
+      <p>&gt; <strong>需求 SSOT</strong>: <code>SPEC/01-REQUIREMENTS.md §15</code> REQ-INTENT-001..003</p>
+      <p>&gt; <strong>API 定义 SSOT</strong>: <code>SPEC/04-API-DESIGN.md §3.10</code></p>
+      <p>&gt; <strong>遵守铁律</strong>: ARCH-FULL-JIT、NO_SILENT_FALLBACK、NO_ISLAND_MODULE、DRY</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 动机</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 为什么需要中间层 encode</h4>
+      <p>完整 forward 跑完所有 Transformer 层成本高。许多下游任务 (意图分类 / 粗召回 / 关键词匹配) 只需要"<strong>前半层 hidden 足够抽取语义</strong>"的证据 — 研究已反复表明 BERT/GPT 系列模型在 ~50-70% 深度处 hidden 空间几何对分类任务最有用。</p>
+      <p>Intent Recall SDK 将这一观察落地为一个<strong>与 HR 共享代码路径的语义包装 API</strong>:</p>
+      <li><code>Client::encode_to_layer(text, anchor, pool)</code> — HR 暴露的底层截断 encode</li>
+      <li><code>Client::encode_intent(text, anchor, pool)</code> — Intent SDK 语义包装, 内部 delegate 给 <code>encode_to_layer</code></li>
+      <p>两者<strong>完全等价</strong>, 仅 API 命名不同。分离目的: 在 RAG / intent router 代码中读 <code>encode_intent</code> 比 <code>encode_to_layer</code> 更直观。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 与 HR 的正交关系</h4>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>Head Routing</td>
+        </tr>
+        <tr>
+          <td>Intent Recall</td>
+        </tr>
+        <tr>
+          <td>用途描述</td>
+        </tr>
+        <tr>
+          <td>通用中间层 encode + pool</td>
+        </tr>
+        <tr>
+          <td>专用意图识别 / query 召回</td>
+        </tr>
+        <tr>
+          <td>API 命名语义</td>
+        </tr>
+        <tr>
+          <td>encode_to_layer</td>
+        </tr>
+        <tr>
+          <td>encode_intent</td>
+        </tr>
+        <tr>
+          <td>实现</td>
+        </tr>
+        <tr>
+          <td>原始 JIT 前向截断</td>
+        </tr>
+        <tr>
+          <td>delegate 到 </td>
+          <td>encode_to_layer</td>
+          <td> (零代码复制)</td>
+        </tr>
+        <tr>
+          <td>返回类型</td>
+        </tr>
+        <tr>
+          <td>Vec&lt;f32&gt;</td>
+        </tr>
+        <tr>
+          <td>IntentEncoding { embedding, actual_layer, pool }</td>
+        </tr>
+        <tr>
+          <td>错误集</td>
+        </tr>
+        <tr>
+          <td>HeadRoutingError</td>
+        </tr>
+        <tr>
+          <td>IntentError</td>
+          <td> (可 </td>
+          <td>From&lt;HeadRoutingError&gt;</td>
+          <td>)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 架构</h3>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="2.1">
+      <h4>2.1 数据流</h4>
+      <p>```</p>
+      <p> ┌─ Client::encode_intent(text, anchor, pool) ─┐</p>
+      <p> │                                              │</p>
+      <p> │  1. 解析 anchor → actual_layer               │</p>
+      <p> │     (LayerAnchor::resolve)                   │</p>
+      <p> │                                              │</p>
+      <p> │  2. embedding = Client::encode_to_layer(...)  │</p>
+      <p> │     ↓ (详见 <a href="http://HEAD-ROUTING.md">HEAD-ROUTING.md</a> §5)              │</p>
+      <p> │     ├─ 构造 MidLayerEncodeCallback            │</p>
+      <p> │     ├─ Mega-Kernel CALL (output_mode_selector │</p>
+      <p> │     │    = EncodeToLayer(anchor_layer))       │</p>
+      <p> │     │    在 anchor_layer 截断输出             │</p>
+      <p> │     └─ pool.apply(hidden, seq_len, hidden_size)│</p>
+      <p> │                                              │</p>
+      <p> │  3. 返回 IntentEncoding {                    │</p>
+      <p> │       embedding, actual_layer, pool          │</p>
+      <p> │     }                                        │</p>
+      <p> └──────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 关键不变量</h4>
+      <p>1. <strong>DRY 铁律</strong>: <code>encode_intent</code> 不得<strong>复制</strong> <code>encode_to_layer</code> 实现逻辑。一行 <code>delegate</code>, 然后包装为 <code>IntentEncoding</code>。</p>
+      <p>2. <strong>JIT 合规</strong>: 前向仍走 JIT 管线; 中间层 exit 仅通过 <code>CallbackAction::ExitEarly</code> 实现, 不绕开 JIT codegen。</p>
+      <p>3. <strong>确定性</strong>: <code>encode_intent("text", anchor, pool).embedding</code> 与 <code>encode_to_layer("text", anchor, pool)</code> 输出<strong>严格按位相等</strong> (除接口外无运算差异)。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 API</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 方法签名</h4>
+      <p>```rust</p>
+      <p>use gllm::{Client, IntentEncoding, LayerAnchor, PoolMode};</p>
+      <p>impl Client {</p>
+      <p>    pub fn encode_intent(</p>
+      <p>        &amp;self,</p>
+      <p>        text: &amp;str,</p>
+      <p>        anchor: LayerAnchor,</p>
+      <p>        pool: PoolMode,</p>
+      <p>    ) -&gt; Result&lt;IntentEncoding, ClientError&gt;;</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 返回类型</h4>
+      <p>```rust</p>
+      <p>pub struct IntentEncoding {</p>
+      <p>    pub embedding: Vec&lt;f32&gt;,   // 长度 = model hidden_size</p>
+      <p>    pub actual_layer: usize,   // anchor.resolve(num_layers) 的结果</p>
+      <p>    pub pool: PoolMode,        // 使用的 pool 模式 (原样透传)</p>
+      <p>}</p>
+      <p>impl IntentEncoding {</p>
+      <p>    pub fn dim(&amp;self) -&gt; usize;         // = embedding.len()</p>
+      <p>    pub fn l2_norm(&amp;self) -&gt; f32;       // L2 范数, 调试/健康检查</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 错误类型</h4>
+      <p>```rust</p>
+      <p>pub enum IntentError {</p>
+      <p>    InvalidLayerAnchor(String),   // Anchor 越界 / NaN</p>
+      <p>    EncodeFailed(String),         // 下游 executor/backend 错误</p>
+      <p>    NoModelLoaded,</p>
+      <p>}</p>
+      <p>impl From<headroutingerror> for IntentError { /* 透传 */ }</headroutingerror></p>
+      <p>```</p>
+      <p>注意: <code>Client::encode_intent</code> 当前通过 <code>encode_to_layer</code> 实现, 返回的是 <code>Result&lt;IntentEncoding, ClientError&gt;</code>。<code>IntentError</code> 保留给未来需要与 HR 错误分离的场景 (例如独立 intent router 库)。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 用例</h3>
+      <p>```rust</p>
+      <p>let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;</p>
+      <p>// 对意图分类: 取 50% 层 + mean pool</p>
+      <p>let intent = client.encode_intent(</p>
+      <p>    "What is the weather in Paris?",</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    PoolMode::MeanPool,</p>
+      <p>)?;</p>
+      <p>assert_eq!(intent.dim(), 576); // SmolLM2-135M hidden_size</p>
+      <p>println!("actual_layer = {}", intent.actual_layer);</p>
+      <p>// 用作 RAG query 召回向量, 对 knowledge base 做 cosine search:</p>
+      <p>let query_vec = intent.embedding;</p>
+      <p>let top_docs = kb.nearest(query_vec, k=5);</p>
+      <p>```</p>
+    </section>
+    <section id="artifact-integration" data-artifact-type="integration" data-section="5">
+      <h3>§5 Integration Trace (NO_ISLAND_MODULE 合规证据)</h3>
+      <p>审计命令:</p>
+      <p>```bash</p>
+      <p>grep -rn "encode_intent|MidLayerEncodeCallback" src/ --include="*.rs" | grep -v "#[cfg(test)]" | grep -v "mod tests"</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>文件:函数</td>
+        </tr>
+        <tr>
+          <td>用户 API</td>
+        </tr>
+        <tr>
+          <td>src/client.rs::Client::encode_intent</td>
+        </tr>
+        <tr>
+          <td>Delegate</td>
+        </tr>
+        <tr>
+          <td>Client::encode_intent</td>
+          <td> → </td>
+          <td>Client::encode_to_layer</td>
+        </tr>
+        <tr>
+          <td>底层实现</td>
+        </tr>
+        <tr>
+          <td>Client::encode_to_layer</td>
+          <td> → </td>
+          <td>Executor::encode_at_layer_for_prompt</td>
+        </tr>
+        <tr>
+          <td>MidLayer Callback</td>
+        </tr>
+        <tr>
+          <td>src/engine/callbacks/mid_layer_encode.rs::MidLayerEncodeCallback::post_node</td>
+        </tr>
+        <tr>
+          <td>Executor 接入</td>
+        </tr>
+        <tr>
+          <td>Executor::encode_at_layer_for_prompt</td>
+          <td> 构造 </td>
+          <td>CallbackChain</td>
+          <td>, 设置 </td>
+          <td>callback_chain_ptr</td>
+        </tr>
+        <tr>
+          <td>Backend CPU 路径</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel CALL（</td>
+          <td>output_mode_selector</td>
+          <td> = EncodeToLayer，在 anchor 层截断）</td>
+        </tr>
+        <tr>
+          <td>GPU 实现</td>
+        </tr>
+        <tr>
+          <td>Unimplemented</td>
+          <td> (macro 统一声明), 待 ARCH-CPU-GPU-UNIFIED 落地</td>
+        </tr>
+        <tr>
+          <td>公共导出</td>
+        </tr>
+        <tr>
+          <td>src/lib.rs</td>
+          <td> (</td>
+          <td>pub use intent::{IntentEncoding, IntentError}</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_intent.rs</td>
+        </tr>
+      </table>
+    </section>
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MODEL-CONFIG ENT-HEAD-ROUTING" <h3="" data-section="6" data-req-api="POST /client/intent/encode" data-req-entity="ENT-COMPILER-GRAPH,ENT-MODEL-CONFIG,ENT-HEAD-ROUTING" data-req-category="business" data-req-domain="intent" data-req-status="implemented" data-req="REQ-INTENT-001" id="req-intent-001">§6 E2E 验收 (REQ-INTENT-001..003)
+      <p>验证 Intent Recall SDK 的 <code>encode_intent</code> 截断前向至 anchor 层的正确性。核心约束：pool hidden 作为意图识别向量、delegate 到 <code>encode_to_layer</code>（DRY 铁律）、intent 向量与完整前向一致。实现通过 Mega-Kernel <code>output_mode_selector=EncodeToLayer</code> 在 anchor 层截断前向，返回指定 anchor 层的 pooled hidden 向量作为意图编码。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">encode_intent 截断前向至 anchor 层正确</li>
+        <li id="id-2" data-criterion="2">pool hidden 作为意图识别向量</li>
+        <li id="id-3" data-criterion="3">delegate 到 encode_to_layer (DRY)</li>
+        <li id="id-4" data-criterion="4">E2E: intent 向量与完整前向一致</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    
+
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MODEL-CONFIG ENT-HEAD-ROUTING" <h4="" data-section="001" data-req-api="POST /client/intent/encode" data-req-entity="ENT-COMPILER-GRAPH,ENT-MODEL-CONFIG,ENT-HEAD-ROUTING" data-req-category="business" data-req-domain="intent" data-req-status="implemented" data-req="REQ-INTENT-004" id="req-intent-004">REQ-INTENT-004: Basic shape + finite
+      <p>```</p>
+      <p>输入: SmolLM2-135M-Instruct, "Hello world", LayerAnchor::Relative(0.5), MeanPool</p>
+      <p>验收:</p>
+      <p>  (a) intent.dim() == model hidden_size</p>
+      <p>  (b) intent.embedding 所有元素 finite</p>
+      <p>  (c) intent.l2_norm() &gt; 0</p>
+      <p>  (d) intent.pool == MeanPool (原样透传)</p>
+      <p>  (e) intent.actual_layer ∈ [0, num_layers)</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">encode_intent 截断前向至 anchor 层正确</li>
+        <li id="id-2" data-criterion="2">pool hidden 作为意图识别向量</li>
+        <li id="id-3" data-criterion="3">delegate 到 encode_to_layer (DRY)</li>
+        <li id="id-4" data-criterion="4">E2E: intent 向量与完整前向一致</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-INTENT-004" data-test="TEST-INTENT-004" id="test-intent-004">TEST-INTENT-004: Intent Recall SDK测试<p>验证REQ-INTENT-004相关功能正确性</p>
+      <div id="encode-intent-截断前向至-anchor-层正确" data-criterion="encode_intent 截断前向至 anchor 层正确">encode_intent 截断前向至 anchor 层正确</div>
+      <div id="pool-hidden-作为意图识别向量" data-criterion="pool hidden 作为意图识别向量">pool hidden 作为意图识别向量</div>
+      <div id="delegate-到-encode-to-layer-dry" data-criterion="delegate 到 encode_to_layer (DRY)">delegate 到 encode_to_layer (DRY)</div>
+      <div id="e2e-intent-向量与完整前向一致" data-criterion="E2E: intent 向量与完整前向一致">E2E: intent 向量与完整前向一致</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MODEL-CONFIG ENT-HEAD-ROUTING" <h4="" data-section="002" data-req-api="POST /client/intent/encode" data-req-entity="ENT-COMPILER-GRAPH,ENT-MODEL-CONFIG,ENT-HEAD-ROUTING" data-req-category="business" data-req-domain="intent" data-req-status="implemented" data-req="REQ-INTENT-003" id="req-intent-003">REQ-INTENT-3: PoolMode 影响结果
+      <p>```</p>
+      <p>输入: 多 token 文本, 同一 anchor, 三种 PoolMode (MeanPool / LastToken / ClsToken)</p>
+      <p>验收:</p>
+      <p>  (a) 三个 embedding 维度相同 (= hidden_size)</p>
+      <p>  (b) MeanPool 与 LastToken 向量差异显著 (L1 delta &gt; 1e-3)</p>
+      <p>  (c) ClsToken 与 LastToken 向量差异显著 (L1 delta &gt; 1e-3)</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">encode_intent 截断前向至 anchor 层正确</li>
+        <li id="id-2" data-criterion="2">pool hidden 作为意图识别向量</li>
+        <li id="id-3" data-criterion="3">delegate 到 encode_to_layer (DRY)</li>
+        <li id="id-4" data-criterion="4">E2E: intent 向量与完整前向一致</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-INTENT-003" data-test="TEST-INTENT-3" id="test-intent-3">TEST-INTENT-3: Intent Recall SDK测试<p>验证REQ-INTENT-001相关功能正确性</p>
+      <div id="encode-intent-截断前向至-anchor-层正确" data-criterion="encode_intent 截断前向至 anchor 层正确">encode_intent 截断前向至 anchor 层正确</div>
+      <div id="pool-hidden-作为意图识别向量" data-criterion="pool hidden 作为意图识别向量">pool hidden 作为意图识别向量</div>
+      <div id="delegate-到-encode-to-layer-dry" data-criterion="delegate 到 encode_to_layer (DRY)">delegate 到 encode_to_layer (DRY)</div>
+      <div id="e2e-intent-向量与完整前向一致" data-criterion="E2E: intent 向量与完整前向一致">E2E: intent 向量与完整前向一致</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MODEL-CONFIG ENT-HEAD-ROUTING" <h4="" data-section="003" data-req-api="POST /client/intent/encode" data-req-entity="ENT-COMPILER-GRAPH,ENT-MODEL-CONFIG,ENT-HEAD-ROUTING" data-req-category="business" data-req-domain="intent" data-req-status="implemented" data-req="REQ-INTENT-002" id="req-intent-002">REQ-INTENT-002: `encode_intent` 与 `encode_to_layer` 等价
+      <p>```</p>
+      <p>输入: 同一 text, 同一 anchor, 同一 PoolMode</p>
+      <p>验收:</p>
+      <p>  (a) encode_intent(...).embedding 与 encode_to_layer(...) 逐元素近似相等 (|Δ| &lt; 1e-5)</p>
+      <p>  (b) DRY 铁律: <a href="http://client.rs">client.rs</a> 中 encode_intent 直接 delegate 到 encode_to_layer, 无重复实现</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">encode_intent 截断前向至 anchor 层正确</li>
+        <li id="id-2" data-criterion="2">pool hidden 作为意图识别向量</li>
+        <li id="id-3" data-criterion="3">delegate 到 encode_to_layer (DRY)</li>
+        <li id="id-4" data-criterion="4">E2E: intent 向量与完整前向一致</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-INTENT-002" data-test="TEST-INTENT-002" id="test-intent-002">TEST-INTENT-002: Intent Recall SDK测试<p>验证REQ-INTENT-002相关功能正确性</p>
+      <div id="encode-intent-截断前向至-anchor-层正确" data-criterion="encode_intent 截断前向至 anchor 层正确">encode_intent 截断前向至 anchor 层正确</div>
+      <div id="pool-hidden-作为意图识别向量" data-criterion="pool hidden 作为意图识别向量">pool hidden 作为意图识别向量</div>
+      <div id="delegate-到-encode-to-layer-dry" data-criterion="delegate 到 encode_to_layer (DRY)">delegate 到 encode_to_layer (DRY)</div>
+      <div id="e2e-intent-向量与完整前向一致" data-criterion="E2E: intent 向量与完整前向一致">E2E: intent 向量与完整前向一致</div>
+      
+    </section>
+
+    <section id="s7" data-section="7">
+      <h3>§7 与 SG / Guardrail 的组合</h3>
+      <p>同一 Client 加挂 SG + Guardrail 后再调 <code>encode_intent</code>:</p>
+      <li>SG 在 pre_node 注入知识残差 — 影响中间 hidden</li>
+      <li>Guardrail 在 post_node 评估 hidden 做安全检测</li>
+      <li>Intent 在 anchor 层的 post_node 抽取 hidden 然后 ExitEarly</li>
+      <p>执行顺序 (按 priority): SG (90) → MidLayerEncode (55) → Guardrail (40)。</p>
+      <p>注意: 若 Guardrail 在 anchor_layer 前触发 veto, MidLayerEncodeCallback 永远不会执行, <code>encode_intent</code> 返回空 embedding — 这是<strong>预期行为</strong> (veto 优先于 encode)。</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 实现映射</h3>
+      <table>
+        <tr>
+          <th>SPEC 条目</th>
+        </tr>
+        <tr>
+          <td>代码位置</td>
+        </tr>
+        <tr>
+          <td>IntentEncoding</td>
+          <td> / </td>
+          <td>IntentError</td>
+        </tr>
+        <tr>
+          <td>src/intent.rs</td>
+        </tr>
+        <tr>
+          <td>Client::encode_intent</td>
+        </tr>
+        <tr>
+          <td>src/client.rs</td>
+        </tr>
+        <tr>
+          <td>MidLayerEncodeCallback</td>
+          <td> (</td>
+          <td>LayerCallback::post_node</td>
+          <td> 实现)</td>
+        </tr>
+        <tr>
+          <td>src/engine/callbacks/mid_layer_encode.rs</td>
+        </tr>
+        <tr>
+          <td>Executor::encode_at_layer_for_prompt</td>
+        </tr>
+        <tr>
+          <td>src/engine/executor.rs</td>
+        </tr>
+        <tr>
+          <td>MegaKernelExecutor::execute_encode_at_layer()</td>
+          <td> (output_mode=5)</td>
+        </tr>
+        <tr>
+          <td>src/engine/mega_kernel.rs</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel CALL (output_mode_selector)</td>
+        </tr>
+        <tr>
+          <td>src/engine/executor.rs</td>
+        </tr>
+        <tr>
+          <td>公共导出</td>
+        </tr>
+        <tr>
+          <td>src/lib.rs</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_intent.rs</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>§9 变更历史</h3>
+      <p>SPEC 文件不维护变更历史 (<a href="http://CLAUDE.md">CLAUDE.md</a> §6 铁律 4: SPEC 防腐化)。版本历史由 git 管理。</p>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-compiler-graph" data-entity="ENT-COMPILER-GRAPH" data-req-ref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-BUFFER-LAYOUT ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-FUSION-PLAN ENT-GRAPH-RESOURCE-PLAN" data-xref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-head-routing" data-entity="ENT-HEAD-ROUTING" data-req-ref="REQ-HR-001 REQ-HR-006 REQ-HR-005 REQ-HR-002 REQ-HR-003" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-MODEL-CONFIG" data-xref="REQ-HR-001 REQ-HR-006 REQ-HR-005 REQ-HR-002 REQ-HR-003"><h4>ENT-HEAD-ROUTING</h4><p>HeadRouting — 多头路由配置</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="layer_anchor" data-type="string" data-required="true" <td="">layer_anchor<td>string</td><td>是</td><td>Relative/Absolute</td><td>LayerAnchor encode_to_layer截断层位置</td></tr><tr data-field="pool_mode" data-type="string" data-required="true" <td="">pool_mode<td>string</td>
+<td>是</td><td>MeanPool/LastToken/ClsToken</td><td>PoolMode hidden state池化方式</td></tr><tr data-field="classify_binary_config" data-type="string" data-required="false" <td="">classify_binary_config<td>string</td><td>否</td><td></td><td>ClassifyBinaryConfig 二分类配置(positive_token/negative_token/temperature)</td></tr><tr data-field="classify_multiway_config" data-type="string" data-required="false" <td="">classify_multiway_config<td>string</td><td>否</td><td></td><td>
+ClassifyMultiwayConfig 多分类配置(temperature)</td></tr><tr data-field="zero_weight_reload" data-type="boolean" data-required="true" <td="">zero_weight_reload<td>boolean</td><td>是</td><td></td><td>零权重重载：多头API切换不重新加载权重</td></tr><tr data-field="zero_jit_recompile" data-type="boolean" data-required="true" <td="">zero_jit_recompile<td>boolean</td><td>是</td><td></td><td>零JIT重编译：多头API切换不重新编译JIT</td></tr></table></section>
+      <section id="ent-model-config" data-entity="ENT-MODEL-CONFIG" data-req-ref="REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002 REQ-ARCH-001" data-entity-model-type="relational" data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-HEAD-ROUTING ENT-INTENT-TRACKER ENT-KV-CACHE ENT-MODEL-ARCH-KEY" data-xref="REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002 REQ-ARCH-001">
+        <h4>ENT-MODEL-CONFIG</h4>
+        <p>ModelConfig — 模型配置 (tensor-driven Ω1)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hidden_size" data-type="number" data-required="true" <td="">hidden_size<td>number</td><td>是</td><td>usize</td><td>隐藏层维度</td></tr><tr data-field="num_attention_heads" data-type="number" data-required="true" <td="">num_attention_heads<td>number</td><td>是</td><td>usize</td><td>注意力头数</td></tr>
+<tr data-field="num_key_value_heads" data-type="number" data-required="true" <td="">num_key_value_heads<td>number</td><td>是</td><td>usize</td><td>KV头数 (GQA)</td></tr><tr data-field="num_hidden_layers" data-type="number" data-required="true" <td="">num_hidden_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小</td></tr>
+<tr data-field="max_position_embeddings" data-type="number" data-required="true" <td="">max_position_embeddings<td>number</td><td>是</td><td>usize</td><td>最大位置编码数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>模型权重dtype (F32/F16/BF16)</td></tr><tr data-field="qk_norm" data-type="boolean" data-required="false"><td>qk_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="value_norm" data-type="boolean" data-required="false"><td>value_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="embedding_scale_factor" data-type="number" data-required="false"><td>embedding_scale_factor</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="rope_partial_ratio_global" data-type="number" data-required="false"><td>rope_partial_ratio_global</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="mla_use_unabsorbed" data-type="boolean" data-required="false"><td>mla_use_unabsorbed</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="unabsorbed_threshold" data-type="number" data-required="false"><td>unabsorbed_threshold</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="hidden_act" data-type="string" data-required="false"><td>hidden_act</td><td>string</td><td>否</td><td>(synced)</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section id="api-intent-encode" data-api="POST /client/intent/encode" data-req-ref="REQ-SIT-001 REQ-SIT-002 REQ-SIT-003 REQ-SIT-004 REQ-SIT-005" data-api-type="client" data-api-name="API-INTENT-ENCODE" data-xref="REQ-SIT-001 REQ-SIT-002 REQ-SIT-003 REQ-SIT-004 REQ-SIT-005"><h4>POST /client/intent/encode — Client::encode_intent()</h4><p>Intent 编码 API，将文本编码为意图向量</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="string" data-required="true" data-param="text"><td>text</td><td>string</td><td>是</td><td>待编码文本</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="IntentVector"><td>200</td><td>成功</td><td>IntentVector</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"IntentVector"}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：INTENT.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-intent-001" data-test="TEST-INTENT-001" data-req-ref="REQ-INTENT-001" data-test-categories="unit"><h4>TEST-INTENT-001: REQ-INTENT-001 单元测试</h4><p>验证 REQ-INTENT-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

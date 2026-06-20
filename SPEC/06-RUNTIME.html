@@ -1,0 +1,2334 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head><body><section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-kv-addr-001" data-test="TEST-KV-ADDR-001" data-req-ref="REQ-KV-ADDR-001" data-test-categories="unit"><h4>TEST-KV-ADDR-001: REQ-KV-ADDR-001 单元测试</h4><p>验证 REQ-KV-ADDR-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-kv-addr-002" data-test="TEST-KV-ADDR-002" data-req-ref="REQ-KV-ADDR-002" data-test-categories="unit"><h4>TEST-KV-ADDR-002: REQ-KV-ADDR-002 单元测试</h4><p>验证 REQ-KV-ADDR-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-kv-addr-003" data-test="TEST-KV-ADDR-003" data-req-ref="REQ-KV-ADDR-003" data-test-categories="unit"><h4>TEST-KV-ADDR-003: REQ-KV-ADDR-003 单元测试</h4><p>验证 REQ-KV-ADDR-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-symdim-runtime-001" data-test="TEST-SYMDIM-RUNTIME-001" data-req-ref="REQ-SYMDIM-RUNTIME-001" data-test-categories="unit"><h4>TEST-SYMDIM-RUNTIME-001: REQ-SYMDIM-RUNTIME-001 单元测试</h4><p>验证 REQ-SYMDIM-RUNTIME-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-symdim-runtime-002" data-test="TEST-SYMDIM-RUNTIME-002" data-req-ref="REQ-SYMDIM-RUNTIME-002" data-test-categories="unit"><h4>TEST-SYMDIM-RUNTIME-002: REQ-SYMDIM-RUNTIME-002 单元测试</h4><p>验证 REQ-SYMDIM-RUNTIME-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-symdim-runtime-003" data-test="TEST-SYMDIM-RUNTIME-003" data-req-ref="REQ-SYMDIM-RUNTIME-003" data-test-categories="unit"><h4>TEST-SYMDIM-RUNTIME-003: REQ-SYMDIM-RUNTIME-003 单元测试</h4><p>验证 REQ-SYMDIM-RUNTIME-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-strategy-select-001" data-test="TEST-STRATEGY-SELECT-001" data-req-ref="REQ-STRATEGY-SELECT-001" data-test-categories="unit"><h4>TEST-STRATEGY-SELECT-001: REQ-STRATEGY-SELECT-001 单元测试</h4><p>验证 REQ-STRATEGY-SELECT-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-strategy-select-002" data-test="TEST-STRATEGY-SELECT-002" data-req-ref="REQ-STRATEGY-SELECT-002" data-test-categories="unit"><h4>TEST-STRATEGY-SELECT-002: REQ-STRATEGY-SELECT-002 单元测试</h4><p>验证 REQ-STRATEGY-SELECT-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-telemetry-001" data-test="TEST-TELEMETRY-001" data-req-ref="REQ-TELEMETRY-001" data-test-categories="unit"><h4>TEST-TELEMETRY-001: REQ-TELEMETRY-001 单元测试</h4><p>验证 REQ-TELEMETRY-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-telemetry-002" data-test="TEST-TELEMETRY-002" data-req-ref="REQ-TELEMETRY-002" data-test-categories="unit"><h4>TEST-TELEMETRY-002: REQ-TELEMETRY-002 单元测试</h4><p>验证 REQ-TELEMETRY-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="06-RUNTIME">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"06-RUNTIME", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>运行时编排层 (Runtime Orchestration)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>06-RUNTIME</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-运行时编排层-runtime-orchestration" data-section="null">
+      <h2>运行时编排层 (Runtime Orchestration)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档是 gllm 调度器、KV Cache 管理、Continuous Batching、内存管理、遥测管线的唯一真源。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. HGAL 调度算法总览</h3>
+      <p>HGAL (Hybrid Gang-Aware LIRS) 解决 VLLM 分页调度中的两个核心问题：页面序列错乱（同一 Sequence 的页面被分散换出/换入）和 Cache Thrashing（刚 swap-in 的页面立即被换出）。</p>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 组成</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>Gang-Aware Eviction</td>
+        </tr>
+        <tr>
+          <td>序列组（SequenceGroup）作为换出单位，保持页面连续性</td>
+        </tr>
+        <tr>
+          <td>LIRS Priority</td>
+        </tr>
+        <tr>
+          <td>使用 IRR（Inter-Reference Recency）替代纯 LRU</td>
+        </tr>
+        <tr>
+          <td>Warm-up Protection</td>
+        </tr>
+        <tr>
+          <td>新换入页面保护期，禁止立即换出</td>
+        </tr>
+        <tr>
+          <td>Working Set Detection</td>
+        </tr>
+        <tr>
+          <td>自动检测热页并锁定保护</td>
+        </tr>
+        <tr>
+          <td>CLOCK-Pro Approximation</td>
+        </tr>
+        <tr>
+          <td>低成本的 LIRS 近似实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 核心约束</h4>
+      <table>
+        <tr>
+          <th>约束</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>违规后果</td>
+        </tr>
+        <tr>
+          <td>禁止序列内页面分散</td>
+        </tr>
+        <tr>
+          <td>必须以 SequenceGroup 为单位换出</td>
+        </tr>
+        <tr>
+          <td>序列错乱、内存碎片</td>
+        </tr>
+        <tr>
+          <td>禁止新换入页立即换出</td>
+        </tr>
+        <tr>
+          <td>Warm-up 保护期内禁止换出</td>
+        </tr>
+        <tr>
+          <td>Cache Thrashing</td>
+        </tr>
+        <tr>
+          <td>禁止纯 LRU</td>
+        </tr>
+        <tr>
+          <td>必须使用 LIRS 或 CLOCK-Pro</td>
+        </tr>
+        <tr>
+          <td>无法区分访问模式</td>
+        </tr>
+        <tr>
+          <td>零拷贝原则</td>
+        </tr>
+        <tr>
+          <td>Swap 不介入生成循环数据流</td>
+        </tr>
+        <tr>
+          <td>数据回流到 CPU</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 调度器 API</h4>
+      <table>
+        <tr>
+          <th>接口</th>
+        </tr>
+        <tr>
+          <td>功能</td>
+        </tr>
+        <tr>
+          <td>select_victim_groups(count)</td>
+          <td> → </td>
+          <td>Vec&lt;RequestId&gt;</td>
+        </tr>
+        <tr>
+          <td>Gang-Aware 受害者选择</td>
+        </tr>
+        <tr>
+          <td>handle_page_fault(page_id, seq_id)</td>
+          <td> → </td>
+          <td>PageLocation</td>
+        </tr>
+        <tr>
+          <td>页面错误处理</td>
+        </tr>
+        <tr>
+          <td>get_batch_page_table(request_ids)</td>
+          <td> → </td>
+          <td>BatchPageTable</td>
+        </tr>
+        <tr>
+          <td>批次页表获取</td>
+        </tr>
+        <tr>
+          <td>update_batch(batch, results)</td>
+          <td> → </td>
+          <td>BatchAction</td>
+        </tr>
+        <tr>
+          <td>批次状态更新</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. PagedAttention 页面管理</h3>
+    </section>
+    <section id="artifact-state-machine" data-artifact-type="state-machine" data-section="2.1">
+      <h4>2.1 PageState 状态机</h4>
+      <strong>Warm-up 防护盾</strong>: 新分配页面在 <code>warmup_duration = 100ms</code> 且被访问 &gt;= 2 次之前，绝对不可被换出。
+      <table>
+        <tr>
+          <th>状态</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>转换条件</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Active</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>在 GPU 且正在使用</td>
+        </tr>
+        <tr>
+          <td>变为 Standby</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Standby</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>在 GPU 但未使用</td>
+        </tr>
+        <tr>
+          <td>可被换出</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Swapped</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>已换出到 CPU</td>
+        </tr>
+        <tr>
+          <td>swap-in 后转 Warm</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Warm</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>刚 swap-in，保护期</td>
+        </tr>
+        <tr>
+          <td>保护期结束且访问 &gt;= 2 次后转 Active/Protected</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Protected</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>工作集保护（类似 LIR）</td>
+        </tr>
+        <tr>
+          <td>超过 working_set_window 未访问则降级</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 Gang-Aware 换出</h4>
+      <p>Eviction 对象不能是单一离散 Page，必须是 SequenceGroup（序列组整体换出）。禁止破坏同一序列组中不同序列的 KV 数据完整性。</p>
+      <strong>受害者选择算法</strong>:
+      <p>1. 排除 Warm、Protected、Pinned 状态的页面</p>
+      <p>2. 对每个序列组计算 LIRS 优先级分数</p>
+      <p>3. 按优先级从低到高排序</p>
+      <p>4. 选择最少数量的序列组满足所需页面数</p>
+      <strong>优先级公式</strong>:
+      <p>```</p>
+      <p>priority(group) = time_penalty + recency_penalty - freq_bonus - pin_bonus</p>
+      <p>```</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 Working Set 自动检测</h4>
+      <p>检测周期: 每 N 个 generation tick。</p>
+      <p>保护解除: 热页在 <code>working_set_window</code> 时间内未被访问则解除保护。</p>
+      <table>
+        <tr>
+          <th>条件</th>
+        </tr>
+        <tr>
+          <td>阈值</td>
+        </tr>
+        <tr>
+          <td>访问频率</td>
+        </tr>
+        <tr>
+          <td>access_count &gt;= hot_threshold</td>
+        </tr>
+        <tr>
+          <td>最近访问</td>
+        </tr>
+        <tr>
+          <td>now - last_access &lt; working_set_window</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>2.4 CLOCK-Pro 近似实现</h4>
+      <p>扫描算法: 从 clock_hand 开始，被访问的页面 cold → hot 或保持 hot，未被访问的 hot → cold 或保持 cold。</p>
+      <table>
+        <tr>
+          <th>结构</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>clock_hand</td>
+        </tr>
+        <tr>
+          <td>扫描指针位置</td>
+        </tr>
+        <tr>
+          <td>cold_pages</td>
+        </tr>
+        <tr>
+          <td>冷页面候选集合</td>
+        </tr>
+        <tr>
+          <td>hot_pages</td>
+        </tr>
+        <tr>
+          <td>热页面集合（类似 LIR）</td>
+        </tr>
+        <tr>
+          <td>test_pages</td>
+        </tr>
+        <tr>
+          <td>测试页面（检测访问模式变化）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Continuous Batching</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 ContinuousBatcher</h4>
+      <p>```rust</p>
+      <p>pub enum BatchAction {</p>
+      <p>    /// 继续处理当前序列</p>
+      <p>    Continue,</p>
+      <p>    /// 序列已完成生成</p>
+      <p>    Complete,</p>
+      <p>    /// 序列暂停（内存不足）</p>
+      <p>    Pause,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>ContinuousBatcher 在每个 <code>step()</code> 中动态管理 active sequences:</p>
+      <p>1. 执行当前 batch forward</p>
+      <p>2. 对每个序列检查 <code>BatchAction</code>（EOS → Complete，内存不足 → Pause）</p>
+      <p>3. 完成的序列移出，释放 KV 页面</p>
+      <p>4. 新序列通过 <code>admit_waiting()</code> 加入</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 企业级死锁防护（drain 模式）</h4>
+      <strong>禁止 <code>while let</code> 无限循环</strong>: 当所有序列都无法分配内存时，<code>while let</code> 循环会导致 CPU 100%。
+      <strong>解决方案</strong> (drain 模式):
+      <p>```rust</p>
+      <p>fn admit_waiting(&amp;mut self, scheduler: &amp;mut PagedScheduler) {</p>
+      <p>    // 1. drain(..) 一次性清空等待队列</p>
+      <p>    let waiting_sequences: Vec&lt;_&gt; = self.waiting.drain(..).collect();</p>
+      <p>    // 2. 尝试 admit 每个序列</p>
+      <p>    for mut sequence in waiting_sequences {</p>
+      <p>        match scheduler.add_sequence(sequence.to_sequence_group()) {</p>
+      <p>            Ok(()) =&gt; { self.running.insert(<a href="http://sequence.id">sequence.id</a>, sequence); }</p>
+      <p>            Err(_) =&gt; { self.waiting.push_back(sequence); }  // 放回末尾，不在本次调用中重试</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <p>关键设计: <code>drain(..)</code> 一次性清空等待队列避免迭代中修改；失败序列放回末尾下次 build_batch 重试；本次调用不重试避免无限循环。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. KV Cache 管理</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 Paged KV Cache 物理布局</h4>
+      <p>KV Cache 按 PagedAttention 方式管理:</p>
+      <p>```</p>
+      <p>全局布局: [K_all_layers | V_all_layers]</p>
+      <p>每半:      [layer][head][seq_pos][head_dim]</p>
+      <p>页面大小:  page_size tokens (默认 128)</p>
+      <p>```</p>
+      <p>每个 token 在每层占用 <code>2 × num_kv_heads × head_dim × elem_bytes</code> 字节的 KV 空间。</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 KvPrefixIndex 前缀复用</h4>
+      <p>用于无 Session ID 场景下查找最长可复用 token 前缀。</p>
+      <p>```rust</p>
+      <p>pub struct KvPrefixIndex {</p>
+      <p>    pub root: TrieNode,</p>
+      <p>}</p>
+      <p>pub struct TrieNode {</p>
+      <p>    pub children: HashMap&lt;TokenId, TrieNode&gt;,</p>
+      <p>    pub page_ref: Option<pageref>,</pageref></p>
+      <p>}</p>
+      <p>```</p>
+      <strong>集成约束</strong>:
+      <p>1. <code>GlobalMemoryManager</code> 负责维护索引生命周期，与页表一致更新</p>
+      <p>2. <code>prepare_prefill_with_auto_reuse(request_id, tokens)</code> 必须先做最长前缀匹配</p>
+      <p>3. 前缀命中后采用虚拟页映射复用语义，禁止直接共享可写物理页</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 SessionKvCache 会话级确定性复用</h4>
+      <p>用于 AI 编程场景的确定性 append 复用。</p>
+      <p>&gt; <strong>数据结构 SSOT</strong>: <code>SessionKvCache</code> 完整字段定义见 <code>03-DATA-STRUCTURE.md §8.2</code>。</p>
+      <strong>集成约束</strong>:
+      <p>1. <code>claim_session_prefix</code> 只能 claim <code>finalized_position</code> 范围内页面</p>
+      <p>2. <code>finalize_session_tokens</code> 只能单调递增</p>
+      <p>3. 禁止越界复用</p>
+    </section>
+    <section id="artifact-pipeline" data-artifact-type="pipeline" data-section="4.4">
+      <h4>4.4 KvPipeline 双管线隔离</h4>
+      <p>```rust</p>
+      <p>pub enum KvPipeline {</p>
+      <p>    Conversation,  // 跨轮保留</p>
+      <p>    Working,       // 轮次结束可回收</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>隔离约束</strong>: 页表、换出策略、预取逻辑均按 pipeline 维度隔离。Working 管线的释放不影响 Conversation 管线。
+      <table>
+        <tr>
+          <th>管线</th>
+        </tr>
+        <tr>
+          <td>语义</td>
+        </tr>
+        <tr>
+          <td>生命周期</td>
+        </tr>
+        <tr>
+          <td>Conversation</td>
+        </tr>
+        <tr>
+          <td>主对话上下文</td>
+        </tr>
+        <tr>
+          <td>跨轮保留</td>
+        </tr>
+        <tr>
+          <td>Working</td>
+        </tr>
+        <tr>
+          <td>Thinking/Reasoning 临时上下文</td>
+        </tr>
+        <tr>
+          <td>prepare_next_turn</td>
+          <td> 全量释放</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.5" data-section="4.5">
+      <h4>4.5 Dual-Track 量化池</h4>
+      <p>```rust</p>
+      <p>pub struct DualTrackMemoryPool {</p>
+      <p>    pub main_pool: BlockAllocator,      // 3-4 bit 主数据流</p>
+      <p>    pub _xnor_pool: BitsetAllocator,    // 1-bit QJL 残差掩码</p>
+      <p>}</p>
+      <p>```</p>
+      <p>显存被物理隔离为双轨通道。多卡同步时仅需传输原 FP16 内存量纲的 25%（4x 压缩）。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. GlobalMemoryManager</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 三级 Tier</h4>
+      <p>&gt; <strong>跨 SPEC Tier 映射</strong>: 本 Tier 是 <code>GlobalMemoryManager</code> 全局容量管理的 SSOT。21-WEIGHT-PAGING <code>WeightTier</code> 和 22-PAGE-COMPRESSION <code>StorageTier</code> 是同一物理层级的领域视图：</p>
+      <table>
+        <tr>
+          <th>本 Tier</th>
+        </tr>
+        <tr>
+          <td>21-WEIGHT-PAGING </td>
+          <td>WeightTier</td>
+        </tr>
+        <tr>
+          <td>22-PAGE-COMPRESSION </td>
+          <td>StorageTier</td>
+        </tr>
+        <tr>
+          <td>物理位置</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>DeviceLocal</td>
+        </tr>
+        <tr>
+          <td>GpuHbm</td>
+        </tr>
+        <tr>
+          <td>GPU HBM</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>HostLocal</td>
+        </tr>
+        <tr>
+          <td>CpuDram</td>
+        </tr>
+        <tr>
+          <td>CPU DRAM</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>DiskMmap</td>
+        </tr>
+        <tr>
+          <td>Nvme</td>
+        </tr>
+        <tr>
+          <td>NVMe 磁盘</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>Tier</th>
+        </tr>
+        <tr>
+          <td>位置</td>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>GPU HBM</td>
+        </tr>
+        <tr>
+          <td>热路径计算数据（KV Cache、激活值）</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>CPU RAM</td>
+        </tr>
+        <tr>
+          <td>冷 KV Cache 换出目标</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>磁盘</td>
+        </tr>
+        <tr>
+          <td>JIT 编译缓存（7 天 TTL）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 页面分配/释放 API</h4>
+      <table>
+        <tr>
+          <th>接口</th>
+        </tr>
+        <tr>
+          <td>功能</td>
+        </tr>
+        <tr>
+          <td>allocate_page_in_pipeline(pipeline, tier)</td>
+          <td> → </td>
+          <td>PhysicalId</td>
+        </tr>
+        <tr>
+          <td>在指定管线和 Tier 分配页面</td>
+        </tr>
+        <tr>
+          <td>plan_prefill(prompt_tokens, chunk_size)</td>
+          <td> → </td>
+          <td>PrefillPlan</td>
+        </tr>
+        <tr>
+          <td>Prefill 页面规划</td>
+        </tr>
+        <tr>
+          <td>prepare_prefill_with_auto_reuse(request_id, tokens)</td>
+          <td> → </td>
+          <td>PrefillPlan</td>
+        </tr>
+        <tr>
+          <td>带前缀自动复用的 Prefill 规划</td>
+        </tr>
+        <tr>
+          <td>prepare_next_turn(session_id)</td>
+        </tr>
+        <tr>
+          <td>释放 Working 管线，保留 Conversation 管线</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 Unified Virtual Page</h4>
+      <p>废弃按功能划分的 KvCacheConfig / MoESharedWeight，系统唯一物理原子级驻留容器:</p>
+      <p>```rust</p>
+      <p>pub struct UnifiedVirtualPage {</p>
+      <p>    pub page_id: VirtualPageId,</p>
+      <p>    pub payload_kind: PagePayloadKind,  // KvContext / ExpertWeight / PromptSystem / KnowledgeRAG</p>
+      <p>    pub residency: MemoryResidency,</p>
+      <p>    pub quant_type: QuantType,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>无论内容是什么，对 GlobalMemoryManager 而言仅是一个固定尺寸的极化数组，使用同一套 LIRS 页面置换与锁定状态机。</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. Chunked Prefill + Adaptive Chunking</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 交织调度</h4>
+      <p>将长 Prefill 切成固定大小的物理 Chunk，与 Decode Token 交织塞进同一个 Batch。Decode 请求永远零等待。</p>
+      <p>```</p>
+      <p>Batch: [Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1, Prefill-64, ...]</p>
+      <p>```</p>
+      <strong>精度隔离壁</strong>: Prefill Chunk 的 Softmax 分布平坦，Decode Token 的 Softmax 尖锐。在 Attention 阶段，两者必须物理分轨调度到不同 Thread Block 组和 SMEM 分区执行。FFN 阶段允许合流。
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 Batch Composition Token Budget</h4>
+      <p>```</p>
+      <p>total_budget = max_batch_tokens × memory_pressure_ratio</p>
+      <p>decode_budget = min(decode_ready_count, floor(total_budget × 0.6))</p>
+      <p>prefill_budget = total_budget - decode_budget</p>
+      <p>```</p>
+      <strong>decode_ratio_cap = 0.6</strong>: decode 最多占 60% 预算，保证 prefill 持续进展。
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 Batch Composition 五步流程</h4>
+      <p>1. 收集 ready decode tokens，按 BatchOrderPolicy 排序</p>
+      <p>2. 填充 decode slots 直到 decode_budget 用尽</p>
+      <p>3. 计算 prefill_budget</p>
+      <p>4. 从 prefill_queue 填入 chunks，按 AdaptiveChunkSize 切分</p>
+      <p>5. 生成 BatchManifest（每个 slot 的 type、token_range、compact_required）</p>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>6.4 AdaptiveChunkPolicy</h4>
+      <p>Chunk 大小由三个维度动态决定:</p>
+      <p>```rust</p>
+      <p>fn adaptive_chunk_size(</p>
+      <p>    l1_available_ratio: f32,    // L1 可用页比例</p>
+      <p>    concurrent_reqs: usize,     // 并发请求数</p>
+      <p>    remaining_prefill_tokens: usize,  // prompt 剩余 tokens</p>
+      <p>) -&gt; usize  // 映射到最近的 Golden Size</p>
+      <p>```</p>
+      <p>Chunk size 限定为 Golden Size 集合（非任意值），编译为独立 stride 常量。</p>
+    </section>
+    <section id="s6.5" data-section="6.5">
+      <h4>6.5 Compact 决策模型</h4>
+      <strong>触发条件</strong> (必须同时满足):
+      <p>1. <code>waste_ratio &gt; 0.25</code></p>
+      <p>2. <code>active_count &gt;= min_compact_threshold</code> (默认 4)</p>
+      <p>3. Compact 发生在 GEMM op 级别，禁止在 Attention op 上（memory-bound，compact 不节省带宽）</p>
+      <strong>开销模型</strong>:
+      <p>```</p>
+      <p>compact_cost = 2 × active_count × elem_size × cache_line_latency</p>
+      <p>saved_flops  = waste_ratio × total_flops</p>
+      <p>decision     = compact_cost &lt; saved_flops × flops_to_mem_ratio</p>
+      <p>```</p>
+    </section>
+    <section id="s6.6" data-section="6.6">
+      <h4>6.6 BatchManifest</h4>
+      <p>```rust</p>
+      <p>pub struct BatchManifest {</p>
+      <p>    pub slots: Vec<batchslot>,</batchslot></p>
+      <p>    pub total_decode_tokens: usize,</p>
+      <p>    pub total_prefill_tokens: usize,</p>
+      <p>    pub compact_required: bool,</p>
+      <p>    pub waste_ratio: f32,</p>
+      <p>}</p>
+      <p>pub enum SlotType {</p>
+      <p>    Decode,</p>
+      <p>    PrefillChunk { chunk_offset: usize, chunk_len: usize, remaining_after: usize },</p>
+      <p>}</p>
+      <p>pub struct BatchSlot {</p>
+      <p>    pub request_id: RequestId,</p>
+      <p>    pub slot_type: SlotType,</p>
+      <p>    pub token_range: (usize, usize),</p>
+      <p>    pub priority: f32,</p>
+      <p>    pub sub_batch_key: SubBatchKey,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.7" data-section="6.7">
+      <h4>6.7 SplitFuse 废弃声明</h4>
+      <p>SplitFuse 混批路径已永久移除。<code>enable_splitfuse</code> 配置字段锁定为 <code>false</code>。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. BatchOrderPolicy</h3>
+      <p>```rust</p>
+      <p>pub enum BatchOrderPolicy {</p>
+      <p>    StrictRequestIdOrder,  // 默认：确定性优先</p>
+      <p>    FifoOrder,             // FIFO 排序</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>约束</strong>: 默认策略为 <code>StrictRequestIdOrder</code>。吞吐优先重排会改变浮点规约顺序，破坏可复现性。<code>Executor::run_batch_forward</code> 需校验输入序列严格单调递增。
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 遥测管线</h3>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 零额外计算原则</h4>
+      <strong>禁止</strong>: 独立的旁路探测、CPU 定时轮询、无锁环形队列（RingBuffer）。所有遥测数据只能由 Kernel 的下半场（Epilogue）生成并嵌在结果集或 KV Page Header。
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 采集 → 传输 → 消费闭环</h4>
+      <strong>采集</strong> (Epilogue, 寄存器内, ~3-10 条 SIMD):
+      <li>Softmax Entropy + Centroid + max → 预取 + Sink 检测</li>
+      <li>RmsNorm per-channel scale → KIVI K 量化</li>
+      <li>Residual Delta_rho → Early Exit 决策</li>
+      <li>SiLU 死神经元计数 → Gate-First Skip</li>
+      <li>MoE Gate 命中计数 → Deopt 信号</li>
+      <strong>传输</strong> (Epilogue 尾段 STG 指令):
+      <li>Epilogue 尾段的 STG 指令 → 写入 KV Page Header padding bytes</li>
+      <li>宿主机低频轮询（后台 Daemon，不在热路径）</li>
+      <li>L1i 影响: 零 — STG 不增加指令足迹</li>
+      <strong>消费</strong>:
+      <li>JIT Director Daemon: 冷专家零命中 → Hot JMP 物理封杀</li>
+      <li>Block Routing: Delta_rho &lt; epsilon → Thread Block Thread Exit</li>
+      <li>Spec Scheduling: Entropy 低 → 启用推测解码</li>
+      <li>Adaptive Chunking: Softmax 锐度 → 动态 chunk size</li>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 KvPageHeader (40B)</h4>
+      <p>```rust</p>
+      <p>#[repr(C)]</p>
+      <p>pub struct KvPageHeader {</p>
+      <p>    // 基础管理 (8 Bytes)</p>
+      <p>    pub page_id: u32,</p>
+      <p>    pub ref_count: u32,</p>
+      <p>    // Phase 1 — Epilogue 自动写入 (12 Bytes)</p>
+      <p>    pub fragmentation_metric: f32,</p>
+      <p>    pub logits_entropy: f32,</p>
+      <p>    pub guard_veto_flag: u32,</p>
+      <p>    // Phase 2 — 全链路白嫖扩展 (20 Bytes)</p>
+      <p>    pub softmax_max: f32,</p>
+      <p>    pub softmax_sharpness: f32,</p>
+      <p>    pub residual_delta_rho: f32,</p>
+      <p>    pub dead_neuron_ratio: f32,</p>
+      <p>    pub per_channel_scale: f32,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>8.4 Observer 观测</h4>
+      <strong>BasicObserver</strong>: 系统状态实时采集。不开启独立线程，不在热路径分配内存。
+      <strong>SystemState</strong>: 调度决策的输入快照，包含 memory_pressure、kv_fragmentation、running_count 等。
+    </section>
+    <section id="s8.5" data-section="8.5">
+      <h4>8.5 AbsolutePolicy 护栏</h4>
+      <p>单轨调度策略，去掉了 Accuracy/Throughput/Balanced 妥协路径。底层在遇到无效请求时交给 Mega-Kernel 内部硬件屏蔽掩码消化，无需上升到主机层面分流。</p>
+      <table>
+        <tr>
+          <th>条件</th>
+        </tr>
+        <tr>
+          <td>max_batch_size</td>
+        </tr>
+        <tr>
+          <td>admit_prefill</td>
+        </tr>
+        <tr>
+          <td>swap_out</td>
+        </tr>
+        <tr>
+          <td>memory_pressure &gt; 0.9</td>
+        </tr>
+        <tr>
+          <td>current_running.max(1)</td>
+        </tr>
+        <tr>
+          <td>false</td>
+        </tr>
+        <tr>
+          <td>ceil(pressure * 3)</td>
+        </tr>
+        <tr>
+          <td>kv_fragmentation &gt; 0.5</td>
+        </tr>
+        <tr>
+          <td>current_running.max(1)</td>
+        </tr>
+        <tr>
+          <td>false</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>正常</td>
+        </tr>
+        <tr>
+          <td>min(256, capacity)</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.6" data-section="8.6">
+      <h4>8.6 禁止事项</h4>
+      <table>
+        <tr>
+          <th>禁止</th>
+        </tr>
+        <tr>
+          <td>原因</td>
+        </tr>
+        <tr>
+          <td>主线程新开 </td>
+          <td>std::thread</td>
+          <td> 或 </td>
+          <td>tokio::spawn</td>
+          <td> 做性能监控</td>
+        </tr>
+        <tr>
+          <td>Epilogue 寄生是唯一采集路径</td>
+        </tr>
+        <tr>
+          <td>RingBuffer (crossbeam_channel / flume) 向主机侧汇报</td>
+        </tr>
+        <tr>
+          <td>PCIe 延迟与缓存击穿</td>
+        </tr>
+        <tr>
+          <td>运行时策略热切换</td>
+        </tr>
+        <tr>
+          <td>全系统锁定在 AbsolutePolicy</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. JIT 编译缓存协议</h3>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>9.1 核心铁律</h4>
+      <p>JIT 编译只允许在两个时间点发生:</p>
+      <p>1. <strong>模型加载时</strong> — 静态形状已知，一次性编译</p>
+      <p>2. <strong>Autotuning 窗口期</strong> — 首次推理前 3-5 秒</p>
+      <p>推理热路径中禁止出现任何编译行为。</p>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2 缓存粒度</h4>
+      <p>缓存粒度 = 全模型单体计算图 (Whole-Model Graph)。CPU 和 GPU 后端共享完全一致的执行图。禁止算子级/层级分离缓存。</p>
+      <strong>缓存键</strong> = 模型结构签名，不包含运行时动态维度:
+      <p>```rust</p>
+      <p>ModelArchKey {</p>
+      <p>    model_id: String,</p>
+      <p>    backend: BackendKind,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s9.3" data-section="9.3">
+      <h4>9.3 动态维度处理</h4>
+      <p>动态维度通过 ShapeBinding 运行时绑定，不触发重编译。</p>
+      <table>
+        <tr>
+          <th>维度性质</th>
+        </tr>
+        <tr>
+          <td>编码方式</td>
+        </tr>
+        <tr>
+          <td>绑定时机</td>
+        </tr>
+        <tr>
+          <td>静态 (hidden_size)</td>
+        </tr>
+        <tr>
+          <td>SymDim::Concrete(value)</td>
+        </tr>
+        <tr>
+          <td>编译时</td>
+        </tr>
+        <tr>
+          <td>动态 (seq_len, total_seq)</td>
+        </tr>
+        <tr>
+          <td>SymDim::Symbolic("name")</td>
+        </tr>
+        <tr>
+          <td>launch 时 ShapeBinding</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.4" data-section="9.4">
+      <h4>9.4 三级缓存</h4>
+      <p>Debug 模式（<code>cargo test</code>）L3 磁盘缓存完全禁用。Release 模式正常工作，启动时自动清理超 7 天的缓存。</p>
+      <table>
+        <tr>
+          <th>级别</th>
+        </tr>
+        <tr>
+          <td>存储</td>
+        </tr>
+        <tr>
+          <td>TTL</td>
+        </tr>
+        <tr>
+          <td>作用</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>模型级内存</td>
+        </tr>
+        <tr>
+          <td>模型生命周期</td>
+        </tr>
+        <tr>
+          <td>单模型共享实例</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>全局内存 LRU</td>
+        </tr>
+        <tr>
+          <td>进程生命周期</td>
+        </tr>
+        <tr>
+          <td>跨模型复用</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>磁盘 (</td>
+          <td>~/.gllm/jit_cache/</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>7 天</td>
+        </tr>
+        <tr>
+          <td>跨进程复用</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 配置参数汇总</h3>
+      <table>
+        <tr>
+          <th>配置项</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>page_size</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>128</td>
+        </tr>
+        <tr>
+          <td>每页 token 数</td>
+        </tr>
+        <tr>
+          <td>total_pages</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>2048</td>
+        </tr>
+        <tr>
+          <td>总页面数</td>
+        </tr>
+        <tr>
+          <td>max_batch</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>最大批大小</td>
+        </tr>
+        <tr>
+          <td>max_batch_tokens</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>4096</td>
+        </tr>
+        <tr>
+          <td>每步最大 token 数</td>
+        </tr>
+        <tr>
+          <td>warmup_duration</td>
+        </tr>
+        <tr>
+          <td>Duration</td>
+        </tr>
+        <tr>
+          <td>100ms</td>
+        </tr>
+        <tr>
+          <td>Warm-up 保护期</td>
+        </tr>
+        <tr>
+          <td>working_set_window</td>
+        </tr>
+        <tr>
+          <td>Duration</td>
+        </tr>
+        <tr>
+          <td>1s</td>
+        </tr>
+        <tr>
+          <td>工作集时间窗</td>
+        </tr>
+        <tr>
+          <td>hot_threshold</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>热页访问阈值</td>
+        </tr>
+        <tr>
+          <td>lir_ratio</td>
+        </tr>
+        <tr>
+          <td>f32</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>LIR 页面比例</td>
+        </tr>
+        <tr>
+          <td>chunk_size</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>64</td>
+        </tr>
+        <tr>
+          <td>Prefill Chunk 大小</td>
+        </tr>
+        <tr>
+          <td>decode_slots</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>每批 Decode 插槽</td>
+        </tr>
+        <tr>
+          <td>max_chunks_per_batch</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>每批最大 Chunk 数</td>
+        </tr>
+        <tr>
+          <td>decode_ratio_cap</td>
+        </tr>
+        <tr>
+          <td>f32</td>
+        </tr>
+        <tr>
+          <td>0.6</td>
+        </tr>
+        <tr>
+          <td>Decode 占比上限</td>
+        </tr>
+        <tr>
+          <td>min_compact_threshold</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>Compact 最小 batch</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>11. SEQ 分布直方图 (SeqHistogram)</h3>
+    </section>
+    <section id="s11.1" data-section="11.1">
+      <h4>11.1 设计目标</h4>
+      <p>在推理热路径中以极低开销 (&lt;100ns/step) 采集当前 batch 的 <code>seq_len</code> 分布，为 GoldenBucketRegistry 的 <code>evolve()</code> 提供输入。所有计数器使用 <code>AtomicU64</code>，无锁并发更新，不在 Mega-Kernel 内引入条件分支。</p>
+    </section>
+    <section id="s11.2" data-section="11.2">
+      <h4>11.2 数据结构</h4>
+      <p>```rust</p>
+      <p>pub struct SeqHistogram {</p>
+      <p>    buckets: Vec<seqbucket>,</seqbucket></p>
+      <p>    window_size: usize,</p>
+      <p>    total_samples: AtomicU64,</p>
+      <p>}</p>
+      <p>pub struct SeqBucket {</p>
+      <p>    pub start: usize,       // 区间闭左端</p>
+      <p>    pub end: usize,         // 区间闭右端</p>
+      <p>    pub count: AtomicU64,   // 无锁并发计数器</p>
+      <p>}</p>
+      <p>pub struct HistogramSnapshot {</p>
+      <p>    pub buckets: Vec&lt;(usize, usize, u64)&gt;,</p>
+      <p>    pub total_samples: u64,</p>
+      <p>    pub top_k: Vec&lt;(usize, usize, u64)&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s11.3" data-section="11.3">
+      <h4>11.3 分档规则</h4>
+      <p>按 2 的幂分档，每个 bucket 的区间为 <code>(2^(n-1), 2^n]</code>：</p>
+      <p>最后一个 bucket 扩展到 <code>max_seq</code>，确保所有 <code>seq_len</code> 均可映射。</p>
+      <table>
+        <tr>
+          <th>Bucket 索引</th>
+        </tr>
+        <tr>
+          <td>区间</td>
+        </tr>
+        <tr>
+          <td>示例 seq_len</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>[0, 1]</td>
+        </tr>
+        <tr>
+          <td>0, 1</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>(1, 2]</td>
+        </tr>
+        <tr>
+          <td>2, 3</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>(2, 4]</td>
+        </tr>
+        <tr>
+          <td>4, 5, 6, 7</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>(4, 8]</td>
+        </tr>
+        <tr>
+          <td>8, 9, ..., 15</td>
+        </tr>
+        <tr>
+          <td>...</td>
+        </tr>
+        <tr>
+          <td>...</td>
+        </tr>
+        <tr>
+          <td>...</td>
+        </tr>
+        <tr>
+          <td>n</td>
+        </tr>
+        <tr>
+          <td>(2^(n-1), 2^n]</td>
+        </tr>
+        <tr>
+          <td>12</td>
+        </tr>
+        <tr>
+          <td>(2048, 4096]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.4" data-section="11.4">
+      <h4>11.4 核心算法</h4>
+      <strong><code>find_bucket(seq_len)</code></strong> — O(1) bucket 定位：
+      <p>使用前导零计数 (<code>lzcnt</code>) 计算 <code>floor(log2(seq_len))</code>，直接映射到 bucket 索引。x86_64 上编译为单条 <code>lzcnt</code> 指令。</p>
+      <p>```</p>
+      <p>log2 = BITS - seq_len.leading_zeros() - 1</p>
+      <p>bucket_index = log2.min(buckets.len() - 1)</p>
+      <p>```</p>
+      <strong><code>record(seq_len)</code></strong> — O(1) 无锁更新：
+      <p>1. <code>find_bucket(seq_len)</code> 定位 bucket</p>
+      <p>2. <code>bucket.count.fetch_add(1, Relaxed)</code> 原子递增</p>
+      <p>3. <code>total_samples.fetch_add(1, Relaxed)</code> 原子递增</p>
+      <p>内存序使用 <code>Relaxed</code>，因为直方图仅用于统计决策，不参与同步。</p>
+    </section>
+    <section id="s11.5" data-section="11.5">
+      <h4>11.5 滑动窗口与衰减</h4>
+      <strong><code>decay(factor)</code></strong> — 遗忘效果：
+      <p>遍历所有 bucket，将计数器乘以 <code>factor</code>（如 0.9），同时衰减 <code>total_samples</code>。由 JIT Director Daemon 周期性调用（不在热路径），实现滑动窗口的时间衰减。</p>
+    </section>
+    <section id="s11.6" data-section="11.6">
+      <h4>11.6 快照与查询</h4>
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>snapshot()</td>
+        </tr>
+        <tr>
+          <td>读取全部 bucket 计数器，返回 </td>
+          <td>HistogramSnapshot</td>
+          <td>（含 top_k 热门区间，默认 top 10）</td>
+        </tr>
+        <tr>
+          <td>top_k(k)</td>
+        </tr>
+        <tr>
+          <td>返回最热门 k 个区间的 </td>
+          <td>(start, end, count)</td>
+        </tr>
+        <tr>
+          <td>is_gap(seq_len, tolerance)</td>
+        </tr>
+        <tr>
+          <td>检测 </td>
+          <td>seq_len</td>
+          <td> 是否远离 bucket 中心（</td>
+          <td>distance &gt; tolerance</td>
+          <td>）</td>
+        </tr>
+        <tr>
+          <td>gap_hit_rate(tolerance)</td>
+        </tr>
+        <tr>
+          <td>估算 bucket 边缘缝隙的累计命中率</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.7" data-section="11.7">
+      <h4>11.7 与 GoldenBucketRegistry 的集成</h4>
+      <code>SeqHistogram</code> 是 <code>GoldenBucketRegistry::evolve()</code> 的唯一输入源：
+      <p>1. JIT Director Daemon 周期性调用 <code>histogram.snapshot()</code></p>
+      <p>2. <code>evolve(snapshot)</code> 扫描高流量缝隙区间（<code>find_high_traffic_gaps</code>）</p>
+      <p>3. 在缝隙中创建新中间态 GoldenSize（命中率 &gt; 5%）</p>
+      <p>4. 详见 §12.4 运行时演化</p>
+    </section>
+    <section id="s12" data-section="12">
+      <h3>12. 黄金装筒规则 (Golden Bucket)</h3>
+    </section>
+    <section id="s12.1" data-section="12.1">
+      <h4>12.1 核心原则</h4>
+      <strong>严禁预设硬编码数组</strong>：禁止使用 <code>[128, 512, 1024, 2048]</code> 等静态 Bucket。所有黄金尺寸从硬件物理探测推导，由 <code>ProbeResult.spill_points</code> 决定。
+      <strong>零退化原则</strong>：禁止 Padding 补零，使用 Ragged Compaction（§6.5）。
+    </section>
+    <section id="s12.2" data-section="12.2">
+      <h4>12.2 数据结构</h4>
+      <p>```rust</p>
+      <p>pub struct GoldenSize {</p>
+      <p>    pub seq_len: usize,</p>
+      <p>    pub register_efficiency: f32,</p>
+      <p>    pub smem_efficiency: f32,</p>
+      <p>    pub l2_hit_rate: f32,</p>
+      <p>    pub performance_score: f32,</p>
+      <p>}</p>
+      <p>pub struct GoldenBucketRegistry {</p>
+      <p>    golden_sizes: Vec<goldensize>,</goldensize></p>
+      <p>    constraints: CompilerConstraints,</p>
+      <p>    hit_stats: BTreeMap&lt;usize, u64&gt;,</p>
+      <p>    max_buckets: usize,         // 默认 32</p>
+      <p>    zombie_threshold: f64,       // 默认 0.001 (&lt;0.1%)</p>
+      <p>}</p>
+      <p>pub enum EvolveDecision {</p>
+      <p>    InsufficientData,</p>
+      <p>    NoEvolutionNeeded,</p>
+      <p>    CapacityLimitReached { current: usize, max: usize },</p>
+      <p>    Evolved { new_bucket_count: usize },</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s12.3" data-section="12.3">
+      <h4>12.3 GoldenSize 评分公式</h4>
+      <p>```</p>
+      <p>performance_score = 0.4 × register_efficiency</p>
+      <p>                  + 0.3 × smem_efficiency</p>
+      <p>                  + 0.3 × l2_hit_rate</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>权重</th>
+        </tr>
+        <tr>
+          <td>指标</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>0.4</td>
+        </tr>
+        <tr>
+          <td>register_efficiency</td>
+        </tr>
+        <tr>
+          <td>寄存器利用率 (0.0-1.0)，spill point 前最高</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>smem_efficiency</td>
+        </tr>
+        <tr>
+          <td>共享内存利用率 (0.0-1.0)，tile 面积 / SMEM 容量</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>l2_hit_rate</td>
+        </tr>
+        <tr>
+          <td>L2 缓存命中率 (0.0-1.0)，距离 L2 thrash 阈值越近越低</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12.4" data-section="12.4">
+      <h4>12.4 生命周期</h4>
+      <strong>Load-Time 推导逻辑</strong>：
+      <p>1. 遍历 <code>ProbeResult.spill_points</code>，每个 spill point 代表寄存器溢出的物理拐点</p>
+      <p>2. GoldenSize = spill point 前的最大 seq_len（寄存器未溢出的最佳尺寸）</p>
+      <p>3. SMEM 利用率 = tile 面积 / <code>constraints.smem_size</code></p>
+      <p>4. L2 命中率 = <code>1.0 - (seq_len / l2_thrash_threshold) × 0.3</code></p>
+      <p>5. 如果无 spill points，回退到 L2 thrash 阈值的 25%/50%/75%/100% 比例推导</p>
+      <p>6. 最终兜底：至少一个默认 GoldenSize (seq_len=256)</p>
+      <table>
+        <tr>
+          <th>阶段</th>
+        </tr>
+        <tr>
+          <td>触发</td>
+        </tr>
+        <tr>
+          <td>行为</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Load-Time</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>模型加载</td>
+        </tr>
+        <tr>
+          <td>from_probe_results(probe, constraints)</td>
+          <td> — </td>
+          <td>ProbeResult.spill_points</td>
+          <td> → GoldenSize 列表</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Runtime</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>JIT Director Daemon 周期调用</td>
+        </tr>
+        <tr>
+          <td>evolve(histogram)</td>
+          <td> — 高流量缝隙检测 → 创建中间态 Bucket (&gt;5% 命中率)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Hot-Swap</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>L1i 缓存重排</td>
+        </tr>
+        <tr>
+          <td>evict_zombies()</td>
+          <td> — 原子覆写跳表，淘汰命中率 &lt; 0.1% 的僵尸 Bucket</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12.5" data-section="12.5">
+      <h4>12.5 collapse() — 任意 seq_len → 黄金尺寸</h4>
+      <p>```rust</p>
+      <p>pub fn collapse(&amp;mut self, seq_len: usize) -&gt; (usize, &amp;GoldenSize)</p>
+      <p>```</p>
+      <p>使用二分查找 (<code>partition_point</code>) 定位最近的黄金尺寸，同时记录命中统计到 <code>hit_stats</code>。算法复杂度 O(log n)。</p>
+      <strong>查找策略</strong>：找到第一个 <code>seq_len &gt;= golden.seq_len</code> 的位置，比较前后两个 GoldenSize 的距离，返回更近者。
+    </section>
+    <section id="s12.6" data-section="12.6">
+      <h4>12.6 evolve() — 运行时演化</h4>
+      <strong>高流量缝隙检测</strong> (<code>find_high_traffic_gaps</code>)：扫描 SeqHistogram 快照，找出落在两个相邻 GoldenSize 之间且累计命中数 &gt; 0 的区间。
+      <table>
+        <tr>
+          <th>条件</th>
+        </tr>
+        <tr>
+          <td>决策</td>
+        </tr>
+        <tr>
+          <td>total_samples &lt; 100</td>
+        </tr>
+        <tr>
+          <td>InsufficientData</td>
+        </tr>
+        <tr>
+          <td>无高流量缝隙</td>
+        </tr>
+        <tr>
+          <td>NoEvolutionNeeded</td>
+        </tr>
+        <tr>
+          <td>golden_sizes.len() + gaps &gt; max_buckets</td>
+        </tr>
+        <tr>
+          <td>CapacityLimitReached</td>
+        </tr>
+        <tr>
+          <td>缝隙区间命中率 &gt; 5%</td>
+        </tr>
+        <tr>
+          <td>Evolved</td>
+          <td> — 在缝隙中心创建新 GoldenSize</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12.7" data-section="12.7">
+      <h4>12.7 evict_zombies() — 僵尸淘汰</h4>
+      <p>命中率 &lt; <code>zombie_threshold</code> (默认 0.1%) 的 GoldenSize 被移除，同时清理对应的 <code>hit_stats</code> 条目。淘汰后保持 <code>golden_sizes</code> 升序不变。</p>
+    </section>
+    <section id="s12.8" data-section="12.8">
+      <h4>12.8 与 AdaptiveChunkPolicy 的集成</h4>
+      <p>§6.4 中 <code>adaptive_chunk_size()</code> 的返回值限定为 Golden Size 集合（非任意值）。Chunk size 映射为 <code>collapse(chunk_size).seq_len</code>，编译为独立 stride 常量。这确保了 Prefill Chunk 与 JIT 编译的 Tile 形状完全匹配。</p>
+    </section>
+    <section id="s13" data-section="13">
+      <h3>13. 变体注册表 (VariantRegistry)</h3>
+    </section>
+    <section id="s13.1" data-section="13.1">
+      <h4>13.1 核心原则</h4>
+      <strong>所有跨机制冲突通过编译时变体隔离消解，禁止 Mega-Kernel 内运行时 if</strong>。
+      <p>禁止模式：</p>
+      <li><code>if moe_enabled { ... }</code> 在 Mega-Kernel 内部</li>
+      <li><code>if guardrail_active { ... }</code> 在 Mega-Kernel 内部</li>
+      <li><code>if rag_enabled { ... }</code> 在 Mega-Kernel 内部</li>
+      <p>变体选择发生在 Dispatch-Time (<code>build_batch</code> 阶段)，不在 Mega-Kernel 执行时。</p>
+    </section>
+    <section id="s13.2" data-section="13.2">
+      <h4>13.2 数据结构</h4>
+      <p>```rust</p>
+      <p>pub struct VariantKey {</p>
+      <p>    pub arch: ModelArchitecture,</p>
+      <p>    pub moe_enabled: bool,</p>
+      <p>    pub guardrail_enabled: bool,</p>
+      <p>    pub spec_phase: Option<specphase>,</specphase></p>
+      <p>    pub rag_enabled: bool,</p>
+      <p>    pub golden_size: usize,</p>
+      <p>    pub quant_type: Option&lt;String&gt;,</p>
+      <p>}</p>
+      <p>pub struct CompiledVariant {</p>
+      <p>    pub code: Vec&lt;u8&gt;,</p>
+      <p>    pub instruction_footprint_bytes: usize,</p>
+      <p>    pub mechanisms: Vec<mechanismid>,</mechanismid></p>
+      <p>    pub section: CodeSection,</p>
+      <p>    pub key: VariantKey,</p>
+      <p>}</p>
+      <p>pub enum CodeSection { Hot, Warm, Cold }</p>
+      <p>```</p>
+    </section>
+    <section id="s13.3" data-section="13.3">
+      <h4>13.3 VariantKey 签名</h4>
+      <p>每个 VariantKey 维度及其含义：</p>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>决定内容</td>
+        </tr>
+        <tr>
+          <td>arch</td>
+        </tr>
+        <tr>
+          <td>ModelArchitecture</td>
+        </tr>
+        <tr>
+          <td>基础图结构 (RmsNorm → QKV → Attn → FFN → Residual)</td>
+        </tr>
+        <tr>
+          <td>moe_enabled</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>专家分发代码（</td>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.7 MoE）</td>
+        </tr>
+        <tr>
+          <td>guardrail_enabled</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>安全探针代码（</td>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.5 Guardrail）</td>
+        </tr>
+        <tr>
+          <td>spec_phase</td>
+        </tr>
+        <tr>
+          <td>Option&lt;SpecPhase&gt;</td>
+        </tr>
+        <tr>
+          <td>推测解码阶段：Draft (浅层变体) / Verify (全量模型) / None (标准)（</td>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.8）</td>
+        </tr>
+        <tr>
+          <td>rag_enabled</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>Late-Fusion 知识注入残差代码（</td>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.4 RAG）</td>
+        </tr>
+        <tr>
+          <td>golden_size</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>序列长度装筒（§12 黄金装筒）</td>
+        </tr>
+        <tr>
+          <td>quant_type</td>
+        </tr>
+        <tr>
+          <td>Option&lt;String&gt;</td>
+        </tr>
+        <tr>
+          <td>TurboQuant FWHT 旋转代码精度标识</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.4" data-section="13.4">
+      <h4>13.4 L1i 预算检查</h4>
+      <code>register()</code> 时强制检查指令足迹：
+      <p>```</p>
+      <p>instruction_footprint_bytes ≤ 80% × L1i_size</p>
+      <p>```</p>
+      <p>超预算时返回 <code>L1iBudgetExceeded</code> 错误，建议减少 batch 并发或禁用部分机制。</p>
+      <table>
+        <tr>
+          <th>参数</th>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>l1i_budget_bytes</td>
+        </tr>
+        <tr>
+          <td>32 KB</td>
+        </tr>
+        <tr>
+          <td>x86_64 主流 L1i 大小</td>
+        </tr>
+        <tr>
+          <td>L1I_BUDGET_RATIO</td>
+        </tr>
+        <tr>
+          <td>0.8</td>
+        </tr>
+        <tr>
+          <td>80% 预算上限</td>
+        </tr>
+        <tr>
+          <td>available_budget()</td>
+        </tr>
+        <tr>
+          <td>l1i_budget_bytes × 0.8</td>
+        </tr>
+        <tr>
+          <td>实际可用空间</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.5" data-section="13.5">
+      <h4>13.5 代码段分层</h4>
+      <table>
+        <tr>
+          <th>代码段</th>
+        </tr>
+        <tr>
+          <td>缓存层级</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>.text.hot</td>
+          <td> (</td>
+          <td>CodeSection::Hot</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>L1i 常驻</td>
+        </tr>
+        <tr>
+          <td>热路径代码，足迹 ≤ 80% L1i</td>
+        </tr>
+        <tr>
+          <td>.text.warm</td>
+          <td> (</td>
+          <td>CodeSection::Warm</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>L2 常驻</td>
+        </tr>
+        <tr>
+          <td>温路径，通过 NOP Trampoline 按需拉入 L1i</td>
+        </tr>
+        <tr>
+          <td>.text.cold</td>
+          <td> (</td>
+          <td>CodeSection::Cold</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>L3/DRAM</td>
+        </tr>
+        <tr>
+          <td>冷路径，长跳转 (Long JMP)，几乎不执行</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.6" data-section="13.6">
+      <h4>13.6 find_closest() — 逐步放松约束</h4>
+      <p>当精确匹配失败时，按以下优先级逐步放松约束：</p>
+      <p>放松后的变体仍可正确执行——被放松的机制在 Dispatch-Time 已被禁用。</p>
+      <table>
+        <tr>
+          <th>优先级</th>
+        </tr>
+        <tr>
+          <td>放松维度</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>golden_size</td>
+        </tr>
+        <tr>
+          <td>找 ≤ 目标值的最大 GoldenSize</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>spec_phase → None</td>
+        </tr>
+        <tr>
+          <td>放弃推测解码阶段特化</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>guardrail → false</td>
+        </tr>
+        <tr>
+          <td>放弃 Guardrail 探针代码</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>spec_phase → None</td>
+          <td> + </td>
+          <td>guardrail → false</td>
+        </tr>
+        <tr>
+          <td>组合放松</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>rag → false</td>
+        </tr>
+        <tr>
+          <td>放弃 RAG 注入代码</td>
+        </tr>
+        <tr>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>全部放松</td>
+        </tr>
+        <tr>
+          <td>仅保留 </td>
+          <td>arch</td>
+          <td> + </td>
+          <td>moe_enabled</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.7" data-section="13.7">
+      <h4>13.7 MechanismId 枚举</h4>
+      <p>12 种机制标识，每个 <code>CompiledVariant</code> 包含其所涉及的全部机制清单：</p>
+      <table>
+        <tr>
+          <th>MechanismId</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>SPEC 引用</td>
+        </tr>
+        <tr>
+          <td>Dense</td>
+        </tr>
+        <tr>
+          <td>基础稠密前向 (RmsNorm → QKV → Attn → FFN → Residual)</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+        </tr>
+        <tr>
+          <td>MoeDispatch</td>
+        </tr>
+        <tr>
+          <td>MoE 专家分发</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.7</td>
+        </tr>
+        <tr>
+          <td>SpecDraft</td>
+        </tr>
+        <tr>
+          <td>推测解码 Draft 阶段</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.8</td>
+        </tr>
+        <tr>
+          <td>SpecVerify</td>
+        </tr>
+        <tr>
+          <td>推测解码 Verify 阶段</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.8</td>
+        </tr>
+        <tr>
+          <td>GuardrailProbe</td>
+        </tr>
+        <tr>
+          <td>Guardrail 安全探针</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.5</td>
+        </tr>
+        <tr>
+          <td>RagInjection</td>
+        </tr>
+        <tr>
+          <td>Late-Fusion RAG 知识注入</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.4</td>
+        </tr>
+        <tr>
+          <td>TurboQuantFwht</td>
+        </tr>
+        <tr>
+          <td>TurboQuant FWHT 旋转</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §4.2</td>
+        </tr>
+        <tr>
+          <td>GateFirstSkip</td>
+        </tr>
+        <tr>
+          <td>Gate-First Skip 死神经元跳过</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.1</td>
+        </tr>
+        <tr>
+          <td>ResidualBypass</td>
+        </tr>
+        <tr>
+          <td>残差旁路 Δρ 跳过</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.2</td>
+        </tr>
+        <tr>
+          <td>Telemetry</td>
+        </tr>
+        <tr>
+          <td>Epilogue 遥测</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §5</td>
+        </tr>
+        <tr>
+          <td>EarlyExit</td>
+        </tr>
+        <tr>
+          <td>Early-Exit 微型 lm_head</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §2.3</td>
+        </tr>
+        <tr>
+          <td>RaggedCompaction</td>
+        </tr>
+        <tr>
+          <td>Compact→Execute→Scatter 三段式</td>
+        </tr>
+        <tr>
+          <td>05-OPTIMIZATIONS.md</td>
+          <td> §3.2</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.8" data-section="13.8">
+      <h4>13.8 Dispatch-Time 选择</h4>
+      <code>build_batch()</code> 阶段调用 <code>derive_key()</code> 收集 batch 中所有请求属性，生成 VariantKey：
+      <p>```rust</p>
+      <p>pub fn derive_key(</p>
+      <p>    arch: ModelArchitecture,</p>
+      <p>    has_moe_layers: bool,</p>
+      <p>    guardrail_active: bool,</p>
+      <p>    spec_phase: Option<specphase>,</specphase></p>
+      <p>    rag_active: bool,</p>
+      <p>    golden_size: usize,</p>
+      <p>    quant_type: Option&lt;String&gt;,</p>
+      <p>) -&gt; VariantKey</p>
+      <p>```</p>
+      <p>随后通过 <code>find_closest(&amp;key)</code> 查找最优编译产物。整个过程发生在批构建阶段，不进入 Mega-Kernel 执行路径。</p>
+    </section>
+    <section id="s13.9" data-section="13.9">
+      <h4>13.9 与 CompilerConstraints 的协作</h4>
+      <p>L1i budget 来自 <code>CompilerConstraints.l1i_size</code>，通过 <code>VariantRegistry::with_l1i_budget(l1i_bytes)</code> 在构造时注入。<code>DeviceProfile</code> → <code>CompilerConstraints</code> → <code>VariantRegistry</code> 形成完整的硬件参数传递链。</p>
+    </section>
+    <section id="s14" data-section="14">
+      <h3>14. Multi-Wave 空间并行与硬件饱和</h3>
+    </section>
+    <section id="s14.1" data-section="14.1">
+      <h4>14.1 Multi-Wave 空间并行</h4>
+      <p>在单个 <code>step()</code> 内，多个计算 wave 在不同硬件单元上空间并行执行。每个 wave 是一个独立的 prefill chunk 或 decode token 集合，分配到不同的 SM 组或 NUMA 节点。</p>
+      <strong>Multi-Wave 是 Mega-Kernel 内部执行路径</strong>：
+      <p>```</p>
+      <p>Rust 调用: executor.step(requests)</p>
+      <p>  → 一次 CALL 进入 Mega-Kernel 入口函数</p>
+      <p>  → Mega-Kernel 内部:</p>
+      <p>      ├── 读取 WaveSchedule (已由 Scheduler 预计算)</p>
+      <p>      ├── GPU: 启动 grid launch，每个 Thread Block 处理一个 wave</p>
+      <p>      │         Thread Block 0: Wave 1 (SM 0-39)</p>
+      <p>      │         Thread Block 1: Wave 2 (SM 40-79)</p>
+      <p>      │         → 内部自行调度 wave partitioning，无需 Rust 介入</p>
+      <p>      ├── CPU: 每个 NUMA 节点的线程执行一个 wave</p>
+      <p>      │         Thread 0-7 (Node 0): Wave 1</p>
+      <p>      │         Thread 8-15 (Node 1): Wave 2</p>
+      <p>      └── 所有 wave 完成后返回 Rust</p>
+      <p>→ 调度器负责生成 WaveSchedule (请求→wave 分配)</p>
+      <p>→ Mega-Kernel 负责执行 WaveSchedule (内部 wave 并行)</p>
+      <p>→ Rust 层只做一次 CALL，不参与 wave 级编排</p>
+      <p>```</p>
+      <strong>架构原则</strong>：
+      <li>Mega-Kernel 是单一的编译单元，内部包含所有 wave 的代码路径</li>
+      <li>WaveSchedule 通过 ABI 参数传入 Mega-Kernel（非运行时动态调度）</li>
+      <li>每个 wave 的 KV cache 指针、权重指针、激活 buffer 在 ABI 中预分配</li>
+      <li>wave 间无运行时同步需求（各自独立处理请求），仅在最终写回 output_buffer 时通过原子操作协调</li>
+      <strong>GPU Multi-Wave</strong>:
+      <p>```</p>
+      <p>Timeline (sm_90, 80 SM, 2 waves):</p>
+      <p>  SM 0-39:  Wave 1 Attention (WGMMA)  →  Wave 1 FFN (WGMMA)  →  ...</p>
+      <p>  SM 40-79: Wave 2 QKV Projection (TMA) →  Wave 2 Attn (WGMMA) →  ...</p>
+      <p>  → Wave 1 进入 FFN 时, SM 0-39 切换到 FFN 权重</p>
+      <p>  → Wave 2 进入 Attention 时, SM 40-79 开始 Wave 3 Prefill</p>
+      <p>  → 所有 SM 始终忙碌</p>
+      <p>```</p>
+      <strong>CPU NUMA Multi-Wave</strong>:
+      <p>```</p>
+      <p>Timeline (2 NUMA node, 16 cores):</p>
+      <p>  Node 0 (cores 0-7):  Wave 1 Attention (L3 local KV) → Wave 1 FFN (BLIS)</p>
+      <p>  Node 1 (cores 8-15): Wave 2 Attention (L3 local KV) → Wave 2 FFN (BLIS)</p>
+      <p>  → 每个 NUMA 节点的 KV cache 和权重数据在本地 L3</p>
+      <p>  → 零跨 NUMA 内存访问</p>
+      <p>```</p>
+      <strong>数据结构</strong>:
+      <p>```rust</p>
+      <p>pub struct WaveSchedule {</p>
+      <p>    pub waves: Vec<wave>,</wave></p>
+      <p>    pub sm_partition: GpuSmPartition,  // 见 <a href="http://02-HARDWARE.md">02-HARDWARE.md</a> §8.5</p>
+      <p>    pub numa_binding: Option<numabinding>,</numabinding></p>
+      <p>}</p>
+      <p>pub struct Wave {</p>
+      <p>    pub request_ids: Vec<requestid>,</requestid></p>
+      <p>    pub wave_type: WaveType,</p>
+      <p>    pub golden_size: usize,  // 本 wave 所有 seq 的装筒尺寸</p>
+      <p>}</p>
+      <p>pub enum WaveType {</p>
+      <p>    PrefillChunk { chunk_offset: usize, chunk_len: usize },</p>
+      <p>    Decode,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>调度约束</strong>:
+      <table>
+        <tr>
+          <th>约束</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>同 wave 内所有 seq 必须同一 golden_size</td>
+        </tr>
+        <tr>
+          <td>保证 GEMM 形状一致，零 padding</td>
+        </tr>
+        <tr>
+          <td>GPU wave 数 ≤ SM 分区数</td>
+        </tr>
+        <tr>
+          <td>每个 wave 独占一个 SM 分区</td>
+        </tr>
+        <tr>
+          <td>CPU wave 数 ≤ NUMA 节点数</td>
+        </tr>
+        <tr>
+          <td>每个 wave 绑定到一个 NUMA 节点</td>
+        </tr>
+        <tr>
+          <td>Wave 间权重共享</td>
+        </tr>
+        <tr>
+          <td>同模型不同 wave 共享权重，只有 KV cache 独立</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s14.2" data-section="14.2">
+      <h4>14.2 硬件饱和策略</h4>
+      <p>确保每个计算单元在任何微秒都有工作：</p>
+      <strong>GPU 最小 batch tokens 计算</strong>:
+      <p>```</p>
+      <p>min_batch_tokens_per_wave = sm_per_partition × warp_size × occupancy_target</p>
+      <p>// GPU sm_80 (108 SM, 2 partitions, warp=32):</p>
+      <p>//   sm_per_partition = 54</p>
+      <p>//   min_tokens = 54 × 32 × 0.5 = 864 tokens per wave</p>
+      <p>//   decode (seq=1): 需要 864 个并发 decode 序列才能饱和一个 wave</p>
+      <p>//   prefill: chunk_size ≥ 864 时一个 wave 即可饱和</p>
+      <p>// GPU sm_90 (132 SM, 2 partitions, warp=32):</p>
+      <p>//   sm_per_partition = 66</p>
+      <p>//   min_tokens = 66 × 32 × 0.5 = 1056 tokens per wave</p>
+      <p>```</p>
+      <strong>CPU 最小并行度计算</strong>:
+      <p>```</p>
+      <p>min_parallel_gemms = num_cores / cores_per_blis_instance</p>
+      <p>// AVX-512 (16 cores):</p>
+      <p>//   cores_per_blis_instance = 2  (主线程 + 1 helper 做 pack)</p>
+      <p>//   min_parallel_gemms = 8</p>
+      <p>//   → 需要 8 个独立 GEMM 任务（不同 seq 或不同 head group）保持所有核心忙碌</p>
+      <p>```</p>
+      <strong>饱和度监控</strong>:
+      <p>```rust</p>
+      <p>pub struct SaturationMetrics {</p>
+      <p>    pub compute_utilization: f32,    // 理论 TFLOPS / 实际 TFLOPS</p>
+      <p>    pub memory_bandwidth_util: f32,  // 实际带宽 / 理论带宽</p>
+      <p>    pub sm_occupancy: f32,           // 活跃 SM 占比</p>
+      <p>    pub wave_pipeline_depth: usize,  // 当前并行 wave 数</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s14.3" data-section="14.3">
+      <h4>14.3 Batch 同号合并（Same-Length Grouping）</h4>
+      <p>将相似 seq_len 的序列合并到同一个 batch/wave，消除 padding 浪费。</p>
+      <strong>问题</strong>: 不同 seq_len 的序列混在同一个 batch 中，短序列被 padding 到最长序列的长度：
+      <p>```</p>
+      <p>seq_1: [tok × 2048] → GEMM(2048, hidden, hidden) → 有效</p>
+      <p>seq_2: [tok × 64]   → GEMM(2048, hidden, hidden) → 1984 行浪费 FLOPs</p>
+      <p>```</p>
+      <strong>解决方案</strong>: 按 Golden Bucket 分组，同号序列合并：
+      <p>```</p>
+      <p>1. 收集所有 ready 序列</p>
+      <p>2. 按 seq_len 分配到对应的 Golden Bucket (collapse())</p>
+      <p>3. 同 bucket 的序列打包到同一个 wave</p>
+      <p>4. 每个 wave 内所有 seq_len 相同 → GEMM 形状统一 → 零 padding</p>
+      <p>```</p>
+      <strong>算法</strong>:
+      <p>```rust</p>
+      <p>fn group_by_golden_size(</p>
+      <p>    sequences: &amp;[SequenceInfo],</p>
+      <p>    registry: &amp;GoldenBucketRegistry,</p>
+      <p>) -&gt; Vec&lt;Vec<requestid>&gt; {</requestid></p>
+      <p>    // 1. 每个序列映射到最近的 Golden Size</p>
+      <p>    let mut groups: BTreeMap&lt;usize, Vec<requestid>&gt; = BTreeMap::new();</requestid></p>
+      <p>    for seq in sequences {</p>
+      <p>        let (golden_size, _) = registry.collapse(seq.seq_len);</p>
+      <p>        groups.entry(golden_size).or_default().push(<a href="http://seq.id">seq.id</a>);</p>
+      <p>    }</p>
+      <p>    // 2. 按 wave 容量拆分过大的组</p>
+      <p>    // 3. 合并过小的组到最近 bucket（允许少量 padding）</p>
+      <p>    groups.into_values().collect()</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>与 Continuous Batching 的集成</strong>:
+      <code>ContinuousBatcher::build_batch()</code> 流程更新：
+      <p>```</p>
+      <p>1. 收集 ready decode tokens 和 prefill chunks</p>
+      <p>2. 按 golden_size 分组（decode 和 prefill 分开）</p>
+      <p>3. 为每个组分配 wave slot</p>
+      <p>4. 生成 WaveSchedule（包含 wave 数量、SM 分配、NUMA 绑定）</p>
+      <p>5. 构建 BatchManifest（每个 wave 的 slot 列表）</p>
+      <p>```</p>
+      <strong>收益量化</strong>:
+      <table>
+        <tr>
+          <th>场景</th>
+        </tr>
+        <tr>
+          <td>无合并 (padding)</td>
+        </tr>
+        <tr>
+          <td>同号合并</td>
+        </tr>
+        <tr>
+          <td>FLOPs 节省</td>
+        </tr>
+        <tr>
+          <td>8 seq × [2048, 512, 64, 1024, 256, 128, 4096, 32]</td>
+        </tr>
+        <tr>
+          <td>全 padding 到 4096</td>
+        </tr>
+        <tr>
+          <td>3 groups: [32,64,128], [256,512,1024], [2048,4096]</td>
+        </tr>
+        <tr>
+          <td>55-70%</td>
+        </tr>
+        <tr>
+          <td>4 decode seq × [1, 1, 1, 1]</td>
+        </tr>
+        <tr>
+          <td>无 padding</td>
+        </tr>
+        <tr>
+          <td>单组</td>
+        </tr>
+        <tr>
+          <td>0% (已均匀)</td>
+        </tr>
+        <tr>
+          <td>混合 prefill+decode</td>
+        </tr>
+        <tr>
+          <td>decode 和 prefill 分离</td>
+        </tr>
+        <tr>
+          <td>decode 一组, prefill 按 chunk 分组</td>
+        </tr>
+        <tr>
+          <td>30-50%</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s14.4" data-section="14.4">
+      <h4>14.4 资源分配算法总览</h4>
+      <p>系统级资源分配的决策流程：</p>
+      <p>```</p>
+      <p>DeviceProfile + MemoryNetworkSensors</p>
+      <p>  → CompilerConstraints (<a href="http://02-HARDWARE.md">02-HARDWARE.md</a> §8)</p>
+      <p>    → 资源分配决策:</p>
+      <p>      ├── 寄存器: 微内核 MR×NR + epilogue 深度 (<a href="http://04-OPERATORS.md">04-OPERATORS.md</a> §13.3)</p>
+      <p>      ├── L1 Cache: GEMM tile 分块 KC × MC (<a href="http://04-OPERATORS.md">04-OPERATORS.md</a> §13.4)</p>
+      <p>      ├── L2 Cache: KV/权重/激活 三路预算 (<a href="http://04-OPERATORS.md">04-OPERATORS.md</a> §13.4)</p>
+      <p>      ├── L3/HBM: 全模型 + KV pool + workspace (<a href="http://04-OPERATORS.md">04-OPERATORS.md</a> §13.4)</p>
+      <p>      ├── SM/Core: Multi-Wave 分区 (本节 §14.1)</p>
+      <p>      └── Batch: 同号合并 + 硬件饱和 (本节 §14.2-14.3)</p>
+      <p>```</p>
+      <strong>分配优先级</strong>:
+      <table>
+        <tr>
+          <th>优先级</th>
+        </tr>
+        <tr>
+          <td>资源</td>
+        </tr>
+        <tr>
+          <td>分配策略</td>
+        </tr>
+        <tr>
+          <td>不可压缩</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>模型权重</td>
+        </tr>
+        <tr>
+          <td>常驻 HBM，按需 L2 预取</td>
+        </tr>
+        <tr>
+          <td>是</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>KV Cache</td>
+        </tr>
+        <tr>
+          <td>PagedAttention 管理，L2 热页 + L3 冷页</td>
+        </tr>
+        <tr>
+          <td>否（可 swap）</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>Workspace</td>
+        </tr>
+        <tr>
+          <td>区间图着色复用，最小化分配</td>
+        </tr>
+        <tr>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>寄存器</td>
+        </tr>
+        <tr>
+          <td>微内核累加器优先，epilogue 其次</td>
+        </tr>
+        <tr>
+          <td>是</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>SM/Core</td>
+        </tr>
+        <tr>
+          <td>Multi-Wave 分区，按 batch 负载动态调整</td>
+        </tr>
+        <tr>
+          <td>否</td>
+        </tr>
+      </table>
+    </section>
+  <section id="req-kv-addr-001" data-req="REQ-KV-ADDR-001" data-req-status="approved" data-req-domain="kv-addr" data-req-category="architecture" data-req-entity="ENT-KV-CACHE" data-req-api="POST /internal/paged_attention"><h3>REQ-KV-ADDR-001 KV 寻址 — Paged KV Cache 寻址正确性</h3><p>KV 寻址契约：Paged KV Cache 物理布局必须满足寻址正确性：
+1. KvPageHeader 正确记录页面的逻辑序列号和物理页号
+2. 页表查找：logical_page → physical_page 映射必须双向一致
+3. Gang-Aware 换出时页面组必须原子换出，不允许部分换出
+
+前置条件：KvPageHeader 和页表结构正确初始化
+后置条件：每次 KV 读写通过页表正确定位物理页
+违规检测：KV cache 一致性测试验证读写正确性</p><div data-criteria=""><strong>验收标准：</strong><ol><li>KvPageHeader 正确记录页面的逻辑序列号和物理页号</li><li>页表查找：logical_page → physical_page 映射必须双向一致</li><li>Gang-Aware 换出时页面组必须原子换出，不允许部分换出
+
+前置条件：KvPageHeader 和页表结构正确初始化
+后置条件：每次 KV 读写通过页表正确定位物理页
+违规检测：KV cache 一致性测试验证读写正确性</li><li>前置条件满足: KvPageHeader 和页表结构正确初始化</li><li>后置条件验证: 每次 KV 读写通过页表正确定位物理页</li><li>违规可检测: KV cache 一致性测试验证读写正确性</li></ol></div></section><section id="req-kv-addr-002" data-req="REQ-KV-ADDR-002" data-req-status="approved" data-req-domain="kv-addr" data-req-category="architecture" data-req-entity="ENT-KV-CACHE" data-req-api="POST /internal/paged_attention"><h3>REQ-KV-ADDR-002 KV 寻址 — 前缀复用语义正确性</h3><p>KV 寻址契约：KvPrefixIndex 前缀复用必须满足语义正确性：
+1. 前缀匹配必须是严格前缀（共享前缀 token 序列完全相同）
+2. 前缀复用时引用计数必须正确（引用归零才可换出）
+3. SessionKvCache 会话级确定性复用必须保证同一 session 内 KV 一致
+
+前置条件：KvPrefixIndex 正确构建和维护
+后置条件：前缀复用不导致 KV 数据损坏或不一致
+违规检测：前缀复用 E2E 测试验证输出正确性</p><div data-criteria=""><strong>验收标准：</strong><ol><li>前缀匹配必须是严格前缀（共享前缀 token 序列完全相同）</li><li>前缀复用时引用计数必须正确（引用归零才可换出）</li><li>SessionKvCache 会话级确定性复用必须保证同一 session 内 KV 一致
+
+前置条件：KvPrefixIndex 正确构建和维护
+后置条件：前缀复用不导致 KV 数据损坏或不一致
+违规检测：前缀复用 E2E 测试验证输出正确性</li><li>前置条件满足: KvPrefixIndex 正确构建和维护</li><li>后置条件验证: 前缀复用不导致 KV 数据损坏或不一致</li><li>违规可检测: 前缀复用 E2E 测试验证输出正确性</li></ol></div></section><section id="req-kv-addr-003" data-req="REQ-KV-ADDR-003" data-req-status="approved" data-req-domain="kv-addr" data-req-category="architecture" data-req-entity="ENT-KV-CACHE" data-req-api="POST /internal/paged_attention"><h3>REQ-KV-ADDR-003 KV 寻址 — 三级换入换出数据完整性</h3><p>KV 寻址契约：三级换入换出必须满足数据完整性：
+1. GPU→CPU 换出：页面数据完整复制，不允许部分复制
+2. CPU→NVMe 换出：DMA 传输完整性校验
+3. NVMe→CPU→GPU 换入：页面数据与换出时一致
+4. 页面状态机（Hot/Warm/Cold/Free）转换必须原子
+
+前置条件：GlobalMemoryManager 三级 Tier 正确初始化
+后置条件：换入的页面数据与换出时一致
+违规检测：换入换出循环后 KV 数据一致性测试</p><div data-criteria=""><strong>验收标准：</strong><ol><li>GPU→CPU 换出：页面数据完整复制，不允许部分复制</li><li>CPU→NVMe 换出：DMA 传输完整性校验</li><li>NVMe→CPU→GPU 换入：页面数据与换出时一致</li><li>页面状态机（Hot/Warm/Cold/Free）转换必须原子
+
+前置条件：GlobalMemoryManager 三级 Tier 正确初始化
+后置条件：换入的页面数据与换出时一致
+违规检测：换入换出循环后 KV 数据一致性测试</li><li>前置条件满足: GlobalMemoryManager 三级 Tier 正确初始化</li><li>后置条件验证: 换入的页面数据与换出时一致</li><li>违规可检测: 换入换出循环后 KV 数据一致性测试</li></ol></div></section><section id="req-symdim-runtime-001" data-req="REQ-SYMDIM-RUNTIME-001" data-req-status="approved" data-req-domain="symdim-runtime" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /internal/symdim/bind"><h3>REQ-SYMDIM-RUNTIME-001 SymDim 运行时 — 穿透不变量与禁止降级</h3><p>SymDim 运行时契约：运行时 SymDim 穿透不变量（ARCH-SYMDIM-NO-CONST-DEGRADE）：
+1. SymDim::Symbolic 维度在运行时从 ABI 参数读取，禁止编译时固化
+2. BoundExpr::Symbolic 传播到 emit_loop 边界时保持 Symbolic
+3. SYMDIM_MAX_SEQ_LEN 仅用于 buffer 分配上界，禁止作为运算参数
+
+前置条件：编译时 SymDim 保持 Symbolic 语义
+后置条件：运行时 ABI 参数包含所有 Symbolic 维度的绑定值
+违规检测：grep SYMDIM_MAX_SEQ_LEN 用作运算参数</p><div data-criteria=""><strong>验收标准：</strong><ol><li>SymDim::Symbolic 维度在运行时从 ABI 参数读取，禁止编译时固化</li><li>BoundExpr::Symbolic 传播到 emit_loop 边界时保持 Symbolic</li><li>SYMDIM_MAX_SEQ_LEN 仅用于 buffer 分配上界，禁止作为运算参数
+
+前置条件：编译时 SymDim 保持 Symbolic 语义
+后置条件：运行时 ABI 参数包含所有 Symbolic 维度的绑定值
+违规检测：grep SYMDIM_MAX_SEQ_LEN 用作运算参数</li><li>前置条件满足: 编译时 SymDim 保持 Symbolic 语义</li><li>后置条件验证: 运行时 ABI 参数包含所有 Symbolic 维度的绑定值</li><li>违规可检测: grep SYMDIM_MAX_SEQ_LEN 用作运算参数</li></ol></div></section><section id="req-symdim-runtime-002" data-req="REQ-SYMDIM-RUNTIME-002" data-req-status="approved" data-req-domain="symdim-runtime" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /internal/symdim/bind"><h3>REQ-SYMDIM-RUNTIME-002 SymDim 运行时 — ShapeBinding 运行时完整性</h3><p>SymDim 运行时契约：ShapeBinding 必须在运行时完成绑定：
+1. ShapeBinding 将 Symbolic 维度映射到运行时参数索引
+2. 绑定必须在 MegaKernelFn 调用前完成
+3. 未绑定的 Symbolic 维度 = 运行时 Err，不是默认值
+
+前置条件：MegaKernelFn ABI 包含 SymDim 参数槽位
+后置条件：运行时调用 MegaKernelFn 前所有 Symbolic 维度已绑定
+违规检测：未绑定 Symbolic 维度 → 运行时 Err</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ShapeBinding 将 Symbolic 维度映射到运行时参数索引</li><li>绑定必须在 MegaKernelFn 调用前完成</li><li>未绑定的 Symbolic 维度 = 运行时 Err，不是默认值
+
+前置条件：MegaKernelFn ABI 包含 SymDim 参数槽位
+后置条件：运行时调用 MegaKernelFn 前所有 Symbolic 维度已绑定
+违规检测：未绑定 Symbolic 维度 → 运行时 Err</li><li>前置条件满足: MegaKernelFn ABI 包含 SymDim 参数槽位</li><li>后置条件验证: 运行时调用 MegaKernelFn 前所有 Symbolic 维度已绑定</li><li>违规可检测: 未绑定 Symbolic 维度 → 运行时 Err</li></ol></div></section><section id="req-symdim-runtime-003" data-req="REQ-SYMDIM-RUNTIME-003" data-req-status="approved" data-req-domain="symdim-runtime" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /internal/symdim/bind"><h3>REQ-SYMDIM-RUNTIME-003 SymDim 运行时 — 动态 seq_len 与 JIT 缓存正确性</h3><p>SymDim 运行时契约：seq_len 动态变化时的 JIT 缓存正确性：
+1. 不同 seq_len 使用同一 JIT 编译产物（SymDim 不触发重编译）
+2. seq_len 变化通过 ABI 参数传递，不触发重编译
+3. JIT 缓存命中率不受 seq_len 变化影响
+
+前置条件：JIT 缓存协议正确实现
+后置条件：seq_len 变化不触发重编译，缓存命中
+违规检测：seq_len 变化时检测重编译行为</p><div data-criteria=""><strong>验收标准：</strong><ol><li>不同 seq_len 使用同一 JIT 编译产物（SymDim 不触发重编译）</li><li>seq_len 变化通过 ABI 参数传递，不触发重编译</li><li>JIT 缓存命中率不受 seq_len 变化影响
+
+前置条件：JIT 缓存协议正确实现
+后置条件：seq_len 变化不触发重编译，缓存命中
+违规检测：seq_len 变化时检测重编译行为</li><li>前置条件满足: JIT 缓存协议正确实现</li><li>后置条件验证: seq_len 变化不触发重编译，缓存命中</li><li>违规可检测: seq_len 变化时检测重编译行为</li></ol></div></section><section id="req-strategy-select-001" data-req="REQ-STRATEGY-SELECT-001" data-req-status="approved" data-req-domain="strategy-select" data-req-category="architecture" data-req-entity="ENT-STRATEGY-ARBITER" data-req-api="POST /internal/strategy/arbitrate"><h3>REQ-STRATEGY-SELECT-001 策略选择 — DeviceProfile 驱动策略选择</h3><p>策略选择契约：StrategySelector 必须由 DeviceProfile 和图结构驱动：
+1. 策略选择 = 纯函数(DeviceProfile, GraphTopology) → Strategy
+2. 禁止硬编码策略选择（如"GPU 一律用 FlashAttention"）
+3. 策略选择结果必须与 Backend Capability Matrix 一致
+
+前置条件：DeviceProfile 和图拓扑信息完整
+后置条件：策略选择结果可回溯到具体硬件参数
+违规检测：grep 硬编码策略选择</p><div data-criteria=""><strong>验收标准：</strong><ol><li>策略选择 = 纯函数(DeviceProfile, GraphTopology) → Strategy</li><li>禁止硬编码策略选择（如"GPU 一律用 FlashAttention"）</li><li>策略选择结果必须与 Backend Capability Matrix 一致
+
+前置条件：DeviceProfile 和图拓扑信息完整
+后置条件：策略选择结果可回溯到具体硬件参数
+违规检测：grep 硬编码策略选择</li><li>前置条件满足: DeviceProfile 和图拓扑信息完整</li><li>后置条件验证: 策略选择结果可回溯到具体硬件参数</li><li>违规可检测: grep 硬编码策略选择</li></ol></div></section><section id="req-strategy-select-002" data-req="REQ-STRATEGY-SELECT-002" data-req-status="approved" data-req-domain="strategy-select" data-req-category="architecture" data-req-entity="ENT-STRATEGY-ARBITER" data-req-api="POST /internal/strategy/arbitrate"><h3>REQ-STRATEGY-SELECT-002 策略选择 — 策略选择可诊断性</h3><p>策略选择契约：策略选择结果必须可诊断：
+1. 策略选择必须记录决策原因（哪个硬件参数驱动了哪个决策）
+2. 策略选择日志可通过编译 dump 查看
+3. 策略选择失败必须返回 Err + 失败原因，不是静默默认
+
+前置条件：策略选择器记录决策日志
+后置条件：策略选择结果可诊断、可回溯
+违规检测：策略选择无决策日志 = 不可诊断</p><div data-criteria=""><strong>验收标准：</strong><ol><li>策略选择必须记录决策原因（哪个硬件参数驱动了哪个决策）</li><li>策略选择日志可通过编译 dump 查看</li><li>策略选择失败必须返回 Err + 失败原因，不是静默默认
+
+前置条件：策略选择器记录决策日志
+后置条件：策略选择结果可诊断、可回溯
+违规检测：策略选择无决策日志 = 不可诊断</li><li>前置条件满足: 策略选择器记录决策日志</li><li>后置条件验证: 策略选择结果可诊断、可回溯</li><li>违规可检测: 策略选择无决策日志 = 不可诊断</li></ol></div></section><section id="req-telemetry-001" data-req="REQ-TELEMETRY-001" data-req-status="approved" data-req-domain="telemetry" data-req-category="architecture" data-req-entity="ENT-TELEMETRY-OFFSET" data-req-api="POST /compile"><h3>REQ-TELEMETRY-001 遥测 — 零额外计算原则</h3><p>遥测契约：遥测管线必须满足零额外计算原则：
+1. 遥测数据采集在 Epilogue 白嫖网络中完成，不增加额外计算
+2. KvPageHeader 写入在 KV 更新时顺便完成，不增加额外内存访问
+3. 遥测数据传输异步进行，不阻塞推理热路径
+
+前置条件：Epilogue 白嫖网络和 KvPageHeader 正确实现
+后置条件：遥测采集不增加推理延迟
+违规检测：性能测试对比有/无遥测的推理延迟差异</p><div data-criteria=""><strong>验收标准：</strong><ol><li>遥测数据采集在 Epilogue 白嫖网络中完成，不增加额外计算</li><li>KvPageHeader 写入在 KV 更新时顺便完成，不增加额外内存访问</li><li>遥测数据传输异步进行，不阻塞推理热路径
+
+前置条件：Epilogue 白嫖网络和 KvPageHeader 正确实现
+后置条件：遥测采集不增加推理延迟
+违规检测：性能测试对比有/无遥测的推理延迟差异</li><li>前置条件满足: Epilogue 白嫖网络和 KvPageHeader 正确实现</li><li>后置条件验证: 遥测采集不增加推理延迟</li><li>违规可检测: 性能测试对比有/无遥测的推理延迟差异</li></ol></div></section><section id="req-telemetry-002" data-req="REQ-TELEMETRY-002" data-req-status="approved" data-req-domain="telemetry" data-req-category="architecture" data-req-entity="ENT-TELEMETRY-OFFSET" data-req-api="POST /compile"><h3>REQ-TELEMETRY-002 遥测 — 采集→传输→消费闭环完整性</h3><p>遥测契约：遥测闭环必须满足采集→传输→消费完整性：
+1. 采集：Epilogue 白嫖 + KvPageHeader + Observer 观测
+2. 传输：异步传输到消费端，不阻塞推理
+3. 消费：AbsolutePolicy 护栏基于遥测数据做决策
+4. 闭环：决策反馈影响调度参数
+
+前置条件：遥测管线各组件正确连接
+后置条件：遥测数据从采集到消费无丢失
+违规检测：遥测端到端测试验证数据完整性</p><div data-criteria=""><strong>验收标准：</strong><ol><li>采集：Epilogue 白嫖 + KvPageHeader + Observer 观测</li><li>传输：异步传输到消费端，不阻塞推理</li><li>消费：AbsolutePolicy 护栏基于遥测数据做决策</li><li>闭环：决策反馈影响调度参数
+
+前置条件：遥测管线各组件正确连接
+后置条件：遥测数据从采集到消费无丢失
+违规检测：遥测端到端测试验证数据完整性</li><li>前置条件满足: 遥测管线各组件正确连接</li><li>后置条件验证: 遥测数据从采集到消费无丢失</li><li>违规可检测: 遥测端到端测试验证数据完整性</li></ol></div></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：06-RUNTIME.html</address>
+  </footer>
+</body>
+</html>

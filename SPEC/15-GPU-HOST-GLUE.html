@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="15-GPU-HOST-GLUE">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"15-GPU-HOST-GLUE", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>GPU Mega-Kernel Host 执行胶水 (ARCH-GPU-HOST-GLUE)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>15-GPU-HOST-GLUE</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-gpu-mega-kernel-host-执行胶水-arch-gpu-host-glue" data-section="null">
+      <h2>GPU Mega-Kernel Host 执行胶水 (ARCH-GPU-HOST-GLUE)</h2>
+    </section>
+    <section id="s-定位" data-section="null">
+      <h3>定位</h3>
+      <p>gllm 层 GPU 执行路径的实现。将已编译的 mega-kernel PTX/HIP/MSL 代码 launch 到 GPU 设备。GPU mega-kernel 与 CPU mega-kernel 共享同一 <code>MegaKernelExecutor</code> 编译产物，区别仅在执行层。</p>
+    </section>
+    <section id="s-前置原则" data-section="null">
+      <h3>前置原则</h3>
+      <li><strong>ARCH-CPU-GPU-UNIFIED</strong>: GPU 走与 CPU 相同的 <code>compile()</code> 编译路径（SPEC/39 统一编译器架构）。GPU PTX/HIP/MSL 由 gllm-kernels <code>gpu_lower.rs</code> 生成。编译器不假设图结构——喂什么编译什么</li>
+      <li><strong>ARCH-RUST-IS-CODEGEN</strong>: 推理时 Rust 只做一次 <code>cuLaunchKernel</code>。GPU 上一次 kernel launch 完成整个 generate loop</li>
+      <li><strong>NO_SILENT_FALLBACK</strong>: GPU 不可用时返回 <code>Err</code>，不降级到 CPU</li>
+    </section>
+    <section id="s-架构" data-section="null">
+      <h3>架构</h3>
+      <p>```</p>
+      <p>                    ┌─────────────────────────┐</p>
+      <p>                    │ MegaKernelExecutor       │</p>
+      <p>                    │ (compile, SPEC/39)       │</p>
+      <p>                    └─────────┬───────────────┘</p>
+      <p>                              │</p>
+      <p>                    ┌─────────▼───────────────┐</p>
+      <p>                    │ exec_code (CompiledLayer) │</p>
+      <p>                    │ .code_bytes() = PTX bin  │</p>
+      <p>                    └─────────┬───────────────┘</p>
+      <p>                              │</p>
+      <p>              ┌───────────────┼───────────────┐</p>
+      <p>              │ CPU           │ GPU            │</p>
+      <p>              │ entry_fn()    │ cuLaunchKernel │</p>
+      <p>              │ 直接 CALL     │ weight_gpu_ptr │</p>
+      <p>              │               │ scratchpad_gpu │</p>
+      <p>              └───────────────┴───────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s-现有基础" data-section="null">
+      <h3>现有基础</h3>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>文件</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>PTX 编译缓存</td>
+        </tr>
+        <tr>
+          <td>cuda_backend.rs:compiled_ptx</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>GPU kernel launch</td>
+        </tr>
+        <tr>
+          <td>cuda_backend.rs:gpu_launch_mega_kernel</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>GPU 权重上传</td>
+        </tr>
+        <tr>
+          <td>cuda_backend.rs:upload_weight_blob</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>GPU scratchpad/上传/下载</td>
+        </tr>
+        <tr>
+          <td>cuda_backend.rs</td>
+          <td> helper methods</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>KV cache GPU 分配</td>
+        </tr>
+        <tr>
+          <td>gpu_helpers.rs:gpu_alloc_kv_cache</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>KV swap in/out</td>
+        </tr>
+        <tr>
+          <td>gpu_helpers.rs:gpu_swap_out/in_pages</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>GPU 采样</td>
+        </tr>
+        <tr>
+          <td>gpu_helpers.rs:gpu_sample_from_tensor</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Mega-kernel PTX 生成</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels gpu_lower.rs</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>6 个 gpu_pure 方法</td>
+        </tr>
+        <tr>
+          <td>gpu_backend_macro.rs</td>
+        </tr>
+        <tr>
+          <td>✅ 全部已实现</td>
+        </tr>
+        <tr>
+          <td>prepare_gpu_mega_kernel</td>
+        </tr>
+        <tr>
+          <td>Backend</td>
+          <td> trait + macro</td>
+        </tr>
+        <tr>
+          <td>✅ executor 调用上传</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>GPU PTX 编译接入</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>mega_kernel.rs</td>
+        </tr>
+        <tr>
+          <td>✅ clone graph + GPU 编译</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Forward-only GPU 编译</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>已物理删除</td>
+        </tr>
+        <tr>
+          <td>统一走 </td>
+          <td>compile()</td>
+          <td> GPU 变体 (SPEC/39)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>HIP/Metal launch</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>hip_backend.rs</td>
+          <td>/</td>
+          <td>metal_backend.rs</td>
+        </tr>
+        <tr>
+          <td>✅ HIP hipModuleLaunchKernel + Metal launch_compute</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-关键设计" data-section="null">
+      <h3>关键设计</h3>
+    </section>
+    <section id="s-gpu-mega-kernel-执行-vs-cpu-mega-kernel-执行" data-section="null">
+      <h4>GPU mega-kernel 执行 vs CPU mega-kernel 执行</h4>
+      <p>```</p>
+      <p>CPU: entry_fn(input_ids_ptr, weight_blob_ptr, kv_cache, positions, ...,</p>
+      <p>              scratchpad_ptr, output_tokens_ptr, ...)</p>
+      <p>     → 直接函数调用，所有指针都是 host 内存</p>
+      <p>GPU: cuLaunchKernel(kernel_fn,</p>
+      <p>     grid_dim, block_dim, shared_mem_bytes, stream,</p>
+      <p>     [input_ids_gpu, weight_blob_gpu, kv_cache_gpu, positions_gpu, ...,</p>
+      <p>      scratchpad_gpu, output_tokens_gpu, ...])</p>
+      <p>     → GPU kernel launch，所有指针都是 device 内存</p>
+      <p>```</p>
+      <p>核心差异：</p>
+      <p>1. <strong>weight_blob 必须上传到 GPU</strong>：<code>htod(weight_blob) → weight_gpu_ptr</code></p>
+      <p>2. <strong>scratchpad 必须分配在 GPU</strong>：<code>device.alloc(scratchpad_bytes) → scratchpad_gpu_ptr</code></p>
+      <p>3. <strong>input_ids 必须上传</strong>：<code>htod(input_ids) → input_ids_gpu_ptr</code></p>
+      <p>4. <strong>output_tokens 必须从 GPU 取回</strong>：<code>dtoh(output_tokens_gpu) → host_vec</code></p>
+      <p>5. <strong>positions 必须上传</strong>：<code>htod(positions) → positions_gpu_ptr</code></p>
+    </section>
+    <section id="s-权重上传策略" data-section="null">
+      <h4>权重上传策略</h4>
+      <li><strong>首次调用时上传</strong>：weight_blob 是只读的，首次 <code>generate</code>/<code>forward</code> 时 <code>htod</code> 一次，缓存 device ptr</li>
+      <li><strong>后续调用复用</strong>：device 端 weight_blob 指针不变，只需上传 input_ids 和分配 scratchpad</li>
+      <li><strong>生命周期</strong>：权重 GPU buffer 绑定到 <code>CudaBackend</code> 实例生命周期</li>
+    </section>
+    <section id="s-req-清单" data-section="null">
+      <h3>REQ 清单</h3>
+    </section>
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="010" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-010" id="req-gpu-010">REQ-GPU-010: GPU PTX 编译接入 MegaKernelExecutor
+      <p>在 mega-kernel 编译时同步生成 GPU PTX/HIP 代码，存入 <code>gpu_code</code> 字段。</p>
+      <strong>问题</strong>: 统一 <code>compile()</code> 入口（SPEC/39）需要同时生成 CPU 和 GPU JIT 代码，存入 <code>CompileOutput</code>。
+      <strong>设计</strong>:
+      <li><code>compile()</code>: 编译时同时调用 CPU 和 GPU 路径（通过 <code>CompileConfig</code> 的 <code>sm_version</code>/<code>gfx_arch</code> 字段决定是否生成 GPU 代码）</li>
+      <li>encoder 统一走 <code>compile()</code>，GPU 编译使用同一入口（SPEC/39）</li>
+      <li>SM version 从哪里来：executor 编译时从 <code>backend.device_info().sm_version()</code> 获取，传入 <code>CompileConfig</code></li>
+      <li><code>CompileConfig</code> 包含 <code>sm_version: Option&lt;u32&gt;</code> 字段（替代 <code>MegaKernelConfig</code>，SPEC/39 §1.1.1）</li>
+      <li>HIP: <code>gfx_arch</code> 和 <code>wave_size</code> 从 HipBackend.gpu_profile 获取</li>
+      <li>Metal: 从 MetalBackend.gpu_profile 获取</li>
+      <strong>调用链</strong>:
+      <p>```</p>
+      <a href="http://executor.rs">executor.rs</a> compile
+      <p>  → MegaKernelExecutor::compile(graph, ..., config)</p>
+      <p>    → graph.clone()</p>
+      <p>    → compiler.compile(graph, &amp;config)          // CPU (SPEC/39 统一编译入口)</p>
+      <p>    → compiler.compile(graph_clone, &amp;gpu_config) // GPU (SPEC/39 统一编译入口)</p>
+      <p>    → mega_compiled.gpu_code = Some(gpu_output.gpu_code)</p>
+      <p>  → backend.prepare_gpu_mega_kernel(wb, mk.gpu_code(), ...)</p>
+      <p>    → CudaBackend: upload weight_blob + cache PTX in compiled_ptx</p>
+      <p>```</p>
+      <strong>关键文件</strong>:
+      <li><code>gllm/mega_kernel.rs</code>: clone graph + GPU 编译 + set_gpu_code</li>
+      <li><code>gllm/executor.rs</code>: 传 sm_version 到 CompileConfig (SPEC/39 §1.1.1)</li>
+      <li><code>gllm-kernels/mod.rs</code>: 统一 <code>compile()</code> 入口，GPU 变体内置 (SPEC/39)</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-010" data-test="TEST-GPU-010" id="test-gpu-010">TEST-GPU-010: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-010相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="011" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-011" id="req-gpu-011">~~REQ-GPU-011: Forward-only GPU 编译~~ 已物理删除
+      <p>&gt; <strong>已物理删除</strong> (SPEC/39 统一编译器架构): encoder GPU 编译走同一 <code>compile()</code> 入口。编译器不假设图结构，不存在"forward-only"编译路径。10-param <code>CompiledLayerFn</code> ABI 已删除。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-011" data-test="TEST-GPU-011" id="test-gpu-011">TEST-GPU-011: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-011相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="012" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-012" id="req-gpu-012">REQ-GPU-012: HIP/Metal Mega-Kernel Launch ✅
+      <p>实现 HIP 和 Metal 后端的 <code>gpu_launch_mega_kernel</code> 及 <code>GpuEncoderOps</code>。</p>
+      <strong>设计</strong>:
+      <li>HIP: <code>HipDevice::load_hsaco</code> (HipModule + get_function) + <code>launch_kernel</code> (hipModuleLaunchKernel)</li>
+      <li>Metal: <code>MetalDevice::load_library_data</code> (AIR bitcode) + <code>launch_compute</code> (MTLComputeCommandEncoder + dispatchThreadgroups)</li>
+      <li>23-param ABI 参数布局与 CUDA 完全一致（全为 device 指针）</li>
+      <li><code>GpuEncoderOps</code> trait 三后端统一实现 encoder forward</li>
+      <strong>关键文件</strong>:
+      <li><code>gllm-kernels/gpu/hip/device.rs</code>: HipModule + load_hsaco + launch_kernel</li>
+      <li><code>gllm-kernels/gpu/metal/device.rs</code>: launch_compute</li>
+      <li><code>gllm/hip_backend.rs:gpu_launch_mega_kernel</code></li>
+      <li><code>gllm/metal_backend.rs:gpu_launch_mega_kernel</code></li>
+      <li><code>gllm/gpu_backend_macro.rs:GpuEncoderOps</code> impl for HIP/Metal</li>
+      <p>&gt; <strong>执行路径说明</strong>: GPU 后端通过这些 Backend 方法执行推理。CPU 后端由 Executor 直接调用 MegaKernelExecutor (mega-kernel single CALL)，绕过 Backend trait。</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-012" data-test="TEST-GPU-012" id="test-gpu-012">TEST-GPU-012: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-012相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="001" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-001" id="req-gpu-001">REQ-GPU-001: batch_forward_gpu_pure ✅
+      <p>实现 GPU decoder forward，用于 continuous batching 调度路径。</p>
+      <strong>设计</strong>:
+      <li><code>gpu_backend_macro.rs</code> 的 <code>batch_forward_gpu_pure</code> 方法</li>
+      <li>Launch mega-kernel PTX 到 GPU，传入 batch 维度参数</li>
+      <li>KV cache 使用 device ptr（<code>gpu_alloc_kv_cache</code> 已分配）</li>
+      <li>返回 <code>(Vec&lt;LogitsHandle&gt;, sparsity, telemetries)</code></li>
+      <li>LogitsHandle 中的 data 在 GPU 上，通过 <code>gpu_sample_from_tensor</code> 采样</li>
+      <strong>调用方</strong>: <code>executor.rs:step()</code> L1591, <code>executor.rs</code> profiling L2656
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-001" data-test="TEST-GPU-001" id="test-gpu-001">TEST-GPU-001: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-001相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="002" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-002" id="req-gpu-002">REQ-GPU-002: GPU Embedding Forward (Mega-Kernel) ✅
+      <p>实现 GPU encoder forward，用于 embedding 推理。</p>
+      <strong>设计</strong>:
+      <li>Launch mega-kernel PTX（encoder 图，无 Argmax/StoreToken ops，见 SPEC/39 §1.3）</li>
+      <li>上传 input_ids 到 GPU</li>
+      <li>执行 forward pass</li>
+      <li>DtoH 取回 output buffer (hidden states)</li>
+      <li>MeanPool 在 JIT 图内已完成，返回 <code>Vec&lt;f32&gt;</code></li>
+      <strong>调用方</strong>: <code>executor.rs</code> embedding 路径
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-002" data-test="TEST-GPU-002" id="test-gpu-002">TEST-GPU-002: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-002相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="003" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-003" id="req-gpu-003">REQ-GPU-003: rerank_forward_gpu_pure ✅
+      <p>实现 GPU reranker forward。</p>
+      <strong>设计</strong>: 复用 REQ-GPU-002 架构，区别仅在：
+      <li>OutputMode = <code>ClsToken</code>（取 [CLS] token 位置的 hidden state）</li>
+      <li>JIT 图内已包含 ClsToken pooling</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-003" data-test="TEST-GPU-003" id="test-gpu-003">TEST-GPU-003: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-003相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="004" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-004" id="req-gpu-004">REQ-GPU-004: classify_forward_gpu_pure ✅
+      <p>实现 GPU classifier forward。</p>
+      <strong>设计</strong>: 复用 REQ-GPU-002 架构，区别仅在：
+      <li>OutputMode = <code>ClassifyMultiway</code></li>
+      <li>JIT 图内已包含 label token logits 提取</li>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-004" data-test="TEST-GPU-004" id="test-gpu-004">TEST-GPU-004: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-004相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="005" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-005" id="req-gpu-005">REQ-GPU-005: score_tokens_forward_gpu_pure ✅
+      <p>实现 HR score_tokens GPU 路径。</p>
+      <strong>设计</strong>:
+      <li>传入 tokens + target_token_ids</li>
+      <li>Mega-kernel output_mode_selector = EncodeToLayer + score computation</li>
+      <li>返回 <code>Vec&lt;f32&gt;</code> (每个 target token 的 score)</li>
+      <strong>调用方</strong>: <code>executor.rs:score_tokens()</code> L2920
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-005" data-test="TEST-GPU-005" id="test-gpu-005">TEST-GPU-005: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-005相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="006" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-006" id="req-gpu-006">REQ-GPU-006: encode_at_layer_forward_gpu_pure ✅
+      <p>实现 Intent/HR mid-layer encode GPU 路径。</p>
+      <strong>设计</strong>:
+      <li>传入 tokens + anchor_layer</li>
+      <li>Mega-kernel 执行到 anchor_layer 截断</li>
+      <li>DtoH 取回 hidden states</li>
+      <li>返回 <code>Vec&lt;f32&gt;</code></li>
+      <strong>调用方</strong>: <code>executor.rs:encode_at_layer()</code> L2957
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-006" data-test="TEST-GPU-006" id="test-gpu-006">TEST-GPU-006: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-006相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="007" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-007" id="req-gpu-007">REQ-GPU-007: GPU 权重上传管理 ✅
+      <p>一次性 htod 权重 blob + scratchpad 分配。</p>
+      <strong>设计</strong>:
+      <li><code>CudaBackend</code> 新增字段 <code>weight_blob_gpu: Option&lt;(u64, usize)&gt;</code> (device_ptr, bytes)</li>
+      <li>首次调用时：<code>device.alloc(weight_blob_bytes)</code> + <code>device.htod(weight_blob)</code></li>
+      <li>后续调用：复用 device_ptr</li>
+      <li>Scratchpad 每次调用重新分配（大小可能变化）</li>
+      <strong>关键文件</strong>: <code>cuda_backend.rs</code>, <code>hip_backend.rs</code>, <code>metal_backend.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-007" data-test="TEST-GPU-007" id="test-gpu-007">TEST-GPU-007: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-007相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="008" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-008" id="req-gpu-008">REQ-GPU-008: GPU Callback 传递 ✅
+      <p>SG/Guardrail callback table 通过 GPU shared memory 传递。</p>
+      <strong>设计</strong>:
+      <li>SG <code>SgSharedMemory</code> 已经是共享内存设计，GPU 上通过 device ptr 传递</li>
+      <li>Callback table (<code>MegaKernelCallbackTable</code>) 在 GPU 上通过 <code>LoadCallbackEntry</code> + <code>NativeCall</code> VmInstr 调用</li>
+      <li><strong>约束</strong>: GPU callback 只能调用 <code>__device__</code> 函数</li>
+      <li>无 callback 时传 NULL ptr（零开销）</li>
+      <strong>关键文件</strong>: <code>cuda_backend.rs</code>, <code>gpu_backend_macro.rs</code>, <code>mega_kernel.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-008" data-test="TEST-GPU-008" id="test-gpu-008">TEST-GPU-008: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-008相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-DEVICE-PROFILE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-ISA-PROFILE" <h4="" data-section="009" data-req-api="POST /internal/gpu/host_glue" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-DEVICE-PROFILE,ENT-BATCH-CONTEXT,ENT-COMPILER-GRAPH,ENT-ISA-PROFILE" data-req-category="business" data-req-domain="gpu" data-req-status="implemented" data-req="REQ-GPU-009" id="req-gpu-009">REQ-GPU-009: HIP/Metal 对等实现
+      <p>CUDA GPU launch 已实现。HIP/Metal 的 mega-kernel launch 返回 <code>Err("not yet implemented (REQ-GPU-009)")</code>。</p>
+      <strong>关键文件</strong>: <code>hip_backend.rs</code>, <code>metal_backend.rs</code>
+      <strong>关键文件</strong>: <code>gpu_helpers.rs</code>, <code>cuda_backend.rs</code>, <code>hip_backend.rs</code>, <code>metal_backend.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">GPU host glue 函数编译通过: cargo check --features cuda</li>
+        <li id="id-2" data-criterion="2">Mega-Kernel GPU launch 参数正确</li>
+        <li id="id-3" data-criterion="3">GPU/CPU 数值对齐: 同输入同输出</li>
+        <li id="id-4" data-criterion="4">集成测试: E2E GPU 推理正确</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-batch-context" href="./32-MEGA-KERNEL-ENHANCEMENT#ent-batch-context">ENT-BATCH-CONTEXT
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GPU-009" data-test="TEST-GPU-009" id="test-gpu-009">TEST-GPU-009: GPU Mega-Kernel Host执行胶水测试<p>验证REQ-GPU-009相关功能正确性</p>
+      <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
+      <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
+      <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
+      <div id="集成测试-e2e-gpu-推理正确" data-criterion="集成测试: E2E GPU 推理正确">集成测试: E2E GPU 推理正确</div>
+      
+    </section>
+
+    <section id="s-abi-映射" data-section="null">
+      <h3>ABI 映射</h3>
+    </section>
+    <section id="s23" data-section="23">
+      <h4>CPU/GPU Mega-Kernel ABI (23 参数, 0-based 索引)</h4>
+      <p>&gt; <strong>SSOT</strong>: 完整 23 参数定义见 <code>GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.5 (L1117-1141)</code>。本节为跨后端引用摘要。所有 arg 编号使用 0-based 逻辑索引。</p>
+      <p>```rust</p>
+      <p>entry_fn(</p>
+      <p>    // arg 0-5: 基础推理参数</p>
+      <p>    input_ids_ptr: *const u32,       // arg 0  — 输入 token IDs</p>
+      <p>    weight_blob_ptr: *const u8,      // arg 1  — 权重 blob</p>
+      <p>    kv_cache_ptr: *mut u8,           // arg 2  — KV cache buffer</p>
+      <p>    positions_ptr: *const u32,       // arg 3  — 位置编码表</p>
+      <p>    aux_ptr: *const u8,              // arg 4  — 辅助数据</p>
+      <p>    batch_size: usize,               // arg 5  — 批大小</p>
+      <p>    // arg 6-13: 序列控制参数</p>
+      <p>    prompt_len: usize,               // arg 6  — 输入长度</p>
+      <p>    scratchpad_ptr: *mut u8,         // arg 7  — 临时计算缓冲区</p>
+      <p>    output_tokens_ptr: *mut u32,     // arg 8  — 输出 token 缓冲区</p>
+      <p>    temperature_u32: usize,          // 8-byte aligned            // arg 9  — 采样温度 (IEEE 754)</p>
+      <p>    top_k: usize,                    // 8-byte aligned                      // arg 10 — top-k 参数</p>
+      <p>    top_p_u32: usize,                // 8-byte aligned                  // arg 11 — top-p 参数 (IEEE 754)</p>
+      <p>    max_new_tokens: usize,           // arg 12 — 最大生成 token 数</p>
+      <p>    eos_token_id: usize,             // 8-byte aligned               // arg 13 — 终止 token ID</p>
+      <p>    // arg 14-22: 高级功能参数</p>
+      <p>    output_mode_selector: usize,     // 8-byte aligned       // arg 14 — 输出模式 (0-5 JMP Table)</p>
+      <p>    hook_ctx_ptr: *mut u8,           // arg 15 — Hook/SG 共享内存</p>
+      <p>    telemetry_ptr: *mut u8,          // arg 16 — 遥测数据</p>
+      <p>    session_position: usize,         // arg 17 — Session KV 已处理位置</p>
+      <p>    fused_hidden_ptr: <em>const u8,     // void</em> 泛型指针    // arg 18 — 多模态 fused hidden</p>
+      <p>    num_mm_tokens: usize,            // arg 19 — 多模态 token 数</p>
+      <p>    callback_table_ptr: *const u8,   // arg 20 — Callback 函数指针表</p>
+      <p>    page_table_ptr: *const u32,      // arg 21 — PagedAttention 页表</p>
+      <p>    batch_ctx_ptr: *const u8,        // arg 22 — BatchContext 批量推理上下文</p>
+      <p>)</p>
+      <p>```</p>
+    </section>
+    <section id="s-gpu-kernel-launch-abi" data-section="null">
+      <h4>GPU Kernel Launch ABI</h4>
+      <p>```c</p>
+      <p>// CUDA / HIP / Metal — 所有 GPU 后端统一</p>
+      <p>cuLaunchKernel(</p>
+      <p>    kernel_fn,</p>
+      <p>    grid_dim_x, grid_dim_y, grid_dim_z,</p>
+      <p>    block_dim_x, block_dim_y, block_dim_z,</p>
+      <p>    shared_mem_bytes,</p>
+      <p>    stream,</p>
+      <p>    kernel_params: [*mut void; 23],        // 23 个指针/值参数 (0-based)</p>
+      <p>    extra: null</p>
+      <p>)</p>
+      <p>```</p>
+      <p>GPU launch 时 23 个参数全部转为 <code>void*</code> 数组，每个参数指向 device 内存地址。CPU 路径等价：<code>entry_fn</code> 直接按上述签名调用。</p>
+    </section>
+    <section id="s-实施顺序" data-section="null">
+      <h3>实施顺序</h3>
+      <p>1. <s>REQ-GPU-007 (权重上传)</s> ✅</p>
+      <p>2. <s>REQ-GPU-008 (Callback 传递)</s> ✅</p>
+      <p>3. <s>REQ-GPU-001 (batch_forward)</s> ✅</p>
+      <p>4. <s>REQ-GPU-002 (embedding_forward)</s> ✅</p>
+      <p>5. <s>REQ-GPU-003/004 (rerank/classify)</s> ✅</p>
+      <p>6. <s>REQ-GPU-005/006 (score_tokens/encode_at_layer)</s> ✅</p>
+      <p>7. <s>REQ-GPU-010 (GPU PTX 编译接入)</s> ✅</p>
+      <p>8. <s>REQ-GPU-011 (Forward-only GPU 编译)</s> 废弃 → 统一到 <code>compile()</code> GPU 变体（见 SPEC/39）</p>
+      <p>9. <s>REQ-GPU-012 (HIP/Metal launch)</s> ✅</p>
+    </section>
+    <section id="s-验证" data-section="null">
+      <h3>验证</h3>
+      <p>```bash</p>
+      <p>cd ../gllm &amp;&amp; cargo check</p>
+      <p>cargo test --lib</p>
+      <p>cargo test --test test_e2e_generator -- --test-threads=1</p>
+      <p>cargo test --test test_e2e_embedding -- --test-threads=1</p>
+      <p>```</p>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-batch-context" data-entity="ENT-BATCH-CONTEXT" data-req-ref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002" data-entity-model-type="relational" data-entity-ref="ENT-CALLBACK-CHAIN ENT-COMPILER-GRAPH ENT-COORDINATOR ENT-DEVICE-PROFILE ENT-EXECUTOR ENT-ISA-PROFILE ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-xref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002"><h4>ENT-BATCH-CONTEXT</h4><p>BatchContext — 批量并发推理上下文（struct BatchContext in gllm/src/engine/batch_context.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_seqs" data-type="number" data-required="true" <td="">num_seqs<td>number</td><td>是</td><td>usize, 当前序列数</td><td>当前批次中的活跃序列数</td></tr>
+<tr data-field="max_batch_size" data-type="number" data-required="true" <td="">max_batch_size<td>number</td><td>是</td><td>usize, &gt;= num_seqs</td><td>最大批次容量（SPEC 32 扩展区大小依据）</td></tr><tr data-field="has_v2_extension" data-type="boolean" data-required="true" <td="">has_v2_extension<td>boolean</td><td>是</td><td>SPEC 32 扩展区是否存在</td><td>是否包含 SPEC 32 扩展区</td></tr><tr data-field="data_size" data-type="number" data-required="true" <td="">data_size<td>number</td><td>是</td><td>字节</td><td>
+flat memory buffer 总大小</td></tr><tr data-field="seq_mapping_len" data-type="number" data-required="false" <td="">seq_mapping_len<td>number</td><td>否</td><td>Vec&lt;u32&gt; 长度</td><td>per-token seq_mapping 长度</td></tr><tr data-field="header_size" data-type="number" data-required="false" <td="">header_size<td>number</td><td>否</td><td>96 字节</td><td>固定头大小</td></tr><tr data-field="seq_meta_stride" data-type="number" data-required="false" <td="">seq_meta_stride<td>number</td><td>否</td><td>
+64 字节</td><td>per-seq 元数据步长</td></tr><tr data-field="extension_size" data-type="number" data-required="false" <td="">extension_size<td>number</td><td>否</td><td>96 字节</td><td>SPEC 32 扩展区大小</td></tr></table></section>
+      <section id="ent-compiler-graph" data-entity="ENT-COMPILER-GRAPH" data-req-ref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-BUFFER-LAYOUT ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-FUSION-PLAN ENT-GRAPH-RESOURCE-PLAN" data-xref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-device-profile" data-entity="ENT-DEVICE-PROFILE" data-req-ref="REQ-AIS-001 REQ-LOADER-001 REQ-LOADER-002 REQ-OP-HWMATRIX-001 REQ-OP-HWMATRIX-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-COMPUTE-PATTERN ENT-FUSION-PLAN ENT-HW-OPT-ENGINE ENT-ISA-PROFILE ENT-MEGA-KERNEL-FN" data-xref="REQ-AIS-001 REQ-LOADER-001 REQ-LOADER-002 REQ-OP-HWMATRIX-001 REQ-OP-HWMATRIX-002">
+        <h4>ENT-DEVICE-PROFILE</h4>
+        <p>DeviceProfile — 硬件能力探测 (12 Profile)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="arch" data-type="string" data-required="true" <td="">arch<td>string</td><td>是</td><td>MicroArch</td><td>检测到的微架构</td></tr><tr data-field="isa" data-type="string" data-required="true" <td="">isa<td>string</td><td>是</td><td>IsaLevel</td><td>ISA级别 (Scalar/Avx2/Avx512/Avx512Amx/Neon/Sve/Sve2/NeonAmx)</td></tr>
+<tr data-field="peak_gflops_f32" data-type="number" data-required="true" <td="">peak_gflops_f32<td>number</td><td>是</td><td>f64</td><td>峰值单精度GFLOPS</td></tr><tr data-field="peak_bandwidth_gbs" data-type="number" data-required="true" <td="">peak_bandwidth_gbs<td>number</td><td>是</td><td>f64</td><td>峰值内存带宽 (GB/s)</td></tr><tr data-field="physical_cores" data-type="number" data-required="true" <td="">physical_cores<td>number</td><td>是</td><td>usize</td><td>物理核心数</td></tr>
+<tr data-field="logical_cores" data-type="number" data-required="true" <td="">logical_cores<td>number</td><td>是</td><td>usize</td><td>逻辑核心数 (含HT/SMT)</td></tr><tr data-field="quant_capabilities" data-type="string" data-required="true" <td="">quant_capabilities<td>string</td><td>是</td><td>QuantCapability</td><td>量化能力声明</td></tr><tr data-field="isv" data-type="string" data-required="true" <td="">isv<td>string</td><td>是</td><td>IsvCapabilities</td><td>ISV库可用性</td></tr></table>
+      </section>
+      <section id="ent-isa-profile" data-entity="ENT-ISA-PROFILE" data-req-ref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-HW-OPT-ENGINE ENT-MEGA-KERNEL-FN ENT-OP ENT-SYSTEM-TOPOLOGY ENT-TRACE-OP" data-xref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002"><h4>ENT-ISA-PROFILE</h4><p>IsaProfile — ISA硬件Profile（Register VM的全部硬件规则）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="platform" data-type="string" data-required="true" <td="">platform<td>string</td><td>是</td><td>X86_64/AArch64/Cuda/Hip/Metal</td><td>Platform 目标平台及ISA特性</td></tr><tr data-field="gpr_regs" data-type="number" data-required="false" <td="">gpr_regs<td>
+number</td><td>否</td><td></td><td>Vec&lt;PhysGpr&gt; 可用通用寄存器</td></tr><tr data-field="vec_regs" data-type="number" data-required="false" <td="">vec_regs<td>number</td><td>否</td><td></td><td>Vec&lt;PhysVec&gt; 可用向量寄存器</td></tr><tr data-field="abi" data-type="string" data-required="true" <td="">abi<td>string</td><td>是</td><td></td><td>AbiConvention ABI约定</td></tr><tr data-field="cache" data-type="string" data-required="true" <td="">cache<td>string</td><td>是</td><td></td><td>
+CacheHierarchy 缓存层级</td></tr><tr data-field="features" data-type="string" data-required="true" <td="">features<td>string</td><td>是</td><td></td><td>Vec&lt;IsaFeature&gt; 硬件特性集</td></tr><tr data-field="k_unroll_factor" data-type="number" data-required="true" <td="">k_unroll_factor<td>number</td><td>是</td><td></td><td>GEMM K循环展开因子</td></tr><tr data-field="tile_regs" data-type="number" data-required="false" <td="">tile_regs<td>number</td><td>否</td><td></td><td>Vec&lt;PhysTile&gt; 可用tile寄存器</td>
+</tr></table></section>
+      <section id="ent-mega-kernel-fn" data-entity="ENT-MEGA-KERNEL-FN" data-req-ref="REQ-PIPELINE-001 REQ-PIPELINE-002 REQ-HOTPATH-001 REQ-HOTPATH-002 REQ-HOTPATH-003" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-CALLBACK-CHAIN ENT-COMPILER-GRAPH ENT-COT-REASONER ENT-DEVICE-PROFILE ENT-EMA-TRACKER ENT-FUSION-PLAN ENT-HEAD-ROUTING" data-xref="REQ-PIPELINE-001 REQ-PIPELINE-002 REQ-HOTPATH-001 REQ-HOTPATH-002 REQ-HOTPATH-003">
+        <h4>ENT-MEGA-KERNEL-FN</h4>
+        <p>MegaKernelFn — 唯一编译产物 ABI (23+参数函数指针)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="entry_fn" data-type="string" data-required="true" <td="">entry_fn<td>string</td><td>是</td><td>MegaKernelFn = unsafe extern "C" fn(*const u8) -&gt; u32</td><td>JIT编译产物函数指针</td></tr><tr data-field="weight_layout" data-type="string" data-required="true" <td="">weight_layout<td>string</td><td>是</td><td>WeightLayout</td><td>
+权重blob中每个tensor的偏移布局</td></tr><tr data-field="buffer_layout" data-type="string" data-required="true" <td="">buffer_layout<td>string</td><td>是</td><td>BufferLayout</td><td>运行时缓冲布局 (activation/logits/sampling)</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小 (logits每行元素数)</td></tr><tr data-field="hidden" data-type="number" data-required="true" <td="">hidden<td>number</td><td>是</td><td>usize</td><td>
+隐藏维度 (SG scratchpad需要)</td></tr><tr data-field="elem_bytes" data-type="number" data-required="true" <td="">elem_bytes<td>number</td><td>是</td><td>usize</td><td>每元素字节数 (compute dtype)</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>编译时max_seq_len (KV cache层步长)</td></tr><tr data-field="mtp_depth" data-type="number" data-required="true" <td="">mtp_depth<td>number</td><td>是</td><td>usize</td><td>
+MTP预测深度 (0=禁用)</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section id="api-gpu-host" data-api="POST /internal/gpu/host_glue" data-req-ref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002" data-api-name="API-GPU-HOST" data-api-type="internal" data-xref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002"><h4>POST /internal/gpu/host_glue — GPU Mega-Kernel Host glue</h4><p>GPU Host 执行胶水接口，Mega-Kernel 在 GPU 上的 Host 端调度与资源管理。Kernel launch、stream 管理、device memory 分配、CUDA/HIP/Metal 统一抽象。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="GpuExecutionContext"><td>200</td><td>成功</td><td>GpuExecutionContext</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：15-GPU-HOST-GLUE.html</address>
+  </footer>
+</body>
+</html>

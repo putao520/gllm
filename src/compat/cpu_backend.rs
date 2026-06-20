@@ -984,7 +984,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                 kern.iq_matmul(weight_blocks, input, output, quant_type, m, n, k);
             }
             // AWQ4/GPTQ4: Weight-Only 格式，已在 loader 层 repack 成 72 字节 block，
-            // 推理路径走 OpKind::QuantGemm → JIT emit_quant_gemm_tiled，
+            // 推理路径走 Op::QuantGemm → JIT emit_quant_gemm_tiled，
             // 不经过此 trait 的 f32 quantized_matmul。
             AWQ4 | GPTQ4 => {
                 return Err(BE::Unimplemented("quantized_matmul: AWQ4/GPTQ4 must go through JIT QuantGemm (REQ-QCG-010/010a/012)"));

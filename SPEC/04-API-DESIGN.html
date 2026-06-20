@@ -1,0 +1,1686 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="04-API-DESIGN">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"04-API-DESIGN", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>gllm API 设计</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>04-API-DESIGN</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-gllm-api-设计" data-section="null">
+      <h2>gllm API 设计</h2>
+      <p>&gt; <strong>📌 SSOT</strong>: 本文档定义 gllm 的公共 API 接口规范。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 核心设计原则</h3>
+      <li><strong>Builder 模式</strong>: 复杂配置通过 Builder 链式调用</li>
+      <li><strong>同步优先</strong>: 所有操作均为同步（CPU-bound 推理无需异步运行时，无 tokio/async/await）</li>
+      <li><strong>Lock-free 状态</strong>: <code>arc_swap::ArcSwapOption&lt;ClientState&gt;</code> 实现零开销原子模型切换，无 RwLock</li>
+      <li><strong>显式类型</strong>: 使用强类型枚举而非字符串魔法值</li>
+      <li><strong>结果导向</strong>: 返回 <code>Result&lt;Output, Error&gt;</code> 清晰表达成功/失败</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 客户端 (Client)</h3>
+      <p>客户端是 gllm 的主要入口，负责管理模型生命周期和请求分发。</p>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 初始化</h4>
+      <p>```rust</p>
+      <p>// 推荐用法：自动推断架构和任务类型</p>
+      <p>let client = Client::builder()</p>
+      <p>    .model("Qwen/Qwen3-7B-Instruct")</p>
+      <p>    .kind(ModelKind::Chat)  // 显式指定用途</p>
+      <p>    .backend(BackendType::Cuda) // 可选：强制指定后端</p>
+      <p>    .build()?;</p>
+      <p>// 快捷方式</p>
+      <p>let chat_client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;</p>
+      <p>let embed_client = Client::new_embedding("BAAI/bge-m3")?;</p>
+      <p>// 多模型管线 (ARCH-MULTI-MODEL-PIPELINE)</p>
+      <p>let pipeline_client = Client::builder()</p>
+      <p>    .model("BAAI/bge-m3")                           // embedder (必需)</p>
+      <p>    .reranker("BAAI/bge-reranker-v2-m3")             // reranker (可选)</p>
+      <p>    .generator("Qwen/Qwen3-7B-Instruct")            // LLM (可选)</p>
+      <p>    // SchedulingMode 从 batch_size 自动推导 (SPEC/12)，无需显式指定</p>
+      <p>    .build()?;</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 运行时模型切换 (Runtime Switching)</h4>
+      <p>支持在不重启进程的情况下切换底层模型。</p>
+      <p>```rust</p>
+      <p>// 切换到新模型 (原子操作，自动释放旧模型显存)</p>
+      <p>client.swap_model("Qwen/Qwen3-14B-Chat")?;</p>
+      <p>// 卸载当前模型 (释放资源，保持 Client 实例)</p>
+      <p>client.unload_model()?;</p>
+      <p>// 重新加载</p>
+      <p>client.load_model("org/model", ModelKind::Chat)?;</p>
+      <p>// 检查当前状态</p>
+      <p>if let Some(info) = client.model_info() {</p>
+      <p>    println!("Current model: {}", <a href="http://info.id">info.id</a>);</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>行为约束</strong>:
+      <p>1. <code>swap_model</code> 是原子操作，失败时回滚（尽量保留原模型，或处于无模型状态）。</p>
+      <p>2. 调用期间新请求会被阻塞或排队（取决于配置）。</p>
+      <p>3. 必须彻底释放旧模型的 KV Cache 和权重显存。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 推理接口</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 文本生成 (Generator)</h4>
+      <p>```rust</p>
+      <p>let output = client.generate("Hello, who are you?")</p>
+      <p>    .max_tokens(100)</p>
+      <p>    .temperature(0.7)</p>
+      <p>    .top_k(40)</p>
+      <p>    .top_p(0.9)</p>
+      <p>    .stream(false)</p>
+      <p>    .generate()?;</p>
+      <p>println!("{}", output.text);</p>
+      <p>```</p>
+    </section>
+    <section id="s3.1.1" data-section="3.1.1">
+      <h5>3.1.1 采样参数</h5>
+      <table>
+        <tr>
+          <th>参数</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>默认</td>
+        </tr>
+        <tr>
+          <td>语义</td>
+        </tr>
+        <tr>
+          <td>temperature</td>
+        </tr>
+        <tr>
+          <td>f32</td>
+        </tr>
+        <tr>
+          <td>0.7</td>
+        </tr>
+        <tr>
+          <td>0.0</td>
+          <td> → greedy（确定性）；</td>
+          <td>&gt;0</td>
+          <td> → 缩放 logits 后多项式采样</td>
+        </tr>
+        <tr>
+          <td>top_k</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>0</td>
+          <td> → 禁用；</td>
+          <td>k&gt;0</td>
+          <td> → 只从 logit 值最大的 k 个候选中采样</td>
+        </tr>
+        <tr>
+          <td>top_p</td>
+        </tr>
+        <tr>
+          <td>f32</td>
+        </tr>
+        <tr>
+          <td>1.0</td>
+        </tr>
+        <tr>
+          <td>1.0</td>
+          <td> → 禁用；</td>
+          <td>p∈(0,1)</td>
+          <td> → 按概率降序累积截断（nucleus sampling）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.1.2" data-section="3.1.2">
+      <h5>3.1.2 采样语义契约 (REQ-API-SAMPLING-CONTRACT)</h5>
+      <strong>所有后端（CPU / CUDA / HIP / Metal）必须遵循相同的采样语义，禁止静默降级为 argmax。</strong>
+      <p>&gt; <strong>铁律 ARCH-RUST-IS-CODEGEN</strong>: 采样由 JIT mega-kernel 内部完成（详见 <code>08-EXECUTOR.md §4.1.1</code>）。采样参数（temperature、top_k、top_p）通过 <code>MegaKernelFn</code> 栈参数传入，每次请求可不同。Rust 不参与采样计算，不读取 logits，不做 DtoH 传回 logits。</p>
+      <p>采样语义（JIT 机器码内部执行，Rust 不可见）：</p>
+      <p>1. <strong>Greedy</strong>: <code>temperature == 0.0</code> → 直接对原始 logits 取 argmax，忽略 <code>top_k</code> / <code>top_p</code>；结果确定性、可复现。</p>
+      <p>2. <strong>Stochastic</strong> (<code>temperature &gt; 0.0</code>):</p>
+      <p>   a. 按原始 logit 降序，取前 <code>top_k</code> 个候选（<code>top_k == 0</code> 表示保留全部）。</p>
+      <p>   b. 对候选应用 <code>logit / temperature</code> 缩放。</p>
+      <p>   c. softmax（subtract max 数值稳定）→ 得到概率分布 <code>p_i</code>。</p>
+      <p>   d. 若 <code>top_p ∈ (0, 1)</code>：按 <code>p_i</code> 降序累积，截断至累积概率首次 <code>≥ top_p</code> 的位置，再重新归一化。</p>
+      <p>   e. 多项式采样：从硬件随机源取 <code>r ∈ [0, 1)</code>，落在对应 CDF 桶内的候选即为结果。</p>
+      <p>3. <strong>组合行为</strong>: <code>top_k &gt; 0 &amp;&amp; top_p ∈ (0, 1)</code> 时，先 <code>top_k</code> 截断候选集，再 <code>top_p</code> 截断累积概率 — 两者可叠加。</p>
+      <p>4. <strong>错误路径</strong>: 空 logits / 所有 logit 为 <code>-inf</code> / softmax 和为零 → JIT 内部返回 EOS token，<strong>不得</strong>返回默认 token 0 或静默 argmax 绕过。</p>
+      <strong>JIT codegen 实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/x86_64.rs</code>（CPU）/ <code>gpu_ir/</code>（GPU）。采样逻辑编译进 mega-kernel，参数从栈读取。
+      <strong>不变式</strong>:
+      <li><code>T=0, 任意 logits</code> → 每次调用结果恒定（argmax）。</li>
+      <li><code>T=1, uniform logits</code> → 不同 token 出现概率相等（统计意义上 argmax 非唯一胜出）。</li>
+      <li><code>top_k=k</code> → 采样结果必落在 logit 前 k 名内。</li>
+      <li><code>top_p=p (p&lt;1, 尖峰分布)</code> → 采样集中在峰值候选。</li>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 向量嵌入 (Embedding)</h4>
+      <p>```rust</p>
+      <p>// 基础用法：纯 embed</p>
+      <p>let embeddings = client.embed(vec![</p>
+      <p>    "Hello world",</p>
+      <p>    "Machine learning is fascinating"</p>
+      <p>])?;</p>
+      <p>assert_eq!(embeddings.len(), 2);</p>
+      <p>assert_eq!(embeddings[0].len(), 1024); // 维度</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 重排序 (Rerank)</h4>
+      <p>```rust</p>
+      <p>let scores = client.rerank(</p>
+      <p>    "What is the capital of France?",</p>
+      <p>    vec![</p>
+      <p>        "Paris is the capital of France",</p>
+      <p>        "London is in UK",</p>
+      <p>        "Berlin is in Germany"</p>
+      <p>    ]</p>
+      <p>)?;</p>
+      <p>```</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 文本分类 (Classify)</h4>
+      <p>支持 encoder-based (BERT/XLM-R + classifier head) 和 decoder-based (LLM + score head) 的序列分类模型。</p>
+      <p>```rust</p>
+      <p>// 快捷方式</p>
+      <p>let client = Client::new_classifier("model-with-classifier-head")?;</p>
+      <p>// 分类</p>
+      <p>let result = client.classify(["Positive review!", "Terrible product."])?;</p>
+      <p>for pred in &amp;result.predictions {</p>
+      <p>    println!("text[{}]: label={} score={:.4}", pred.index, pred.label_id, pred.score);</p>
+      <p>    // pred.logits — 原始 logits（所有标签）</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>Encoder 分类流程</strong>:
+      <p>```</p>
+      <p>tokens → BERT Encoder → CLS hidden → Pooler Dense (tanh) → Classifier Head → logits</p>
+      <p>```</p>
+      <strong>Decoder 分类流程</strong>:
+      <p>```</p>
+      <p>tokens → Decoder Layers → Last Token Hidden → Score Head → logits</p>
+      <p>```</p>
+      <strong>Response 类型</strong>:
+      <p>```rust</p>
+      <p>pub struct ClassifyResponse {</p>
+      <p>    pub predictions: Vec<classificationresult>,</classificationresult></p>
+      <p>}</p>
+      <p>pub struct ClassificationResult {</p>
+      <p>    pub index: usize,       // 输入文本索引</p>
+      <p>    pub label_id: usize,    // 预测标签 ID (argmax)</p>
+      <p>    pub score: f32,          // 预测标签的 softmax 概率</p>
+      <p>    pub logits: Vec&lt;f32&gt;,    // 原始 logits（所有标签）</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-FUSION-PLAN" <h4="" data-section="3.5" data-req-api="POST /internal/quant/pipeline" data-req-entity="ENT-COMPILER-GRAPH,ENT-MEGA-KERNEL-FN,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="pipeline" data-req-status="implemented" data-req="REQ-PIPELINE-001" id="req-pipeline-001">3.5 Embed+Rerank 融合管线 (REQ-PIPELINE-001)
+      <p>当 Client 挂载了 reranker 模型时，embed API 支持透明内部 rerank。用户体验与普通 embed 完全一致，但返回结果已按 query 相关性重排序。</p>
+      <p>```rust</p>
+      <p>// 前提：Client 已挂载 reranker</p>
+      <p>let client = Client::builder()</p>
+      <p>    .model("BAAI/bge-m3")</p>
+      <p>    .reranker("BAAI/bge-reranker-v2-m3")</p>
+      <p>    .build()?;</p>
+      <p>// Level 2: embed + 内部 rerank（对用户透明）</p>
+      <p>let results = client.embed(vec!["doc1", "doc2", "doc3"])</p>
+      <p>    .rerank_query("What is the capital of France?")  // 触发内部 rerank</p>
+      <p>    .top_n(2)                                         // rerank 后取 top-n</p>
+      <p>    .generate()?;</p>
+      <p>// 返回的 embeddings 已按 rerank score 排序</p>
+      <p>// results.embeddings[0] 是最相关的文档的 embedding</p>
+      <p>// results.rerank_scores — 可选，附带 rerank 分数</p>
+      <p>```</p>
+      <strong>行为约束</strong>:
+      <p>1. 未设 <code>.rerank_query()</code> 时行为与普通 embed 完全一致（向后兼容）</p>
+      <p>2. 设了 <code>.rerank_query()</code> 但 Client 未挂载 reranker → 返回 <code>GllmError::RerankerNotLoaded</code></p>
+      <p>3. Reranker 与 embedder 架构相同时，encoder 权重共享（零重复加载）</p>
+      <p>4. Reranker 与 embedder 架构不同时，各自独立 encoder forward</p>
+      <strong>内部流程</strong>:
+      <p>```</p>
+      <p>embed(texts).rerank_query(query).generate()</p>
+      <p>  → texts 分词</p>
+      <p>  → [Embedder Encoder] forward → hidden_states</p>
+      <p>  → MeanPool(hidden_states) → L2Norm → embeddings</p>
+      <p>  → [Reranker] forward(query, texts) → scores  (共享 encoder 或独立 encoder)</p>
+      <p>  → 按 scores 降序重排 embeddings</p>
+      <p>  → 截取 top_n</p>
+      <p>  → 返回 EmbeddingsResponse { embeddings, rerank_scores }</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">融合管线实现完整且符合 SPEC 描述</li>
+        <li id="id-2" data-criterion="2">编译通过: cargo check</li>
+        <li id="id-3" data-criterion="3">单元测试覆盖核心路径</li>
+        <li id="id-4" data-criterion="4">E2E 测试验证正确性</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-PIPELINE-001" data-test="TEST-PIPELINE-001" id="test-pipeline-001">TEST-PIPELINE-001: 管线功能测试<p>验证REQ-PIPELINE-001相关功能正确性</p>
+      <div id="融合管线实现完整且符合-spec-描述" data-criterion="融合管线实现完整且符合 SPEC 描述">融合管线实现完整且符合 SPEC 描述</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-FUSION-PLAN" <h4="" data-section="3.6" data-req-api="POST /internal/quant/pipeline" data-req-entity="ENT-COMPILER-GRAPH,ENT-MEGA-KERNEL-FN,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="pipeline" data-req-status="implemented" data-req="REQ-PIPELINE-002" id="req-pipeline-002">3.6 Embed+Rerank+LLM 完整 RAG 管线 (REQ-PIPELINE-002)
+      <p>当 Client 同时挂载了 reranker 和 generator 时，支持一体化 RAG：embed → rerank → LLM 生成。</p>
+      <p>```rust</p>
+      <p>let client = Client::builder()</p>
+      <p>    .model("BAAI/bge-m3")</p>
+      <p>    .reranker("BAAI/bge-reranker-v2-m3")</p>
+      <p>    .generator("Qwen/Qwen3-7B-Instruct")</p>
+      <p>    .build()?;</p>
+      <p>// Level 3: embed + rerank + LLM 生成</p>
+      <p>let answer = client.embed(vec!["doc1", "doc2", "doc3"])</p>
+      <p>    .rerank_query("What is the capital of France?")</p>
+      <p>    .top_n(3)</p>
+      <p>    .generate_answer("基于以下文档回答问题")?;</p>
+      <p>// answer.text — LLM 生成的答案</p>
+      <p>// answer.sources — 被选中的 top-n 文档索引</p>
+      <p>// answer.rerank_scores — 各文档的 rerank 分数</p>
+      <p>```</p>
+      <strong>内部流程</strong>:
+      <p>```</p>
+      <p>embed(texts).rerank_query(query).top_n(n).generate_answer(prompt)</p>
+      <p>  → Level 2 流程产出 top-n embeddings + 对应原文</p>
+      <p>  → 拼接 prompt: "{system_prompt}\n\n文档:\n{top_n_docs}\n\n问题: {query}"</p>
+      <p>  → [Generator LLM] forward → sample → answer</p>
+      <p>  → 返回 RagResponse { text, sources, rerank_scores }</p>
+      <p>```</p>
+      <strong>行为约束</strong>:
+      <p>1. 未挂载 generator 时调用 <code>.generate_answer()</code> → 返回 <code>GllmError::GeneratorNotLoaded</code></p>
+      <p>2. Generator 独立于 embedder/reranker（Decoder 架构 vs Encoder 架构），权重不共享</p>
+      <p>3. top-n 文档通过文本拼接传入 LLM（非 hidden state 注入），保持 LLM 的通用性</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">融合管线实现完整且符合 SPEC 描述</li>
+        <li id="id-2" data-criterion="2">编译通过: cargo check</li>
+        <li id="id-3" data-criterion="3">单元测试覆盖核心路径</li>
+        <li id="id-4" data-criterion="4">E2E 测试验证正确性</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-PIPELINE-002" data-test="TEST-PIPELINE-002" id="test-pipeline-002">TEST-PIPELINE-002: 管线功能测试<p>验证REQ-PIPELINE-002相关功能正确性</p>
+      <div id="融合管线实现完整且符合-spec-描述" data-criterion="融合管线实现完整且符合 SPEC 描述">融合管线实现完整且符合 SPEC 描述</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
+      <div id="e2e-测试验证正确性" data-criterion="E2E 测试验证正确性">E2E 测试验证正确性</div>
+      
+    </section>
+
+    <section id="s3.7" data-section="3.7">
+      <h4>3.7 多模态生成 (Multimodal Generation) — REQ-API-MULTIMODAL</h4>
+      <strong>适用范围</strong>: Gemma 4 31B/E4B 等 vision+audio 多模态 generator。文本-only 模型 (SmolLM2、Qwen3 等) 的 <code>.image()</code> / <code>.audio()</code> 被拒为 <code>InvalidModelType</code>。
+    </section>
+    <section id="s3.7.1" data-section="3.7.1">
+      <h5>3.7.1 API 表面</h5>
+      <strong>注入编码器</strong>:
+      <p>```rust</p>
+      <p>use gllm::compat::multimodal::MultimodalEncoder;</p>
+      <p>let client = Client::new_chat("google/gemma-4-31B-IT")?;</p>
+      <p>client.set_multimodal_encoder(Arc::new(MySigLipUsmEncoder::new()?));</p>
+      <p>```</p>
+      <strong>附加媒体输入</strong>:
+      <p>```rust</p>
+      <p>let resp = client.generate("Describe this image.")</p>
+      <p>    .image(MediaInput::File("/path/to/cat.jpg".into()))    // 或 Base64/Raw</p>
+      <p>    .max_tokens(100)</p>
+      <p>    .temperature(0.3)</p>
+      <p>    .generate()?;</p>
+      <p>```</p>
+      <code>MediaInput</code> 支持四种模式,按代价递增:
+      <table>
+        <tr>
+          <th>模式</th>
+        </tr>
+        <tr>
+          <td>使用场景</td>
+        </tr>
+        <tr>
+          <td>MediaInput::File(PathBuf)</td>
+        </tr>
+        <tr>
+          <td>本地文件,由 encoder 负责解码</td>
+        </tr>
+        <tr>
+          <td>MediaInput::Base64 { data, mime_type }</td>
+        </tr>
+        <tr>
+          <td>网络上传的 base64 payload</td>
+        </tr>
+        <tr>
+          <td>MediaInput::Raw(bytes)</td>
+        </tr>
+        <tr>
+          <td>预解码的像素 / PCM 帧</td>
+        </tr>
+        <tr>
+          <td>MediaInput::Url(String)</td>
+        </tr>
+        <tr>
+          <td>远程 URI,encoder 负责拉取(可能 Err::NetworkUnreachable)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.7.2" data-section="3.7.2">
+      <h5>3.7.2 Encoder trait (REQ-API-MULTIMODAL-ENCODER)</h5>
+      <p>```rust</p>
+      <p>pub trait MultimodalEncoder: Send + Sync {</p>
+      <p>    fn encode_image(&amp;self, media: &amp;EncoderMedia) -&gt; Result&lt;MultimodalEncoded, BackendError&gt;;</p>
+      <p>    fn encode_audio(&amp;self, media: &amp;EncoderMedia) -&gt; Result&lt;MultimodalEncoded, BackendError&gt;;</p>
+      <p>}</p>
+      <p>pub struct MultimodalEncoded {</p>
+      <p>    pub tokens: Vec&lt;u32&gt;,        // 虚拟 token 序列(长度由 encoder 决定)</p>
+      <p>    pub embeddings: Vec&lt;f32&gt;,    // [num_tokens, hidden_size] row-major</p>
+      <p>    pub kind: MediaKind,         // Image / Audio</p>
+      <p>}</p>
+      <p>```</p>
+      <li><code>tokens.len() * hidden_size == embeddings.len()</code> 由 <code>MultimodalEncoded::validate()</code> 强制</li>
+      <li>encoder 实现可选 SigLIP ViT (image) / USM Conformer (audio),或任何满足 trait 的实现</li>
+    </section>
+    <section id="s3.7.3" data-section="3.7.3">
+      <h5>3.7.3 特殊 Token ID 来源 (REQ-API-MULTIMODAL-TOKENS)</h5>
+      <li><strong>SSOT</strong>: <code>ModelConfig::multimodal_token_ids: Option&lt;MultimodalTokenIds&gt;</code></li>
+      <li>解析优先级(<code>model_config.rs::from_value</code>):</li>
+      <p>  1. <code>config.json</code> 顶层 <code>image_token_id</code> / <code>audio_token_id</code> (HF 惯例)</p>
+      <p>  2. alias <code>boi_token_id</code> / <code>boa_token_id</code> (Gemma 4 命名)</p>
+      <p>  3. 两者均缺且 <code>vision_config</code> 存在 → fallback <code>MultimodalTokenIds::gemma4_defaults()</code> (258880 / 258881)</p>
+      <p>  4. 纯文本模型 → <code>None</code>,<code>.image()</code> 调用在 <code>execute_generation_multimodal</code> 第 2 步被 <code>InvalidModelType</code> 拒绝</p>
+      <li><strong>禁止硬编码</strong>: 任何 <code>const IMAGE_TOKEN: u32 = 258880</code> 直接写到 Rust 源码均违规,必须从 config 或 manifest 读</li>
+    </section>
+    <section id="s3.7.4" data-section="3.7.4">
+      <h5>3.7.4 行为约束 (REQ-API-MULTIMODAL-BEHAVIOR)</h5>
+      <p>1. <code>.image()</code> / <code>.audio()</code> 调用前未 <code>set_multimodal_encoder</code> → <code>ClientError::InvalidModelType</code> (不是 silent-drop)</p>
+      <p>2. 模型不声明 <code>multimodal_token_ids</code> → <code>InvalidModelType</code> 拒绝媒体输入</p>
+      <p>3. encoder 执行失败(文件不存在、解码异常、OOM) → 原错误包装为 <code>RuntimeError("vision encode failed: ...")</code></p>
+      <p>4. <strong>decoder-side fusion 未就绪时禁止 silent fallback</strong>: 当 encoder 成功产出 embedding 序列但 <code>executor.generate</code> 当前不支持 embedding 直接注入,client 必须 <code>Err("multimodal decoder fusion not yet implemented")</code> (NO_SILENT_FALLBACK)。不允许"看似成功但 media 被默默丢弃"的虚假 API。</p>
+      <p>5. 纯文本调用(无 <code>.image()</code> / <code>.audio()</code>)永远绕过多模态 routing,与既有 <code>generate()</code> 语义 100% 一致</p>
+    </section>
+    <section id="s3.8" data-section="3.8">
+      <h4>3.8 Head Routing — 同一 generator 多头 API (REQ-HR)</h4>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/HEAD-ROUTING.md</code></p>
+      <p>&gt; <strong>需求</strong>: <code>SPEC/01-REQUIREMENTS.md §13</code> REQ-HR-001..005</p>
+      <p>&gt; <strong>定位</strong>: 同一 <code>Client::new_chat(...)</code> 加载的 generator LLM,通过运行时 API 选择输出头形态,<strong>不重新加载权重、不重新 JIT 编译</strong>。与加载时的 <code>ModelKind</code> 正交——<code>ModelKind</code> 决定主 head,Head Routing 在单次 API 调用中切换输出形态。</p>
+    </section>
+    <section id="s3.8.1" data-section="3.8.1">
+      <h5>3.8.1 API 表面</h5>
+      <p>```rust</p>
+      <p>use gllm::{Client, ClassifyBinaryConfig, ClassifyMultiwayConfig, LayerAnchor, PoolMode};</p>
+      <p>let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;</p>
+      <p>// 1. Generate head (已有 §3.1, 不变)</p>
+      <p>let text = client.generate("Hello").response()?;</p>
+      <p>// 2. Binary classify head</p>
+      <p>let score: f32 = client.classify_binary(</p>
+      <p>    "Is water wet? Answer yes or no:",</p>
+      <p>    ClassifyBinaryConfig {</p>
+      <p>        positive_token: "yes".to_string(),</p>
+      <p>        negative_token: "no".to_string(),</p>
+      <p>        temperature: 1.0,</p>
+      <p>    },</p>
+      <p>)?;</p>
+      <p>// 返回 P(yes) ∈ [0.0, 1.0]</p>
+      <p>// 3. Multiway classify head</p>
+      <p>let scores: Vec&lt;f32&gt; = client.classify_multiway(</p>
+      <p>    "Topic:",</p>
+      <p>    &amp;["sports", "politics", "technology"],</p>
+      <p>    ClassifyMultiwayConfig::default(),</p>
+      <p>)?;</p>
+      <p>// 返回 [P(sports), P(politics), P(technology)], sum ≈ 1.0</p>
+      <p>// 4. Encode to mid-layer</p>
+      <p>let emb: Vec&lt;f32&gt; = client.encode_to_layer(</p>
+      <p>    "embedding text",</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    PoolMode::MeanPool,</p>
+      <p>)?;</p>
+      <p>// 当前阶段: Err(HeadRoutingError::MidLayerNotSupported) - Mega-Kernel</p>
+      <p>// 单次前向未暴露 callback 截断路径,显式拒绝以保持 NO_SILENT_FALLBACK 合规。</p>
+      <p>// 落地依赖 Mega-Kernel callback table 扩展 mid-layer exit 支持。</p>
+      <p>```</p>
+    </section>
+    <section id="s3.8.2" data-section="3.8.2">
+      <h5>3.8.2 配置类型</h5>
+      <p>```rust</p>
+      <p>pub struct ClassifyBinaryConfig {</p>
+      <p>    /// positive 类别对应的 token 文本 (必须单 token 化)</p>
+      <p>    pub positive_token: String,</p>
+      <p>    /// negative 类别对应的 token 文本 (必须单 token 化)</p>
+      <p>    pub negative_token: String,</p>
+      <p>    /// softmax 温度 (&gt; 0)。1.0 保持原始分布;&lt; 1 锐化;&gt; 1 平滑。</p>
+      <p>    pub temperature: f32,</p>
+      <p>}</p>
+      <p>pub struct ClassifyMultiwayConfig {</p>
+      <p>    /// softmax 温度 (&gt; 0)</p>
+      <p>    pub temperature: f32,</p>
+      <p>}</p>
+      <p>impl Default for ClassifyMultiwayConfig {</p>
+      <p>    fn default() -&gt; Self { Self { temperature: 1.0 } }</p>
+      <p>}</p>
+      <p>pub enum LayerAnchor {</p>
+      <p>    /// 相对深度 ∈ [0.0, 1.0]。0.0 = layer 0, 1.0 = 最后一层</p>
+      <p>    Relative(f32),</p>
+      <p>    /// 绝对层索引 (0-based)</p>
+      <p>    Absolute(usize),</p>
+      <p>}</p>
+      <p>pub enum PoolMode {</p>
+      <p>    /// 对 seq 维度求平均</p>
+      <p>    MeanPool,</p>
+      <p>    /// 取最后一个 token</p>
+      <p>    LastToken,</p>
+      <p>    /// 取第一个 token (CLS 位置)</p>
+      <p>    ClsToken,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.8.3" data-section="3.8.3">
+      <h5>3.8.3 错误类型</h5>
+      <p>```rust</p>
+      <p>pub enum HeadRoutingError {</p>
+      <p>    /// label 或 positive/negative token 无法单 token 化,或 tokenize 失败</p>
+      <p>    TokenNotFound(String),</p>
+      <p>    /// LayerAnchor::Relative 越界 [0.0, 1.0] 或 Absolute 越界 [0, num_layers)</p>
+      <p>    InvalidLayerAnchor(f32),</p>
+      <p>    /// classify_multiway 收到空 labels 切片</p>
+      <p>    EmptyLabels,</p>
+      <p>    /// 配置参数非法 (如 temperature ≤ 0)</p>
+      <p>    InvalidConfig(String),</p>
+      <p>    /// encode_to_layer 通过 Mega-Kernel callback table 的 MidLayerEncodeCallback 实现</p>
+      <p>    MidLayerNotSupported,</p>
+      <p>    /// 下游 backend/tokenizer 错误传播</p>
+      <p>    Backend(String),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    
+    <section id="s3.9" data-section="3.9">
+      <h4>3.9 Guardrail SDK — in-flight 安全 veto 探针 (REQ-GR)</h4>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/GUARDRAIL.md</code></p>
+      <p>&gt; <strong>需求</strong>: <code>SPEC/01-REQUIREMENTS.md §14</code> REQ-GR-001..005</p>
+    </section>
+    <section id="s3.9.1" data-section="3.9.1">
+      <h5>3.9.1 API 表面</h5>
+      <p>```rust</p>
+      <p>use gllm::{Client, GuardProbe, GuardProbeWeights, LayerAnchor, SafetyPolicy};</p>
+      <p>let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;</p>
+      <p>// 从 safetensors 加载探针</p>
+      <p>let attachment = client.attach_guardrail(</p>
+      <p>    GuardProbe::from_safetensors("toxicity_probe.safetensors"),</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    SafetyPolicy::HaltAndVeto { threshold: 0.95 },</p>
+      <p>)?;</p>
+      <p>// 或 inline 权重 (测试 / 程序生成)</p>
+      <p>let attachment = client.attach_guardrail_inline(</p>
+      <p>    GuardProbeWeights { weight: vec![0.0; 576], bias: 0.0 },</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    SafetyPolicy::LogOnly,</p>
+      <p>)?;</p>
+      <p>let _score = client.classify_binary(prompt, cfg)?;</p>
+      <p>if attachment.is_vetoed() {</p>
+      <p>    eprintln!("blocked: {:?}", attachment.last_veto_reason());</p>
+      <p>}</p>
+      <p>client.detach_guardrail(<a href="http://attachment.id">attachment.id</a>)?;</p>
+      <p>```</p>
+    </section>
+    <section id="s3.9.2" data-section="3.9.2">
+      <h5>3.9.2 类型定义</h5>
+      <p>```rust</p>
+      <p>pub enum GuardProbe {</p>
+      <p>    FromSafetensors { path: String },</p>
+      <p>}</p>
+      <p>pub struct GuardProbeWeights {</p>
+      <p>    pub weight: Vec&lt;f32&gt;,</p>
+      <p>    pub bias: f32,</p>
+      <p>}</p>
+      <p>pub enum SafetyPolicy {</p>
+      <p>    HaltAndVeto { threshold: f32 },</p>
+      <p>    LogOnly,</p>
+      <p>    SampleDowngrade { min_temperature: f32 },</p>
+      <p>}</p>
+      <p>pub struct GuardrailAttachment {</p>
+      <p>    pub id: u64,</p>
+      <p>    pub actual_layer: usize,</p>
+      <p>    pub probe_name: String,</p>
+      <p>    // ... (shared state accessors)</p>
+      <p>}</p>
+      <p>impl GuardrailAttachment {</p>
+      <p>    pub fn id(&amp;self) -&gt; u64;</p>
+      <p>    pub fn last_score(&amp;self) -&gt; Option&lt;f32&gt;;</p>
+      <p>    pub fn is_vetoed(&amp;self) -&gt; bool;</p>
+      <p>    pub fn last_veto_reason(&amp;self) -&gt; Option<string>;</string></p>
+      <p>    pub fn downgraded_temperature(&amp;self) -&gt; Option&lt;f32&gt;;</p>
+      <p>    pub fn reset(&amp;self);</p>
+      <p>}</p>
+      <p>pub enum GuardrailError {</p>
+      <p>    ProbeLoadFailed(String),</p>
+      <p>    InvalidShape(String),</p>
+      <p>    InvalidPolicy(String),</p>
+      <p>    InvalidAnchor(String),</p>
+      <p>    NoModelLoaded,</p>
+      <p>    NotFound(u64),</p>
+      <p>    Io(String),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    
+    <section id="s3.10" data-section="3.10">
+      <h4>3.10 Intent Recall SDK — 中间层 encode 语义包装 (REQ-INTENT)</h4>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/INTENT.md</code></p>
+      <p>&gt; <strong>需求</strong>: <code>SPEC/01-REQUIREMENTS.md §15</code> REQ-INTENT-001..003</p>
+      <p>```rust</p>
+      <p>use gllm::{Client, IntentEncoding, LayerAnchor, PoolMode};</p>
+      <p>let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;</p>
+      <p>let intent = client.encode_intent(</p>
+      <p>    "What is the weather in Paris?",</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    PoolMode::MeanPool,</p>
+      <p>)?;</p>
+      <p>assert_eq!(intent.dim(), 576);</p>
+      <p>println!("actual_layer = {}", intent.actual_layer);</p>
+      <p>let query_vec = intent.embedding;</p>
+      <p>```</p>
+    </section>
+    <section id="s3.10.1" data-section="3.10.1">
+      <h5>3.10.1 类型定义</h5>
+      <p>```rust</p>
+      <p>pub struct IntentEncoding {</p>
+      <p>    pub embedding: Vec&lt;f32&gt;,</p>
+      <p>    pub actual_layer: usize,</p>
+      <p>    pub pool: PoolMode,</p>
+      <p>}</p>
+      <p>impl IntentEncoding {</p>
+      <p>    pub fn dim(&amp;self) -&gt; usize;</p>
+      <p>    pub fn l2_norm(&amp;self) -&gt; f32;</p>
+      <p>}</p>
+      <p>pub enum IntentError {</p>
+      <p>    InvalidLayerAnchor(String),</p>
+      <p>    EncodeFailed(String),</p>
+      <p>    NoModelLoaded,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.10.2" data-section="3.10.2">
+      <h5>3.10.2 行为契约</h5>
+      <li><code>encode_intent</code> 内部直接 delegate 到 <code>encode_to_layer</code> (DRY 铁律 — 零代码复制)。</li>
+      <li>相同 <code>text/anchor/pool</code> 下, <code>encode_intent(...).embedding</code> 与 <code>encode_to_layer(...)</code> 逐元素相等 (|Δ| &lt; 1e-5)。</li>
+      <li><code>actual_layer</code> 即 <code>anchor.resolve(num_layers)</code> 的结果,严格 &lt; <code>num_layers</code>。</li>
+    </section>
+    <section id="s3.11" data-section="3.11">
+      <h4>3.11 CoT Reasoner — 任意 LLM 原生多步推理 (REQ-COT)</h4>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/COT-REASONER.md</code></p>
+      <p>&gt; <strong>需求 SSOT</strong>: <code>SPEC/01-REQUIREMENTS.md §16</code> REQ-COT-001..006</p>
+      <p>&gt; <strong>核心定位</strong>: 对<strong>任意</strong> generator LLM 原生支持 Chain-of-Thought 推理,<strong>不依赖模型自带 thinking_head 权重</strong>,<strong>不新增 Backend trait 方法</strong>。仅通过 prompt engineering + 多轮 <code>Client::generate</code> iteration 在 Client 层 orchestrate。</p>
+    </section>
+    <section id="s3.11.1" data-section="3.11.1">
+      <h5>3.11.1 基本用法</h5>
+      <p>```rust</p>
+      <p>use gllm::{Client, ReasoningMode};</p>
+      <p>let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;</p>
+      <p>// Manual 模式: 固定步长 + 精确 budget 控制</p>
+      <p>let answer = client</p>
+      <p>    .generate("What is 127 * 83?")</p>
+      <p>    .reasoning(ReasoningMode::Manual {</p>
+      <p>        max_reasoning_tokens: 512,</p>
+      <p>        step_count: 3,</p>
+      <p>    })</p>
+      <p>    .execute()?;</p>
+      <p>println!("Final answer: {}", answer.text);</p>
+      <p>for (i, step) in answer.reasoning_trace.iter().enumerate() {</p>
+      <p>    println!("Step {}: {}", i + 1, step);</p>
+      <p>}</p>
+      <p>println!("Stopped due to: {:?}", answer.stopped_reason);</p>
+      <p>```</p>
+      <p>```rust</p>
+      <p>// Auto 模式: 引擎自动决定步数/停止</p>
+      <p>let answer = client</p>
+      <p>    .generate("Design a REST API for a blog service")</p>
+      <p>    .reasoning(ReasoningMode::Auto {</p>
+      <p>        max_total_tokens: 2048,</p>
+      <p>        entropy_threshold: Some(0.5),</p>
+      <p>        stop_patterns: vec!["Final Answer:".into(), "In conclusion,".into()],</p>
+      <p>    })</p>
+      <p>    .execute()?;</p>
+      <p>```</p>
+    </section>
+    <section id="s3.11.2" data-section="3.11.2">
+      <h5>3.11.2 ReasoningMode</h5>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>字段</td>
+        </tr>
+        <tr>
+          <td>语义</td>
+        </tr>
+        <tr>
+          <td>Manual</td>
+        </tr>
+        <tr>
+          <td>max_reasoning_tokens: usize</td>
+        </tr>
+        <tr>
+          <td>所有 reasoning step 合计最大 token 数(不含 final answer)</td>
+        </tr>
+        <tr>
+          <td>Manual</td>
+        </tr>
+        <tr>
+          <td>step_count: usize</td>
+        </tr>
+        <tr>
+          <td>步数 ≥ 1,引擎为每步分配约 </td>
+          <td>max_reasoning_tokens / step_count</td>
+          <td> 预算</td>
+        </tr>
+        <tr>
+          <td>Auto</td>
+        </tr>
+        <tr>
+          <td>max_total_tokens: usize</td>
+        </tr>
+        <tr>
+          <td>所有 step 合计上限,耗尽即停</td>
+        </tr>
+        <tr>
+          <td>Auto</td>
+        </tr>
+        <tr>
+          <td>entropy_threshold: Option&lt;f32&gt;</td>
+        </tr>
+        <tr>
+          <td>Some(t)</td>
+          <td> 启用文本启发式熵收敛检测(§5.2);</td>
+          <td>None</td>
+          <td> 禁用</td>
+        </tr>
+        <tr>
+          <td>Auto</td>
+        </tr>
+        <tr>
+          <td>stop_patterns: Vec&lt;String&gt;</td>
+        </tr>
+        <tr>
+          <td>任一子串在 chunk 中命中即停,空列表 = 禁用 pattern match</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.11.3" data-section="3.11.3">
+      <h5>3.11.3 ReasoningTemplate</h5>
+      <p>可覆写的 prompt 模板:</p>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>语义</td>
+        </tr>
+        <tr>
+          <td>system_prompt</td>
+        </tr>
+        <tr>
+          <td>"You are a careful reasoner. Break problems into explicit steps..."</td>
+        </tr>
+        <tr>
+          <td>整条 reasoning 开头的系统引导</td>
+        </tr>
+        <tr>
+          <td>step_prefix</td>
+        </tr>
+        <tr>
+          <td>"Step {n}:"</td>
+        </tr>
+        <tr>
+          <td>每步前置标记,</td>
+          <td>{n}</td>
+          <td> 替换为 1-based index</td>
+        </tr>
+        <tr>
+          <td>final_prefix</td>
+        </tr>
+        <tr>
+          <td>"Final Answer:"</td>
+        </tr>
+        <tr>
+          <td>Final answer 阶段前置标记</td>
+        </tr>
+        <tr>
+          <td>step_separator</td>
+        </tr>
+        <tr>
+          <td>"\n\n"</td>
+        </tr>
+        <tr>
+          <td>step 间分隔符</td>
+        </tr>
+        <tr>
+          <td>temperature</td>
+        </tr>
+        <tr>
+          <td>0.7</td>
+        </tr>
+        <tr>
+          <td>每 step 采样温度</td>
+        </tr>
+        <tr>
+          <td>top_k</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>top-k 采样参数</td>
+        </tr>
+        <tr>
+          <td>top_p</td>
+        </tr>
+        <tr>
+          <td>1.0</td>
+        </tr>
+        <tr>
+          <td>top-p nucleus 采样参数</td>
+        </tr>
+        <tr>
+          <td>final_answer_budget</td>
+        </tr>
+        <tr>
+          <td>256</td>
+        </tr>
+        <tr>
+          <td>Final answer 阶段独立 token 预算</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.11.4" data-section="3.11.4">
+      <h5>3.11.4 ReasoningResponse</h5>
+      <p>```rust</p>
+      <p>pub struct ReasoningResponse {</p>
+      <p>    pub text: String,                       // Final answer (不含 trace)</p>
+      <p>    pub reasoning_trace: Vec<string>,       // 每 step 的原始 chunk text</string></p>
+      <p>    pub total_reasoning_tokens: usize,      // 所有 reasoning step 的合计 token 估算</p>
+      <p>    pub actual_steps: usize,                // == reasoning_trace.len()</p>
+      <p>    pub stopped_reason: ReasoningStopReason, // BudgetExhausted / StepCountReached / PatternMatched(s) / EntropyConverged</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.11.5" data-section="3.11.5">
+      <h5>3.11.5 错误模式</h5>
+      <strong>禁止</strong>: 静默返回空 <code>ReasoningResponse</code>、fallback 到单次 generate、忽略 budget 溢出。所有错误显式 propagate。
+      <table>
+        <tr>
+          <th>错误</th>
+        </tr>
+        <tr>
+          <td>触发场景</td>
+        </tr>
+        <tr>
+          <td>ClientError::NoModelLoaded</td>
+        </tr>
+        <tr>
+          <td>调用前未加载模型</td>
+        </tr>
+        <tr>
+          <td>ClientError::RuntimeError("cot_reasoner: ...")</td>
+        </tr>
+        <tr>
+          <td>内部某轮 </td>
+          <td>Client::generate</td>
+          <td> 失败,原 message 包装</td>
+        </tr>
+        <tr>
+          <td>ClientError::RuntimeError("cot_reasoner invalid config: ...")</td>
+        </tr>
+        <tr>
+          <td>step_count == 0</td>
+          <td> / </td>
+          <td>max_reasoning_tokens == 0</td>
+          <td> / </td>
+          <td>temperature &lt;= 0</td>
+          <td> 等</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.11.6" data-section="3.11.6">
+      <h5>3.11.6 与 thinking_budget 的区分</h5>
+      <p>两者可独立使用,不冲突。注意: 当前 CoT Reasoner 内部 <code>Client::generate</code> 调用不开启 <code>thinking_budget</code>(保持默认 <code>None</code>),避免 reasoning trace 被模型的 <code>&lt;thinking&gt;</code> 二次分割。</p>
+      <table>
+        <tr>
+          <th>关注点</th>
+        </tr>
+        <tr>
+          <td>thinking_budget(n)</td>
+          <td> (§3.1)</td>
+        </tr>
+        <tr>
+          <td>reasoning(ReasoningMode)</td>
+          <td> (本节)</td>
+        </tr>
+        <tr>
+          <td>作用粒度</td>
+        </tr>
+        <tr>
+          <td>单次 generate 内 </td>
+          <td>&lt;thinking&gt;</td>
+          <td> token 数</td>
+        </tr>
+        <tr>
+          <td>跨多次 generate 调用的 orchestration</td>
+        </tr>
+        <tr>
+          <td>依赖权重</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>是</td>
+          <td>(qwen3-thinking 等有 thinking_head)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>否</td>
+          <td>(任意 LLM)</td>
+        </tr>
+        <tr>
+          <td>Step 概念</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>有(Manual 指定,Auto 自适应)</td>
+        </tr>
+        <tr>
+          <td>停止信号</td>
+        </tr>
+        <tr>
+          <td>budget 耗尽</td>
+        </tr>
+        <tr>
+          <td>budget / step count / pattern / entropy</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 错误处理</h3>
+      <p>所有 API 返回 <code>Result&lt;T, GllmError&gt;</code>。</p>
+      <p>```rust</p>
+      <p>pub enum GllmError {</p>
+      <p>    /// 模型未找到或下载失败</p>
+      <p>    ModelNotFound(String),</p>
+      <p>    /// 后端初始化失败 (如 CUDA 不可用)</p>
+      <p>    /// 嵌套类型保留完整错误信息，可通过 source() 访问</p>
+      <p>    BackendError(BackendError),</p>
+      <p>    /// 显存不足 (嵌套类型保留 OOM 详情)</p>
+      <p>    OutOfMemory(OomHaltError),</p>
+      <p>    /// 模型类型不匹配 (如用 Embedding 模型做 Chat)</p>
+      <p>    InvalidModelType,</p>
+      <p>    /// 运行时错误</p>
+      <p>    RuntimeError(String),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 错误源链 (Error Source Chain)</h4>
+      <p>嵌套错误类型 (<code>BackendError</code>, <code>OomHaltError</code>) 可通过 <code>source()</code> 方法访问，允许调用方检查详细错误信息：</p>
+      <p>```rust</p>
+      <p>match result {</p>
+      <p>    Err(GllmError::BackendError(e)) =&gt; {</p>
+      <p>        // 可通过 source() 或直接匹配检查具体变体</p>
+      <p>        if let Some(backend_err) = err.source() {</p>
+      <p>            // backend_err 是 BackendError，可匹配 Unimplemented 等变体</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>    // ...</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 内部架构映射</h3>
+      <table>
+        <tr>
+          <th>API 层</th>
+        </tr>
+        <tr>
+          <td>内部组件</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>Client</td>
+        </tr>
+        <tr>
+          <td>Arc&lt;ArcSwapOption&lt;ClientState&gt;&gt;</td>
+        </tr>
+        <tr>
+          <td>Lock-free 原子模型状态容器</td>
+        </tr>
+        <tr>
+          <td>Executor</td>
+        </tr>
+        <tr>
+          <td>Backend + Scheduler</td>
+        </tr>
+        <tr>
+          <td>核心推理引擎</td>
+        </tr>
+        <tr>
+          <td>Builder</td>
+        </tr>
+        <tr>
+          <td>Loader</td>
+        </tr>
+        <tr>
+          <td>模型加载与配置</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. GGUF Loader API (API-GGUF)</h3>
+      <p>&gt; <strong>定位</strong>: gllm 内部使用的 GGUF 格式解析器，<strong>不是通用工具库</strong></p>
+      <p>&gt; <strong>关联需求</strong>: REQ-LOADER-011, REQ-LOADER-014, REQ-LOADER-019</p>
+      <p>&gt; <strong>关联架构</strong>: ARCH-GGUF-PARSER</p>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 核心接口 (极简化)</h4>
+      <p>```rust</p>
+      <p>use gllm::loader::gguf::GgufReader;</p>
+      <p>/// 打开 GGUF 文件 (内存映射)</p>
+      <p>let reader = GgufReader::open("model.gguf")?;</p>
+      <p>/// Ω1: 从元数据读取架构类型</p>
+      <p>let arch = reader.architecture()?;  // "llama"</p>
+      <p>/// Ω1: 读取元数据值（通用方法，禁止硬编码默认值）</p>
+      <p>let vocab_size = reader.get_metadata_u64(&amp;format!("{}.vocab_size", arch))?</p>
+      <p>    .ok_or(GgufError::MissingMetadata("vocab_size"))?;</p>
+      <p>let hidden_size = reader.get_metadata_u64(&amp;format!("{}.embedding_length", arch))?</p>
+      <p>    .ok_or(GgufError::MissingMetadata("embedding_length"))?;</p>
+      <p>/// Tokenizer tokens (修复 ARRAY[STRING] bug)</p>
+      <p>let tokens = reader.tokenizer_tokens()?;  // Vec&lt;&amp;str&gt;</p>
+      <p>/// 读取 Tensor (零拷贝)</p>
+      <p>let tensor = reader.tensor("token_embd.weight")?;</p>
+      <p>println!("shape: {:?}, dtype: {:?}", tensor.shape(), tensor.dtype());</p>
+      <p>/// 获取原始字节（传递给 gllm-kernels）</p>
+      <p>let data = tensor.as_bytes();</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 Ω1 真实性原则 API</h4>
+      <p>```rust</p>
+      <p>/// 配置从 GGUF 元数据读取（禁止硬编码默认值）</p>
+      <p>impl ModelConfig {</p>
+      <p>    pub fn from_gguf(reader: &amp;GgufReader) -&gt; Result&lt;Self, GgufError&gt; {</p>
+      <p>        let arch = reader.architecture()?;</p>
+      <p>        Ok(Self {</p>
+      <p>            vocab_size: reader.get_metadata_u64(&amp;format!("{}.vocab_size", arch))</p>
+      <p>                .ok_or_else(|| GgufError::MissingMetadata("vocab_size"))?,</p>
+      <p>            hidden_size: reader.get_metadata_u64(&amp;format!("{}.embedding_length", arch))</p>
+      <p>                .ok_or_else(|| GgufError::MissingMetadata("embedding_length"))?,</p>
+      <p>            // ... 其他字段类似，全部从元数据读取</p>
+      <p>        })</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 与 gllm-kernels 集成</h4>
+      <p>&gt; <strong>🚨 边界约束</strong>: GGUF 解析器只负责文件格式解析，不负责类型适配</p>
+      <p>&gt; <strong>职责分离</strong>:</p>
+      <p>&gt; - GGUF 解析器 (<code>GgufReader</code>): 返回原始字节 + 类型标识符</p>
+      <p>&gt; - 适配层 (<code>GgufAdapter</code>): 负责类型映射和 gllm-kernels 集成</p>
+      <p>```rust</p>
+      <p>use gllm::loader::gguf::GgufReader;</p>
+      <p>use gllm::loader::adapter::GgufAdapter;</p>
+      <p>// GGUF 解析器: 返回原始数据</p>
+      <p>let reader = GgufReader::open("model.gguf")?;</p>
+      <p>let tensor = reader.tensor("token_embd.weight")?;</p>
+      <p>let ggml_dtype = tensor.ggml_dtype();  // GgmlDType 枚举</p>
+      <p>let data = tensor.as_bytes(); // &amp;[u8] 原始字节</p>
+      <p>// 适配层: 负责类型映射</p>
+      <p>let adapter = GgufAdapter::new(reader)?;</p>
+      <p>let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;</p>
+      <p>// 返回 KernelTensorView&lt;'_&gt;</p>
+      <p>```</p>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>6.4 适配层接口 (API-GGUF-ADAPTER)</h4>
+      <p>```rust</p>
+      <p>use gllm::loader::adapter::{GgufAdapter, KernelTensorView, StorageFormat, PackedBits};</p>
+      <p>/// 创建适配器</p>
+      <p>let adapter = GgufAdapter::new(reader)?;</p>
+      <p>// 或直接从文件打开</p>
+      <p>let adapter = GgufAdapter::open("model.gguf")?;</p>
+      <p>/// 将 GGUF Tensor 转换为 gllm-kernels 格式</p>
+      <p>let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;</p>
+      <p>/// KernelTensorView — 零拷贝张量视图</p>
+      <p>pub struct KernelTensorView&lt;'a&gt; {</p>
+      <p>    pub storage_format: StorageFormat, // 物理层映射结构</p>
+      <p>    pub shape: Vec&lt;usize&gt;,       // 形状</p>
+      <p>    pub data: &amp;'a [u8],          // 生命周期绑定的字节切片（零拷贝）</p>
+      <p>}</p>
+      <p>/// StorageFormat — 适配层物理源格式扩展（文件中的原始物理存储格式，JIT 根据 QuantType 生成对应内核）</p>
+      <p>pub enum StorageFormat {</p>
+      <p>    F32, F16, BF16, U8,          // 表示文件中的原始物理存储格式</p>
+      <p>    PackedU8(PackedBits),        // Int1/Int2/Int4 量化打包</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s6.5" data-section="6.5">
+      <h4>6.5 类型映射约束</h4>
+      <p>&gt; <strong>关联架构</strong>: gllm-kernels ARCH-QUANT-GENERIC</p>
+      <p>&gt; - GGUF 解析器使用 <code>GgmlDType</code> 枚举 (文件格式层)</p>
+      <p>&gt; - 适配层通过 <code>map_storage_format()</code> 映射到 <code>StorageFormat</code>（运行时类型）</p>
+      <p>&gt; - 量化内核分派通过 <code>ggml_dtype_to_quant_type()</code> 映射到 <code>QuantType</code></p>
+      <p>&gt; - 两层映射职责分离：<code>map_storage</code> 负责提取物理布局，<code>ggml_dtype_to_quant_type</code> 直接映射为 QuantType 驱动 JIT</p>
+      <p>&gt; <strong>注1</strong>: Q3/Q5/Q6/IQ3 系列在 <code>ggml_dtype_to_quant_type()</code> 中有 QuantType 映射，但 <code>map_storage_format()</code> 返回 <code>UnsupportedType</code>。这些类型的量化内核可用，但适配层 StorageFormat 映射尚未覆盖（需要扩展 PackedBits 或新增 StorageFormat 变体）。</p>
+      <table>
+        <tr>
+          <th>GGUF 类型</th>
+        </tr>
+        <tr>
+          <td>adapter StorageFormat</td>
+        </tr>
+        <tr>
+          <td>QuantType</td>
+        </tr>
+        <tr>
+          <td>映射位置</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>None</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>None</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>None</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>Q4_0/Q4_1/Q4_K/IQ4_NL/IQ4_XS/MXFP4</td>
+        </tr>
+        <tr>
+          <td>PackedU8(Int4)</td>
+        </tr>
+        <tr>
+          <td>Q4_0/Q4_1/Q4K/IQ4NL/IQ4XS/—</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>Q2_K/IQ2_XXS/IQ2_XS/IQ2_S/TQ2_0</td>
+        </tr>
+        <tr>
+          <td>PackedU8(Int2)</td>
+        </tr>
+        <tr>
+          <td>Q2K/IQ2XXS/IQ2XS/IQ2S/—</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>IQ1_S/IQ1_M/TQ1_0</td>
+        </tr>
+        <tr>
+          <td>PackedU8(Int1)</td>
+        </tr>
+        <tr>
+          <td>IQ1S/IQ1M/—</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>Q8_0/Q8_1/Q8_K/I8</td>
+        </tr>
+        <tr>
+          <td>U8</td>
+        </tr>
+        <tr>
+          <td>Q8_0/Q8_1/Q8K/—</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+        </tr>
+        <tr>
+          <td>Q3_K/Q5_0/Q5_1/Q5_K/Q6_K/IQ3_XXS/IQ3_S</td>
+        </tr>
+        <tr>
+          <td>UnsupportedType</td>
+        </tr>
+        <tr>
+          <td>Q3K/Q5_0/Q5_1/Q5K/Q6K/IQ3XXS/IQ3S</td>
+        </tr>
+        <tr>
+          <td>adapter.rs</td>
+          <td> (注1)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.6" data-section="6.6">
+      <h4>6.6 错误处理</h4>
+      <p>```rust</p>
+      <p>use gllm::loader::gguf::GgufError;</p>
+      <p>match GgufReader::open("model.gguf") {</p>
+      <p>    Ok(reader) =&gt; { /* ... */ }</p>
+      <p>    Err(GgufError::InvalidMagic(m)) =&gt; {</p>
+      <p>        eprintln!("Not a GGUF file: 0x{:08x}", m);</p>
+      <p>    }</p>
+      <p>    Err(GgufError::MissingMetadata(key)) =&gt; {</p>
+      <p>        eprintln!("Missing required metadata: {}", key);</p>
+      <p>    }</p>
+      <p>    Err(GgufError::TensorNotFound(name)) =&gt; {</p>
+      <p>        eprintln!("Tensor not found: {}", name);</p>
+      <p>    }</p>
+      <p>    Err(e) =&gt; eprintln!("Error: {}", e),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. Semantic Gatekeeper 用户接口 (API-SEMANTIC-GATEKEEPER)</h3>
+      <p>&gt; <strong>定位</strong>: gllm 零训练、纯运行时的结构化知识调度与注入 SDK。</p>
+      <p>&gt; <strong>关联协议</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md</code>（技术协议 SSOT）</p>
+      <p>&gt; <strong>关联 Callback 集成</strong>: <code>SPEC/05-OPTIMIZATIONS.md §2.9</code></p>
+      <p>&gt; <strong>关联需求</strong>: <code>SPEC/01-REQUIREMENTS.md §12</code> REQ-SG-001..008</p>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 注册 Semantic Gatekeeper</h4>
+      <code>Client::register_semantic_gatekeeper()</code> 在模型加载后注册一个 Gatekeeper 实例。注册时触发 Level Keys 预计算（见 <code>SPEC/SEMANTIC-GATEKEEPER.md §3</code>）。
+      <p>```rust</p>
+      <p>use gllm::semantic_gatekeeper::{</p>
+      <p>    SemanticGatekeeperConfig, SemanticLevel, KnowledgeProvider, AstSentinel,</p>
+      <p>    KnowledgeEntry, RetrieveContext, AstContext,</p>
+      <p>};</p>
+      <p>let gatekeeper_config = SemanticGatekeeperConfig {</p>
+      <p>    // 三个层级的描述文本（默认见 §7.2 表，可覆写）</p>
+      <p>    level_descriptors: [</p>
+      <p>        "struct fields and method signatures".into(),</p>
+      <p>        "validation rules and invariants".into(),</p>
+      <p>        "module dependencies and design patterns".into(),</p>
+      <p>    ],</p>
+      <p>    // 检测层相对深度列表（如 [0.5, 0.75, 0.9]）</p>
+      <p>    detection_depths: vec![0.5, 0.75, 0.9],</p>
+      <p>    // 门控阈值 τ：best_score &lt; τ 时不注入</p>
+      <p>    gate_threshold: 0.35,</p>
+      <p>    // 稳定性阈值：hidden 与锚点相似度 &gt; 该值时复用缓存的 v_knowledge</p>
+      <p>    stability_threshold: 0.95,</p>
+      <p>    // 残差注入强度 α ∈ [0.1, 0.3]</p>
+      <p>    alpha: 0.15,</p>
+      <p>    // 用户实现的知识源（可返回本地 LSP 检索结果或远程服务结果）</p>
+      <p>    knowledge_provider: Arc::new(MyProvider::new()),</p>
+      <p>    // 可选：AST 哨兵（Tree-sitter 等），用于语法驱动的强制刷新</p>
+      <p>    ast_sentinel: Some(Arc::new(MyAstSentinel::new())),</p>
+      <p>};</p>
+      <p>client.register_semantic_gatekeeper(gatekeeper_config)?;</p>
+      <p>```</p>
+      <p>注册后后续所有 <code>client.generate(...)</code> 调用自动启用 SG。通过 <code>client.unregister_semantic_gatekeeper()</code> 取消注册，或 <code>client.reset_gatekeeper_state()</code> 仅清空 ActiveState（保留 Level Keys 缓存）。</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 SemanticLevel 枚举</h4>
+      <p>```rust</p>
+      <p>pub enum SemanticLevel {</p>
+      <p>    /// L1: 符号签名、类型成员</p>
+      <p>    L1,</p>
+      <p>    /// L2: 接口约束、业务规则</p>
+      <p>    L2,</p>
+      <p>    /// L3: 架构分层、模块职责</p>
+      <p>    L3,</p>
+      <p>}</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>层级</th>
+        </tr>
+        <tr>
+          <td>默认描述文本</td>
+        </tr>
+        <tr>
+          <td>典型知识类型</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>"struct fields and method signatures"</td>
+        </tr>
+        <tr>
+          <td>LSP </td>
+          <td>documentSymbol</td>
+          <td> 结果、类型成员列表</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>"validation rules and invariants"</td>
+        </tr>
+        <tr>
+          <td>接口前置条件、运行时断言、业务规则</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>"module dependencies and design patterns"</td>
+        </tr>
+        <tr>
+          <td>项目架构摘要、模块依赖图、设计模式约定</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 KnowledgeProvider Trait</h4>
+      <p>&gt; <strong>类型定义 SSOT</strong>: <code>RetrieveContext</code>、<code>AstContext</code>、<code>AstSentinel</code>、<code>KnowledgeEntry</code> 的完整字段语义见 <code>SEMANTIC-GATEKEEPER.md §6</code>。此处仅列出 API 层精简签名。</p>
+      <p>```rust</p>
+      <p>pub trait KnowledgeProvider: Send + Sync {</p>
+      <p>    /// 根据 Query 向量、层级、上下文检索知识条目。</p>
+      <p>    /// 返回 None 表示无匹配（SG 不注入，保持原 hidden_state）。</p>
+      <p>    fn retrieve(</p>
+      <p>        &amp;self,</p>
+      <p>        query: &amp;[f32],</p>
+      <p>        level: SemanticLevel,</p>
+      <p>        ctx: &amp;RetrieveContext&lt;'_&gt;,</p>
+      <p>    ) -&gt; Option<knowledgeentry>;</knowledgeentry></p>
+      <p>}</p>
+      <p>pub struct KnowledgeEntry {</p>
+      <p>    /// 将被主模型 tokenizer + 冻结 embed 层编码的文本。</p>
+      <p>    /// 保证与 hidden_state 处于同一语义空间。</p>
+      <p>    pub text: String,</p>
+      <p>    /// 置信度 ∈ [0.0, 1.0]，动态调节 α_effective = α × confidence</p>
+      <p>    pub confidence: f32,</p>
+      <p>}</p>
+      <p>pub struct RetrieveContext&lt;'a&gt; {</p>
+      <p>    pub generated_tokens: &amp;'a [u32],</p>
+      <p>    pub ast: Option&lt;AstContext&lt;'a&gt;&gt;,</p>
+      <p>    pub step: u64,</p>
+      <p>    pub request_id: RequestId,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.4" data-section="7.4">
+      <h4>7.4 AstSentinel Trait（可选）</h4>
+      <p>```rust</p>
+      <p>pub trait AstSentinel: Send + Sync {</p>
+      <p>    fn current_context&lt;'a&gt;(</p>
+      <p>        &amp;self,</p>
+      <p>        generated_tokens: &amp;'a [u32],</p>
+      <p>        tokenizer: &amp;dyn TokenizerLookup,</p>
+      <p>    ) -&gt; Option&lt;AstContext&lt;'a&gt;&gt;;</p>
+      <p>}</p>
+      <p>pub struct AstContext&lt;'a&gt; {</p>
+      <p>    /// Tree-sitter 节点 kind（如 "member_expression" / "call_expression"）</p>
+      <p>    pub node_kind: &amp;'a str,</p>
+      <p>    pub cursor_line: u32,</p>
+      <p>    pub cursor_column: u32,</p>
+      <p>    pub prefix: &amp;'a str,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>触发作用</strong>：
+      <li>AST <code>node_kind</code> 变更时 SG 强制刷新 ActiveState（§8.3）</li>
+      <li>未注册 AST 哨兵时，SG 仅凭 Query 向量 + hidden 锚点做稳定性判断</li>
+    </section>
+    <section id="s7.5" data-section="7.5">
+      <h4>7.5 部署形态</h4>
+      <p>SG 内核对部署形态无感。Provider 实现者自由选择本地 vs 远程。</p>
+      <p>&gt; <strong>详述</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md §9</code></p>
+      <table>
+        <tr>
+          <th>形态</th>
+        </tr>
+        <tr>
+          <td>KnowledgeProvider 实现</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>完全本地</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>同进程内的 LSP 客户端 + LSH 索引 + 向量查询</td>
+        </tr>
+        <tr>
+          <td>离线、高隐私、实时补全</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>云端推理 + 本地知识库</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>HTTP/gRPC 客户端回调到用户本地服务</td>
+        </tr>
+        <tr>
+          <td>代码隐私 + 云端大模型 + 任务级延迟容忍</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 Semantic Gatekeeper 内部实现架构 (API-SG-IMPL)</h3>
+      <p>&gt; <strong>协议 SSOT</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md</code></p>
+      <p>&gt; <strong>上层 API</strong>: §7 定义的用户侧接口</p>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 整体管线</h4>
+      <p>```</p>
+      <p>┌─ 模型加载期 ────────────────────────────────────────┐</p>
+      <p>│ register_semantic_gatekeeper(config):              │</p>
+      <p>│   1. 构造 EmbedLookupOnlyGraph + KProjOnlyGraph    │</p>
+      <p>│      (ARCH-FULL-JIT 合规，CompilerGraph 小图)      │</p>
+      <p>│   2. compile(graph, config) ×2 (小图 JIT 编译)      │</p>
+      <p>│   3. 对每个 detection_depth:                        │</p>
+      <p>│        预计算 [K_L1, K_L2, K_L3] 存入 LevelKeysCache│</p>
+      <p>│   4. 为检测层 Attention OpKind 注入 q_tap 配置     │</p>
+      <p>│      (通过 MegaKernelBusinessConfig 驱动)           │</p>
+      <p>│   5. 注册 SemanticGatekeeperCallback 到 CallbackChain│</p>
+      <p>│      优先级 90（SPEC/05-OPTIMIZATIONS.md §8）       │</p>
+      <p>└────────────────────────────────────────────────────┘</p>
+      <p>┌─ 推理期（每 decode step，每个检测层） ──────────────┐</p>
+      <p>│ SemanticGatekeeperCallback.pre_node(ctx, node_idx):│</p>
+      <p>│   详见 SPEC/SEMANTIC-GATEKEEPER.md §2.1 和 §7.1     │</p>
+      <p>└────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 Level Keys 预计算（挑战 2 决策 B）</h4>
+      <p>通过 Mega-Kernel JIT 编译执行两个小 <code>CompilerGraph</code>：</p>
+      <li><strong>EmbedLookupOnlyGraph</strong>：单个 <code>Gather(embed_weight)</code> 节点（<code>SPEC/08-EXECUTOR.md §4.3</code> ARCH-GATHER-JIT）</li>
+      <li><strong>KProjOnlyGraph@layer_L</strong>：<code>RmsNorm(input_layernorm_weight_@L) → Gemm(k_proj_weight_@L)</code></li>
+      <p>&gt; <strong>ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED 合规</strong>：小图与主推理图共享同一 <code>CompilerGraph</code> IR，Phase 3 codegen 按 <code>DeviceProfile</code> 生成 CPU/PTX/HIP/MSL 原生代码。不引入后端特化。</p>
+      <code>LevelKeysCache</code> 定义与一致性不变量见 <code>SPEC/SEMANTIC-GATEKEEPER.md §3.5</code>。
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 Q 向量截获（挑战 1 决策 B）</h4>
+      <strong>FusedAttentionLayer Q-Tap 变体</strong>：检测层的 <code>FusedAttentionLayer</code> 编译期携带 <code>q_tap: Some(QTapConfig)</code>，JIT codegen 在 <code>q_proj</code> GEMM 后尾段插入 STG 指令，将 Q 向量写入设备可见的 <code>GatekeeperRingBuffer</code>。
+      <strong>关键属性</strong>：
+      <li>融合完整性保持（未拆子算子）</li>
+      <li>非检测层 <code>q_tap: None</code>，零额外指令开销</li>
+      <li>Ring buffer 双缓冲 + atomic step_index 协议防陈旧读</li>
+      <li>全后端统一（x86_64 / AArch64 / PTX / HIP / MSL 均由 JIT 生成）</li>
+      <p>&gt; <strong>详述</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md §4</code> + <code>SPEC/08-EXECUTOR.md §4.2</code></p>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>8.4 ActiveState 稳定性追踪</h4>
+      <p>跨 decode step 维护 <code>ActiveState { level, key_hash, anchor_hidden, v_knowledge, ast_node_kind, last_step }</code>。</p>
+      <strong>状态转移</strong>：
+      <li>hidden 与 anchor 相似度 &gt; <code>stability_threshold</code> &amp;&amp; AST 节点未变 → <strong>ReuseCache</strong>（跳过 LSP 检索）</li>
+      <li>否则 / AST 节点变更 / 新请求 → <strong>FullCompute</strong>（完整流程）</li>
+      <p>&gt; <strong>详述</strong>: <code>SPEC/SEMANTIC-GATEKEEPER.md §5</code></p>
+    </section>
+    <section id="s8.5" data-section="8.5">
+      <h4>8.5 残差相加注入（挑战 4 决策 B）</h4>
+      <p>利用现有 <code>LayerContext.hidden_state: &amp;'a mut [f32]</code>（<code>SPEC/05-OPTIMIZATIONS.md §1.2</code>），Callback 内部计算：</p>
+      <p>```</p>
+      <p>new_hidden_last_token = hidden_state[-1] + α × confidence × v_knowledge</p>
+      <p>```</p>
+      <p>然后返回现有 <code>CallbackAction::InjectHidden { data }</code>。</p>
+      <strong>零 API 扩展</strong>：不改 <code>CallbackAction</code> 枚举；不改 <code>LayerCallback</code> trait 签名。
+    </section>
+    <section id="s8.6" data-section="8.6">
+      <h4>8.6 文本编码（挑战 3 决策 B）</h4>
+      <code>KnowledgeProvider.retrieve(...)</code> 返回的 <code>KnowledgeEntry.text</code> 在 Callback 内部流程：
+      <p>```</p>
+      <p>tokens = main_model_tokenizer.encode(text)</p>
+      <p>embed  = EmbedLookupOnlyGraph.run(tokens)       (复用 §8.2 预编译的小图)</p>
+      <p>v_knowledge = mean_pool(embed, axis=seq)        (形状 hidden_size)</p>
+      <p>```</p>
+      <strong>同语义空间保证</strong>：使用主模型冻结 Token Embedding，<code>v_knowledge</code> 与主推理流 hidden_state 处于同一向量空间，可直接相加无需任何投影。
+    </section>
+    <section id="artifact-module" data-artifact-type="module" data-section="8.7">
+      <h4>8.7 NO_ISLAND_MODULE 强制性</h4>
+      <p>注册的 Gatekeeper <strong>必须</strong>被真实推理路径触发。集成测试验收：</p>
+      <li><code>SemanticGatekeeperCallback.pre_node</code> 在 Mega-Kernel callback table 中真实被调用（通过 SgDetect/SgInject 共享内存，非 <code>#[cfg(test)]</code> 路径）</li>
+      <li>Mock Provider 返回固定文本时，生成 token 分布对比无 SG 基线存在可测量差异</li>
+      <p>详见 <code>SPEC/SEMANTIC-GATEKEEPER.md §8</code>。</p>
+    </section>
+    <section id="s8.8" data-section="8.8">
+      <h4>8.8 与其他优化模块的协调</h4>
+      <table>
+        <tr>
+          <th>场景</th>
+        </tr>
+        <tr>
+          <td>SG 行为</td>
+        </tr>
+        <tr>
+          <td>与 Early Exit 共存</td>
+        </tr>
+        <tr>
+          <td>SG 在 </td>
+          <td>pre_node</td>
+          <td> 执行；Early Exit 在 </td>
+          <td>post_node</td>
+          <td>。若 Early Exit 在 SG 注入后的层触发，v_knowledge 的语义影响已被累积进 logits</td>
+        </tr>
+        <tr>
+          <td>与 Gate Skip 共存</td>
+        </tr>
+        <tr>
+          <td>SG 优先级 90 &gt; Gate Skip 60。若 SG 返回 </td>
+          <td>InjectHidden</td>
+          <td>，节点仍正常执行，下游 Gate Skip 可继续判定</td>
+        </tr>
+        <tr>
+          <td>与 RAG Inject 共存</td>
+        </tr>
+        <tr>
+          <td>SG 优先级 90 &gt; RAG 80。两者都返回 </td>
+          <td>InjectHidden</td>
+          <td> 时，SG 先注入到 hidden_state，RAG 的后续注入在 SG 修改后的状态上叠加</td>
+        </tr>
+        <tr>
+          <td>与 MoE 共存</td>
+        </tr>
+        <tr>
+          <td>检测层若同时是 MoE 层，SG 在 </td>
+          <td>pre_node</td>
+          <td> 完成注入后 MoE Dispatch 路由正常进行</td>
+        </tr>
+        <tr>
+          <td>与 Speculative Decoding 共存</td>
+        </tr>
+        <tr>
+          <td>Draft phase 跳过深层检测（复用 </td>
+          <td>SPEC/05-OPTIMIZATIONS.md §6.2 H11</td>
+          <td> 约定）。Verify phase 完整跑 SG</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>§9 全局引擎 API 配置 (API-GLOBAL-CONFIG)</h3>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>9.1 量化执行配置</h4>
+      <p>QuantType 从加载的权重文件自动检测，JIT 据此生成硬件原生内核。不需要用户手动指定精度。</p>
+      <p>```rust</p>
+      <p>// QuantType 从权重文件自动推导，无需用户配置：</p>
+      <p>// GGUF Q4_K → QuantType::Q4K → kquant_matmul JIT 内核</p>
+      <p>// SafeTensors F16 → QuantType::F16 → float_matmul JIT 内核</p>
+      <p>// 推理过程中无类型判断分支</p>
+      <p>let client = Client::builder()</p>
+      <p>    .model("model.gguf")  // QuantType 自动检测</p>
+      <p>    .build()?;</p>
+      <p>```</p>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2 飞行安全护栏全局守护 (`SafetyPolicyConfig`)</h4>
+      <p>在应用级统一管理跨请求的安全阈值：</p>
+      <p>```rust</p>
+      <p>pub struct SafetyPolicyConfig {</p>
+      <p>    /// 是否在运行时为所有请求挂载护栏探针</p>
+      <p>    pub global_guardrail_enabled: bool,</p>
+      <p>    /// 当探针发现毒性特征概率 &gt; 该阈值时，硬件级物理阻断当前请求</p>
+      <p>    pub halt_and_veto_threshold: f32, // 默认 0.95</p>
+      <p>    /// 指定探针挂载的锚点深度</p>
+      <p>    pub target_layer: LayerTarget,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-compiler-graph" data-entity="ENT-COMPILER-GRAPH" data-req-ref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-BUFFER-LAYOUT ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-FUSION-PLAN ENT-GRAPH-RESOURCE-PLAN" data-xref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-fusion-plan" data-entity="ENT-FUSION-PLAN" data-req-ref="REQ-PIPELINE-001 REQ-PIPELINE-002 REQ-FUSION-LEGAL-001 REQ-FUSION-LEGAL-002 REQ-FUSION-LEGAL-003" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-MEGA-KERNEL-FN" data-xref="REQ-PIPELINE-001 REQ-PIPELINE-002 REQ-FUSION-LEGAL-001 REQ-FUSION-LEGAL-002 REQ-FUSION-LEGAL-003"><h4>ENT-FUSION-PLAN</h4><p>FusionPlan — 融合决策产出</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="groups" data-type="string" data-required="true" <td="">groups<td>string</td><td>是</td><td></td><td>Vec&lt;FusionGroup&gt; 融合组列表（执行顺序）</td></tr><tr data-field="op_to_group" data-type="string" data-required="true" <td="">op_to_group<td>string</td><td>是</td><td></td><td>
+HashMap&lt;OpId,usize&gt; OpId到组索引的映射</td></tr></table></section>
+      <section id="ent-mega-kernel-fn" data-entity="ENT-MEGA-KERNEL-FN" data-req-ref="REQ-PIPELINE-001 REQ-PIPELINE-002 REQ-HOTPATH-001 REQ-HOTPATH-002 REQ-HOTPATH-003" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-CALLBACK-CHAIN ENT-COMPILER-GRAPH ENT-COT-REASONER ENT-DEVICE-PROFILE ENT-EMA-TRACKER ENT-FUSION-PLAN ENT-HEAD-ROUTING" data-xref="REQ-PIPELINE-001 REQ-PIPELINE-002 REQ-HOTPATH-001 REQ-HOTPATH-002 REQ-HOTPATH-003">
+        <h4>ENT-MEGA-KERNEL-FN</h4>
+        <p>MegaKernelFn — 唯一编译产物 ABI (23+参数函数指针)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="entry_fn" data-type="string" data-required="true" <td="">entry_fn<td>string</td><td>是</td><td>MegaKernelFn = unsafe extern "C" fn(*const u8) -&gt; u32</td><td>JIT编译产物函数指针</td></tr><tr data-field="weight_layout" data-type="string" data-required="true" <td="">weight_layout<td>string</td><td>是</td><td>WeightLayout</td><td>
+权重blob中每个tensor的偏移布局</td></tr><tr data-field="buffer_layout" data-type="string" data-required="true" <td="">buffer_layout<td>string</td><td>是</td><td>BufferLayout</td><td>运行时缓冲布局 (activation/logits/sampling)</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小 (logits每行元素数)</td></tr><tr data-field="hidden" data-type="number" data-required="true" <td="">hidden<td>number</td><td>是</td><td>usize</td><td>
+隐藏维度 (SG scratchpad需要)</td></tr><tr data-field="elem_bytes" data-type="number" data-required="true" <td="">elem_bytes<td>number</td><td>是</td><td>usize</td><td>每元素字节数 (compute dtype)</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>编译时max_seq_len (KV cache层步长)</td></tr><tr data-field="mtp_depth" data-type="number" data-required="true" <td="">mtp_depth<td>number</td><td>是</td><td>usize</td><td>
+MTP预测深度 (0=禁用)</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section id="api-umk-compile" data-api="POST /compile" data-req-ref="REQ-AIS-001 REQ-OBS-001 REQ-OBS-002 REQ-OBS-003 REQ-ERR-001" data-api-name="API-UMK-COMPILE" data-api-type="internal" data-xref="REQ-AIS-001 REQ-OBS-001 REQ-OBS-002 REQ-OBS-003 REQ-ERR-001"><h4>POST /compile</h4><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="string" data-required="true" data-param="graph" data-desc="编译器图 IR" <td="">graph<td>CompilerGraph</td><td>是</td><td>编译器图 IR</td></tr><tr data-type="string" data-required="true" data-param="config" data-desc="编译配置" <td="">config<td>CompileConfig</td><td>是</td><td>编译配置</td></tr>
+<tr data-type="string" data-required="true" data-param="device_profile" data-desc="设备配置" <td="">device_profile<td>DeviceProfile</td><td>是</td><td>设备配置</td></tr></table><script type="application/ld+json">{
+  "@type": "ApiResponse",
+  "source": "example",
+  "schema": "MegaKernelCompiled",
+  "body": {
+    "description": "编译产出",
+    "type": "MegaKernelCompiled"
+  }
+}</script><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="MegaKernelCompiled" <td="">200<td>成功</td><td>MegaKernelCompiled</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section id="api-client-generate" data-api="POST /client/generate" data-req-ref="REQ-TEST-002 REQ-TEST-003 REQ-TEST-004 REQ-TEST-005 REQ-TEST-006" data-api-type="client" data-api-name="API-CLIENT-GENERATE" data-xref="REQ-TEST-002 REQ-TEST-003 REQ-TEST-004 REQ-TEST-005 REQ-TEST-006"><h4>POST /client/generate — Client::generate()</h4><p>文本生成公共 API，接受 prompt 返回 GenerationBuilder。支持流式/非流式生成，采样参数配置，停止条件设定。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="PromptInput" data-required="true" data-param="prompt"><td>prompt</td><td>PromptInput</td><td>是</td><td>生成提示输入</td></tr><tr data-type="GenerationConfig" data-required="false" data-param="config"><td>config</td><td>GenerationConfig</td><td>否</td><td>采样参数配置</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="GenerationBuilder"><td>200</td><td>成功</td><td>GenerationBuilder</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"GenerationBuilder"}</script></section><section id="api-client-embed" data-api="POST /client/embed" data-api-type="client" data-api-name="API-CLIENT-EMBED"><h4>POST /client/embed — Client::embed()</h4><p>文本嵌入公共 API，接受输入文本返回 EmbeddingsResponse。支持批量嵌入、维度配置、归一化选项。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="EmbedInput" data-required="true" data-param="input"><td>input</td><td>EmbedInput</td><td>是</td><td>嵌入输入文本</td></tr><tr data-type="EmbedConfig" data-required="false" data-param="config"><td>config</td><td>EmbedConfig</td><td>否</td><td>嵌入参数配置</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="EmbeddingsResponse"><td>200</td><td>成功</td><td>EmbeddingsResponse</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"EmbeddingsResponse"}</script></section><section id="api-client-rerank" data-api="POST /client/rerank" data-api-type="client" data-api-name="API-CLIENT-RERANK"><h4>POST /client/rerank — Client::rerank()</h4><p>重排序公共 API，接受 query + documents 返回 RerankResponse。支持相关性评分、Top-K 截断、混合排序。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="string" data-required="true" data-param="query"><td>query</td><td>string</td><td>是</td><td>查询文本</td></tr><tr data-type="string[]" data-required="true" data-param="documents"><td>documents</td><td>string[]</td><td>是</td><td>待排序文档列表</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="RerankResponse"><td>200</td><td>成功</td><td>RerankResponse</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"RerankResponse"}</script></section><section id="api-client-generate-batch" data-api="POST /client/generate_batch" data-api-type="client" data-api-name="API-CLIENT-GENERATE-BATCH"><h4>POST /client/generate_batch — AsyncClient::generate_batch()</h4><p>批量生成公共 API，AsyncClient 异步批量生成接口。支持多请求并发调度、连续批处理、KV Cache 共享前缀。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="BatchRequest[]" data-required="true" data-param="requests"><td>requests</td><td>BatchRequest[]</td><td>是</td><td>批量生成请求列表</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="BatchResponse"><td>200</td><td>成功</td><td>BatchResponse</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"BatchResponse"}</script></section><section id="api-client-classify" data-api="POST /client/classify" data-api-type="client" data-api-name="API-CLIENT-CLASSIFY"><h4>POST /client/classify — Client::classify()</h4><p>分类公共 API，接受文本输入返回分类结果。支持多标签分类、置信度阈值、标签映射。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="string" data-required="true" data-param="input"><td>input</td><td>string</td><td>是</td><td>分类输入文本</td></tr><tr data-type="ClassifyConfig" data-required="false" data-param="config"><td>config</td><td>ClassifyConfig</td><td>否</td><td>分类参数配置</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="ClassifyResponse"><td>200</td><td>成功</td><td>ClassifyResponse</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"ClassifyResponse"}</script></section><section id="api-client-build" data-api="POST /client/build" data-req-ref="REQ-MODEL-7 REQ-MODEL-8 REQ-MODEL-9 REQ-MODEL-10 REQ-MODEL-11" data-api-type="client" data-api-name="API-CLIENT-BUILD" data-xref="REQ-MODEL-7 REQ-MODEL-8 REQ-MODEL-9 REQ-MODEL-10 REQ-MODEL-11"><h4>POST /client/build — ClientBuilder::build()</h4><p>客户端构建器 API，配置模型路径、设备、量化策略等参数构建 Client 实例。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="string" data-required="true" data-param="model_path"><td>model_path</td><td>string</td><td>是</td><td>模型文件路径</td></tr><tr data-type="ClientConfig" data-required="false" data-param="config"><td>config</td><td>ClientConfig</td><td>否</td><td>客户端配置</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="Client"><td>200</td><td>成功</td><td>Client</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Client"}</script></section><section id="df-biz-001" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-CLIENT-GENERATE" data-dataflow="DF-BIZ-001" data-dataflow-dimension="business"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-BIZ-001",
+  "title": "Client Generate Flow",
+  "dimension": "business",
+  "from": "api-client-build",
+  "to": "api-client-generate"
+}</script></section><section id="df-biz-002" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-CLIENT-EMBED" data-dataflow="DF-BIZ-002" data-dataflow-dimension="business"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-BIZ-002",
+  "title": "Client Embed Flow",
+  "dimension": "business",
+  "from": "api-client-build",
+  "to": "api-client-embed"
+}</script></section><section id="df-biz-003" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-CLIENT-RERANK" data-dataflow="DF-BIZ-003" data-dataflow-dimension="business"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-BIZ-003",
+  "title": "Client Rerank Flow",
+  "dimension": "business",
+  "from": "api-client-build",
+  "to": "api-client-rerank"
+}</script><section id="df-biz-004" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-BIZ-004" data-dataflow-dimension="business"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-BIZ-004",
+  "title": "Compilation → VmInstr Dispatch (Business)",
+  "dimension": "business",
+  "from": "api-umk-compile",
+  "to": "api-vminstr"
+}</script></section></section><section id="cf-biz-001" data-controlflow="CF-BIZ-001" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="api-client-build" data-controlflow-target="api-client-generate"><script type="application/ld+json">{
+  "@type": "Controlflow",
+  "id": "CF-BIZ-001",
+  "title": "Client Build → Inference Dispatch",
+  "dimension": "business",
+  "from": "api-client-build",
+  "to": "api-client-generate"
+}</script></section><section id="cf-biz-002" data-controlflow="CF-BIZ-002" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="api-client-build" data-controlflow-target="api-client-embed"><script type="application/ld+json">{
+  "@type": "Controlflow",
+  "id": "CF-BIZ-002",
+  "title": "Client Build → Embed Dispatch",
+  "dimension": "business",
+  "from": "api-client-build",
+  "to": "api-client-embed"
+}</script></section><section id="cf-biz-003" data-controlflow="CF-BIZ-003" data-controlflow-relation="precedes" data-controlflow-dimension="business" data-controlflow-source="api-client-build" data-controlflow-target="api-client-rerank"><script type="application/ld+json">{
+  "@type": "Controlflow",
+  "id": "CF-BIZ-003",
+  "title": "Client Build → Rerank Dispatch",
+  "dimension": "business",
+  "from": "api-client-build",
+  "to": "api-client-rerank"
+}</script></section><section id="df-biz-005" data-flow-from="API-CLIENT-BUILD" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-BIZ-005" data-dataflow-dimension="business"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-BIZ-005",
+  "title": "Client Build → JIT Compile (Business)",
+  "dimension": "business",
+  "from": {
+    "element": "API-CLIENT-BUILD"
+  },
+  "to": {
+    "element": "API-UMK-COMPILE"
+  }
+}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：04-API-DESIGN.html</address>
+  </footer>
+</body>
+</html>

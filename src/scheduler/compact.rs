@@ -63,7 +63,7 @@ pub enum CompactReason {
 
 /// Op-level compact eligibility.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum OpKind {
+pub enum CompactOpCategory {
     /// GEMM (QKV, FFN, lm_head) — compute-bound, compact eligible
     Gemm,
     /// Attention (QK^T, softmax, AV) — memory-bound, compact NOT eligible
@@ -74,19 +74,19 @@ pub enum OpKind {
     Elementwise,
 }
 
-impl OpKind {
+impl CompactOpCategory {
     /// Whether compact is eligible for this op type.
     ///
     /// SPEC §10.6.3: "禁止在 Attention op 上做 compact
     /// (attention 是 memory-bound，compact 无法节省 memory bandwidth，
     /// 反而增加数据搬移)"
     pub fn is_compact_eligible(&self) -> bool {
-        matches!(self, OpKind::Gemm)
+        matches!(self, CompactOpCategory::Gemm)
     }
 
     /// Whether this op is compute-bound (compact can save FLOPS).
     pub fn is_compute_bound(&self) -> bool {
-        matches!(self, OpKind::Gemm)
+        matches!(self, CompactOpCategory::Gemm)
     }
 }
 
@@ -99,7 +99,7 @@ impl OpKind {
 /// 4. compact_cost < saved_flops × flops_to_mem_ratio
 pub fn evaluate_compact(
     manifest: &BatchManifest,
-    op: OpKind,
+    op: CompactOpCategory,
     config: &CompactConfig,
 ) -> CompactDecision {
     let total = manifest.slots.len();
@@ -236,7 +236,7 @@ mod tests {
     fn test_compact_triggered_high_waste_gemm() {
         let manifest = make_manifest(8, 5); // 37.5% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::Triggered { .. }));
     }
@@ -245,7 +245,7 @@ mod tests {
     fn test_compact_not_triggered_low_waste() {
         let manifest = make_manifest(8, 7); // 12.5% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }));
     }
@@ -254,7 +254,7 @@ mod tests {
     fn test_compact_not_triggered_attention() {
         let manifest = make_manifest(8, 5); // 37.5% waste but attention op
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
         assert!(!decision.should_compact);
     }
 
@@ -262,7 +262,7 @@ mod tests {
     fn test_compact_not_triggered_too_few_active() {
         let manifest = make_manifest(8, 2); // Only 2 active
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::TooFewActive { .. }));
     }
@@ -278,7 +278,7 @@ mod tests {
             waste_ratio: 0.0,
         };
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::EmptyBatch));
     }
@@ -303,33 +303,33 @@ mod tests {
 
     #[test]
     fn op_kind_is_compact_eligible() {
-        assert!(OpKind::Gemm.is_compact_eligible());
-        assert!(!OpKind::Attention.is_compact_eligible());
-        assert!(!OpKind::Norm.is_compact_eligible());
-        assert!(!OpKind::Elementwise.is_compact_eligible());
+        assert!(CompactOpCategory::Gemm.is_compact_eligible());
+        assert!(!CompactOpCategory::Attention.is_compact_eligible());
+        assert!(!CompactOpCategory::Norm.is_compact_eligible());
+        assert!(!CompactOpCategory::Elementwise.is_compact_eligible());
     }
 
     #[test]
     fn op_kind_is_compute_bound() {
-        assert!(OpKind::Gemm.is_compute_bound());
-        assert!(!OpKind::Attention.is_compute_bound());
-        assert!(!OpKind::Norm.is_compute_bound());
-        assert!(!OpKind::Elementwise.is_compute_bound());
+        assert!(CompactOpCategory::Gemm.is_compute_bound());
+        assert!(!CompactOpCategory::Attention.is_compute_bound());
+        assert!(!CompactOpCategory::Norm.is_compute_bound());
+        assert!(!CompactOpCategory::Elementwise.is_compute_bound());
     }
 
     #[test]
     fn op_kind_equality() {
-        assert_eq!(OpKind::Gemm, OpKind::Gemm);
-        assert_ne!(OpKind::Gemm, OpKind::Attention);
+        assert_eq!(CompactOpCategory::Gemm, CompactOpCategory::Gemm);
+        assert_ne!(CompactOpCategory::Gemm, CompactOpCategory::Attention);
     }
 
     #[test]
     fn op_kind_copy_clone() {
-        let op = OpKind::Gemm;
+        let op = CompactOpCategory::Gemm;
         let op2 = op;
         assert_eq!(op, op2);
         let op3 = op.clone();
-        assert_eq!(op3, OpKind::Gemm);
+        assert_eq!(op3, CompactOpCategory::Gemm);
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod tests {
     fn compact_not_triggered_norm_op() {
         let manifest = make_manifest(8, 5);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Norm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Norm, &config);
         assert!(!decision.should_compact);
     }
 
@@ -370,7 +370,7 @@ mod tests {
     fn compact_not_triggered_elementwise_op() {
         let manifest = make_manifest(8, 5);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Elementwise, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Elementwise, &config);
         assert!(!decision.should_compact);
     }
 
@@ -378,7 +378,7 @@ mod tests {
     fn compact_all_active_no_waste() {
         let manifest = make_manifest(8, 8); // 0% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!((decision.waste_ratio).abs() < 1e-5);
     }
@@ -388,7 +388,7 @@ mod tests {
         // 25% waste exactly at threshold → should NOT trigger (<= check)
         let manifest = make_manifest(8, 6); // 25% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
     }
 
@@ -398,7 +398,7 @@ mod tests {
         // Need 0.26 * 20 = 5.2 > 4.0 cost → should trigger
         let manifest = make_manifest(100, 74); // 26% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(decision.should_compact);
     }
 
@@ -410,7 +410,7 @@ mod tests {
             cycles_per_element: 100.0, // very expensive
             ..CompactConfig::default()
         };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::CostExceedsBenefit { .. }));
     }
@@ -422,7 +422,7 @@ mod tests {
             flops_to_mem_ratio: 1.0, // low compute advantage
             ..CompactConfig::default()
         };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // cost = 4.0, saved = 0.375 * 1.0 = 0.375 → cost > saved
         assert!(!decision.should_compact);
     }
@@ -434,7 +434,7 @@ mod tests {
             min_active_count: 1,
             ..CompactConfig::default()
         };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert_eq!(decision.total_count, 10);
         assert_eq!(decision.active_count, 6);
         assert!((decision.waste_ratio - 0.4).abs() < 1e-5);
@@ -447,7 +447,7 @@ mod tests {
             min_active_count: 1,
             ..CompactConfig::default()
         };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(decision.should_compact);
     }
 
@@ -477,7 +477,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(4, 2); // 50% waste, threshold 0%
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // waste_ratio (0.5) > threshold (0.0) and cost-benefit passes
         assert!(decision.should_compact);
     }
@@ -489,7 +489,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 4); // 50% waste
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // cost_ratio (4.0) < saved_ratio (0.5) * 0.0 = 0.0 → cost > benefit
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::CostExceedsBenefit { .. }));
@@ -503,7 +503,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 4); // 50% waste, but threshold is 100%
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }));
     }
@@ -588,11 +588,11 @@ mod tests {
         }
     }
 
-    // -- OpKind variants exhaustive coverage --
+    // -- CompactOpCategory variants exhaustive coverage --
 
     #[test]
     fn op_kind_all_variants_copy() {
-        let variants = [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise];
+        let variants = [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise];
         // Copy: moving does not invalidate original
         for v in &variants {
             let copied = *v;
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn op_kind_all_variants_clone() {
-        let variants = [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise];
+        let variants = [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise];
         for v in &variants {
             let cloned = v.clone();
             assert_eq!(*v, cloned);
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn op_kind_all_variants_inequality() {
-        let variants = [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise];
+        let variants = [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise];
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {
                 if i != j {
@@ -678,10 +678,10 @@ mod tests {
 
     #[test]
     fn op_kind_debug_output_all_variants() {
-        assert!(format!("{:?}", OpKind::Gemm).contains("Gemm"));
-        assert!(format!("{:?}", OpKind::Attention).contains("Attention"));
-        assert!(format!("{:?}", OpKind::Norm).contains("Norm"));
-        assert!(format!("{:?}", OpKind::Elementwise).contains("Elementwise"));
+        assert!(format!("{:?}", CompactOpCategory::Gemm).contains("Gemm"));
+        assert!(format!("{:?}", CompactOpCategory::Attention).contains("Attention"));
+        assert!(format!("{:?}", CompactOpCategory::Norm).contains("Norm"));
+        assert!(format!("{:?}", CompactOpCategory::Elementwise).contains("Elementwise"));
     }
 
     // ============================================================
@@ -710,7 +710,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 4 active out of 8 = 50% waste, slot type doesn't matter
         assert!(decision.should_compact);
@@ -738,7 +738,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 4 active out of 8, slot type does not affect evaluate_compact logic
         assert!(decision.should_compact);
@@ -754,7 +754,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 1 active < min_active_count(4) → TooFewActive (checked before waste)
         assert!(!decision.should_compact);
@@ -768,7 +768,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 0 active < min_active_count(4) → TooFewActive
         assert!(!decision.should_compact);
@@ -784,7 +784,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: TooFewActive guard fires before waste check
         assert!(!decision.should_compact);
@@ -799,7 +799,7 @@ mod tests {
         let config = CompactConfig { min_active_count: 0, ..CompactConfig::default() };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: min_active_count=0 bypasses TooFewActive, but 100% waste > threshold
         // cost = 4.0, saved = 1.0 * 20.0 = 20.0 → triggers
@@ -816,7 +816,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 75% waste, GEMM → should trigger
         assert!(decision.should_compact);
@@ -831,7 +831,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: low waste → BelowThreshold
         assert!(!decision.should_compact);
@@ -858,7 +858,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 2 active out of 6, but 2 < min_active_count(4)
         assert!(!decision.should_compact);
@@ -875,7 +875,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: active(4) >= min(4) passes, 75% waste > 25% threshold passes
         assert!(decision.should_compact);
@@ -888,7 +888,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: TooFewActive despite very high waste
         assert!(!decision.should_compact);
@@ -910,7 +910,7 @@ mod tests {
         };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: cost (20.0) > saved (7.5) → CostExceedsBenefit
         assert!(!decision.should_compact);
@@ -935,7 +935,7 @@ mod tests {
         };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert
         assert!(decision.should_compact);
@@ -950,7 +950,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
 
         // Assert: cost_ratio = infinity
         if let CompactReason::CostExceedsBenefit { cost_ratio, saved_ratio } = decision.reason {
@@ -965,7 +965,7 @@ mod tests {
     fn compact_norm_infinite_cost() {
         let manifest = make_manifest(8, 5);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Norm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Norm, &config);
         if let CompactReason::CostExceedsBenefit { cost_ratio, .. } = decision.reason {
             assert!(cost_ratio.is_infinite());
         } else {
@@ -977,7 +977,7 @@ mod tests {
     fn compact_elementwise_infinite_cost() {
         let manifest = make_manifest(8, 5);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Elementwise, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Elementwise, &config);
         if let CompactReason::CostExceedsBenefit { cost_ratio, .. } = decision.reason {
             assert!(cost_ratio.is_infinite());
         } else {
@@ -994,7 +994,7 @@ mod tests {
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: saved_flops_ratio == waste_ratio
         if let CompactReason::Triggered { saved_flops_ratio, .. } = decision.reason {
@@ -1017,7 +1017,7 @@ mod tests {
         let manifest = make_manifest(8, 6); // 25% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 25% > 10% threshold, cost=4.0, saved=0.25*100=25.0 → triggers
         assert!(decision.should_compact);
@@ -1033,7 +1033,7 @@ mod tests {
         let manifest = make_manifest(10, 8); // 20% waste, 8 >= min_active
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 20% < 90% threshold → BelowThreshold
         assert!(!decision.should_compact);
@@ -1055,7 +1055,7 @@ mod tests {
         let manifest = make_manifest(100, 10); // 90% waste, 10 active >= 4
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: cost = 20000, saved = 0.9 * 20 = 18 → cost >> saved
         assert!(!decision.should_compact);
@@ -1071,7 +1071,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: TooFewActive checked first
         assert!(matches!(decision.reason, CompactReason::TooFewActive { .. }));
@@ -1086,7 +1086,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
 
         // Assert: BelowThreshold fires before compute-bound check
         assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }));
@@ -1101,7 +1101,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: waste = (12-3)/12 = 0.75
         let expected_waste = (12 - 3) as f32 / 12.0f32;
@@ -1116,7 +1116,7 @@ mod tests {
     fn compact_decision_fields_populated_for_triggered() {
         let manifest = make_manifest(8, 4);
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
-        let d = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let d = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(d.should_compact);
         assert_eq!(d.active_count, 4);
         assert_eq!(d.total_count, 8);
@@ -1130,7 +1130,7 @@ mod tests {
             total_tokens: 0, decode_tokens: 0, prefill_tokens: 0,
             compact_required: false, waste_ratio: 0.0,
         };
-        let d = evaluate_compact(&manifest, OpKind::Gemm, &CompactConfig::default());
+        let d = evaluate_compact(&manifest, CompactOpCategory::Gemm, &CompactConfig::default());
         assert!(!d.should_compact);
         assert_eq!(d.active_count, 0);
         assert_eq!(d.total_count, 0);
@@ -1235,7 +1235,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 4 active out of 8, 50% waste → should trigger
         assert!(decision.should_compact);
@@ -1249,8 +1249,8 @@ mod tests {
         let manifest = make_manifest(10, 6);
         let config = CompactConfig::default();
 
-        let d1 = evaluate_compact(&manifest, OpKind::Gemm, &config);
-        let d2 = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let d1 = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
+        let d2 = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         assert_eq!(d1.should_compact, d2.should_compact);
         assert!((d1.waste_ratio - d2.waste_ratio).abs() < 1e-10);
@@ -1272,7 +1272,7 @@ mod tests {
         let manifest = make_manifest(100, 99); // 1% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 1% > 0.25% is false → BelowThreshold (waste must exceed threshold)
         // Actually 0.01 > 0.25 is false → BelowThreshold
@@ -1290,7 +1290,7 @@ mod tests {
         let manifest = make_manifest(10, 5);
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert
         assert!(decision.should_compact);
@@ -1318,7 +1318,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: evaluate_compact uses token_end > token_start, not compact_target
         assert!(decision.should_compact);
@@ -1351,14 +1351,14 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: evaluate_compact computes waste from slots, not from manifest.waste_ratio
         assert!(decision.should_compact);
         assert!((decision.waste_ratio - 0.5).abs() < 1e-5);
     }
 
-    // -- Exhaustive OpKind × (trigger/not-trigger) matrix --
+    // -- Exhaustive CompactOpCategory × (trigger/not-trigger) matrix --
 
     #[test]
     fn compact_all_op_kinds_with_minimal_active() {
@@ -1366,10 +1366,10 @@ mod tests {
         let config = CompactConfig { min_active_count: 4, ..CompactConfig::default() };
 
         // GEMM should be the only op that can trigger
-        let gemm_decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
-        let attn_decision = evaluate_compact(&manifest, OpKind::Attention, &config);
-        let norm_decision = evaluate_compact(&manifest, OpKind::Norm, &config);
-        let elem_decision = evaluate_compact(&manifest, OpKind::Elementwise, &config);
+        let gemm_decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
+        let attn_decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
+        let norm_decision = evaluate_compact(&manifest, CompactOpCategory::Norm, &config);
+        let elem_decision = evaluate_compact(&manifest, CompactOpCategory::Elementwise, &config);
 
         assert!(gemm_decision.should_compact, "GEMM should trigger with 50% waste");
         assert!(!attn_decision.should_compact, "Attention should never trigger");
@@ -1389,7 +1389,7 @@ mod tests {
         };
         let manifest = make_manifest(8, 4); // 50% waste
 
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         if let CompactReason::Triggered { cost_ratio, .. } = decision.reason {
             assert!((cost_ratio - 7.0).abs() < 1e-5, "cost_ratio should be 2 * 3.5 = 7.0");
@@ -1408,7 +1408,7 @@ mod tests {
         };
         let manifest = make_manifest(10, 8); // 20% waste < 42%
 
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         if let CompactReason::BelowThreshold { waste_ratio, threshold } = decision.reason {
             assert!((waste_ratio - 0.2).abs() < 1e-5);
@@ -1428,7 +1428,7 @@ mod tests {
         };
         let manifest = make_manifest(10, 6); // 6 active < 7 min
 
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         if let CompactReason::TooFewActive { active, min } = decision.reason {
             assert_eq!(active, 6);
@@ -1448,7 +1448,7 @@ mod tests {
     fn compact_waste_ratio_two_slots_one_active() {
         let manifest = make_manifest(2, 1);
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 1 active out of 2 → 50% waste
         assert!((decision.waste_ratio - 0.5).abs() < 1e-5);
         assert_eq!(decision.active_count, 1);
@@ -1459,7 +1459,7 @@ mod tests {
     fn compact_waste_ratio_three_slots_two_active() {
         let manifest = make_manifest(3, 2);
         let config = CompactConfig { min_active_count: 2, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 2 active out of 3 → 33.3% waste
         let expected = 1.0 / 3.0;
         assert!((decision.waste_ratio - expected).abs() < 1e-5);
@@ -1470,7 +1470,7 @@ mod tests {
         // 100 slots, 33 active → 67% waste
         let manifest = make_manifest(100, 33);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         let expected = 67.0 / 100.0;
         assert!((decision.waste_ratio - expected).abs() < 1e-5);
         assert_eq!(decision.active_count, 33);
@@ -1592,7 +1592,7 @@ mod tests {
     fn compact_attention_all_active_no_waste() {
         let manifest = make_manifest(8, 8);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
         assert!(!decision.should_compact);
         assert!(decision.waste_ratio.abs() < 1e-5);
     }
@@ -1602,7 +1602,7 @@ mod tests {
         // Even 90% waste, Norm should reject
         let manifest = make_manifest(10, 1);
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Norm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Norm, &config);
         assert!(!decision.should_compact);
     }
 
@@ -1610,7 +1610,7 @@ mod tests {
     fn compact_elementwise_high_waste_still_rejected() {
         let manifest = make_manifest(10, 1);
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Elementwise, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Elementwise, &config);
         assert!(!decision.should_compact);
     }
 
@@ -1626,7 +1626,7 @@ mod tests {
             compact_required: false,
             waste_ratio: 0.0,
         };
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &CompactConfig::default());
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::EmptyBatch));
     }
@@ -1641,7 +1641,7 @@ mod tests {
             compact_required: false,
             waste_ratio: 0.0,
         };
-        let decision = evaluate_compact(&manifest, OpKind::Norm, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Norm, &CompactConfig::default());
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::EmptyBatch));
     }
@@ -1656,7 +1656,7 @@ mod tests {
             compact_required: false,
             waste_ratio: 0.0,
         };
-        let decision = evaluate_compact(&manifest, OpKind::Elementwise, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Elementwise, &CompactConfig::default());
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::EmptyBatch));
     }
@@ -1681,7 +1681,7 @@ mod tests {
             waste_ratio: 0.25,
         };
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 3 active out of 4 = 25% waste, <= threshold → BelowThreshold
         assert!(!decision.should_compact);
         assert_eq!(decision.active_count, 3);
@@ -1706,7 +1706,7 @@ mod tests {
             waste_ratio: 1.0,
         };
         let config = CompactConfig { min_active_count: 0, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert_eq!(decision.active_count, 0);
         assert!((decision.waste_ratio - 1.0).abs() < 1e-5);
     }
@@ -1731,7 +1731,7 @@ mod tests {
             waste_ratio: 0.2,
         };
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 4 active out of 5 = 20% waste, <= 25% threshold
         assert!(!decision.should_compact);
         assert_eq!(decision.active_count, 4);
@@ -1744,17 +1744,17 @@ mod tests {
         let config = CompactConfig::default();
         // First call with high waste
         let manifest1 = make_manifest(8, 4);
-        let d1 = evaluate_compact(&manifest1, OpKind::Gemm, &config);
+        let d1 = evaluate_compact(&manifest1, CompactOpCategory::Gemm, &config);
 
         // Second call with low waste
         let manifest2 = make_manifest(8, 8);
-        let d2 = evaluate_compact(&manifest2, OpKind::Gemm, &config);
+        let d2 = evaluate_compact(&manifest2, CompactOpCategory::Gemm, &config);
 
         assert!(d1.should_compact);
         assert!(!d2.should_compact);
 
         // Third call: same as first → same result
-        let d3 = evaluate_compact(&manifest1, OpKind::Gemm, &config);
+        let d3 = evaluate_compact(&manifest1, CompactOpCategory::Gemm, &config);
         assert_eq!(d3.should_compact, d1.should_compact);
         assert!((d3.waste_ratio - d1.waste_ratio).abs() < 1e-10);
     }
@@ -1768,7 +1768,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 5); // 37.5% waste
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // cost = 4.0, saved = 0.375 * 10000 = 3750 → triggers
         assert!(decision.should_compact);
     }
@@ -1779,7 +1779,7 @@ mod tests {
     fn compact_two_slots_one_active() {
         let manifest = make_manifest(2, 1);
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 50% waste, 1 active >= 1 min
         // cost = 4.0, saved = 0.5 * 20.0 = 10.0 → triggers
         assert!(decision.should_compact);
@@ -1793,7 +1793,7 @@ mod tests {
     fn compact_no_waste_attention() {
         let manifest = make_manifest(4, 4);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
         assert!(!decision.should_compact);
         assert!(decision.waste_ratio.abs() < 1e-5);
     }
@@ -1802,7 +1802,7 @@ mod tests {
     fn compact_no_waste_norm() {
         let manifest = make_manifest(4, 4);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Norm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Norm, &config);
         assert!(!decision.should_compact);
     }
 
@@ -1810,7 +1810,7 @@ mod tests {
     fn compact_no_waste_elementwise() {
         let manifest = make_manifest(4, 4);
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Elementwise, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Elementwise, &config);
         assert!(!decision.should_compact);
     }
 
@@ -1826,7 +1826,7 @@ mod tests {
                 ..CompactConfig::default()
             };
             let manifest = make_manifest(8, 4); // 50% waste
-            let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+            let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
             if let CompactReason::Triggered { cost_ratio, .. } = decision.reason {
                 assert!(
                     (cost_ratio - 2.0 * cycles).abs() < 1e-3,
@@ -1847,7 +1847,7 @@ mod tests {
         let config = CompactConfig { min_active_count: 0, ..CompactConfig::default() };
         for active in 0..=10usize {
             let manifest = make_manifest(10, active);
-            let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+            let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
             assert!(
                 decision.waste_ratio >= 0.0 && decision.waste_ratio <= 1.0,
                 "waste_ratio {} out of [0,1] for active={}",
@@ -1865,7 +1865,7 @@ mod tests {
         for total in 1..=20usize {
             for active in 0..=total {
                 let manifest = make_manifest(total, active);
-                let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+                let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
                 assert!(
                     decision.active_count <= decision.total_count,
                     "active {} > total {}",
@@ -1882,7 +1882,7 @@ mod tests {
     fn compact_zero_waste_below_threshold() {
         let manifest = make_manifest(8, 8); // 0% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 0% <= 25% → BelowThreshold
         assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }));
         if let CompactReason::BelowThreshold { waste_ratio, .. } = decision.reason {
@@ -1899,7 +1899,7 @@ mod tests {
         for total in [4, 8, 16, 32, 64] {
             for active in 1..total {
                 let manifest = make_manifest(total, active);
-                let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+                let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
                 if decision.should_compact {
                     assert!(
                         decision.waste_ratio > config.waste_threshold,
@@ -1927,11 +1927,11 @@ mod tests {
         assert!(s.contains("min"));
     }
 
-    // -- OpKind: is_compute_bound mirrors is_compact_eligible --
+    // -- CompactOpCategory: is_compute_bound mirrors is_compact_eligible --
 
     #[test]
     fn op_kind_compute_bound_matches_eligible() {
-        for op in [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise] {
+        for op in [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise] {
             assert_eq!(
                 op.is_compute_bound(),
                 op.is_compact_eligible(),
@@ -1952,7 +1952,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 4);
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         if let CompactReason::CostExceedsBenefit { cost_ratio, saved_ratio } = decision.reason {
             assert!((cost_ratio - 200.0).abs() < 1e-3);
             assert!((saved_ratio - 0.5).abs() < 1e-3);
@@ -1985,7 +1985,7 @@ mod tests {
             waste_ratio: 0.99,     // misleading
         };
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // All 8 slots active → 0% actual waste → BelowThreshold
         assert!(!decision.should_compact);
         assert!(decision.waste_ratio.abs() < 1e-5);
@@ -2003,7 +2003,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 5); // 37.5% waste
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(decision.should_compact);
     }
 
@@ -2017,7 +2017,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 5);
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }));
     }
@@ -2039,7 +2039,7 @@ mod tests {
             compact_required: false,
             waste_ratio: 0.0,
         };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // EmptyBatch should fire even though all guards are relaxed
         assert!(matches!(decision.reason, CompactReason::EmptyBatch));
     }
@@ -2055,20 +2055,20 @@ mod tests {
             waste_threshold: 0.0,
             ..CompactConfig::default()
         };
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
         // Should get CostExceedsBenefit (from compute-bound check), not a cost-benefit analysis
         assert!(matches!(decision.reason, CompactReason::CostExceedsBenefit { .. }));
     }
 
-    // -- verify all 4 OpKind variants produce distinct Debug output --
+    // -- verify all 4 CompactOpCategory variants produce distinct Debug output --
 
     #[test]
     fn op_kind_debug_outputs_are_distinct() {
         let outputs: Vec<String> = [
-            format!("{:?}", OpKind::Gemm),
-            format!("{:?}", OpKind::Attention),
-            format!("{:?}", OpKind::Norm),
-            format!("{:?}", OpKind::Elementwise),
+            format!("{:?}", CompactOpCategory::Gemm),
+            format!("{:?}", CompactOpCategory::Attention),
+            format!("{:?}", CompactOpCategory::Norm),
+            format!("{:?}", CompactOpCategory::Elementwise),
         ].to_vec();
         for i in 0..outputs.len() {
             for j in (i + 1)..outputs.len() {
@@ -2095,7 +2095,7 @@ mod tests {
     fn compact_very_large_batch_mostly_active() {
         let manifest = make_manifest(1024, 1020); // ~0.4% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(decision.waste_ratio < 0.01);
     }
@@ -2104,7 +2104,7 @@ mod tests {
     fn compact_very_large_batch_mostly_inactive() {
         let manifest = make_manifest(1024, 10); // ~99% waste
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(decision.should_compact);
         assert!(decision.waste_ratio > 0.98);
     }
@@ -2160,7 +2160,7 @@ mod tests {
         for size in [1, 2, 4, 8, 16, 32] {
             for active in 0..=size {
                 let manifest = make_manifest(size, active);
-                let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+                let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
                 assert_eq!(decision.total_count, manifest.slots.len());
             }
         }
@@ -2185,7 +2185,7 @@ mod tests {
             waste_ratio: 0.0,
         };
         let config = CompactConfig::default();
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!(!decision.should_compact);
         assert!(decision.waste_ratio.abs() < 1e-5);
         assert_eq!(decision.active_count, 4);
@@ -2200,7 +2200,7 @@ mod tests {
             min_active_count: 100,
             ..CompactConfig::default()
         };
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // 4 active < 100 min → TooFewActive
         assert!(matches!(decision.reason, CompactReason::TooFewActive { active: 4, min: 100 }));
     }
@@ -2299,7 +2299,7 @@ mod tests {
         let slots_len_before = manifest.slots.len();
         let total_tokens_before = manifest.total_tokens;
         let decode_tokens_before = manifest.decode_tokens;
-        let _ = evaluate_compact(&manifest, OpKind::Gemm, &CompactConfig::default());
+        let _ = evaluate_compact(&manifest, CompactOpCategory::Gemm, &CompactConfig::default());
         assert_eq!(manifest.slots.len(), slots_len_before);
         assert_eq!(manifest.total_tokens, total_tokens_before);
         assert_eq!(manifest.decode_tokens, decode_tokens_before);
@@ -2316,7 +2316,7 @@ mod tests {
             flops_to_mem_ratio: 25.0,
         };
         let manifest = make_manifest(8, 4);
-        let _ = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let _ = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         assert!((config.waste_threshold - 0.33).abs() < 1e-5);
         assert_eq!(config.min_active_count, 7);
         assert!((config.cycles_per_element - 1.5).abs() < 1e-5);
@@ -2446,19 +2446,19 @@ mod tests {
             ..CompactConfig::default()
         };
         let manifest = make_manifest(8, 4); // 50% waste
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // cost = 4.0, saved = 0.5 * (-10.0) = -5.0 → 4.0 < -5.0 is false
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::CostExceedsBenefit { .. }));
     }
 
-    // -- All 4 OpKind variants produce valid decisions with non-empty manifest --
+    // -- All 4 CompactOpCategory variants produce valid decisions with non-empty manifest --
 
     #[test]
     fn compact_all_ops_produce_valid_decision() {
         let manifest = make_manifest(8, 5);
         let config = CompactConfig::default();
-        let ops = [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise];
+        let ops = [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise];
         for op in ops {
             let d = evaluate_compact(&manifest, op, &config);
             assert_eq!(d.total_count, 8);
@@ -2503,7 +2503,7 @@ mod tests {
         };
         let manifest = make_manifest(8, 7); // 12.5% actual waste
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: waste_ratio(0.125) > threshold(-0.1) passes, cost-benefit decides
         // cost=4.0, saved=0.125*20=2.5 → 4.0 < 2.5 is false → CostExceedsBenefit
         assert!(!decision.should_compact);
@@ -2538,11 +2538,11 @@ mod tests {
         assert!(debug.contains("cost_ratio"), "Missing cost_ratio in Debug");
     }
 
-    // -- OpKind is_compact_eligible false for all non-GEMM via iteration --
+    // -- CompactOpCategory is_compact_eligible false for all non-GEMM via iteration --
 
     #[test]
     fn op_kind_only_gemm_is_compact_eligible() {
-        let non_gemms = [OpKind::Attention, OpKind::Norm, OpKind::Elementwise];
+        let non_gemms = [CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise];
         for op in &non_gemms {
             assert!(!op.is_compact_eligible(), "{:?} should not be compact-eligible", op);
             assert!(!op.is_compute_bound(), "{:?} should not be compute-bound", op);
@@ -2563,7 +2563,7 @@ mod tests {
         };
         let config = CompactConfig { min_active_count: 0, ..CompactConfig::default() };
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: 0 active, but min=0 → passes. 100% waste > 25% threshold, cost=4 < 1.0*20=20 → triggers
         assert!(decision.should_compact);
         assert_eq!(decision.active_count, 0);
@@ -2621,7 +2621,7 @@ mod tests {
         };
         let manifest = make_manifest(8, 4); // 50% waste
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: cost(4.0) < saved(4.0) is false → not triggered
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::CostExceedsBenefit { .. }));
@@ -2646,7 +2646,7 @@ mod tests {
         };
         let config = CompactConfig::default();
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: 4 active out of 6, compact_target value does not affect counting
         assert_eq!(decision.active_count, 4);
     }
@@ -2668,7 +2668,7 @@ mod tests {
         };
         let config = CompactConfig { min_active_count: 0, ..CompactConfig::default() };
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: all 4 have token_end == token_start → 0 active
         assert_eq!(decision.active_count, 0);
         assert_eq!(decision.total_count, 4);
@@ -2681,8 +2681,8 @@ mod tests {
     fn compact_same_manifest_different_ops_independent() {
         let manifest = make_manifest(8, 4); // 50% waste
         let config = CompactConfig::default();
-        let d_gemm = evaluate_compact(&manifest, OpKind::Gemm, &config);
-        let d_attn = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let d_gemm = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
+        let d_attn = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
         // Assert: same waste ratio regardless of op
         assert!((d_gemm.waste_ratio - d_attn.waste_ratio).abs() < 1e-10);
         assert_eq!(d_gemm.active_count, d_attn.active_count);
@@ -2728,7 +2728,7 @@ mod tests {
         };
         let manifest = make_manifest(4, 4); // 0% waste
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: waste(0.0) <= threshold(0.0) → BelowThreshold
         assert!(!decision.should_compact);
         if let CompactReason::BelowThreshold { waste_ratio, threshold } = decision.reason {
@@ -2756,7 +2756,7 @@ mod tests {
         };
         let manifest = make_manifest(8, 7); // 12.5% waste
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: cost = -10.0 < 0.125 * 20.0 = 2.5 → triggers
         assert!(decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::Triggered { .. }));
@@ -2816,7 +2816,7 @@ mod tests {
         let manifest = make_manifest(2048, 512);
         let config = CompactConfig::default();
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: total_count == slots.len()
         assert_eq!(decision.total_count, 2048);
         assert_eq!(decision.active_count, 512);
@@ -2852,11 +2852,11 @@ mod tests {
         };
         // Act: evaluate multiple times
         let m1 = make_manifest(16, 4);
-        let _d1 = evaluate_compact(&m1, OpKind::Gemm, &config);
+        let _d1 = evaluate_compact(&m1, CompactOpCategory::Gemm, &config);
         let m2 = make_manifest(8, 7);
-        let _d2 = evaluate_compact(&m2, OpKind::Attention, &config);
+        let _d2 = evaluate_compact(&m2, CompactOpCategory::Attention, &config);
         let m3 = make_manifest(100, 50);
-        let _d3 = evaluate_compact(&m3, OpKind::Gemm, &config);
+        let _d3 = evaluate_compact(&m3, CompactOpCategory::Gemm, &config);
         // Assert: config unchanged after all calls
         assert!((config.waste_threshold - 0.3).abs() < 1e-10);
         assert_eq!(config.min_active_count, 5);
@@ -2864,18 +2864,18 @@ mod tests {
         assert!((config.flops_to_mem_ratio - 15.0).abs() < 1e-10);
     }
 
-    // -- OpKind Copy semantics: assignment creates independent copy --
+    // -- CompactOpCategory Copy semantics: assignment creates independent copy --
 
     #[test]
     fn op_kind_copy_assignment_independence() {
         // Arrange
-        let op1 = OpKind::Gemm;
+        let op1 = CompactOpCategory::Gemm;
         let mut op2 = op1;
         // Act: reassign op2
-        op2 = OpKind::Attention;
+        op2 = CompactOpCategory::Attention;
         // Assert: op1 unaffected
-        assert_eq!(op1, OpKind::Gemm);
-        assert_eq!(op2, OpKind::Attention);
+        assert_eq!(op1, CompactOpCategory::Gemm);
+        assert_eq!(op2, CompactOpCategory::Attention);
     }
 
     // -- evaluate_compact with waste_threshold just barely positive and zero waste --
@@ -2890,7 +2890,7 @@ mod tests {
         };
         let manifest = make_manifest(4, 4); // 0% waste
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: zero waste still below any positive threshold
         assert!(!decision.should_compact);
         assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }));
@@ -2908,7 +2908,7 @@ mod tests {
         };
         let manifest = make_manifest(2, 1);
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: 50% > 0% threshold, cost=4.0 < 0.5*20=10.0 → triggers
         assert!(decision.should_compact);
         assert_eq!(decision.active_count, 1);
@@ -2936,7 +2936,7 @@ mod tests {
         };
         let config = CompactConfig::default();
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: evaluate_compact uses slots, not total_tokens → 4/4 active = 0% waste
         assert!(!decision.should_compact);
         assert!(decision.waste_ratio.abs() < 1e-5);
@@ -2988,12 +2988,12 @@ mod tests {
     // 13 additional tests — uncovered edge cases and coverage gaps
     // ============================================================
 
-    // -- OpKind has exactly 4 variants --
+    // -- CompactOpCategory has exactly 4 variants --
 
     #[test]
     fn op_kind_variant_count_is_four() {
-        // Arrange: enumerate all known OpKind variants
-        let all_variants = [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise];
+        // Arrange: enumerate all known CompactOpCategory variants
+        let all_variants = [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise];
         // Assert: exactly 4 distinct variants
         assert_eq!(all_variants.len(), 4);
         for (i, a) in all_variants.iter().enumerate() {
@@ -3055,7 +3055,7 @@ mod tests {
         };
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: only 3 active (slots with end > start), 2 inactive (inverted range)
         assert_eq!(decision.active_count, 3);
         assert_eq!(decision.total_count, 5);
@@ -3073,7 +3073,7 @@ mod tests {
             compact_required: false, waste_ratio: 0.0,
         };
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &CompactConfig::default());
         // Assert: EmptyBatch reason even for GEMM op
         assert!(matches!(decision.reason, CompactReason::EmptyBatch));
         assert!(!decision.should_compact);
@@ -3090,8 +3090,8 @@ mod tests {
         let manifest_large = make_manifest(100, 50); // 50% waste
         let config = CompactConfig { min_active_count: 1, ..CompactConfig::default() };
         // Act
-        let d_small = evaluate_compact(&manifest_small, OpKind::Gemm, &config);
-        let d_large = evaluate_compact(&manifest_large, OpKind::Gemm, &config);
+        let d_small = evaluate_compact(&manifest_small, CompactOpCategory::Gemm, &config);
+        let d_large = evaluate_compact(&manifest_large, CompactOpCategory::Gemm, &config);
         // Assert: same waste ratio regardless of batch size
         assert!((d_small.waste_ratio - d_large.waste_ratio).abs() < 1e-10);
         // Both should trigger (same waste, same cost-benefit)
@@ -3106,7 +3106,7 @@ mod tests {
         let manifest = make_manifest(11, 7);
         let config = CompactConfig::default();
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: waste = (11-7)/11 = 4/11
         let expected = 4.0 / 11.0;
         assert!((decision.waste_ratio - expected).abs() < 1e-6);
@@ -3127,7 +3127,7 @@ mod tests {
             ..CompactConfig::default()
         };
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &config);
         // Assert: compute-bound guard sets cost_ratio=inf, saved_ratio=0.0
         if let CompactReason::CostExceedsBenefit { cost_ratio, saved_ratio } = decision.reason {
             assert!(cost_ratio.is_infinite() && cost_ratio.is_sign_positive());
@@ -3158,7 +3158,7 @@ mod tests {
         };
         let config = CompactConfig::default();
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: slot_type does not affect counting — 4 active out of 8
         assert_eq!(decision.active_count, 4);
         assert_eq!(decision.total_count, 8);
@@ -3190,7 +3190,7 @@ mod tests {
         };
         let config = CompactConfig::default();
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
         // Assert: evaluate_compact computes waste from slots, ignoring negative field
         assert!((decision.waste_ratio - 0.5).abs() < 1e-5);
         assert!(decision.should_compact);
@@ -3266,7 +3266,7 @@ mod tests {
         let manifest = make_manifest(8, 4); // 50% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: NaN < anything is false → CostExceedsBenefit
         assert!(!decision.should_compact);
@@ -3287,7 +3287,7 @@ mod tests {
         let manifest = make_manifest(8, 2); // 75% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: NaN threshold bypasses BelowThreshold; cost-benefit passes → triggers
         assert!(decision.should_compact);
@@ -3308,7 +3308,7 @@ mod tests {
         let manifest = make_manifest(8, 4); // 50% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: cost(4.0) < NaN → false → CostExceedsBenefit
         assert!(!decision.should_compact);
@@ -3324,7 +3324,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 0% waste → BelowThreshold
         assert!(!decision.should_compact);
@@ -3333,7 +3333,7 @@ mod tests {
         assert!(decision.waste_ratio.abs() < 1e-5);
     }
 
-    // -- evaluate_compact with all 4 OpKind variants all not triggered on low waste --
+    // -- evaluate_compact with all 4 CompactOpCategory variants all not triggered on low waste --
 
     #[test]
     fn compact_all_op_kinds_below_threshold_consistent() {
@@ -3342,7 +3342,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act & Assert: all ops should return BelowThreshold
-        for op in [OpKind::Gemm, OpKind::Attention, OpKind::Norm, OpKind::Elementwise] {
+        for op in [CompactOpCategory::Gemm, CompactOpCategory::Attention, CompactOpCategory::Norm, CompactOpCategory::Elementwise] {
             let decision = evaluate_compact(&manifest, op, &config);
             assert!(!decision.should_compact, "{:?} should not trigger on 12.5% waste", op);
             assert!(matches!(decision.reason, CompactReason::BelowThreshold { .. }),
@@ -3371,7 +3371,7 @@ mod tests {
         let manifest = make_manifest(10, 6); // 40% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 7.98 < 8.0 → triggers
         assert!(decision.should_compact);
@@ -3459,7 +3459,7 @@ mod tests {
         let manifest = make_manifest(8, 4);
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 0.5 >> EPSILON → passes threshold; cost=4.0, saved=0.5*100=50 → triggers
         assert!(decision.should_compact);
@@ -3479,7 +3479,7 @@ mod tests {
         let manifest = make_manifest(256, 255); // 1/256 ≈ 0.39% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: waste > 0 > threshold, cost=4.0, saved=(1/256)*10000≈39.06 → triggers
         assert!(decision.should_compact);
@@ -3529,7 +3529,7 @@ mod tests {
         };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: EmptyBatch is the first guard; always fires for empty slots
         assert!(!decision.should_compact);
@@ -3636,7 +3636,7 @@ mod tests {
         };
 
         // Act
-        let eval_result = evaluate_compact(&manifest, OpKind::Gemm, &compact_config);
+        let eval_result = evaluate_compact(&manifest, CompactOpCategory::Gemm, &compact_config);
         let manifest_result = manifest.should_compact(&cp_config);
 
         // Assert: evaluate_compact counts 4 active (token_end > token_start)
@@ -3659,7 +3659,7 @@ mod tests {
         let manifest = make_manifest(8, 1); // 87.5% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 0.875 <= +inf → BelowThreshold
         assert!(!decision.should_compact);
@@ -3692,7 +3692,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: request_id duplication does not affect counting
         assert_eq!(decision.active_count, 4);
@@ -3716,7 +3716,7 @@ mod tests {
         let manifest = make_manifest(8, 4); // 50% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 2 * f32::MAX overflows to +inf; inf < anything is false → CostExceedsBenefit
         assert!(!decision.should_compact);
@@ -3747,7 +3747,7 @@ mod tests {
         let config = CompactConfig::default();
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 4 active out of 6 (33.3% waste), token range magnitude does not matter
         assert_eq!(decision.active_count, 4);
@@ -3770,7 +3770,7 @@ mod tests {
         let manifest = make_manifest(8, 7); // 12.5% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: 0.125 > -inf passes threshold; cost=4.0, saved=0.125*20=2.5 → 4.0 < 2.5 false
         // → CostExceedsBenefit
@@ -3821,7 +3821,7 @@ mod tests {
         let manifest = make_manifest(8, 7); // 12.5% waste
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &config);
 
         // Assert: cost = very large negative < 0.125 * 20 = 2.5 → triggers
         assert!(decision.should_compact);

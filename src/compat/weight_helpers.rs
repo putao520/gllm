@@ -155,7 +155,7 @@ pub(crate) fn needs_weight_transpose<E: Element>(
 ) -> bool {
     // Build name_map from available tensor names for format-agnostic probing.
     let all_names = weights.available_names();
-    let name_map = crate::loader::name_map::TensorNameMap::build_from_names(&all_names, false);
+    let name_map = crate::loader::name_map::TensorNameMap::build_from_names(&all_names, None);
 
     // GGUF models use blk.* names — they always need transpose because
     // GGUF shape [ne0, ne1] stores ne1 rows of ne0 elements, giving

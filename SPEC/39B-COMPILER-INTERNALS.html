@@ -2,8 +2,8 @@
 <html lang="zh-CN" data-spec-root="">
   <head>
     <meta charset="UTF-8">
-    <meta content="39B-COMPILER-INTERNALS" name="spec-file">
-    <meta content="architecture" name="spec-category">
+    <meta name="spec-file" content="39B-COMPILER-INTERNALS">
+    <meta name="spec-category" content="architecture">
 
     <script type="application/ld+json">
     { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"39B-COMPILER-INTERNALS", "dependencies":["39A-COMPILER-CONTRACT","32-MEGA-KERNEL-ENHANCEMENT"], "children":[] }
@@ -26,15 +26,15 @@
 
       <section id="s1" data-section="1">
         <h3>§1 REQ-UMK 内部设计</h3>
-<section id="req-umk-008" data-req="REQ-UMK-008" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-WEIGHT-LAYOUT" data-section="3.2" data-entity-ref="ENT-MEGA-KERNEL-WEIGHT-LAYOUT" <h4="">§3.2 模型级权重布局 (MegaKernelWeightLayout) (REQ-UMK-008)
+<section data-entity-ref="ENT-INFERENCE-COMPILER ENT-COMPILE-CONFIG ENT-MEGA-KERNEL-FN" <h4="" data-section="3.2" data-req-api="POST /compile" data-req-entity="ENT-INFERENCE-COMPILER" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-008" id="req-umk-008">§3.2 模型级权重布局 (MegaKernelWeightLayout) (REQ-UMK-008)
       <p>完整模型编译时，<code>CompileOutput</code> 额外提供 <code>MegaKernelWeightLayout</code> 作为 pack 阶段的约定格式：</p>
       <pre><code>embed_offset -&gt; layer_0_offset -&gt; [layer_stride x N] -&gt; final_norm_offset -&gt; lm_head_offset</code></pre>
       <p>这是<strong>pack 阶段的便利结构</strong>，不是编译器的假设。编译器只读 <code>named_offsets</code>，不读 <code>MegaKernelWeightLayout</code>。</p>
       <div data-criteria="">
-        <h5>验收标准</h5>
+        <h5>REQ-UMK-008 MegaKernelFn pack 阶段约定 — 完整模型编译时额外提供 pack 格式</h5>
         <ol>
-          <li id="1" data-criterion="1"><code>grep -rn "MegaKernelWeightLayout" src/compiler/codegen/</code> 无结果（仅 pack/observe 层使用）</li>
-          <li id="2" data-criterion="2">编译器只读 <code>named_offsets</code></li>
+          <li id="id-1" data-criterion="1"><code>grep -rn "MegaKernelWeightLayout" src/compiler/codegen/</code> 无结果（仅 pack/observe 层使用）</li>
+          <li id="id-2" data-criterion="2">编译器只读 <code>named_offsets</code></li>
         </ol>
       </div>
     
@@ -46,7 +46,7 @@
       </div>
     </section>
 
-<section id="req-umk-012" data-req="REQ-UMK-012" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-COMPILE" data-section="1.3.2" data-entity-ref="ENT-GROUP-MARKER ENT-FUSION-GROUP" data-xref="SPEC-32:REQ-MKO-001 三路分支实现" <h5="">§1.3.2 GroupMarker 触发机制 (REQ-UMK-012)
+<section data-xref="SPEC-32:REQ-MKO-001 三路分支实现" data-entity-ref="ENT-INFERENCE-COMPILER ENT-COMPILE-CONFIG ENT-GROUP-MARKER ENT-FUSION-GROUP" <h5="" data-section="1.3.2" data-req-api="POST /compile" data-req-entity="ENT-INFERENCE-COMPILER" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-012" id="req-umk-012">§1.3.2 GroupMarker 触发机制 (REQ-UMK-012)
       <p>编译器需要知道"哪些组属于同一层循环"来插入 <code>LayerLoopBegin</code>/<code>LayerLoopEnd</code>。这不是硬编码——而是从图的<strong>层结构</strong>推导：</p>
       <pre><code class="language-rust">/// Phase 2 融合引擎在组序列中插入结构标记。
 /// 标记位置由 CompilerGraph 的层拓扑推导，不由编译器假设。
@@ -80,11 +80,11 @@ pub enum GroupMarker {
         <tr><td>含 Argmax + MLA + MoE + MTP</td><td>embed + N*[mla_attn+moe_router+moe_ffn+shared_experts] + lm_head + mtp + argmax + stop_check</td><td><code>ForwardPhaseDispatch</code> + <code>LayerLoopBegin{N}</code> + <code>LayerLoopEnd</code> + MTP 融合组</td></tr>
       </table>
       <div data-criteria="">
-        <h5>验收标准</h5>
+        <h5>REQ-UMK-012 GroupMarker 机制 — 从图同构子结构推导层循环标记替代硬编码</h5>
         <ol>
-          <li id="1" data-criterion="1"><code>grep -rn "LayerLoopBegin|LayerLoopEnd|GroupMarker" src/compiler/codegen/vm/</code> 有结果</li>
-          <li id="2" data-criterion="2">Phase 2 融合引擎根据图同构子结构插入标记</li>
-          <li id="3" data-criterion="3">不同图类型（encoder/decoder/SG 小图/MoE）标记序列正确</li>
+          <li id="id-1" data-criterion="1"><code>grep -rn "LayerLoopBegin|LayerLoopEnd|GroupMarker" src/compiler/codegen/vm/</code> 有结果</li>
+          <li id="id-2" data-criterion="2">Phase 2 融合引擎根据图同构子结构插入标记</li>
+          <li id="id-3" data-criterion="3">不同图类型（encoder/decoder/SG 小图/MoE）标记序列正确</li>
         </ol>
       </div>
     
@@ -96,7 +96,7 @@ pub enum GroupMarker {
       </div>
     </section>
 
-<section id="req-umk-013" data-req="REQ-UMK-013" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-INFERENCE-COMPILER,ENT-COMPILE-CONFIG,ENT-COMPILED-LAYER" data-req-api="API-COMPILE" data-section="1.3.3" data-entity-ref="ENT-FUSION-GROUP ENT-GROUP-MARKER" data-xref="SPEC-32:REQ-MKO-001 三路分支实现" <h5="">§1.3.3 ForwardPhaseDispatch 详细行为 (REQ-UMK-013)
+<section data-xref="SPEC-32:REQ-MKO-001 三路分支实现" data-entity-ref="ENT-INFERENCE-COMPILER ENT-COMPILE-CONFIG ENT-FUSION-GROUP ENT-GROUP-MARKER" <h5="" data-section="1.3.3" data-req-api="POST /compile" data-req-entity="ENT-INFERENCE-COMPILER" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-013" id="req-umk-013">§1.3.3 ForwardPhaseDispatch 详细行为 (REQ-UMK-013)
       <code>ForwardPhaseDispatch</code> 是 JIT 内的三路分支，由 <code>phase_id</code> 寄存器控制：
       <pre><code>JIT 内部:
   mov phase_id, [rbp + phase_offset]     ; ABI 参数传入
@@ -124,17 +124,17 @@ single_pass_path:
         <li>图只有小图 ops → 无 ForwardPhaseDispatch，线性执行</li>
       </ul>
       <div data-criteria="">
-        <h5>验收标准</h5>
+        <h5>REQ-UMK-013 ForwardPhaseDispatch — 仅当图含 Argmax 算子时插入，从图拓扑推导</h5>
         <ol>
-          <li id="1" data-criterion="1">CompileConfig 结构体定义中无 <code>is_encoder</code>/<code>inference_mode</code>/<code>vocab_size</code>/<code>num_layers</code>/<code>hidden</code> 字段</li>
-          <li id="2" data-criterion="2"><code>vocab_size</code> 从 <code>OpKind::Argmax { vocab_size }</code> 推导，不作为 CompileConfig 字段</li>
-          <li id="3" data-criterion="3"><code>num_layers</code> 从图拓扑推导，不作为 CompileConfig 字段</li>
-          <li id="4" data-criterion="4"><code>num_eos_tokens</code> 从 <code>OpKind::CheckStopCondition</code> 推导，不作为 CompileConfig 字段</li>
-          <li id="5" data-criterion="5">无 <code>lm_head_offset</code>/<code>lm_head_bytes</code> 字段——权重偏移通过 <code>named_offsets</code> 映射表统一寻址</li>
-          <li id="6" data-criterion="6">结构体命名为 <code>CompileConfig</code>（非 <code>MegaKernelConfig</code>）</li>
-          <li id="7" data-criterion="7"><code>grep -rn "MegaKernelConfig" src/</code> 无结果</li>
-          <li id="8" data-criterion="8">CompileConfig 结构体中无 <code>business_config</code> 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</li>
-          <li id="9" data-criterion="9"><code>debug_jit</code> 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</li>
+          <li id="id-1" data-criterion="1">CompileConfig 结构体定义中无 <code>is_encoder</code>/<code>inference_mode</code>/<code>vocab_size</code>/<code>num_layers</code>/<code>hidden</code> 字段</li>
+          <li id="id-2" data-criterion="2"><code>vocab_size</code> 从 <code>OpKind::Argmax { vocab_size }</code> 推导，不作为 CompileConfig 字段</li>
+          <li id="id-3" data-criterion="3"><code>num_layers</code> 从图拓扑推导，不作为 CompileConfig 字段</li>
+          <li id="id-4" data-criterion="4"><code>num_eos_tokens</code> 从 <code>OpKind::CheckStopCondition</code> 推导，不作为 CompileConfig 字段</li>
+          <li id="id-5" data-criterion="5">无 <code>lm_head_offset</code>/<code>lm_head_bytes</code> 字段——权重偏移通过 <code>named_offsets</code> 映射表统一寻址</li>
+          <li id="id-6" data-criterion="6">结构体命名为 <code>CompileConfig</code>（非 <code>MegaKernelConfig</code>）</li>
+          <li id="id-7" data-criterion="7"><code>grep -rn "MegaKernelConfig" src/</code> 无结果</li>
+          <li id="id-8" data-criterion="8">CompileConfig 结构体中无 <code>business_config</code> 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</li>
+          <li id="id-9" data-criterion="9"><code>debug_jit</code> 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</li>
         </ol>
       </div>
     
@@ -144,25 +144,25 @@ single_pass_path:
       
       
       </div>
-    <div id="phasedispatch-仅当图含-argmax-算子时存在" data-criterion="ForwardPhaseDispatch 仅当图含 Argmax 算子时存在">ForwardPhaseDispatch 仅当图含 Argmax 算子时存在</div><div id="图无-argmax/storetoken/checkstopcondition-→-无-phasedispatch-分支" data-criterion="图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支">图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支</div><div id="无-argmax-的图（含-meanpool/classify-但无-argmax）无-phasedispatch" data-criterion="无 Argmax 的图（含 MeanPool/Classify 但无 Argmax）无 ForwardPhaseDispatch">
+    <div id="forwardphasedispatch-仅当图含-argmax-算子时存在" data-criterion="ForwardPhaseDispatch 仅当图含 Argmax 算子时存在">ForwardPhaseDispatch 仅当图含 Argmax 算子时存在</div><div id="图无-argmax-storetoken-checkstopcondition-无-forwardphasedispatch-分支" data-criterion="图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支">图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支</div><div id="无-argmax-的图-含-meanpool-classify-但无-argmax-无-forwardphasedispatch" data-criterion="无 Argmax 的图（含 MeanPool/Classify 但无 Argmax）无 ForwardPhaseDispatch">
 无 Argmax 的图（含 MeanPool/Classify 但无 Argmax）无 ForwardPhaseDispatch</div></section>
 
-<section data-req-api="POST /internal/compiler/lower" id="req-umk-015" data-req="REQ-UMK-015" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN" data-entity-ref="ENT-LOWERING-CONTEXT" <h3="">REQ-UMK-015 LoweringContext 编译会话共享状态<p>LoweringContext 持有编译会话的不可变共享状态（SimdWidth、SymDimSlotMap、IsaHook、ResourceBudget 等），替代 emit_fusion_groups 的 16 个参数膨胀。LoweringContext 一旦构造不可变，所有 emit 函数签名简化为 ctx: &amp;LoweringContext + 必要局部参数。这是三层并行编译的基础设施前提。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>
+<section data-entity-ref="ENT-LOWERING-CONTEXT" <h3="" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-015" id="req-umk-015">REQ-UMK-015 LoweringContext 编译会话共享状态<p>LoweringContext 持有编译会话的不可变共享状态（SimdWidth、SymDimSlotMap、IsaHook、ResourceBudget 等），替代 emit_fusion_groups 的 16 个参数膨胀。LoweringContext 一旦构造不可变，所有 emit 函数签名简化为 ctx: &amp;LoweringContext + 必要局部参数。这是三层并行编译的基础设施前提。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>
 LoweringContext 结构体定义在 vm_state.rs，持有 width/sym_map/hook/budget/rope_req/ple_req/dwc_req 不可变字段</li><li>所有 emit 函数签名改为 ctx: &amp;LoweringContext + 必要局部参数，emit_fusion_groups 的 16 参数减少到 ctx + 3 局部参数</li><li>LoweringContext 构造后不可变 — 编译会话期间 width/sym_map/hook/budget 不变</li><li>LoweringContext 通过引用传递（&amp;LoweringContext），不消耗所有权</li><li>cargo test --lib 无 LoweringContext 相关测试失败</li></ol></div></section>
 
-<section data-req-api="POST /internal/compiler/lower" id="req-umk-016" data-req="REQ-UMK-016" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN" data-entity-ref="ENT-EMIT-STATE" <h3="">REQ-UMK-016 EmitState 可变状态抽取<p>EmitState 抽取 emit_fusion_groups 的 5 个跨迭代可变状态（AbiPtrs、HeteroPhase、in_layer_loop、hetero_seg_byte_offset、hetero_seg_weight_base），使 emit_fusion_groups 可被拆分为可并行的子函数。每种层类型（ss/fs/sl/fl）的编译拥有独立 EmitState 快照，层模板编译函数从快照初始化自己的 EmitState。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>
+<section data-entity-ref="ENT-EMIT-STATE" <h3="" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-016" id="req-umk-016">REQ-UMK-016 EmitState 可变状态抽取<p>EmitState 抽取 emit_fusion_groups 的 5 个跨迭代可变状态（AbiPtrs、HeteroPhase、in_layer_loop、hetero_seg_byte_offset、hetero_seg_weight_base），使 emit_fusion_groups 可被拆分为可并行的子函数。每种层类型（ss/fs/sl/fl）的编译拥有独立 EmitState 快照，层模板编译函数从快照初始化自己的 EmitState。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>
 EmitState 结构体定义在 vm_state.rs，持有 abi/hetero_phase/in_layer_loop/hetero_seg_byte_offset/hetero_seg_weight_base 5 个字段</li><li>emit_fusion_groups 内部的 5 个可变状态变量迁移到 EmitState</li><li>每种层类型（ss/fs/sl/fl）的编译拥有独立 EmitState 快照</li><li>compile_layer_type_body 从 EmitState 快照初始化自己的状态</li><li>HeteroPhase 状态机模型完整：BeforeLayers/SlidingSmall/FullSmall/SlidingLarge/FullLarge 5 状态</li><li>cargo test --lib 无 EmitState 相关测试失败</li></ol></div></section>
 
-<section data-req-api="POST /internal/compiler/lower" id="req-umk-017" data-req="REQ-UMK-017" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN" data-entity-ref="ENT-LAYER-TEMPLATE" <h3="">REQ-UMK-017 层模板并行编译（第一层）<p>异构模型（Gemma-4）的多种层类型各自有独立的 fusion group 序列，层类型之间编译完全独立，可以用 rayon 并行编译。核心数据结构 LayerTemplate 封装编译后的 VmProgram + ABI 映射，compile_layer_type_body 编译单个层类型，VmProgram::append_with_mapping 将模板合并到主程序。并行化将编译时间从 O(总 groups) 降低到 O(最慢层类型)。与 REQ-UMK-012 GroupMarker 交互：GroupMarker 标记层边界，层模板并行编译使用标记确定 group 边界。</p>
+<section data-entity-ref="ENT-LAYER-TEMPLATE" <h3="" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-017" id="req-umk-017">REQ-UMK-017 层模板并行编译（第一层）<p>异构模型（Gemma-4）的多种层类型各自有独立的 fusion group 序列，层类型之间编译完全独立，可以用 rayon 并行编译。核心数据结构 LayerTemplate 封装编译后的 VmProgram + ABI 映射，compile_layer_type_body 编译单个层类型，VmProgram::append_with_mapping 将模板合并到主程序。并行化将编译时间从 O(总 groups) 降低到 O(最慢层类型)。与 REQ-UMK-012 GroupMarker 交互：GroupMarker 标记层边界，层模板并行编译使用标记确定 group 边界。</p>
 <div data-criteria=""><strong>验收标准：</strong><ol><li>LayerTemplate 结构体定义（body: VmProgram + abi_map: LayerAbiMap）</li><li>LayerAbiMap 包含 input_ptr/weight_ptr/output_ptr/scratch_base 4 个 VRegId 映射</li><li>compile_layer_type_body 函数签名：ctx + group_range + plan + graph + alloc + state + resolver → Result&lt;LayerTemplate&gt;</li><li>VmProgram::append_with_mapping 方法实现：VReg 重映射 + ABI 指针替换</li><li>rayon 并行编译路径：layer_types.par_iter().map(compile_layer_type_body).collect()</li><li>
-模板按顺序实例化：prog.append_with_mapping(ss_template, &amp;ss_abi_subst) 等</li><li>同构模型（单层类型）走单路径编译，异构模型（Gemma-4）走并行模板编译</li><li>cargo test --lib 无 LayerTemplate/append_with_mapping 相关测试失败</li></ol></div></section><
-<section data-req-api="POST /internal/compiler/lower" id="req-umk-018" data-req="REQ-UMK-018" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN" data-entity-ref="ENT-GROUP-DEPENDENCY-ANALYZER" <h3="">REQ-UMK-018 融合组级并行（第二层）<p>
+模板按顺序实例化：prog.append_with_mapping(ss_template, &amp;ss_abi_subst) 等</li><li>同构模型（单层类型）走单路径编译，异构模型（Gemma-4）走并行模板编译</li><li>cargo test --lib 无 LayerTemplate/append_with_mapping 相关测试失败</li></ol></div></section>&lt;
+<section data-entity-ref="ENT-GROUP-DEPENDENCY-ANALYZER" <h3="" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-018" id="req-umk-018">REQ-UMK-018 融合组级并行（第二层）<p>
 FusionPlan 的 groups 形成生产-消费 DAG，同一拓扑层级的 groups 之间无数据依赖，可以并行 lower。GroupDependencyAnalyzer 分析 group 间依赖，返回拓扑层级列表。依赖分析算法：收集每个 group 的 input TensorId，检查跨 group 的 output→input 依赖，拓扑排序按依赖关系分层。约束：层内 groups 有顺序依赖不能并行，组间 cast 需要所有 groups 编译完成后统一处理。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>GroupDependencyAnalyzer 结构体定义，analyze(plan, graph) → Vec&lt;Vec&lt;usize&gt;&gt; 拓扑层级列表</li><li>依赖分析算法：收集每个 group 的 input TensorId，检查跨 group 的 output→input 依赖</li><li>
-拓扑排序分层：同一层级的 groups 无互相依赖，可并行 lower</li><li>循环依赖检测：无剩余 group 可分配时将剩余合并入同一层</li><li>lower_parallel_groups 函数签名：ctx + groups + plan + graph + alloc + resolver → Vec&lt;(usize, VmProgram)&gt;</li><li>层内 groups 有顺序依赖（attn → ffn）不能并行</li><li>emit_inter_group_casts 在所有 groups 编译完成后统一处理</li><li>cargo test --lib 无 GroupDependencyAnalyzer 相关测试失败</li></ol></div></section><
-<section data-req-api="POST /internal/compiler/lower" id="req-umk-019" data-req="REQ-UMK-019" data-req-status="implemented" data-req-domain="umk" data-req-category="business" data-req-entity="ENT-MEGA-KERNEL-FN" <h3="">
+拓扑排序分层：同一层级的 groups 无互相依赖，可并行 lower</li><li>循环依赖检测：无剩余 group 可分配时将剩余合并入同一层</li><li>lower_parallel_groups 函数签名：ctx + groups + plan + graph + alloc + resolver → Vec&lt;(usize, VmProgram)&gt;</li><li>层内 groups 有顺序依赖（attn → ffn）不能并行</li><li>emit_inter_group_casts 在所有 groups 编译完成后统一处理</li><li>cargo test --lib 无 GroupDependencyAnalyzer 相关测试失败</li></ol></div></section>&lt;
+<section <h3="" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-019" id="req-umk-019">
 REQ-UMK-019 自调优并行（第三层）<p>每个 GEMM 算子的 FMA 策略选择可以并行评估多种候选方案。select_fma_best 收集 select_fma_candidates 的候选列表，使用 rayon into_par_iter 并行 evaluate_cost，选择 estimated_cmp 最优的策略。当 rayon 不可用时回退到串行评估。这是三层并行化中实现优先级最低（第三层）但已完成的层级。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>ResourceBudget 结构体定义：l1_bytes/l2_bytes/avail_regs 3 字段</li><li>FmaCandidate 结构体定义：strategy + estimated_cost</li><li>select_fma_best 使用 rayon into_par_iter 并行 evaluate_cost</li><li>
-select_fma_candidates 返回候选列表，evaluate_cost 计算 estimated_cmp</li><li>rayon 不可用时回退到串行评估（into_iter 替代 into_par_iter）</li><li>成本评估维度：计算吞吐 + 寄存器压力 + Cache 友好性</li><li>此层级已在代码中实现（isa_hook.rs 中 select_fma_best）</li><li>cargo test --lib 无 select_fma_best 相关测试失败</li></ol></div></section><
-    </main>
+select_fma_candidates 返回候选列表，evaluate_cost 计算 estimated_cmp</li><li>rayon 不可用时回退到串行评估（into_iter 替代 into_par_iter）</li><li>成本评估维度：计算吞吐 + 寄存器压力 + Cache 友好性</li><li>此层级已在代码中实现（isa_hook.rs 中 select_fma_best）</li><li>cargo test --lib 无 select_fma_best 相关测试失败</li></ol></div></section>&lt;
+    </section></main>
   
 <section id="gpu-dialect-lowering">
   <h3>§X GPU Dialect Lowering（GPU ISA 间接分层）</h3>
@@ -176,21 +176,21 @@ select_fma_candidates 返回候选列表，evaluate_cost 计算 estimated_cmp</l
     <tr><td>GPU Dialect Lowering</td><td>VmInstr → GpuLower → GpuDialect trait → ISA 文本 → 驱动编译</td><td>Compiled GPU kernel</td></tr>
   </table>
 
-  <section data-entity-model-type="relational" data-entity="GpuDialect" id="data-gpudialect">
+  <section id="gpudialect" data-entity="GpuDialect" data-req-ref="REQ-ORPHAN-437" data-entity-model-type="relational" data-xref="REQ-ORPHAN-437">
     <h3>Entity: GpuDialect</h3>
     <p>Trait 接口定义 GPU vendor 语义差异。三个独立 impl 覆盖主流 GPU 厂商。</p>
     <table data-entity-table="">
       <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
-      <tr data-field="emit_loop_begin" data-type="trait method" data-required="true"><td>emit_loop_begin</td><td>trait method</td><td>是</td><td></td><td>发射循环开始指令（PTX: @%p label / HIP: s_branch / Metal: label:）</td></tr>
-      <tr data-field="emit_loop_end" data-type="trait method" data-required="true"><td>emit_loop_end</td><td>trait method</td><td>是</td><td></td><td>发射循环结束指令</td></tr>
-      <tr data-field="emit_barrier" data-type="trait method" data-required="true"><td>emit_barrier</td><td>trait method</td><td>是</td><td></td><td>发射屏障（PTX: bar.sync / HIP: s_barrier / Metal: threadgroup_barrier）</td></tr>
-      <tr data-field="emit_shared_mem_alloc" data-type="trait method" data-required="true"><td>emit_shared_mem_alloc</td><td>trait method</td><td>是</td><td></td><td>分配共享内存（.shared / .lds / threadgroup）</td></tr>
-      <tr data-field="emit_shared_mem_store" data-type="trait method" data-required="true"><td>emit_shared_mem_store</td><td>trait method</td><td>是</td><td></td><td>共享内存写入</td></tr>
-      <tr data-field="emit_shared_mem_load" data-type="trait method" data-required="true"><td>emit_shared_mem_load</td><td>trait method</td><td>是</td><td></td><td>共享内存读取</td></tr>
-      <tr data-field="emit_warp_reduce" data-type="trait method" data-required="true"><td>emit_warp_reduce</td><td>trait method</td><td>是</td><td></td><td>warp 级规约（PTX: shfl.sync / HIP: ds_wrhs / Metal: simd_reduce）</td></tr>
-      <tr data-field="emit_tma_descriptor_init" data-type="trait method" data-required="false"><td>emit_tmadescriptor_init</td><td>trait method</td><td>否</td><td>SM 9.0+</td><td>TMA 描述符初始化（仅 PTX/Hopper+）</td></tr>
-      <tr data-field="emit_tma2d_copy" data-type="trait method" data-required="false"><td>emit_tma2d_copy</td><td>trait method</td><td>否</td><td>SM 9.0+</td><td>TMA 2D 拷贝（仅 PTX/Hopper+）</td></tr>
-      <tr data-field="emit_tile_mma" data-type="trait method" data-required="false"><td>emit_tile_mma</td><td>trait method</td><td>否</td><td>SM 8.0+</td><td>Tensor Core tile MMA（PTX: mma.async / HIP: mfma / Metal: simd_matrix）</td></tr>
+      <tr data-field="emit_loop_begin" data-type="string" data-required="true"><td>emit_loop_begin</td><td>trait method</td><td>是</td><td></td><td>发射循环开始指令（PTX: @%p label / HIP: s_branch / Metal: label:）</td></tr>
+      <tr data-field="emit_loop_end" data-type="string" data-required="true"><td>emit_loop_end</td><td>trait method</td><td>是</td><td></td><td>发射循环结束指令</td></tr>
+      <tr data-field="emit_barrier" data-type="string" data-required="true"><td>emit_barrier</td><td>trait method</td><td>是</td><td></td><td>发射屏障（PTX: bar.sync / HIP: s_barrier / Metal: threadgroup_barrier）</td></tr>
+      <tr data-field="emit_shared_mem_alloc" data-type="string" data-required="true"><td>emit_shared_mem_alloc</td><td>trait method</td><td>是</td><td></td><td>分配共享内存（.shared / .lds / threadgroup）</td></tr>
+      <tr data-field="emit_shared_mem_store" data-type="string" data-required="true"><td>emit_shared_mem_store</td><td>trait method</td><td>是</td><td></td><td>共享内存写入</td></tr>
+      <tr data-field="emit_shared_mem_load" data-type="string" data-required="true"><td>emit_shared_mem_load</td><td>trait method</td><td>是</td><td></td><td>共享内存读取</td></tr>
+      <tr data-field="emit_warp_reduce" data-type="string" data-required="true"><td>emit_warp_reduce</td><td>trait method</td><td>是</td><td></td><td>warp 级规约（PTX: shfl.sync / HIP: ds_wrhs / Metal: simd_reduce）</td></tr>
+      <tr data-field="emit_tma_descriptor_init" data-type="string" data-required="false"><td>emit_tmadescriptor_init</td><td>trait method</td><td>否</td><td>SM 9.0+</td><td>TMA 描述符初始化（仅 PTX/Hopper+）</td></tr>
+      <tr data-field="emit_tma2d_copy" data-type="string" data-required="false"><td>emit_tma2d_copy</td><td>trait method</td><td>否</td><td>SM 9.0+</td><td>TMA 2D 拷贝（仅 PTX/Hopper+）</td></tr>
+      <tr data-field="emit_tile_mma" data-type="string" data-required="false"><td>emit_tile_mma</td><td>trait method</td><td>否</td><td>SM 8.0+</td><td>Tensor Core tile MMA（PTX: mma.async / HIP: mfma / Metal: simd_matrix）</td></tr>
     </table>
   </section>
 
@@ -207,5 +207,5 @@ select_fma_candidates 返回候选列表，evaluate_cost 计算 estimated_cmp</l
   <p><strong>设计原则</strong>：CPU 直出机器码（性能最优，无中间文本开销），GPU 通过 ISA 文本+驱动编译（GPU 硬件要求 ISA 通过驱动加载，无法直接 mmap）。两种路径共享 VmInstr IR，差异仅在 Phase 3 ISA Lowering。</p>
 </section>
 
-</body>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-umk-008" data-test="TEST-UMK-008" data-req-ref="REQ-UMK-008" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-008: REQ-UMK-008 单元测试</h4><p>验证 REQ-UMK-008 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-012" data-test="TEST-UMK-012" data-req-ref="REQ-UMK-012" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-012: REQ-UMK-012 单元测试</h4><p>验证 REQ-UMK-012 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-013" data-test="TEST-UMK-013" data-req-ref="REQ-UMK-013" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-013: REQ-UMK-013 单元测试</h4><p>验证 REQ-UMK-013 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-015" data-test="TEST-UMK-015" data-req-ref="REQ-UMK-015" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-015: REQ-UMK-015 单元测试</h4><p>验证 REQ-UMK-015 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-016" data-test="TEST-UMK-016" data-req-ref="REQ-UMK-016" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-016: REQ-UMK-016 单元测试</h4><p>验证 REQ-UMK-016 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-017" data-test="TEST-UMK-017" data-req-ref="REQ-UMK-017" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-017: REQ-UMK-017 单元测试</h4><p>验证 REQ-UMK-017 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-018" data-test="TEST-UMK-018" data-req-ref="REQ-UMK-018" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-018: REQ-UMK-018 单元测试</h4><p>验证 REQ-UMK-018 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-umk-019" data-test="TEST-UMK-019" data-req-ref="REQ-UMK-019" data-test-categories="unit" data-level="unit"><h4>TEST-UMK-019: REQ-UMK-019 单元测试</h4><p>验证 REQ-UMK-019 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
 </html>

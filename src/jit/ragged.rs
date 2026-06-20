@@ -12,7 +12,7 @@
 //! ## 约束
 //! - Compact/Scatter 开销必须 < wasted SIMD lanes 的浪费（阈值: 25%）
 //! - 禁止在 Mega-Kernel 内部分配额外内存 — 所有 buffer 预分配
-//! - 与 VariableLengthBatch OpKind 协同工作
+//! - 与 VariableLengthBatch Op 协同工作
 
 use std::fmt;
 

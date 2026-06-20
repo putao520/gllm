@@ -3,6 +3,14 @@
 //! Contains the init / detect / compile helper methods invoked during
 //! `Executor::from_loader`. Split from executor.rs to keep it under the
 //! 2000-line limit.
+// @trace REQ-FATOP-003 [entity:Op] OPCODE_VERSION JIT cache 版本管理 (v3)
+// @trace REQ-FATOP-008 [entity:CompileSession] CompileSession 提取 13 字段
+// @trace REQ-FATOP-009 [entity:CompileSession] LoweringContext 保留 op-local 字段
+// @trace REQ-FATOP-014 [entity:Op] lower_op 41 类别零 OpKind 反查
+// @trace REQ-FATOP-015 [entity:Op] CompilerOp.op 唯一 IR 字段
+// @trace REQ-FATOP-018 lowering 路径直接读 op
+// @trace REQ-FATOP-019 [entity:Op] JIT cache hash 版本失效 (v3)
+// @trace REQ-FATOP-027 [entity:Op] OPCODE_VERSION v3 — OpKind 删除后 JIT cache 失效
 
 use crate::compat::backend_trait::{Backend, Element};
 use crate::loader::WeightsHandle;
@@ -212,11 +220,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         manifest: &crate::manifest::ModelManifest,
     ) -> CanonicalWeightMaps {
         let all_names: Vec<String> = ext_shapes.keys().cloned().collect();
-        let tie_embed = model_config.tie_word_embeddings.unwrap_or(false);
         let name_map =
-            crate::loader::name_map::TensorNameMap::build_from_names(&all_names, tie_embed);
-        let (auto_role_index, _) =
+            crate::loader::name_map::TensorNameMap::build_from_names(&all_names, Some(manifest.kind));
+        let (mut auto_role_index, _) =
             crate::loader::build_tensor_role_index(ext_shapes.keys().map(|s| s.as_str()));
+        // ARCH-RERANKER-CLASSIFY: For Reranker models with a separate output.weight
+        // (GGUF's rename of score.weight), remap OutputHead → ClassifierOutProj so
+        // that analyze_architecture detects has_classifier=true.
+        // Only remap when the output tensor is a SEPARATE weight (not tied to embed).
+        // When output is tied to embed, the model lacks a classification head entirely
+        // (GGUF converter omitted score.weight), and the generative path is the only
+        // viable option.
+        if matches!(manifest.kind, crate::manifest::ModelKind::Reranker) {
+            if let Some(output_ext) = auto_role_index.get(&(crate::manifest::TensorRole::OutputHead, None)) {
+                let embed_ext = auto_role_index.get(&(crate::manifest::TensorRole::Embedding, None));
+                let is_separate = embed_ext.map_or(true, |emb| emb != output_ext);
+                if is_separate {
+                    let ext_name = auto_role_index.remove(&(crate::manifest::TensorRole::OutputHead, None)).unwrap();
+                    auto_role_index.insert((crate::manifest::TensorRole::ClassifierOutProj, None), ext_name);
+                }
+            }
+        }
         let hints = crate::model_config::ArchHints {
             qk_norm: model_config.qk_norm,
             value_norm: model_config.value_norm,
@@ -478,7 +502,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Layer 6: debug_jit flag
         let debug_jit = std::env::var("GLLM_DEBUG_JIT").is_ok();
         if debug_jit {
-            eprintln!("[L6] JIT debug instrumentation enabled — INT3 breakpoints will be inserted");
+            log::info!("[L6] JIT debug instrumentation enabled — INT3 breakpoints will be inserted");
         }
         cfg.debug_jit = debug_jit;
 
@@ -521,30 +545,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             for (ext_name, meta) in &weights.meta {
                 if let Some(dt) = crate::loader::adapter::safetensors_dtype_to_gllm(meta.dtype) {
                     for cn in name_map.all_canonical_for(ext_name) {
-                        eprintln!("[DTYPE-MAP] ext='{}' -> cn='{}' dt={:?}", ext_name, cn, dt);
                         map.entry(cn.to_string()).or_insert(dt);
                     }
                 }
             }
-            eprintln!("[DTYPE-MAP] total={} embed={:?} final_norm={:?}",
-                map.len(), map.get("embed"), map.get("final_norm"));
             map
         };
         let weight_quant_types: std::collections::HashMap<String, gllm_kernels::quant::QuantType> = {
             let mut map = std::collections::HashMap::new();
-            eprintln!("[QMAP-CHECK] token_embd.weight quantized={}",
-                weights.quantized_tensor("token_embd.weight").is_some());
             for name in weights.available_names().iter() {
-                if name == "token_embd.weight" || name.contains("output_norm") {
-                    eprintln!("[QMAP-CHECK] name='{}' qt={}", name, weights.quantized_tensor(name).is_some());
-                }
                 if let Some(qt) = weights.quantized_tensor(name) {
                     for cn in name_map.all_canonical_for(name) {
                         map.entry(cn.to_string()).or_insert(qt.quant_type);
                     }
                 }
             }
-            eprintln!("[QMAP] embed={} final_norm={}", map.contains_key("embed"), map.contains_key("final_norm"));
             map
         };
         (weight_dtypes, weight_quant_types)
@@ -626,7 +641,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         tokenizer: &TokenizerHandle,
         weights: &mut WeightsHandle<B, E>,
         qtap_cfg: &gllm_kernels::compiler::graph::QTapGraphConfig,
-    ) -> ExecutorResult<Option<super::mega_kernel::MegaKernelExecutor>> {
+    ) -> ExecutorResult<(Option<super::mega_kernel::MegaKernelExecutor>, bool)> {
         let eos_id = Self::resolve_eos_token_id(tokenizer, model_config);
         log::info!("mega-kernel eos_id={} (config={:?}, tokenizer={:?})",
             eos_id, model_config.eos_token_id, tokenizer.eos_token_id());
@@ -673,7 +688,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             weights, &name_map, eos_id,
             business_config, hetero_config, gpu_sm_version,
         )?;
-        Ok(Some(mega))
+        Ok((Some(mega), auto_features.has_classifier))
     }
 
 }
@@ -1367,7 +1382,7 @@ mod tests {
             weight_ptrs: HashMap::new(),
             weight_sizes: HashMap::new(),
             weight_shapes: HashMap::new(),
-            name_map: crate::loader::name_map::TensorNameMap::build_from_names(&[], false),
+            name_map: crate::loader::name_map::TensorNameMap::build_from_names(&[], None),
             auto_features: make_auto_features(),
         };
         assert!(cwm.weight_ptrs.is_empty());
@@ -4334,7 +4349,7 @@ mod tests {
     #[test]
     fn canonical_weight_maps_name_map_with_names() {
         let names = vec!["token_embd.weight".to_string(), "lm_head.weight".to_string()];
-        let nm = crate::loader::name_map::TensorNameMap::build_from_names(&names, false);
+        let nm = crate::loader::name_map::TensorNameMap::build_from_names(&names, None);
         let cwm = CanonicalWeightMaps {
             weight_ptrs: HashMap::new(),
             weight_sizes: HashMap::new(),
@@ -5071,14 +5086,14 @@ mod tests {
     #[test]
     fn executor_error_graph_expansion_display_includes_detail() {
         // Arrange
-        let err = ExecutorError::GraphExpansion("unsupported OpKind::CustomOp".to_string());
+        let err = ExecutorError::GraphExpansion("unsupported Op::CustomOp".to_string());
 
         // Act
         let msg = format!("{err}");
 
         // Assert
         assert!(msg.contains("graph expansion failed"));
-        assert!(msg.contains("unsupported OpKind::CustomOp"));
+        assert!(msg.contains("unsupported Op::CustomOp"));
     }
 
     // ======================================================================

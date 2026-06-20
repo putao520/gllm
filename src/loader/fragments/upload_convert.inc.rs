@@ -20,7 +20,7 @@ fn convert_tensor_to_f32(
     meta: &TensorMeta,
     data: &[u8],
     _format: WeightFormat,
-    _explicit_transpose_hint: Option<bool>,
+    explicit_transpose_hint: Option<bool>,
 ) -> Result<(TensorMeta, Vec<f32>, Option<Vec<Vec<u16>>>)> {
     // ARCH-LOADER-PARALLEL-CONVERT: Rayon-parallel dtype→f32 conversion.
     // For large models (e.g. Gemma 4 E2B 9.6 GB BF16), a single-threaded
@@ -47,8 +47,15 @@ fn convert_tensor_to_f32(
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
     deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
 
-    // ARCH-WEIGHT-NO-TRANSPOSE: Linear weights kept in original [out, in] layout.
-    // GEMM lowering handles trans_b=true for HF [N,K] row-major weights.
+    // ARCH-ONNX-MATMUL-TRANSPOSE: ONNX MatMul weights are stored as [K, N]
+    // (input_dim, output_dim), while gllm's GemmBias transB=true expects [N, K]
+    // (output_dim, input_dim) — the same layout as HF SafeTensors.
+    // When explicit_transpose_hint is Some(false), the weight comes from an
+    // ONNX MatMul node and needs physical transpose to [N, K] canonical layout.
+    // SafeTensors/Gemm-transB=1 weights are already [N, K] → no transpose needed.
+    if explicit_transpose_hint == Some(false) {
+        normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
+    }
 
     Ok((cloned_meta, converted_f32, sp_meta_opt))
 }
@@ -64,7 +71,6 @@ fn convert_tensor_to_f32(
 /// meta.shape。内部 op 只处理 canonical layout (ARCH-WEIGHT-CANONICAL-LAYOUT)。
 ///
 /// 只对真正的 Linear 权重生效 — 排除 embedding / LayerNorm / bias / 非 2D tensor。
-#[allow(dead_code)]
 fn normalize_linear_weight_layout(meta: &mut TensorMeta, data: &mut Vec<f32>) {
     if !is_linear_weight(&meta.name, &meta.shape) {
         return;
@@ -321,12 +327,19 @@ impl HalfToF32 for half::bf16 {
 }
 
 /// Heuristic: 判断一个 2D tensor 是否是 Linear 权重 (需要 canonical layout 归一化)。
-#[allow(dead_code)]
+///
+/// 两种命名模式均识别:
+/// - HF 原始名: `xxx.weight` (以 `.weight` 结尾)
+/// - gllm 规范名: `LN.xxx` 或 `classifier.xxx` 等 (不含 `.weight` 后缀)
+///
+/// 排除 embedding / norm / bias / 非 2D tensor。
 fn is_linear_weight(name: &str, shape: &[usize]) -> bool {
     if shape.len() != 2 {
         return false;
     }
-    if !name.ends_with(".weight") {
+    // Bias tensors are 1D — already excluded by shape.len() check above,
+    // but also skip any name ending in ".bias" as a double-safety guard.
+    if name.ends_with(".bias") {
         return false;
     }
     // Embedding weight 是 [vocab, hidden], 用于 Gather 不是 MatMul, 不能转置。
@@ -343,13 +356,29 @@ fn is_linear_weight(name: &str, shape: &[usize]) -> bool {
         "RMSNorm",
         "rms_norm",
         ".norm.",
+        "embed",                // canonical: "embed", "position_embed", "token_type_embed"
+        "position_embed",
+        "token_type_embed",
     ];
     for ex in &excluded_substrings {
         if name.contains(ex) {
             return false;
         }
     }
-    true
+    // HF original name: must end with ".weight"
+    // gllm canonical name: no ".weight" suffix but is a Linear weight
+    //   (e.g. "L0.q_proj", "L0.up_proj", "classifier.dense", "classifier")
+    if name.ends_with(".weight") {
+        return true;
+    }
+    // Canonical names: LN.xxx pattern or classifier head
+    if name.starts_with('L') && name.contains('.') {
+        return true;
+    }
+    if name.starts_with("classifier") && !name.ends_with(".bias") {
+        return true;
+    }
+    false
 }
 
 /// Applies Tier II structural sparsity heuristic on FFN matrices.
@@ -742,17 +771,24 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
         names
     }
 
-    /// Build canonical name mapping from all tensor names.
+    /// Build a TensorNameMap without model_kind context.
+    ///
+    /// **Deprecated**: Use [`name_map_with_kind`] instead to ensure
+    /// Reranker models correctly resolve classifier vs lm_head.
+    /// BCE-20260619-001: model_kind=None may produce wrong canonical names for
+    /// Reranker models.
+    #[deprecated(note = "use name_map_with_kind instead")]
     pub fn name_map(&self) -> name_map::TensorNameMap {
-        self.name_map_with_tied(false)
+        self.name_map_with_kind(None)
     }
 
-    /// Build canonical name mapping with tied embeddings support.
-    /// When `tie_word_embeddings` is true and no separate lm_head tensor exists,
-    /// maps lm_head canonical to embed's physical tensor.
-    pub fn name_map_with_tied(&self, tie_word_embeddings: bool) -> name_map::TensorNameMap {
+    /// Build a TensorNameMap with model_kind context.
+    ///
+    /// When `model_kind` is `Some(ModelKind::Reranker)`, remaps `lm_head` → `classifier`
+    /// because GGUF reranker models rename `score.weight` to `output.weight`.
+    pub fn name_map_with_kind(&self, model_kind: Option<crate::manifest::ModelKind>) -> name_map::TensorNameMap {
         let all: Vec<String> = self.all_tensor_names().into_iter().cloned().collect();
-        name_map::TensorNameMap::build_from_names(&all, tie_word_embeddings)
+        name_map::TensorNameMap::build_from_names(&all, model_kind)
     }
 
     /// Query the data placement of a tensor (DeviceLocal or HostLocal).

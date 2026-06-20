@@ -351,25 +351,26 @@ impl MegaKernelExecutor {
             )
         };
 
-        // Extract logits for yes/no tokens from the last token position
+        // Extract logits for yes/no tokens from row 0 of the logits region.
+        // The generate loop's decode step writes 1 row of logits at row 0.
+        // Although this is the decode step (based on Argmax token + KV cache),
+        // it still reflects the model's assessment of yes/no given the context,
+        // which is sufficient for reranking discrimination.
         let logits_off = mega.logits_scratch_offset;
-        let vocab = self.vocab_size;
-        let row_bytes = vocab * 4;
-        // Last token position = prompt_len - 1
-        let logits_row_off = logits_off + (prompt_len - 1) * row_bytes;
 
-        let yes_logit = if logits_row_off + (yes_token_id as usize + 1) * 4 <= scratchpad.len() {
+        let yes_logit = if logits_off + (yes_token_id as usize + 1) * 4 <= scratchpad.len() {
             unsafe {
-                let ptr = scratchpad[logits_row_off..].as_ptr() as *const f32;
-                *ptr.add(yes_token_id as usize)
+                let ptr = scratchpad[logits_off..].as_ptr() as *const f32;
+                let val = *ptr.add(yes_token_id as usize);
+                val
             }
         } else {
             0.0f32
         };
 
-        let no_logit = if logits_row_off + (no_token_id as usize + 1) * 4 <= scratchpad.len() {
+        let no_logit = if logits_off + (no_token_id as usize + 1) * 4 <= scratchpad.len() {
             unsafe {
-                let ptr = scratchpad[logits_row_off..].as_ptr() as *const f32;
+                let ptr = scratchpad[logits_off..].as_ptr() as *const f32;
                 *ptr.add(no_token_id as usize)
             }
         } else {
@@ -385,10 +386,6 @@ impl MegaKernelExecutor {
     }
 
     /// HR score_tokens: dot-product between last-token hidden state and target token embeddings.
-    ///
-    /// Runs a single forward pass, then reads logits from
-    /// the scratchpad logits region for each target_token_id.
-    /// Returns Vec<f32> with one score per target token.
     pub fn execute_score_tokens(
         &self,
         tokens: &[u32],

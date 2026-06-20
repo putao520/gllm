@@ -219,6 +219,7 @@ mod tests {
             crate::engine::executor::GeneratorForwardConfig {
                 geometry: geom,
                 arch_family: crate::manifest::ArchFamily::Decoder,
+                has_classifier: false,
                 rope: crate::engine::executor::RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: true },
                 rerank_yes_token_id: None, rerank_no_token_id: None,
                 moe_config: None,

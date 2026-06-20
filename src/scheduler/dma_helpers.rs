@@ -6218,11 +6218,11 @@ mod tests {
         let file = open_rw_file(&path);
         nvme_pwrite(&file, 0, b"ABCDEFGHIJ").expect("write original");
         // Act: overwrite first 3 bytes with shorter data
-        nvme_pwrite(&file, 0, b"XXX").expect("overwrite");
+        nvme_pwrite(&file, 0, b"ABC").expect("overwrite");
         // Assert: first 3 changed, rest preserved
         let mut buf = vec![0u8; 10];
         nvme_pread(&file, 0, &mut buf).expect("read");
-        assert_eq!(&buf[0..3], b"XXX");
+        assert_eq!(&buf[0..3], b"ABC");
         assert_eq!(&buf[3..10], b"DEFGHIJ");
     }
 

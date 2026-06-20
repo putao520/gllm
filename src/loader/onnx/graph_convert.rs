@@ -1,9 +1,11 @@
 //! ONNX graph → CompilerGraph direct conversion.
 //!
-//! Bypasses YAML templates entirely: maps ONNX op_types to `OpKind` variants
+//! Bypasses YAML templates entirely: maps ONNX op_types to `Op` variants
 //! and derives all dimensions from initializer tensor shapes.
 //!
 //! See SPEC/07-LOADER.md §7.6 (ONNX Direct Graph Path).
+// @trace REQ-FATOP-024 [entity:Op] add_op(Op) 统一 API — OpKind 参数删除
+// @trace REQ-FATOP-032 OpKind → Op 全量迁移（onnx/graph_convert）
 
 use std::collections::HashMap;
 
@@ -188,8 +190,9 @@ impl<'a> ConvertContext<'a> {
             });
         }
 
-        let n = weight.shape[0];
-        let k = weight.shape[1];
+        // MatMul: Y = A @ B, weight B is [K, N] (input_dim, output_dim)
+        let n = weight.shape[1];
+        let k = weight.shape[0];
 
         let a_tid = self.get_or_create_activation(activation);
         let w_tid = *self.tensor_map.get(weight_name).ok_or_else(|| {
@@ -249,11 +252,13 @@ impl<'a> ConvertContext<'a> {
             });
         }
 
-        // Gemm: Y = alpha * A * B + beta * C (transB swaps n/k)
+        // Gemm: Y = alpha * A * B + beta * C
+        // transB=1: weight is [N, K] (output_dim, input_dim) — same as HF layout
+        // transB=0: weight is [K, N] (input_dim, output_dim) — ONNX MatMul layout
         let (n, k) = if trans_b {
-            (weight.shape[1], weight.shape[0])
+            (weight.shape[0], weight.shape[1])  // B is [N, K]
         } else {
-            (weight.shape[0], weight.shape[1])
+            (weight.shape[1], weight.shape[0])  // B is [K, N]
         };
 
         let a_tid = self.get_or_create_activation(input_a);
@@ -290,7 +295,7 @@ impl<'a> ConvertContext<'a> {
                     n,
                     k,
                     dtype: self.dtype,
-                    trans_b: false,
+                    trans_b,
                     has_bias: true,
                 }),
                 vec![a_tid, w_tid, b_tid],
@@ -304,7 +309,7 @@ impl<'a> ConvertContext<'a> {
                     n,
                     k,
                     dtype: self.dtype,
-                    trans_b: false,
+                    trans_b,
                     has_bias: false,
                 }),
                 vec![a_tid, w_tid],
@@ -346,7 +351,7 @@ impl<'a> ConvertContext<'a> {
         Ok(())
     }
 
-    /// Pass-through conversion for ops without direct OpKind mapping.
+    /// Pass-through conversion for ops without direct Op mapping.
     /// Uses Add as identity passthrough — the tensor shapes are preserved.
     fn convert_passthrough(&mut self, node: &OnnxNode) -> Result<(), ConvertError> {
         let input_name = node.inputs.first().map(|s| s.as_str()).unwrap_or("");
@@ -356,7 +361,7 @@ impl<'a> ConvertContext<'a> {
 
         // Unary passthrough ops (Sigmoid, Relu): map output → same tensor.
         // These ops are elementwise transformations that don't affect ranking.
-        // When OpKind::Sigmoid/Relu are added, replace with proper op.
+        // When Op::Sigmoid/Relu are added, replace with proper op.
         self.tensor_map.insert(output_name, in_tid);
         Ok(())
     }
@@ -764,13 +769,13 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have a Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather_op.op_v2
+        } = &gather_op.op
         {
             assert_eq!(*table_rows, 100, "embed table_rows = 100");
             assert_eq!(*embed_dim, 64, "embed_dim = 64");
@@ -779,30 +784,30 @@ mod tests {
         let matmul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         assert_eq!(matmul_ops.len(), 2, "Should have 2 MatMul ops");
 
         // q_proj: [64, 64] → n=64, k=64
-        if let Op::Gemm(spec) = &matmul_ops[0].op_v2 {
+        if let Op::Gemm(spec) = &matmul_ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 64, "q_proj n = 64");
             assert_eq!(*k, 64, "q_proj k = 64");
         }
 
-        // k_proj: [16, 64] → n=16, k=64
-        if let Op::Gemm(spec) = &matmul_ops[1].op_v2 {
+        // k_proj: [16, 64] → n=64, k=16 (MatMul: n=shape[1], k=shape[0])
+        if let Op::Gemm(spec) = &matmul_ops[1].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 16, "k_proj n = 16");
-            assert_eq!(*k, 64, "k_proj k = 64");
+            assert_eq!(*n, 64, "k_proj n = 64");
+            assert_eq!(*k, 16, "k_proj k = 16");
         }
 
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Should have an Add op");
         assert_eq!(add_op.inputs.len(), 2, "Add should have 2 inputs");
     }
@@ -866,9 +871,9 @@ mod tests {
         let norm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm_op.op_v2 {
+        if let Op::RmsNorm(spec) = &norm_op.op {
             let eps = &spec.eps;
             assert!((eps - 1e-6).abs() < 1e-10, "eps should be 1e-6, got {eps}");
         }
@@ -1374,13 +1379,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have a Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "n should be weight.shape[0]");
-            assert_eq!(*k, 16, "k should be weight.shape[1]");
+            assert_eq!(*n, 16, "n should be weight.shape[0]");
+            assert_eq!(*k, 32, "k should be weight.shape[1]");
         }
     }
 
@@ -1431,7 +1436,7 @@ mod tests {
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op (no bias)");
         assert_eq!(
             gemm_op.inputs.len(),
@@ -1492,7 +1497,7 @@ mod tests {
         let gemm_bias_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
         assert_eq!(
             gemm_bias_op.inputs.len(),
@@ -1560,13 +1565,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "transB swaps: n should be shape[1]=64");
-            assert_eq!(*k, 32, "transB swaps: k should be shape[0]=32");
+            assert_eq!(*n, 32, "transB swaps: n should be shape[1]=64");
+            assert_eq!(*k, 64, "transB swaps: k should be shape[0]=32");
         }
     }
 
@@ -1670,7 +1675,7 @@ mod tests {
         let silu = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Silu))
+            .find(|op| matches!(op.op, Op::Silu))
             .expect("Should have Silu op");
         assert_eq!(silu.inputs.len(), 1, "Silu should have 1 input");
         assert_eq!(silu.outputs.len(), 1, "Silu should have 1 output");
@@ -1690,7 +1695,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gelu)),
+            graph.ops.iter().any(|op| matches!(op.op, Op::Gelu)),
             "Should have Gelu op"
         );
     }
@@ -1709,7 +1714,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Tanh)),
+            graph.ops.iter().any(|op| matches!(op.op, Op::Tanh)),
             "Should have Tanh op"
         );
     }
@@ -1728,7 +1733,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
-            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Softmax)),
+            graph.ops.iter().any(|op| matches!(op.op, Op::Softmax)),
             "Should have Softmax op"
         );
     }
@@ -1751,7 +1756,7 @@ mod tests {
         let mul = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Mul))
+            .find(|op| matches!(op.op, Op::Mul))
             .expect("Should have Mul op");
         assert_eq!(mul.inputs.len(), 2, "Mul should have 2 inputs");
     }
@@ -1857,11 +1862,11 @@ mod tests {
         let reshape = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Should have Reshape op");
         assert_eq!(reshape.inputs.len(), 1);
         assert_eq!(reshape.outputs.len(), 1);
-        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+        if let Op::Reshape { target_shape } = &reshape.op {
             assert!(
                 target_shape.is_empty(),
                 "target_shape should be empty placeholder"
@@ -1900,9 +1905,9 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(*perm, vec![1, 0], "perm should be [1, 0]");
         }
     }
@@ -1923,9 +1928,9 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert!(
                 perm.is_empty(),
                 "perm should default to empty without attribute"
@@ -1983,9 +1988,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-12).abs() < 1e-20,
@@ -2034,9 +2039,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
@@ -2071,9 +2076,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
@@ -2105,11 +2110,11 @@ mod tests {
         let reduce = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool op from ReduceMean");
         if let Op::MeanPool {
             hidden, cls_mode, ..
-        } = &reduce.op_v2
+        } = &reduce.op
         {
             assert!(!cls_mode, "cls_mode should be false for ReduceMean");
             assert_eq!(*hidden, 64, "hidden should be the last dim of input shape");
@@ -2158,13 +2163,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 0, "table_rows should be 0 without initializer");
             assert_eq!(*embed_dim, 0, "embed_dim should be 0 without initializer");
@@ -2391,11 +2396,11 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Sub maps to OpKind::Add (2 Add ops: original add_qk + this one)
+        // Sub maps to Op::Add (2 Add ops: original add_qk + this one)
         let add_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .count();
         assert_eq!(add_count, 2, "Sub should also produce Add op");
     }
@@ -2416,7 +2421,7 @@ mod tests {
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         assert_eq!(mul_count, 1, "Div should produce Mul op");
     }
@@ -2439,7 +2444,7 @@ mod tests {
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         assert_eq!(mul_count, 1, "Pow should produce Mul op");
     }
@@ -2460,7 +2465,7 @@ mod tests {
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         assert_eq!(mul_count, 1, "Sqrt should produce Mul op");
     }
@@ -2561,13 +2566,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "n should be shape[0]=64 without transB");
-            assert_eq!(*k, 32, "k should be shape[1]=32 without transB");
+            assert_eq!(*n, 32, "n should be shape[1]=64 without transB");
+            assert_eq!(*k, 64, "k should be shape[0]=32 without transB");
         }
     }
 
@@ -3349,7 +3354,7 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op (not GemmBias)");
         assert_eq!(
             gemm.inputs.len(),
@@ -3400,13 +3405,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 5000, "table_rows should be 5000");
             assert_eq!(*embed_dim, 256, "embed_dim should be 256");
@@ -3539,7 +3544,7 @@ mod tests {
         let gathers: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .filter(|op| matches!(op.op, Op::Gather { .. }))
             .collect();
         assert_eq!(gathers.len(), 2, "Should have 2 separate Gather ops");
         // Verify they have different dimensions from different initializers
@@ -3550,7 +3555,7 @@ mod tests {
                     table_rows,
                     embed_dim,
                     ..
-                } = &op.op_v2
+                } = &op.op
                 {
                     (*table_rows, *embed_dim)
                 } else {
@@ -3639,9 +3644,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
@@ -3701,9 +3706,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
@@ -4133,18 +4138,18 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(
-                *n, 48,
-                "Non-int transB should default to no-transpose, n=shape[0]"
+                *n, 24,
+                "Non-int transB should default to no-transpose, n=shape[1]=24"
             );
             assert_eq!(
-                *k, 24,
-                "Non-int transB should default to no-transpose, k=shape[1]"
+                *k, 48,
+                "Non-int transB should default to no-transpose, k=shape[0]=48"
             );
         }
     }
@@ -4191,13 +4196,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 100, "1D table rows should be shape[0]");
             assert_eq!(
@@ -4233,12 +4238,12 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Should have 1 Mul op");
         assert_eq!(
@@ -4410,7 +4415,7 @@ mod tests {
         let gemm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         assert_eq!(
             gemm_ops.len(),
@@ -4466,9 +4471,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 1, "n should be 1 for 1x1 weight");
@@ -4518,13 +4523,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op even with 0-row weight");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 0, "n should be 0 for weight with 0 rows");
-            assert_eq!(*k, 64, "k should be 64");
+            assert_eq!(*n, 64, "n should be 0 for weight with 0 rows");
+            assert_eq!(*k, 0, "k should be 64");
         }
     }
 
@@ -4576,7 +4581,7 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have plain Gemm (not GemmBias)");
         assert_eq!(
             gemm.inputs.len(),
@@ -4637,9 +4642,9 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }) && op.label == "transpose_3d")
+            .find(|op| matches!(op.op, Op::Transpose { .. }) && op.label == "transpose_3d")
             .expect("Should have Transpose op with 3D perm");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(*perm, vec![2, 0, 1], "perm should be [2, 0, 1]");
         }
     }
@@ -4696,11 +4701,11 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool op");
         if let Op::MeanPool {
             hidden, cls_mode, ..
-        } = &pool.op_v2
+        } = &pool.op
         {
             assert_eq!(*hidden, 64, "hidden should be 64 (last dim of initializer)");
             assert!(!cls_mode);
@@ -4749,13 +4754,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 50, "3D table_rows should be shape[0]");
             assert_eq!(*embed_dim, 32, "3D embed_dim should be shape[1]");
@@ -4804,13 +4809,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op even with [0,0] table");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 0);
             assert_eq!(*embed_dim, 0);
@@ -5432,7 +5437,7 @@ mod tests {
             1,
             "Clip passthrough + MatMul should produce 1 op"
         );
-        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
+        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
     }
 
     // ── Graph with multiple inputs and outputs ────────────────────────
@@ -5601,7 +5606,7 @@ mod tests {
         let rms_norms: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .filter(|op| matches!(op.op, Op::RmsNorm(..)))
             .collect();
         assert_eq!(rms_norms.len(), 2, "Should have 2 RmsNorm ops");
         assert_eq!(rms_norms[0].label, "norm1");
@@ -5660,7 +5665,7 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Should have Add op");
         // The output of Add should be named "biased"
         let biased = graph
@@ -6124,9 +6129,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert_eq!(*eps, 0.0, "eps should be exactly 0.0");
         }
@@ -6171,9 +6176,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-30).abs() < 1e-35,
@@ -6267,13 +6272,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "Negative transB should swap: n=shape[1]=32");
-            assert_eq!(*k, 16, "Negative transB should swap: k=shape[0]=16");
+            assert_eq!(*n, 16, "Negative transB should swap: n=shape[1]=32");
+            assert_eq!(*k, 32, "Negative transB should swap: k=shape[0]=16");
         }
     }
 
@@ -6295,7 +6300,7 @@ mod tests {
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         assert_eq!(add_ops.len(), 2, "Should have 2 Add ops");
         // They should produce different output tensors
@@ -6709,9 +6714,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let m = &spec.m;
             assert!(
                 matches!(m, SymDim::Symbolic { name, max_value: Some(2048) } if name == "seq_len"),
@@ -6728,9 +6733,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)) && op.label == "q_proj")
+            .find(|op| matches!(op.op, Op::Gemm(..)) && op.label == "q_proj")
             .expect("Should find q_proj Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 64, "n should be concrete from weight shape");
@@ -6787,7 +6792,7 @@ mod tests {
             matches!(&y_tensor.shape[0], SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len"),
             "First dim should be Symbolic(seq_len)"
         );
-        assert!(matches!(&y_tensor.shape[1], SymDim::Concrete(128)));
+        assert!(matches!(&y_tensor.shape[1], SymDim::Concrete(64)));
     }
 
     // ── Large graph with many MatMul ops ──────────────────────────────
@@ -6921,12 +6926,12 @@ mod tests {
         let gemm_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .count();
         let gemm_bias_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .filter(|op| matches!(op.op, Op::GemmBias(..)))
             .count();
         assert_eq!(gemm_count, 1, "Should have 1 plain Gemm");
         assert_eq!(gemm_bias_count, 1, "Should have 1 GemmBias");
@@ -7005,13 +7010,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 100000);
             assert_eq!(*embed_dim, 4096);
@@ -7146,7 +7151,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "trans_bad_attr")
             .expect("Should find Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert!(perm.is_empty(), "Non-Ints perm should default to empty");
         }
     }
@@ -7200,13 +7205,13 @@ mod tests {
         let gb = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let Op::GemmBias(spec) = &gb.op_v2 {
+        if let Op::GemmBias(spec) = &gb.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 256, "n should be weight.shape[0]");
-            assert_eq!(*k, 128, "k should be weight.shape[1]");
+            assert_eq!(*n, 128, "n should be weight.shape[1]");
+            assert_eq!(*k, 256, "k should be weight.shape[0]");
         }
     }
 
@@ -7236,7 +7241,7 @@ mod tests {
         let pools: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .filter(|op| matches!(op.op, Op::MeanPool { .. }))
             .collect();
         assert_eq!(pools.len(), 2, "Should have 2 MeanPool ops");
     }
@@ -7311,13 +7316,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32);
-            assert_eq!(*k, 16);
+            assert_eq!(*n, 16);
+            assert_eq!(*k, 32);
         }
     }
 
@@ -7614,7 +7619,7 @@ mod tests {
         let transposes: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .filter(|op| matches!(op.op, Op::Transpose { .. }))
             .collect();
         assert_eq!(transposes.len(), 2);
         // t2 should consume t1's output
@@ -7679,7 +7684,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 2, "Pow and Sqrt should each produce Mul");
     }
@@ -7779,13 +7784,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "Large non-zero transB should swap: n=shape[1]=32");
-            assert_eq!(*k, 16, "Large non-zero transB should swap: k=shape[0]=16");
+            assert_eq!(*n, 16, "Large non-zero transB should swap: n=shape[1]=32");
+            assert_eq!(*k, 32, "Large non-zero transB should swap: k=shape[0]=16");
         }
     }
 
@@ -7837,9 +7842,9 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let Op::Gather { index_dim, .. } = &gather.op_v2 {
+        if let Op::Gather { index_dim, .. } = &gather.op {
             assert!(
                 matches!(index_dim, SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len"),
                 "Gather index_dim should be Symbolic(seq_len, 4096)"
@@ -7926,7 +7931,7 @@ mod tests {
             graph
                 .ops
                 .iter()
-                .any(|op| matches!(op.op_v2, Op::LayerNorm(..))),
+                .any(|op| matches!(op.op, Op::LayerNorm(..))),
             "Should have LayerNorm even with non-empty scale/bias keys"
         );
     }
@@ -8643,9 +8648,9 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let Op::Gather { indices_kind, .. } = &gather.op_v2 {
+        if let Op::Gather { indices_kind, .. } = &gather.op {
             assert_eq!(
                 *indices_kind,
                 Default::default(),
@@ -8780,17 +8785,17 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
         // When both inputs are initializers, input_b (wb) is preferred as weight
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(
-                *n, 16,
-                "n should be wb.shape[0]=16 (second input preferred)"
+                *n, 8,
+                "n should be wb.shape[1]=8 (MatMul: n=shape[1], second input preferred)"
             );
-            assert_eq!(*k, 8, "k should be wb.shape[1]=8");
+            assert_eq!(*k, 16, "k should be wb.shape[0]=16 (MatMul: k=shape[0])");
         }
     }
 
@@ -8923,13 +8928,13 @@ mod tests {
         let gb = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
-        if let Op::GemmBias(spec) = &gb.op_v2 {
+        if let Op::GemmBias(spec) = &gb.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "transB swaps: n should be shape[1]=64");
-            assert_eq!(*k, 32, "transB swaps: k should be shape[0]=32");
+            assert_eq!(*n, 32, "transB swaps: n should be shape[1]=64");
+            assert_eq!(*k, 64, "transB swaps: k should be shape[0]=32");
         }
         assert_eq!(
             gb.inputs.len(),
@@ -9013,13 +9018,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 65536);
-            assert_eq!(*k, 32768);
+            assert_eq!(*n, 32768);
+            assert_eq!(*k, 65536);
         }
     }
 
@@ -9072,7 +9077,7 @@ mod tests {
         let ln_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .collect();
         assert_eq!(ln_ops.len(), 2, "Should have 2 LayerNorm ops");
         // Both should reference the same scale and bias tensor IDs
@@ -9144,9 +9149,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+        if let Op::MeanPool { hidden, .. } = &pool.op {
             assert_eq!(*hidden, 768, "hidden should be 768 from embed dim");
         }
         assert_eq!(graph.outputs.len(), 1, "Should have 1 output (pooled)");
@@ -9266,13 +9271,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 1024, "n should be 1024 (asymmetric)");
-            assert_eq!(*k, 256, "k should be 256 (asymmetric)");
+            assert_eq!(*n, 256, "n should be 256 (asymmetric, weight [1024,256] no transB)");
+            assert_eq!(*k, 1024, "k should be 1024 (asymmetric, weight [1024,256] no transB)");
         }
         let y_tensor = graph
             .tensors
@@ -9280,8 +9285,8 @@ mod tests {
             .find(|t| t.name == "y")
             .expect("y should exist");
         assert!(
-            matches!(&y_tensor.shape[1], SymDim::Concrete(1024)),
-            "Output second dim should be Concrete(1024)"
+            matches!(&y_tensor.shape[1], SymDim::Concrete(256)),
+            "Output second dim should be Concrete(256)"
         );
     }
 
@@ -9393,13 +9398,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "n should be 64");
-            assert_eq!(*k, 0, "k should be 0 for zero-column weight");
+            assert_eq!(*n, 0, "n should be 64");
+            assert_eq!(*k, 64, "k should be 0 for zero-column weight");
         }
     }
 
@@ -9906,9 +9911,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { seq_len, .. } = &pool.op_v2 {
+        if let Op::MeanPool { seq_len, .. } = &pool.op {
             assert_eq!(*seq_len, 0, "MeanPool seq_len from ReduceMean should be 0");
         }
     }
@@ -9975,13 +9980,13 @@ mod tests {
         let gb = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let Op::GemmBias(spec) = &gb.op_v2 {
+        if let Op::GemmBias(spec) = &gb.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "transB should swap n to shape[1]=32");
-            assert_eq!(*k, 16, "transB should swap k to shape[0]=16");
+            assert_eq!(*n, 16, "transB should swap n to shape[1]=32");
+            assert_eq!(*k, 32, "transB should swap k to shape[0]=16");
         }
     }
 
@@ -10005,7 +10010,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "rs_empty")
             .expect("Should have Reshape");
-        if let Op::Reshape { target_shape } = &rs.op_v2 {
+        if let Op::Reshape { target_shape } = &rs.op {
             assert!(
                 target_shape.is_empty(),
                 "target_shape should always be empty placeholder"
@@ -10104,9 +10109,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm even with 0x0 weight");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 0);
@@ -10534,9 +10539,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(eps.is_nan(), "NaN epsilon should be preserved as NaN");
         }
@@ -10592,9 +10597,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 eps.is_infinite() && eps.is_sign_positive(),
@@ -10642,9 +10647,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 eps.is_infinite() && eps.is_sign_negative(),
@@ -10884,7 +10889,7 @@ mod tests {
         let silu_labels: Vec<&str> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Silu))
+            .filter(|op| matches!(op.op, Op::Silu))
             .map(|op| op.label.as_str())
             .collect();
         assert_eq!(silu_labels, &["extra_silu_1", "extra_silu_2"]);
@@ -10945,13 +10950,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 16, "transB=1 should swap: n=shape[1]=16");
-            assert_eq!(*k, 32, "transB=1 should swap: k=shape[0]=32");
+            assert_eq!(*n, 32, "transB=1: n=shape[0]=32 (weight [32,16], trans_b=true)");
+            assert_eq!(*k, 16, "transB=1: k=shape[1]=16 (weight [32,16], trans_b=true)");
         }
     }
 
@@ -11384,13 +11389,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 768);
-            assert_eq!(*k, 256);
+            assert_eq!(*n, 256);
+            assert_eq!(*k, 768);
         }
     }
 
@@ -11680,13 +11685,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 65536);
-            assert_eq!(*k, 49152);
+            assert_eq!(*n, 49152);
+            assert_eq!(*k, 65536);
         }
     }
 
@@ -11806,11 +11811,11 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
         if let Op::MeanPool {
             hidden, cls_mode, ..
-        } = &pool.op_v2
+        } = &pool.op
         {
             assert_eq!(*hidden, 128, "hidden should be embed_dim from Gather table");
             assert!(!cls_mode);
@@ -11856,9 +11861,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 100.0).abs() < 0.01,
@@ -11986,7 +11991,7 @@ mod tests {
         assert!(
             matches!(&y.shape[0], SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len")
         );
-        assert!(matches!(&y.shape[1], SymDim::Concrete(128)));
+        assert!(matches!(&y.shape[1], SymDim::Concrete(64)));
     }
 
     // ── Transpose output shape copies input shape ────────────────────────
@@ -12655,14 +12660,14 @@ mod tests {
         let gathers: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .filter(|op| matches!(op.op, Op::Gather { .. }))
             .collect();
         assert_eq!(gathers.len(), 2);
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gathers[0].op_v2
+        } = &gathers[0].op
         {
             assert_eq!(*table_rows, 50);
             assert_eq!(*embed_dim, 32);
@@ -12671,7 +12676,7 @@ mod tests {
             table_rows,
             embed_dim,
             ..
-        } = &gathers[1].op_v2
+        } = &gathers[1].op
         {
             assert_eq!(*table_rows, 200);
             assert_eq!(*embed_dim, 128);
@@ -12992,13 +12997,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64);
-            assert_eq!(*k, 32);
+            assert_eq!(*n, 32);
+            assert_eq!(*k, 64);
         }
     }
 
@@ -13060,12 +13065,12 @@ mod tests {
         let reshape = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Should have Reshape");
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
         assert_eq!(
             reshape.outputs[0], pool.inputs[0],
@@ -13208,9 +13213,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-10,
@@ -13306,9 +13311,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let dtype = &spec.dtype;
             assert!(matches!(dtype, DType::BF16));
         }
@@ -13419,7 +13424,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "t2_perm")
             .expect("Should have transpose");
-        if let Op::Transpose { perm } = &t.op_v2 {
+        if let Op::Transpose { perm } = &t.op {
             assert_eq!(*perm, vec![1, 0]);
         }
     }
@@ -13599,7 +13604,7 @@ mod tests {
         let lns: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .collect();
         assert_eq!(lns.len(), 2);
     }
@@ -13672,13 +13677,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "transB swaps: n should be weight.shape[1]=64");
-            assert_eq!(*k, 32, "transB swaps: k should be weight.shape[0]=32");
+            assert_eq!(*n, 32, "transB swaps: n should be weight.shape[1]=64");
+            assert_eq!(*k, 64, "transB swaps: k should be weight.shape[0]=32");
         }
     }
 
@@ -13805,13 +13810,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .unwrap();
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 128);
-            assert_eq!(*k, 64);
+            assert_eq!(*n, 64);
+            assert_eq!(*k, 128);
         }
     }
 
@@ -13879,13 +13884,13 @@ mod tests {
         let gemm_bias = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let Op::GemmBias(spec) = &gemm_bias.op_v2 {
+        if let Op::GemmBias(spec) = &gemm_bias.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "transB: n = weight.shape[1]");
-            assert_eq!(*k, 32, "transB: k = weight.shape[0]");
+            assert_eq!(*n, 32, "transB: n = weight.shape[1]");
+            assert_eq!(*k, 64, "transB: k = weight.shape[0]");
         }
     }
 
@@ -13946,13 +13951,13 @@ mod tests {
         let gathers: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .filter(|op| matches!(op.op, Op::Gather { .. }))
             .collect();
         assert_eq!(gathers.len(), 1);
         let gemms: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         assert_eq!(gemms.len(), 2);
     }
@@ -14012,9 +14017,9 @@ mod tests {
 
         // Assert: 3 ops: Gemm, Add, Mul
         assert_eq!(graph.ops.len(), 3);
-        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gemm(..))));
-        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Add)));
-        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Mul)));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Gemm(..))));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Add)));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Mul)));
     }
 
     #[test]
@@ -14054,16 +14059,16 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
 
-        // Assert: Sub → OpKind::Add, Div → OpKind::Mul
+        // Assert: Sub → Op::Add, Div → Op::Mul
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(add_ops.len(), 1, "Sub should map to Add");
         assert_eq!(mul_ops.len(), 1, "Div should map to Mul");
@@ -14096,12 +14101,12 @@ mod tests {
         let silu_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Silu))
+            .filter(|op| matches!(op.op, Op::Silu))
             .collect();
         let gelu_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gelu))
+            .filter(|op| matches!(op.op, Op::Gelu))
             .collect();
         assert_eq!(silu_ops.len(), 1);
         assert_eq!(gelu_ops.len(), 1);
@@ -14134,12 +14139,12 @@ mod tests {
         let tanh_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Tanh))
+            .filter(|op| matches!(op.op, Op::Tanh))
             .collect();
         let softmax_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Softmax))
+            .filter(|op| matches!(op.op, Op::Softmax))
             .collect();
         assert_eq!(tanh_ops.len(), 1);
         assert_eq!(softmax_ops.len(), 1);
@@ -14222,22 +14227,22 @@ mod tests {
         let rms_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .filter(|op| matches!(op.op, Op::RmsNorm(..)))
             .collect();
         let ln_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .collect();
         assert_eq!(rms_ops.len(), 1);
         assert_eq!(ln_ops.len(), 1);
         // RMS default eps = 1e-5
-        if let Op::RmsNorm(spec) = &rms_ops[0].op_v2 {
+        if let Op::RmsNorm(spec) = &rms_ops[0].op {
             let eps = &spec.eps;
             assert!((eps - 1e-5).abs() < 1e-10);
         }
         // LayerNorm default eps = 1e-5
-        if let Op::LayerNorm(spec) = &ln_ops[0].op_v2 {
+        if let Op::LayerNorm(spec) = &ln_ops[0].op {
             let eps = &spec.eps;
             assert!((eps - 1e-5).abs() < 1e-10);
         }
@@ -14265,14 +14270,14 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
-        // Assert: MeanPool op with hidden = 64 (MatMul output shape is [seq_len, n=64])
+        // Assert: MeanPool op with hidden = 32 (MatMul output shape is [seq_len, n=32])
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
-            assert_eq!(*hidden, 64);
+        if let Op::MeanPool { hidden, .. } = &pool.op {
+            assert_eq!(*hidden, 32);
         }
     }
 
@@ -14318,11 +14323,11 @@ mod tests {
         assert!(graph
             .ops
             .iter()
-            .any(|op| matches!(op.op_v2, Op::Gather { .. })));
+            .any(|op| matches!(op.op, Op::Gather { .. })));
         assert!(graph
             .ops
             .iter()
-            .any(|op| matches!(op.op_v2, Op::Reshape { .. })));
+            .any(|op| matches!(op.op, Op::Reshape { .. })));
     }
 
     #[test]
@@ -14402,9 +14407,9 @@ mod tests {
         let tr = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .unwrap();
-        if let Op::Transpose { perm } = &tr.op_v2 {
+        if let Op::Transpose { perm } = &tr.op {
             assert_eq!(*perm, vec![1, 0]);
         }
     }
@@ -14461,12 +14466,12 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .unwrap();
         let silu_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Silu))
+            .find(|op| matches!(op.op, Op::Silu))
             .unwrap();
         // Both should have inputs
         assert_eq!(add_op.inputs.len(), 2);
@@ -14559,9 +14564,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .unwrap();
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 1);
@@ -14717,11 +14722,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: non-initializer bias should fall back to Gemm (not GemmBias)
-        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gemm(..))));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Gemm(..))));
         assert!(!graph
             .ops
             .iter()
-            .any(|op| matches!(op.op_v2, Op::GemmBias(..))));
+            .any(|op| matches!(op.op, Op::GemmBias(..))));
     }
 
     #[test]
@@ -14758,7 +14763,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1);
     }
@@ -14797,7 +14802,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1);
     }
@@ -14845,13 +14850,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .unwrap();
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 0);
             assert_eq!(*embed_dim, 0);
@@ -14899,13 +14904,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .unwrap();
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 0, "Non-initializer table → table_rows = 0");
             assert_eq!(*embed_dim, 0, "Non-initializer table → embed_dim = 0");
@@ -14988,7 +14993,7 @@ mod tests {
 
         // Assert: only MatMul op (Relu is passthrough)
         assert_eq!(graph.ops.len(), 1);
-        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
+        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
     }
 
     #[test]
@@ -15074,13 +15079,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .unwrap();
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 4);
-            assert_eq!(*k, 8192);
+            assert_eq!(*n, 8192);
+            assert_eq!(*k, 4);
         }
     }
 
@@ -15148,9 +15153,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .unwrap();
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!((eps - 0.1).abs() < 1e-10);
         }
@@ -15213,9 +15218,9 @@ mod tests {
         let rms = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .unwrap();
-        if let Op::RmsNorm(spec) = &rms.op_v2 {
+        if let Op::RmsNorm(spec) = &rms.op {
             let eps = &spec.eps;
             assert!((eps - 1e-12).abs() < 1e-20);
         }
@@ -15649,7 +15654,7 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .unwrap();
         let out_tid = add_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Add output tensor");
@@ -15753,13 +15758,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .unwrap();
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "Float transB ignored, n = weight[0]");
-            assert_eq!(*k, 16, "Float transB ignored, k = weight[1]");
+            assert_eq!(*n, 16, "Float transB ignored, n = weight[0]");
+            assert_eq!(*k, 32, "Float transB ignored, k = weight[1]");
         }
     }
 
@@ -15791,9 +15796,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .unwrap();
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+        if let Op::MeanPool { hidden, .. } = &pool.op {
             assert_eq!(*hidden, 0);
         }
     }
@@ -15843,7 +15848,7 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .unwrap();
         assert_eq!(ln.inputs.len(), 3);
     }
@@ -16003,9 +16008,9 @@ mod tests {
         let tr = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .unwrap();
-        if let Op::Transpose { perm } = &tr.op_v2 {
+        if let Op::Transpose { perm } = &tr.op {
             assert!(perm.is_empty(), "Default perm should be empty");
         }
     }
@@ -16087,9 +16092,9 @@ mod tests {
         let rs = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .unwrap();
-        if let Op::Reshape { target_shape } = &rs.op_v2 {
+        if let Op::Reshape { target_shape } = &rs.op {
             assert!(target_shape.is_empty());
         }
     }
@@ -16246,11 +16251,11 @@ mod tests {
             5,
             "Should have 5 ops: Gather, LayerNorm, Gemm, Silu, Add"
         );
-        assert!(matches!(graph.ops[0].op_v2, Op::Gather { .. }));
-        assert!(matches!(graph.ops[1].op_v2, Op::LayerNorm(..)));
-        assert!(matches!(graph.ops[2].op_v2, Op::Gemm(..)));
-        assert!(matches!(graph.ops[3].op_v2, Op::Silu));
-        assert!(matches!(graph.ops[4].op_v2, Op::Add));
+        assert!(matches!(graph.ops[0].op, Op::Gather { .. }));
+        assert!(matches!(graph.ops[1].op, Op::LayerNorm(..)));
+        assert!(matches!(graph.ops[2].op, Op::Gemm(..)));
+        assert!(matches!(graph.ops[3].op, Op::Silu));
+        assert!(matches!(graph.ops[4].op, Op::Add));
         // Output tensor
         assert_eq!(graph.outputs.len(), 1);
     }
@@ -16345,9 +16350,9 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
-        if let Op::Gather { index_dim, .. } = &gather.op_v2 {
+        if let Op::Gather { index_dim, .. } = &gather.op {
             assert!(
                 matches!(index_dim, SymDim::Symbolic { name, max_value: Some(3333) } if name == "seq_len"),
                 "index_dim should be Symbolic(seq_len, 3333)"
@@ -16571,9 +16576,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let dtype = &spec.dtype;
             assert!(
                 matches!(dtype, DType::BF16),
@@ -16628,9 +16633,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(eps.is_nan(), "NaN epsilon should be preserved as-is");
         }
@@ -16678,13 +16683,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 65536);
-            assert_eq!(*k, 32768);
+            assert_eq!(*n, 32768);
+            assert_eq!(*k, 65536);
         }
     }
 
@@ -16755,14 +16760,14 @@ mod tests {
         let norms: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .filter(|op| matches!(op.op, Op::RmsNorm(..)))
             .collect();
         assert_eq!(norms.len(), 2);
-        if let Op::RmsNorm(spec) = &norms[0].op_v2 {
+        if let Op::RmsNorm(spec) = &norms[0].op {
             let eps = &spec.eps;
             assert!((eps - 1e-6).abs() < 1e-12);
         }
-        if let Op::RmsNorm(spec) = &norms[1].op_v2 {
+        if let Op::RmsNorm(spec) = &norms[1].op {
             let eps = &spec.eps;
             assert!((eps - 1e-3).abs() < 1e-10);
         }
@@ -16883,12 +16888,12 @@ mod tests {
         let add_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .count();
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         assert_eq!(add_count, 2, "Original Add + Sub->Add = 2");
         assert_eq!(mul_count, 1, "Mul produces 1 Mul op");
@@ -16928,7 +16933,7 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm after Relu passthrough");
         // RmsNorm should consume the qk_sum tensor (passthrough maps relu_out -> qk_sum)
         let qk_sum = graph
@@ -17014,7 +17019,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "t4d")
             .expect("Should find t4d Transpose");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(*perm, vec![3, 2, 1, 0]);
         }
     }
@@ -17074,13 +17079,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "Large positive transB swaps: n=shape[1]=32");
-            assert_eq!(*k, 16, "Large positive transB swaps: k=shape[0]=16");
+            assert_eq!(*n, 16, "Large positive transB swaps: n=shape[1]=32");
+            assert_eq!(*k, 32, "Large positive transB swaps: k=shape[0]=16");
         }
     }
 
@@ -17316,13 +17321,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 1024, "n should be 1024");
-            assert_eq!(*k, 256, "k should be 256");
+            assert_eq!(*n, 256, "n should be 1024");
+            assert_eq!(*k, 1024, "k should be 256");
         }
     }
 
@@ -17397,9 +17402,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { seq_len, .. } = &pool.op_v2 {
+        if let Op::MeanPool { seq_len, .. } = &pool.op {
             assert_eq!(
                 *seq_len, 0,
                 "MeanPool from ReduceMean should have seq_len=0"
@@ -17557,13 +17562,13 @@ mod tests {
         let gb = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let Op::GemmBias(spec) = &gb.op_v2 {
+        if let Op::GemmBias(spec) = &gb.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "transB swaps n to shape[1]=64");
-            assert_eq!(*k, 32, "transB swaps k to shape[0]=32");
+            assert_eq!(*n, 32, "transB swaps n to shape[1]=64");
+            assert_eq!(*k, 64, "transB swaps k to shape[0]=32");
         }
     }
 
@@ -17807,9 +17812,9 @@ mod tests {
         let reshape = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Should have Reshape");
-        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+        if let Op::Reshape { target_shape } = &reshape.op {
             assert!(
                 target_shape.is_empty(),
                 "target_shape is always empty placeholder"
@@ -17983,13 +17988,13 @@ mod tests {
         let gb = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias");
-        if let Op::GemmBias(spec) = &gb.op_v2 {
+        if let Op::GemmBias(spec) = &gb.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "transB=0: n should be shape[0]");
-            assert_eq!(*k, 32, "transB=0: k should be shape[1]");
+            assert_eq!(*n, 32, "transB=0: n should be shape[1]");
+            assert_eq!(*k, 64, "transB=0: k should be shape[0]");
         }
     }
 
@@ -18043,7 +18048,7 @@ mod tests {
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         assert_eq!(mul_count, 1, "Pow should map to Mul");
     }
@@ -18066,13 +18071,13 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        // k_proj output has shape [seq_len, 16], last concrete dim = 16
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+        // k_proj output has shape [seq_len, 64], last concrete dim = 64
+        if let Op::MeanPool { hidden, .. } = &pool.op {
             assert_eq!(
-                *hidden, 16,
-                "hidden should be 16 (last dim of k_proj output)"
+                *hidden, 64,
+                "hidden should be 64 (last dim of k_proj output, MatMul n=shape[1]=64)"
             );
         }
     }
@@ -18215,10 +18220,10 @@ mod tests {
             4,
             "Should have 4 ops: Gather + Add + Silu + Gemm"
         );
-        assert!(matches!(graph.ops[0].op_v2, Op::Gather { .. }));
-        assert!(matches!(graph.ops[1].op_v2, Op::Add));
-        assert!(matches!(graph.ops[2].op_v2, Op::Silu));
-        assert!(matches!(graph.ops[3].op_v2, Op::Gemm(..)));
+        assert!(matches!(graph.ops[0].op, Op::Gather { .. }));
+        assert!(matches!(graph.ops[1].op, Op::Add));
+        assert!(matches!(graph.ops[2].op, Op::Silu));
+        assert!(matches!(graph.ops[3].op, Op::Gemm(..)));
         assert_eq!(graph.outputs.len(), 1);
     }
 
@@ -18368,9 +18373,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let dtype = &spec.dtype;
             assert!(matches!(dtype, DType::F16), "Gemm dtype should be F16");
         }
@@ -18418,13 +18423,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64);
-            assert_eq!(*k, 0, "k should be 0 for weight with zero columns");
+            assert_eq!(*n, 0);
+            assert_eq!(*k, 64, "k should be 0 for weight with zero columns");
         }
     }
 
@@ -18461,9 +18466,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+        if let Op::MeanPool { hidden, .. } = &pool.op {
             assert_eq!(*hidden, 0, "Unknown input shape should default hidden to 0");
         }
     }
@@ -18509,13 +18514,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 0);
             assert_eq!(*embed_dim, 0);
@@ -18584,7 +18589,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 1, "Sigmoid passthrough + MatMul = 1 op");
-        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
+        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
     }
 
     // ── Tanh output tensor different from input ─────────────────────────
@@ -18834,7 +18839,7 @@ mod tests {
             1,
             "Single Gather should produce exactly 1 op"
         );
-        assert!(matches!(graph.ops[0].op_v2, Op::Gather { .. }));
+        assert!(matches!(graph.ops[0].op, Op::Gather { .. }));
     }
 
     // ── ConvertError: UnsupportedOp with empty op_type ───────────────
@@ -19064,13 +19069,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("should exist");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 100);
             assert_eq!(*embed_dim, 0, "1D initializer should have embed_dim=0");
@@ -19162,11 +19167,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+        if let Op::Gemm(spec) = &graph.ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32);
-            assert_eq!(*k, 0, "k should be 0 for weight with 0 columns");
+            assert_eq!(*n, 0);
+            assert_eq!(*k, 32, "k should be 0 for weight with 0 columns");
         }
     }
 
@@ -19270,7 +19275,7 @@ mod tests {
         let reshapes: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .filter(|op| matches!(op.op, Op::Reshape { .. }))
             .collect();
         assert_eq!(reshapes.len(), 2);
         assert_eq!(reshapes[0].label, "rs1");
@@ -19310,7 +19315,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "trans_1d")
             .expect("should exist");
-        if let Op::Transpose { perm } = &trans.op_v2 {
+        if let Op::Transpose { perm } = &trans.op {
             assert_eq!(*perm, vec![0]);
         }
     }
@@ -19635,12 +19640,12 @@ mod tests {
         let silu = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Silu))
+            .find(|op| matches!(op.op, Op::Silu))
             .expect("should exist");
         let tanh = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .find(|op| matches!(op.op, Op::Tanh))
             .expect("should exist");
         assert!(
             tanh.inputs.contains(&silu.outputs[0]),
@@ -19666,12 +19671,12 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("should exist");
         let sm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("should exist");
         assert!(sm_op.inputs.contains(&add_op.outputs[0]));
     }
@@ -19743,12 +19748,12 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("should exist");
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("should exist");
         assert!(ln.inputs.contains(&gather.outputs[0]));
     }
@@ -19787,12 +19792,12 @@ mod tests {
         let norm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("should exist");
         let add_op = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .find(|op| op.label == "residual")
             .expect("should exist");
         assert!(add_op.inputs.contains(&norm_op.outputs[0]));
@@ -19924,7 +19929,7 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+        if let Op::Gemm(spec) = &graph.ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 64);
@@ -19982,7 +19987,7 @@ mod tests {
         let gemm_bias = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("should exist");
         assert_eq!(gemm_bias.inputs.len(), 3);
         let bias_tensor = graph
@@ -20201,11 +20206,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+        if let Op::Gemm(spec) = &graph.ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 4);
-            assert_eq!(*k, 8);
+            assert_eq!(*n, 8);
+            assert_eq!(*k, 4);
         }
     }
 
@@ -20322,9 +20327,9 @@ mod tests {
         if let Some(norm) = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
         {
-            if let Op::RmsNorm(spec) = &norm.op_v2 {
+            if let Op::RmsNorm(spec) = &norm.op {
                 let eps = &spec.eps;
                 assert!(
                     (eps - 1e10).abs() < 1.0,
@@ -20380,9 +20385,9 @@ mod tests {
         if let Some(ln) = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
         {
-            if let Op::LayerNorm(spec) = &ln.op_v2 {
+            if let Op::LayerNorm(spec) = &ln.op {
                 let eps = &spec.eps;
                 assert_eq!(*eps, 0.0, "Zero epsilon should be preserved");
             }
@@ -20422,7 +20427,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "trans_rev4")
             .expect("should exist");
-        if let Op::Transpose { perm } = &trans.op_v2 {
+        if let Op::Transpose { perm } = &trans.op {
             assert_eq!(*perm, vec![3, 2, 1, 0]);
         }
     }
@@ -20627,11 +20632,11 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+        if let Op::Gemm(spec) = &graph.ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 10000);
-            assert_eq!(*k, 5000);
+            assert_eq!(*n, 5000);
+            assert_eq!(*k, 10000);
         }
     }
 
@@ -20903,9 +20908,9 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("should exist");
-        if let Op::Gather { indices_kind, .. } = &gather.op_v2 {
+        if let Op::Gather { indices_kind, .. } = &gather.op {
             assert!(
                 matches!(
                     indices_kind,
@@ -20936,7 +20941,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "rs_empty")
             .expect("should exist");
-        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+        if let Op::Reshape { target_shape } = &reshape.op {
             assert!(target_shape.is_empty());
         }
     }
@@ -21099,7 +21104,7 @@ mod tests {
         let softmax_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Softmax))
+            .filter(|op| matches!(op.op, Op::Softmax))
             .collect();
         assert_eq!(softmax_ops.len(), 2);
         assert_ne!(
@@ -21829,12 +21834,12 @@ mod tests {
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         let add_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .count();
         assert_eq!(mul_count, 1, "Div should produce 1 Mul");
         assert_eq!(add_count, 2, "Should have 2 Add ops (original + new)");
@@ -21866,7 +21871,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce 1 Mul op");
     }
@@ -21899,7 +21904,7 @@ mod tests {
         let silu = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Silu))
+            .find(|op| matches!(op.op, Op::Silu))
             .expect("Should have Silu op");
         // Silu consumes the same tensor as qk_sum (passthrough)
         let qk_sum = graph
@@ -22397,7 +22402,7 @@ mod tests {
         let gemm_bias = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
         assert_eq!(
             gemm_bias.inputs.len(),
@@ -22500,7 +22505,7 @@ mod tests {
             matches!(&y.shape[0], SymDim::Symbolic { name, max_value: Some(4096) } if name == "seq_len"),
             "First dim should be Symbolic(seq_len, 4096)"
         );
-        assert!(matches!(&y.shape[1], SymDim::Concrete(32)));
+        assert!(matches!(&y.shape[1], SymDim::Concrete(16)));
     }
 
     // ── Gather output tensor shape is [seq_dim, embed_dim] ─────────────
@@ -22608,7 +22613,7 @@ mod tests {
         let sm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Softmax))
+            .filter(|op| matches!(op.op, Op::Softmax))
             .collect();
         assert_eq!(sm_ops.len(), 2, "Should have 2 Softmax ops");
         assert_ne!(
@@ -22942,7 +22947,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 128).unwrap();
         assert_eq!(graph.ops.len(), 1);
         let op = &graph.ops[0];
-        match &op.op_v2 {
+        match &op.op {
             Op::Transpose { perm } => {
                 assert_eq!(*perm, vec![1, 0]);
             }
@@ -23164,7 +23169,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 1);
         assert!(
-            matches!(graph.ops[0].op_v2, Op::Gemm(..)),
+            matches!(graph.ops[0].op, Op::Gemm(..)),
             "should be Gemm not GemmBias"
         );
     }
@@ -23233,9 +23238,9 @@ mod tests {
         let ln_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("should have LayerNorm op");
-        match &ln_op.op_v2 {
+        match &ln_op.op {
             Op::LayerNorm(spec) => {
                 let eps = &spec.eps;
                 assert!(
@@ -23300,9 +23305,9 @@ mod tests {
         let rn_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("should have RmsNorm op");
-        match &rn_op.op_v2 {
+        match &rn_op.op {
             Op::RmsNorm(spec) => {
                 let eps = &spec.eps;
                 assert!(
@@ -23394,12 +23399,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let mm = &graph.ops[0];
-        match &mm.op_v2 {
+        match &mm.op {
             Op::Gemm(spec) => {
                 let n = &spec.n;
                 let k = &spec.k;
-                assert_eq!(*n, 1, "n should be 1 from weight shape [1, 0]");
-                assert_eq!(*k, 0, "k should be 0 from weight shape [1, 0]");
+                assert_eq!(*n, 0, "n should be 1 from weight shape [1, 0]");
+                assert_eq!(*k, 1, "k should be 0 from weight shape [1, 0]");
             }
             other => panic!("expected Gemm, got {other:?}"),
         }
@@ -23498,12 +23503,12 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 1);
-        match &graph.ops[0].op_v2 {
+        match &graph.ops[0].op {
             Op::GemmBias(spec) => {
                 let n = &spec.n;
                 let k = &spec.k; // transB: weight [32, 64] → n=64, k=32
-                assert_eq!(*n, 64, "transB swaps: n = weight.shape[1]");
-                assert_eq!(*k, 32, "transB swaps: k = weight.shape[0]");
+                assert_eq!(*n, 32, "transB swaps: n = weight.shape[1]");
+                assert_eq!(*k, 64, "transB swaps: k = weight.shape[0]");
             }
             other => panic!("expected GemmBias with transB, got {other:?}"),
         }
@@ -23751,7 +23756,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "mul_scale")
             .expect("Should have mul_scale op");
-        assert!(matches!(mul_op.op_v2, Op::Mul), "Mul op kind should be Mul");
+        assert!(matches!(mul_op.op, Op::Mul), "Mul op kind should be Mul");
         assert_eq!(mul_op.inputs.len(), 2, "Mul should have 2 inputs");
     }
 
@@ -23841,9 +23846,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+        if let Op::MeanPool { hidden, .. } = &pool.op {
             assert_eq!(*hidden, 48, "hidden should be Gather's embed_dim=48");
         }
     }
@@ -23891,13 +23896,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32);
-            assert_eq!(*k, 64);
+            assert_eq!(*n, 64);
+            assert_eq!(*k, 32);
         }
     }
 
@@ -23963,9 +23968,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert_eq!(*eps, 0.0, "Explicit zero epsilon should be preserved");
         }
@@ -24106,7 +24111,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // bias_act is not an initializer, so Gemm (not GemmBias)
         assert!(
-            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gemm(..))),
+            graph.ops.iter().any(|op| matches!(op.op, Op::Gemm(..))),
             "Should produce Gemm (not GemmBias) when bias is non-initializer"
         );
     }
@@ -24140,13 +24145,13 @@ mod tests {
             .iter()
             .find(|op| op.label == "sub1")
             .expect("sub1 op");
-        assert!(matches!(sub_op.op_v2, Op::Add), "Sub should produce Add");
+        assert!(matches!(sub_op.op, Op::Add), "Sub should produce Add");
         let div_op = graph
             .ops
             .iter()
             .find(|op| op.label == "div1")
             .expect("div1 op");
-        assert!(matches!(div_op.op_v2, Op::Mul), "Div should produce Mul");
+        assert!(matches!(div_op.op, Op::Mul), "Div should produce Mul");
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -24222,13 +24227,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 50, "table_rows should be 50");
             assert_eq!(*embed_dim, 0, "embed_dim should be 0");
@@ -24282,16 +24287,16 @@ mod tests {
         let gemms: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         assert_eq!(gemms.len(), 2, "Should have 2 Gemm ops");
         // Both should have n=48, k=32
         for gemm in &gemms {
-            if let Op::Gemm(spec) = &gemm.op_v2 {
+            if let Op::Gemm(spec) = &gemm.op {
                 let n = &spec.n;
                 let k = &spec.k;
-                assert_eq!(*n, 48);
-                assert_eq!(*k, 32);
+                assert_eq!(*n, 32);
+                assert_eq!(*k, 48);
             }
         }
     }
@@ -24363,9 +24368,9 @@ mod tests {
         let t = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose");
-        if let Op::Transpose { perm } = &t.op_v2 {
+        if let Op::Transpose { perm } = &t.op {
             assert_eq!(*perm, vec![4, 3, 2, 1, 0], "perm should be [4,3,2,1,0]");
         }
     }
@@ -24429,11 +24434,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 2, "Should have 2 norm ops");
         assert!(
-            matches!(graph.ops[0].op_v2, Op::RmsNorm(..)),
+            matches!(graph.ops[0].op, Op::RmsNorm(..)),
             "First op should be RmsNorm"
         );
         assert!(
-            matches!(graph.ops[1].op_v2, Op::LayerNorm(..)),
+            matches!(graph.ops[1].op, Op::LayerNorm(..)),
             "Second op should be LayerNorm"
         );
     }
@@ -24651,9 +24656,9 @@ mod tests {
         let t = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose");
-        if let Op::Transpose { perm } = &t.op_v2 {
+        if let Op::Transpose { perm } = &t.op {
             assert!(
                 perm.is_empty(),
                 "Transpose without perm should produce empty perm"
@@ -24695,13 +24700,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(
                 *table_rows, 0,
@@ -24735,7 +24740,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "empty_out")
             .expect("Should have empty_out op");
-        assert!(matches!(add_op.op_v2, Op::Add));
+        assert!(matches!(add_op.op, Op::Add));
         assert_eq!(add_op.outputs.len(), 1);
     }
 
@@ -24760,7 +24765,7 @@ mod tests {
             .find(|op| op.label == "sqrt1")
             .expect("Should have sqrt1 op");
         assert!(
-            matches!(sqrt_op.op_v2, Op::Mul),
+            matches!(sqrt_op.op, Op::Mul),
             "Sqrt should map to Mul op"
         );
     }
@@ -24884,7 +24889,7 @@ mod tests {
             .iter()
             .find(|op| op.label == "silu_empty")
             .expect("Should have silu_empty op");
-        assert!(matches!(silu.op_v2, Op::Silu));
+        assert!(matches!(silu.op, Op::Silu));
         // The input should have been auto-created with seq_dim shape
         assert_eq!(silu.inputs.len(), 1);
     }
@@ -24938,9 +24943,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool");
-        if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+        if let Op::MeanPool { hidden, .. } = &pool.op {
             assert_eq!(*hidden, 0, "Unknown shape should default hidden to 0");
         }
     }
@@ -25025,7 +25030,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert!(mul_ops.len() >= 1, "Pow should produce at least one Mul op");
     }
@@ -25120,7 +25125,7 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Tanh is a unary op, which creates 1 output tensor from first() output name
-        let tanh = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Tanh));
+        let tanh = graph.ops.iter().find(|op| matches!(op.op, Op::Tanh));
         assert!(tanh.is_some(), "Tanh op should be created");
         assert_eq!(
             tanh.unwrap().outputs.len(),
@@ -25174,11 +25179,11 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
-        let gemm = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Gemm(..)));
+        let gemm = graph.ops.iter().find(|op| matches!(op.op, Op::Gemm(..)));
         let gemm_bias = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)));
+            .find(|op| matches!(op.op, Op::GemmBias(..)));
         assert!(gemm.is_some(), "Should produce Gemm (no bias)");
         assert!(
             gemm_bias.is_none(),
@@ -25229,13 +25234,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 0, "table_rows should be 0");
             assert_eq!(*embed_dim, 32, "embed_dim should be 32");
@@ -25290,9 +25295,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 64, "Square weight n = 64");
@@ -25337,7 +25342,7 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
         assert_eq!(
             ln.inputs.len(),
@@ -25370,8 +25375,8 @@ mod tests {
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
-        let gelu = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Gelu));
-        let softmax = graph.ops.iter().find(|op| matches!(op.op_v2, Op::Softmax));
+        let gelu = graph.ops.iter().find(|op| matches!(op.op, Op::Gelu));
+        let softmax = graph.ops.iter().find(|op| matches!(op.op, Op::Softmax));
         assert!(gelu.is_some(), "Gelu op should exist");
         assert!(softmax.is_some(), "Softmax op should exist");
         // Verify data flow: softmax input should come from gelu output
@@ -25509,9 +25514,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!((eps - 1.0).abs() < 1e-10, "eps should be 1.0, got {eps}");
         }
@@ -25549,9 +25554,9 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(perm.len(), 1, "perm should have 1 element");
             assert_eq!(perm[0], 0, "perm[0] should be 0");
         }
@@ -25730,7 +25735,7 @@ mod tests {
             .expect("output tensor should exist");
         assert_eq!(output_tid.shape.len(), 2, "output should be 2-D");
         assert!(
-            matches!(&output_tid.shape[1], SymDim::Concrete(128)),
+            matches!(&output_tid.shape[1], SymDim::Concrete(256)),
             "second dim should be Concrete(128), got {:?}",
             output_tid.shape[1]
         );
@@ -25785,9 +25790,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &norm.op_v2 {
+        if let Op::LayerNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - (-1e-5)).abs() < 1e-10,
@@ -25834,9 +25839,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-12).abs() < 1e-15,
@@ -25856,13 +25861,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(
                 *table_rows, 100,
@@ -25931,9 +25936,9 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(perm, &[1, 0], "perm should be [1, 0]");
         }
     }
@@ -25972,7 +25977,7 @@ mod tests {
         let unary_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Silu | Op::Tanh | Op::Softmax))
+            .filter(|op| matches!(op.op, Op::Silu | Op::Tanh | Op::Softmax))
             .collect();
         assert_eq!(
             unary_ops.len(),
@@ -25999,9 +26004,9 @@ mod tests {
         let reshape = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Should have Reshape op");
-        if let Op::Reshape { target_shape } = &reshape.op_v2 {
+        if let Op::Reshape { target_shape } = &reshape.op {
             assert!(
                 target_shape.is_empty(),
                 "target_shape should be empty (not populated from ONNX attributes)"
@@ -26191,7 +26196,7 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op (not GemmBias)");
         assert_eq!(
             gemm.inputs.len(),
@@ -26256,10 +26261,10 @@ mod tests {
             .find(|t| t.name == "reduced_rm")
             .expect("reduced_rm should exist");
         assert_eq!(reduced.shape.len(), 1, "ReduceMean output should be 1-D");
-        // hidden dim comes from last dim of MatMul output shape [seq_dim, Concrete(n=64)]
+        // hidden dim comes from last dim of MatMul output shape [seq_dim, Concrete(n=32)]
         assert!(
-            matches!(&reduced.shape[0], SymDim::Concrete(64)),
-            "ReduceMean output should be Concrete(hidden_dim), got {:?}",
+            matches!(&reduced.shape[0], SymDim::Concrete(32)),
+            "ReduceMean output should be Concrete(hidden_dim=32), got {:?}",
             reduced.shape
         );
     }
@@ -26395,9 +26400,9 @@ mod tests {
             .ops
             .iter()
             .rev()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(*perm, vec![2, 0, 1], "perm should be [2, 0, 1]");
         }
     }
@@ -26490,13 +26495,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 4096, "n should be 4096");
-            assert_eq!(*k, 11008, "k should be 11008");
+            assert_eq!(*n, 11008, "n should be 4096");
+            assert_eq!(*k, 4096, "k should be 11008");
         }
         // Also verify the output tensor shape uses max_seq_len
         let out = graph
@@ -26509,7 +26514,7 @@ mod tests {
             matches!(&out.shape[0], SymDim::Symbolic { name, max_value: Some(16384) } if name == "seq_len"),
             "First output dim should be Symbolic(seq_len, 16384)"
         );
-        assert!(matches!(&out.shape[1], SymDim::Concrete(4096)));
+        assert!(matches!(&out.shape[1], SymDim::Concrete(11008)));
     }
 
     #[test]
@@ -26555,13 +26560,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 50, "table_rows should be shape[0]");
             assert_eq!(*embed_dim, 30, "embed_dim should be shape[1]");
@@ -26656,7 +26661,7 @@ mod tests {
         let ln_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .collect();
         assert_eq!(ln_ops.len(), 2, "Should have 2 separate LayerNorm ops");
         assert_ne!(
@@ -26746,9 +26751,9 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-15).abs() < 1e-25,
@@ -26812,14 +26817,14 @@ mod tests {
         let gemm_bias = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
         assert_eq!(gemm_bias.inputs.len(), 3, "GemmBias should have 3 inputs");
-        if let Op::GemmBias(spec) = &gemm_bias.op_v2 {
+        if let Op::GemmBias(spec) = &gemm_bias.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 128);
-            assert_eq!(*k, 64);
+            assert_eq!(*n, 64);
+            assert_eq!(*k, 128);
         }
     }
 
@@ -26966,7 +26971,7 @@ mod tests {
     // @trace TEST-GC-807 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn binary_sub_and_div_chain_produces_add_and_mul_ops() {
-        // Arrange: Sub followed by Div — both map to non-obvious OpKinds
+        // Arrange: Sub followed by Div — both map to non-obvious Ops
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sub1".to_string(),
@@ -26987,15 +26992,15 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Assert: Sub maps to OpKind::Add, Div maps to OpKind::Mul
+        // Assert: Sub maps to Op::Add, Div maps to Op::Mul
         let sub_op = graph
             .ops
             .iter()
             .find(|op| op.label == "sub1")
             .expect("sub1 op should exist");
         assert!(
-            matches!(sub_op.op_v2, Op::Add),
-            "Sub should produce OpKind::Add"
+            matches!(sub_op.op, Op::Add),
+            "Sub should produce Op::Add"
         );
         let div_op = graph
             .ops
@@ -27003,8 +27008,8 @@ mod tests {
             .find(|op| op.label == "div1")
             .expect("div1 op should exist");
         assert!(
-            matches!(div_op.op_v2, Op::Mul),
-            "Div should produce OpKind::Mul"
+            matches!(div_op.op, Op::Mul),
+            "Div should produce Op::Mul"
         );
     }
 
@@ -27134,22 +27139,22 @@ mod tests {
         let gemm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         assert_eq!(gemm_ops.len(), 2, "Should have 2 Gemm ops");
-        // g1_no_t: weight [64,32] → n=64, k=32 (no transpose)
-        if let Op::Gemm(spec) = &gemm_ops[0].op_v2 {
+        // g1_no_t: weight [64,32] no transB → n=32, k=64
+        if let Op::Gemm(spec) = &gemm_ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "g1 n should be 64");
-            assert_eq!(*k, 32, "g1 k should be 32");
+            assert_eq!(*n, 32, "g1 n should be 32 (weight [64,32] no transB, n=shape[1])");
+            assert_eq!(*k, 64, "g1 k should be 64 (weight [64,32] no transB, k=shape[0])");
         }
-        // g2_trans: weight [16,64] transB=1 → n=64, k=16 (transposed)
-        if let Op::Gemm(spec) = &gemm_ops[1].op_v2 {
+        // g2_trans: weight [16,64] transB=1 → n=16, k=64 (trans_b=true)
+        if let Op::Gemm(spec) = &gemm_ops[1].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "g2 n should be 64 after transB");
-            assert_eq!(*k, 16, "g2 k should be 16 after transB");
+            assert_eq!(*n, 16, "g2 n should be 16 (weight [16,64] transB=1, n=shape[0])");
+            assert_eq!(*k, 64, "g2 k should be 64 (weight [16,64] transB=1, k=shape[1])");
         }
     }
 
@@ -27194,15 +27199,15 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(perm, &[2, 0, 1], "perm should be [2, 0, 1]");
         }
         let reshape = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Should have Reshape op");
         assert_eq!(
             reshape.label, "rs1",
@@ -27249,9 +27254,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-12,
@@ -27272,13 +27277,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(
                 *table_rows, 100,
@@ -27407,8 +27412,8 @@ mod tests {
             .find(|op| op.label == "silu_chain")
             .expect("silu_chain");
         assert!(
-            matches!(silu.op_v2, Op::Silu),
-            "silu_chain should be OpKind::Silu"
+            matches!(silu.op, Op::Silu),
+            "silu_chain should be Op::Silu"
         );
         let add = graph
             .ops
@@ -27416,8 +27421,8 @@ mod tests {
             .find(|op| op.label == "add_chain")
             .expect("add_chain");
         assert!(
-            matches!(add.op_v2, Op::Add),
-            "add_chain should be OpKind::Add"
+            matches!(add.op, Op::Add),
+            "add_chain should be Op::Add"
         );
         let mm = graph
             .ops
@@ -27425,8 +27430,8 @@ mod tests {
             .find(|op| op.label == "mm_chain")
             .expect("mm_chain");
         assert!(
-            matches!(mm.op_v2, Op::Gemm(..)),
-            "mm_chain should be OpKind::Gemm"
+            matches!(mm.op, Op::Gemm(..)),
+            "mm_chain should be Op::Gemm"
         );
     }
 
@@ -27450,9 +27455,9 @@ mod tests {
         let rm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool op from ReduceMean");
-        if let Op::MeanPool { hidden, .. } = &rm.op_v2 {
+        if let Op::MeanPool { hidden, .. } = &rm.op {
             assert_eq!(
                 *hidden, 64,
                 "hidden should be 64 from q_proj weight n dimension"
@@ -27517,13 +27522,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 48, "n should be 48 (no transB)");
-            assert_eq!(*k, 32, "k should be 32 (no transB)");
+            assert_eq!(*n, 32, "n should be 48 (no transB)");
+            assert_eq!(*k, 48, "k should be 32 (no transB)");
         }
     }
 
@@ -27658,13 +27663,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 48, "transB=1 swaps n to 48");
-            assert_eq!(*k, 32, "transB=1 swaps k to 32");
+            assert_eq!(*n, 32, "transB=1 swaps n to 48");
+            assert_eq!(*k, 48, "transB=1 swaps k to 32");
         }
     }
 
@@ -27677,9 +27682,9 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
-        if let Op::Gather { .. } = &gather_op.op_v2 {
+        if let Op::Gather { .. } = &gather_op.op {
             let hidden = graph
                 .tensors
                 .iter()
@@ -27708,7 +27713,7 @@ mod tests {
         let add_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .count();
         assert_eq!(add_count, 2, "Should have 2 Add ops");
     }
@@ -27747,9 +27752,9 @@ mod tests {
         let norm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
-        if let Op::RmsNorm(spec) = &norm_op.op_v2 {
+        if let Op::RmsNorm(spec) = &norm_op.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-10,
@@ -27801,13 +27806,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(
                 *table_rows, 64,
@@ -27949,9 +27954,9 @@ mod tests {
         let ln_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
-        if let Op::LayerNorm(spec) = &ln_op.op_v2 {
+        if let Op::LayerNorm(spec) = &ln_op.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-10,
@@ -28003,14 +28008,14 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         // Assert: uses first two dims — table_rows=50, embed_dim=32
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather_op.op_v2
+        } = &gather_op.op
         {
             assert_eq!(
                 *table_rows, 50,
@@ -28043,7 +28048,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert!(mul_ops.len() >= 1, "Sqrt should map to at least one Mul op");
     }
@@ -28051,7 +28056,7 @@ mod tests {
     // @trace TEST-GC-836 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn div_maps_to_mul_op_kind() {
-        // Arrange: Div maps to OpKind::Mul via convert_binary
+        // Arrange: Div maps to Op::Mul via convert_binary
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "div1".to_string(),
@@ -28068,7 +28073,7 @@ mod tests {
         let div_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Mul) && op.label == "div1");
+            .find(|op| matches!(op.op, Op::Mul) && op.label == "div1");
         assert!(
             div_op.is_some(),
             "Div node should produce Mul op with matching label"
@@ -28115,10 +28120,10 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
         // Assert: Ints epsilon attribute falls back to default 1e-5
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
@@ -28167,10 +28172,10 @@ mod tests {
         let norm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
         // Assert: Floats (vector) epsilon should fall back to default 1e-5
-        if let Op::RmsNorm(spec) = &norm.op_v2 {
+        if let Op::RmsNorm(spec) = &norm.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-15,
@@ -28211,10 +28216,10 @@ mod tests {
         let tr_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
         // Assert: Float perm should be treated as non-Ints, defaulting to empty
-        if let Op::Transpose { perm } = &tr_op.op_v2 {
+        if let Op::Transpose { perm } = &tr_op.op {
             assert!(
                 perm.is_empty(),
                 "Float perm attribute should default to empty perm, got {:?}",
@@ -28272,7 +28277,7 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }));
+            .find(|op| matches!(op.op, Op::Gather { .. }));
         assert!(
             gather_op.is_some(),
             "Should have Gather op with long table name"
@@ -28340,11 +28345,11 @@ mod tests {
             1,
             "Sigmoid passthrough + MatMul should produce 1 op"
         );
-        if let Op::Gemm(spec) = &graph.ops[0].op_v2 {
+        if let Op::Gemm(spec) = &graph.ops[0].op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "MatMul n should be 64 from weight shape [64, 32]");
-            assert_eq!(*k, 32, "MatMul k should be 32 from weight shape [64, 32]");
+            assert_eq!(*n, 32, "MatMul n should be 64 from weight shape [64, 32]");
+            assert_eq!(*k, 64, "MatMul k should be 32 from weight shape [64, 32]");
         }
     }
 
@@ -28455,11 +28460,11 @@ mod tests {
         let gathers: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .filter(|op| matches!(op.op, Op::Gather { .. }))
             .collect();
         assert_eq!(gathers.len(), 2, "Chained Gather should produce 2 ops");
         // Second gather uses table_b which has embed_dim=16
-        if let Op::Gather { embed_dim, .. } = &gathers[1].op_v2 {
+        if let Op::Gather { embed_dim, .. } = &gathers[1].op {
             assert_eq!(
                 *embed_dim, 16,
                 "Second Gather should use table_b embed_dim=16"
@@ -28536,7 +28541,7 @@ mod tests {
         let pow_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Mul) && op.label == "pow1");
+            .find(|op| matches!(op.op, Op::Mul) && op.label == "pow1");
         assert!(
             pow_op.is_some(),
             "Pow node should produce Mul op with label 'pow1'"
@@ -28685,7 +28690,7 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Should have Add op");
         let out_tid = add_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
@@ -28824,13 +28829,13 @@ mod tests {
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm_op.op_v2 {
+        if let Op::Gemm(spec) = &gemm_op.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "n should be weight.shape[0]");
-            assert_eq!(*k, 16, "k should be weight.shape[1]");
+            assert_eq!(*n, 16, "n should be weight.shape[0]");
+            assert_eq!(*k, 32, "k should be weight.shape[1]");
         }
     }
 
@@ -28874,9 +28879,9 @@ mod tests {
         let pool = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool op");
-        if let Op::MeanPool { cls_mode, .. } = &pool.op_v2 {
+        if let Op::MeanPool { cls_mode, .. } = &pool.op {
             assert!(
                 !cls_mode,
                 "cls_mode should always be false for ONNX ReduceMean"
@@ -29029,7 +29034,7 @@ mod tests {
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
         let out_tid = gemm_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
@@ -29041,8 +29046,8 @@ mod tests {
             panic!("First dim of Gemm output should be symbolic");
         }
         assert!(
-            matches!(&out_tensor.shape[1], SymDim::Concrete(64)),
-            "Second dim should be n=64"
+            matches!(&out_tensor.shape[1], SymDim::Concrete(32)),
+            "Second dim should be n=32"
         );
     }
 
@@ -29086,7 +29091,7 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Should have Add op");
         let out_tid = add_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
@@ -29188,7 +29193,7 @@ mod tests {
             "Should produce 1 Gemm op even with empty node name"
         );
         let gemm_op = &graph.ops[0];
-        assert!(matches!(gemm_op.op_v2, Op::Gemm(..)));
+        assert!(matches!(gemm_op.op, Op::Gemm(..)));
     }
 
     // @trace TEST-GC-858 [req:REQ-LOADER-ONNX] [level:unit]
@@ -29312,7 +29317,7 @@ mod tests {
         let pool_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("Should have MeanPool op");
         let out_tid = pool_op.outputs[0];
         let out_tensor = graph.tensor(out_tid).expect("Output tensor should exist");
@@ -29372,9 +29377,9 @@ mod tests {
         let tr_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Should have Transpose op");
-        if let Op::Transpose { perm } = &tr_op.op_v2 {
+        if let Op::Transpose { perm } = &tr_op.op {
             assert_eq!(perm, &vec![1_usize, 0_usize], "perm should be [1, 0]");
         }
     }
@@ -29560,7 +29565,7 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         let hidden_tid = gather_op.outputs[0];
         let hidden_tensor = graph
@@ -29663,14 +29668,14 @@ mod tests {
         let gemm_bias = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
         assert_eq!(gemm_bias.inputs.len(), 3, "GemmBias should have 3 inputs");
-        if let Op::GemmBias(spec) = &gemm_bias.op_v2 {
+        if let Op::GemmBias(spec) = &gemm_bias.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "transB=true: n should be shape[1]=32");
-            assert_eq!(*k, 16, "transB=true: k should be shape[0]=16");
+            assert_eq!(*n, 16, "transB=true: n should be shape[1]=32");
+            assert_eq!(*k, 32, "transB=true: k should be shape[0]=16");
         }
     }
 
@@ -29899,7 +29904,7 @@ mod tests {
             1,
             "Triple passthrough should not produce any ops"
         );
-        assert!(matches!(graph.ops[0].op_v2, Op::Gemm(..)));
+        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
         // MatMul 应消费原始 "x" tensor（所有 passthrough 都 alias 到 x）
         let x_tensor = graph
             .tensors
@@ -29946,9 +29951,9 @@ mod tests {
         let transpose = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }) && op.label == "transpose_4d")
+            .find(|op| matches!(op.op, Op::Transpose { .. }) && op.label == "transpose_4d")
             .expect("Should have Transpose op with 4D perm");
-        if let Op::Transpose { perm } = &transpose.op_v2 {
+        if let Op::Transpose { perm } = &transpose.op {
             assert_eq!(*perm, vec![0, 3, 1, 2], "perm should be [0, 3, 1, 2]");
         }
     }
@@ -29998,9 +30003,9 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let dtype = &spec.dtype;
             assert!(
                 matches!(dtype, DType::BF16),
@@ -30069,7 +30074,7 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         assert!(
             gather.inputs.contains(&reshape.outputs[0]),
@@ -30168,7 +30173,7 @@ mod tests {
         let gemm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         assert_eq!(gemm_ops.len(), 2);
         assert_eq!(
@@ -30255,12 +30260,12 @@ mod tests {
         let ln_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("Should have LayerNorm op");
         let rn_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("Should have RmsNorm op");
         assert!(
             rn_op.inputs.contains(&ln_op.outputs[0]),
@@ -30313,14 +30318,14 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Should have Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
             let m = &spec.m;
-            assert_eq!(*n, 8192, "n should be 8192");
-            assert_eq!(*k, 4096, "k should be 4096");
+            assert_eq!(*n, 4096, "n should be 8192");
+            assert_eq!(*k, 8192, "k should be 4096");
             assert!(
                 matches!(m, SymDim::Symbolic { name, max_value: Some(16384) } if name == "seq_len"),
                 "m should be Symbolic(seq_len, 16384)"
@@ -30398,13 +30403,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Should have Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 100, "table_rows should be 100");
             assert_eq!(*embed_dim, 64, "embed_dim should be 64");
@@ -30717,7 +30722,7 @@ mod tests {
 
     #[test]
     fn div_output_tensor_shape_matches_higher_rank_input() {
-        // Arrange: Div 使用 Mul OpKind，输出形状取广播后的高秩形状
+        // Arrange: Div 使用 Mul Op，输出形状取广播后的高秩形状
         use super::super::tensor::OnnxTensor;
         let w = OnnxTensor::new(
             "div_w".to_string(),
@@ -30764,15 +30769,15 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: Div 的 OpKind 应为 Mul（Div 映射到 Mul）
+        // Assert: Div 的 Op 应为 Mul（Div 映射到 Mul）
         let div_op = graph
             .ops
             .iter()
             .find(|op| op.label == "div_op")
             .expect("Div op should exist");
         assert!(
-            matches!(div_op.op_v2, Op::Mul),
-            "Div should map to OpKind::Mul"
+            matches!(div_op.op, Op::Mul),
+            "Div should map to Op::Mul"
         );
         // 输出 tensor 名称应为 "div_result"
         let div_result = graph
@@ -30790,7 +30795,7 @@ mod tests {
 
     #[test]
     fn sub_output_tensor_has_correct_name_and_shape() {
-        // Arrange: Sub 映射到 Add OpKind，验证输出 tensor
+        // Arrange: Sub 映射到 Add Op，验证输出 tensor
         use super::super::tensor::OnnxTensor;
         let w = OnnxTensor::new(
             "sub_w".to_string(),
@@ -30837,15 +30842,15 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        // Assert: Sub 映射到 Add OpKind
+        // Assert: Sub 映射到 Add Op
         let sub_op = graph
             .ops
             .iter()
             .find(|op| op.label == "sub_op")
             .expect("Sub op should exist");
         assert!(
-            matches!(sub_op.op_v2, Op::Add),
-            "Sub should map to OpKind::Add"
+            matches!(sub_op.op, Op::Add),
+            "Sub should map to Op::Add"
         );
         // 输出 tensor 名称为 "sub_result"
         let sub_result = graph
@@ -30986,12 +30991,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op should exist");
         let rms_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("RmsNorm op should exist");
         assert!(
             rms_op.inputs.contains(&gather_op.outputs[0]),
@@ -31072,12 +31077,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op should exist");
         let ln_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("LayerNorm op should exist");
         assert!(
             ln_op.inputs.contains(&gather_op.outputs[0]),
@@ -31137,11 +31142,11 @@ mod tests {
         let gb_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("Should have GemmBias op");
-        if let Op::GemmBias(spec) = &gb_op.op_v2 {
+        if let Op::GemmBias(spec) = &gb_op.op {
             let n = &spec.n;
-            assert_eq!(*n, 48, "GemmBias n should be 48 (weight rows)");
+            assert_eq!(*n, 32, "GemmBias n should be 32 (weight [48,32] no transB, n=shape[1])");
         }
         let gb_out = graph
             .tensors
@@ -31149,9 +31154,9 @@ mod tests {
             .find(|t| t.name == "gb_out")
             .expect("gb_out tensor should exist");
         if let SymDim::Concrete(dim) = gb_out.shape.get(1).unwrap() {
-            assert_eq!(*dim, 48, "Output tensor second dim should be 48");
+            assert_eq!(*dim, 32, "Output tensor second dim should be 32 (n=32)");
         } else {
-            panic!("Output tensor second dim should be Concrete(48)");
+            panic!("Output tensor second dim should be Concrete(32)");
         }
     }
 
@@ -31218,12 +31223,12 @@ mod tests {
         let mean_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("ReduceMean should produce MeanPool op");
         let reshape_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Reshape op should exist");
         assert_eq!(
             reshape_op.inputs[0], mean_op.outputs[0],
@@ -31294,12 +31299,12 @@ mod tests {
         let rm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("ReduceMean should produce MeanPool op");
         let trans_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Transpose op should exist");
         assert_eq!(
             trans_op.inputs[0], rm_op.outputs[0],
@@ -31442,7 +31447,7 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: 应产生一个 Add op，消费两个不同的激活 tensor
         assert_eq!(graph.ops.len(), 1, "Should have exactly 1 Add op");
-        assert!(matches!(graph.ops[0].op_v2, Op::Add));
+        assert!(matches!(graph.ops[0].op, Op::Add));
         assert_ne!(
             graph.ops[0].inputs[0], graph.ops[0].inputs[1],
             "Two different activations should have different tensor IDs"
@@ -31511,12 +31516,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op should exist");
         let silu_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Silu))
+            .find(|op| matches!(op.op, Op::Silu))
             .expect("Silu op should exist");
         assert_eq!(
             silu_op.inputs[0], gather_op.outputs[0],
@@ -31577,12 +31582,12 @@ mod tests {
         let tanh_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .find(|op| matches!(op.op, Op::Tanh))
             .expect("Tanh op");
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op");
         assert_eq!(
             gemm_op.inputs[0], tanh_op.outputs[0],
@@ -31630,12 +31635,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather");
         let softmax_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         assert_eq!(
             softmax_op.inputs[0], gather_op.outputs[0],
@@ -31693,17 +31698,17 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        // Assert: Sub maps to Add OpKind
+        // Assert: Sub maps to Add Op
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
-        assert!(add_ops.len() >= 1, "Sub should be mapped to Add OpKind");
+        assert!(add_ops.len() >= 1, "Sub should be mapped to Add Op");
         let softmax_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         let sub_op = add_ops[0];
         assert_eq!(
@@ -31760,12 +31765,12 @@ mod tests {
         let reduce_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("ReduceMean");
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm");
         assert_eq!(
             gemm_op.inputs[0], reduce_op.outputs[0],
@@ -31830,17 +31835,17 @@ mod tests {
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm");
         let gelu_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .find(|op| matches!(op.op, Op::Gelu))
             .expect("Gelu");
         let matmul_op = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .nth(1)
             .expect("Second Gemm (MatMul)");
         assert_eq!(
@@ -31853,7 +31858,7 @@ mod tests {
         );
     }
 
-    // ── 21. Pow 输出接 Add 验证 Mul OpKind 映射链 ──────────────────
+    // ── 21. Pow 输出接 Add 验证 Mul Op 映射链 ──────────────────
 
     #[test]
     fn pow_output_feeds_into_add() {
@@ -31901,13 +31906,13 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
-        assert!(mul_ops.len() >= 1, "Pow should be mapped to Mul OpKind");
+        assert!(mul_ops.len() >= 1, "Pow should be mapped to Mul Op");
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         assert!(add_ops.len() >= 1, "Add should exist");
         assert_eq!(
@@ -31916,7 +31921,7 @@ mod tests {
         );
     }
 
-    // ── 22. Div 输出接 Softmax 验证 Mul OpKind 映射和连接 ───────────
+    // ── 22. Div 输出接 Softmax 验证 Mul Op 映射和连接 ───────────
 
     #[test]
     fn div_output_feeds_into_softmax() {
@@ -31961,17 +31966,17 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        // Assert: Div maps to Mul OpKind
+        // Assert: Div maps to Mul Op
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
-        assert!(mul_ops.len() >= 1, "Div should be mapped to Mul OpKind");
+        assert!(mul_ops.len() >= 1, "Div should be mapped to Mul Op");
         let softmax_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         assert_eq!(
             softmax_op.inputs[0], mul_ops[0].outputs[0],
@@ -32035,12 +32040,12 @@ mod tests {
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Add");
         let reduce_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("ReduceMean");
         assert_eq!(
             reduce_op.inputs[0], add_op.outputs[0],
@@ -32096,12 +32101,12 @@ mod tests {
         let gemm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         let reshape_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Reshape");
         assert_eq!(
             reshape_op.inputs[0], gemm_ops[0].outputs[0],
@@ -32109,7 +32114,7 @@ mod tests {
         );
     }
 
-    // ── 25. Sqrt 输出接 Add 验证 Mul OpKind 映射 ──────────────────
+    // ── 25. Sqrt 输出接 Add 验证 Mul Op 映射 ──────────────────
 
     #[test]
     fn sqrt_output_feeds_into_add() {
@@ -32153,17 +32158,17 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
-        // Assert: Sqrt maps to Mul OpKind
+        // Assert: Sqrt maps to Mul Op
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
-        assert!(mul_ops.len() >= 1, "Sqrt should be mapped to Mul OpKind");
+        assert!(mul_ops.len() >= 1, "Sqrt should be mapped to Mul Op");
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         assert!(add_ops.len() >= 1, "Add should exist");
         assert_eq!(
@@ -32240,17 +32245,17 @@ mod tests {
         let ln_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("LayerNorm");
         let gelu_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .find(|op| matches!(op.op, Op::Gelu))
             .expect("Gelu");
         let gemm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         let matmul_op = gemm_ops.last().expect("Final MatMul");
         assert_eq!(
@@ -32311,17 +32316,17 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather");
         let gelu_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .find(|op| matches!(op.op, Op::Gelu))
             .expect("Gelu");
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm");
         assert_eq!(
             gelu_op.inputs[0], gather_op.outputs[0],
@@ -32382,12 +32387,12 @@ mod tests {
         let softmax_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Add");
         assert_eq!(
             add_op.inputs[0], softmax_op.outputs[0],
@@ -32450,12 +32455,12 @@ mod tests {
         let gemm_bias_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .find(|op| matches!(op.op, Op::GemmBias(..)))
             .expect("GemmBias");
         let softmax_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         assert_eq!(
             softmax_op.inputs[0], gemm_bias_op.outputs[0],
@@ -32500,11 +32505,11 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Pow and Sqrt both map to Mul OpKind
+        // Assert: Pow and Sqrt both map to Mul Op
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(
             mul_ops.len(),
@@ -32888,12 +32893,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op");
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op (MatMul)");
         // MatMul should consume Gather output (Relu passthrough aliases the tensor)
         assert_eq!(
@@ -32955,12 +32960,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather");
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm");
         assert_eq!(
             gemm_op.inputs[0], gather_op.outputs[0],
@@ -33021,12 +33026,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather");
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("MatMul Gemm");
         assert_eq!(
             gemm_op.inputs[0], gather_op.outputs[0],
@@ -33203,12 +33208,12 @@ mod tests {
         let gather_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather");
         let add_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Add))
+            .find(|op| matches!(op.op, Op::Add))
             .expect("Add");
         assert_eq!(
             add_op.inputs[0], gather_op.outputs[0],
@@ -33806,19 +33811,19 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: transB attribute with large int64 should be truthy (non-zero),
-        // which causes n/k swap in convert_gemm (n=shape[1], k=shape[0]).
-        // The OpKind::Gemm trans_b field itself is always false in current code,
+        // which causes n/k swap in convert_gemm (n=shape[0], k=shape[1]).
+        // The Op::Gemm trans_b field itself is always false in current code,
         // but the n/k dimensions reflect the transpose effect.
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 64, "n should be weight shape[1]=64 (transB swaps n/k)");
-            assert_eq!(*k, 32, "k should be weight shape[0]=32 (transB swaps n/k)");
+            assert_eq!(*n, 32, "n should be weight shape[0]=64 (transB swaps n/k)");
+            assert_eq!(*k, 64, "k should be weight shape[1]=32 (transB swaps n/k)");
         }
     }
 
@@ -33884,9 +33889,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("LayerNorm");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e10).abs() < 1.0,
@@ -33970,17 +33975,17 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather");
         let reshape = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Reshape");
         let softmax = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Softmax))
+            .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         // Reshape consumes Gather output
         assert_eq!(
@@ -34319,9 +34324,9 @@ mod tests {
         let tr = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Transpose op");
-        if let Op::Transpose { perm } = &tr.op_v2 {
+        if let Op::Transpose { perm } = &tr.op {
             assert_eq!(perm, &[2usize, 0, 1], "perm should be [2,0,1]");
         }
     }
@@ -34372,9 +34377,9 @@ mod tests {
         let tr = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Transpose");
-        if let Op::Transpose { perm } = &tr.op_v2 {
+        if let Op::Transpose { perm } = &tr.op {
             assert_eq!(
                 perm,
                 &[5usize, 3, 1, 0, 2, 4],
@@ -34383,11 +34388,11 @@ mod tests {
         }
     }
 
-    // ── 72. Gelu followed by Tanh verifies distinct OpKind mapping ───────
+    // ── 72. Gelu followed by Tanh verifies distinct Op mapping ───────
 
     #[test]
     fn gelu_then_tanh_produces_distinct_opkinds() {
-        // Arrange: Gelu and Tanh are both unary but map to different OpKinds
+        // Arrange: Gelu and Tanh are both unary but map to different Ops
         let onnx = OnnxGraph {
             name: "gelu_tanh".to_string(),
             doc_string: String::new(),
@@ -34415,12 +34420,12 @@ mod tests {
         let gelu = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gelu))
+            .find(|op| matches!(op.op, Op::Gelu))
             .expect("Gelu op");
         let tanh = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .find(|op| matches!(op.op, Op::Tanh))
             .expect("Tanh op");
         // Gelu output feeds Tanh input
         assert_eq!(
@@ -34466,13 +34471,13 @@ mod tests {
         let mm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm from MatMul");
-        if let Op::Gemm(spec) = &mm.op_v2 {
+        if let Op::Gemm(spec) = &mm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "n should be weight shape[0]=32");
-            assert_eq!(*k, 16, "k should be weight shape[1]=16");
+            assert_eq!(*n, 16, "n should be weight shape[0]=32");
+            assert_eq!(*k, 32, "k should be weight shape[1]=16");
         }
     }
 
@@ -34504,7 +34509,7 @@ mod tests {
         let rm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .find(|op| matches!(op.op, Op::MeanPool { .. }))
             .expect("MeanPool from ReduceMean");
         assert_eq!(rm.label, "rm1", "label should match node name");
     }
@@ -34555,9 +34560,9 @@ mod tests {
         let tr = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Transpose");
-        if let Op::Transpose { perm } = &tr.op_v2 {
+        if let Op::Transpose { perm } = &tr.op {
             assert_eq!(
                 perm,
                 &[0usize, 1],
@@ -34617,17 +34622,17 @@ mod tests {
         };
         // Act: missing transB should default to false, no panic
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: n/k should reflect no transpose (n=shape[0], k=shape[1])
+        // Assert: n/k should reflect no transpose (n=shape[1], k=shape[0])
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 48, "n should be weight shape[0]=48 (no transB)");
-            assert_eq!(*k, 32, "k should be weight shape[1]=32 (no transB)");
+            assert_eq!(*n, 32, "n should be weight shape[1]=48 (no transB)");
+            assert_eq!(*k, 48, "k should be weight shape[0]=32 (no transB)");
         }
     }
 
@@ -34659,9 +34664,9 @@ mod tests {
         let rs = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Reshape");
-        if let Op::Reshape { target_shape } = &rs.op_v2 {
+        if let Op::Reshape { target_shape } = &rs.op {
             assert!(
                 target_shape.is_empty(),
                 "target_shape should be empty when no attribute"
@@ -34720,9 +34725,9 @@ mod tests {
         let ln = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .find(|op| matches!(op.op, Op::LayerNorm(..)))
             .expect("LayerNorm");
-        if let Op::LayerNorm(spec) = &ln.op_v2 {
+        if let Op::LayerNorm(spec) = &ln.op {
             let eps = &spec.eps;
             assert!(
                 (eps - 1e-5).abs() < 1e-10,
@@ -34882,19 +34887,19 @@ mod tests {
         // Assert: ops must appear in the exact order: Gather, Softmax, MatMul(=Gemm), Add
         assert_eq!(graph.ops.len(), 4, "Should have exactly 4 ops");
         assert!(
-            matches!(graph.ops[0].op_v2, Op::Gather { .. }),
+            matches!(graph.ops[0].op, Op::Gather { .. }),
             "First op should be Gather"
         );
         assert!(
-            matches!(graph.ops[1].op_v2, Op::Softmax),
+            matches!(graph.ops[1].op, Op::Softmax),
             "Second op should be Softmax"
         );
         assert!(
-            matches!(graph.ops[2].op_v2, Op::Gemm(..)),
+            matches!(graph.ops[2].op, Op::Gemm(..)),
             "Third op should be Gemm (MatMul)"
         );
         assert!(
-            matches!(graph.ops[3].op_v2, Op::Add),
+            matches!(graph.ops[3].op, Op::Add),
             "Fourth op should be Add"
         );
     }
@@ -35008,7 +35013,7 @@ mod tests {
         // Assert
         assert_eq!(graph.ops.len(), 1, "Exactly one op");
         let op = &graph.ops[0];
-        assert!(matches!(op.op_v2, Op::Gather { .. }));
+        assert!(matches!(op.op, Op::Gather { .. }));
         assert_eq!(op.label, "g_rt", "Label should match node name");
         assert_eq!(op.inputs.len(), 2, "Gather should have 2 inputs");
         assert_eq!(op.outputs.len(), 1, "Gather should have 1 output");
@@ -35075,9 +35080,9 @@ mod tests {
         let rms = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("RmsNorm");
-        if let Op::RmsNorm(spec) = &rms.op_v2 {
+        if let Op::RmsNorm(spec) = &rms.op {
             let eps = &spec.eps;
             assert_eq!(
                 eps.to_bits(),
@@ -35142,9 +35147,9 @@ mod tests {
         let rms = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::RmsNorm(..)))
+            .find(|op| matches!(op.op, Op::RmsNorm(..)))
             .expect("RmsNorm");
-        if let Op::RmsNorm(spec) = &rms.op_v2 {
+        if let Op::RmsNorm(spec) = &rms.op {
             let eps = &spec.eps;
             assert!(
                 eps.is_infinite() && eps.is_sign_negative(),
@@ -35279,7 +35284,7 @@ mod tests {
             table_rows,
             embed_dim,
             ..
-        } = &op.op_v2
+        } = &op.op
         {
             assert_eq!(
                 *table_rows, 0,
@@ -35516,9 +35521,9 @@ mod tests {
         let rs = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Reshape { .. }))
+            .find(|op| matches!(op.op, Op::Reshape { .. }))
             .expect("Reshape");
-        if let Op::Reshape { target_shape } = &rs.op_v2 {
+        if let Op::Reshape { target_shape } = &rs.op {
             assert!(
                 target_shape.is_empty(),
                 "target_shape should be empty (shape initializer not parsed into attribute)"
@@ -35658,7 +35663,7 @@ mod tests {
     #[test]
     fn pow_with_two_activation_inputs_produces_mul_binary_op() {
         // Arrange: Pow takes two activation inputs (not initializer)
-        // Pow maps to OpKind::Mul via convert_binary
+        // Pow maps to Op::Mul via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![32, 64],
@@ -35680,7 +35685,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce exactly one Mul op");
         assert_eq!(
@@ -35716,7 +35721,7 @@ mod tests {
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Sqrt should produce one Mul op");
         assert_eq!(
@@ -36014,9 +36019,9 @@ mod tests {
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op");
-        if let Op::Gemm(spec) = &gemm_op.op_v2 {
+        if let Op::Gemm(spec) = &gemm_op.op {
             let dtype = &spec.dtype;
             assert_eq!(*dtype, DType::F16, "Gemm op should carry F16 dtype");
         }
@@ -36074,9 +36079,9 @@ mod tests {
         let gemm_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op");
-        if let Op::Gemm(spec) = &gemm_op.op_v2 {
+        if let Op::Gemm(spec) = &gemm_op.op {
             let dtype = &spec.dtype;
             assert_eq!(*dtype, DType::BF16, "Gemm op should carry BF16 dtype");
         }
@@ -36277,13 +36282,13 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op");
         if let Op::Gather {
             table_rows,
             embed_dim,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 200, "FP16 Gather table_rows should be 200");
             assert_eq!(*embed_dim, 48, "FP16 Gather embed_dim should be 48");
@@ -36537,11 +36542,11 @@ mod tests {
         }
     }
 
-    // ── 118. Sub op maps to Add OpKind via convert_binary ──────────────
+    // ── 118. Sub op maps to Add Op via convert_binary ──────────────
 
     #[test]
     fn sub_op_produces_add_opkind_in_graph() {
-        // Arrange: Sub node should map to OpKind::Add via convert_binary
+        // Arrange: Sub node should map to Op::Add via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![32, 16],
@@ -36559,20 +36564,20 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Sub should produce OpKind::Add
+        // Assert: Sub should produce Op::Add
         let add_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         assert_eq!(add_ops.len(), 1, "Sub should produce exactly one Add op");
     }
 
-    // ── 119. Div op maps to Mul OpKind via convert_binary ──────────────
+    // ── 119. Div op maps to Mul Op via convert_binary ──────────────
 
     #[test]
     fn div_op_produces_mul_opkind_in_graph() {
-        // Arrange: Div node should map to OpKind::Mul via convert_binary
+        // Arrange: Div node should map to Op::Mul via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 8],
@@ -36590,11 +36595,11 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Div should produce OpKind::Mul
+        // Assert: Div should produce Op::Mul
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Div should produce exactly one Mul op");
     }
@@ -36946,13 +36951,13 @@ mod tests {
         let gemm = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op");
-        if let Op::Gemm(spec) = &gemm.op_v2 {
+        if let Op::Gemm(spec) = &gemm.op {
             let n = &spec.n;
             let k = &spec.k;
-            assert_eq!(*n, 32, "n should be 32 from weight shape [32, 16]");
-            assert_eq!(*k, 16, "k should be 16 from weight shape [32, 16]");
+            assert_eq!(*n, 16, "n should be 32 from weight shape [32, 16]");
+            assert_eq!(*k, 32, "k should be 16 from weight shape [32, 16]");
         }
     }
 
@@ -37177,18 +37182,18 @@ mod tests {
         let t_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Transpose { .. }))
+            .find(|op| matches!(op.op, Op::Transpose { .. }))
             .expect("Transpose op");
-        if let Op::Transpose { perm } = &t_op.op_v2 {
+        if let Op::Transpose { perm } = &t_op.op {
             assert_eq!(*perm, vec![0usize, 1], "Identity perm should be [0, 1]");
         }
     }
 
-    // ── 133. Pow op maps to Mul OpKind via convert_binary ───────────
+    // ── 133. Pow op maps to Mul Op via convert_binary ───────────
 
     #[test]
     fn pow_op_produces_mul_opkind_in_graph() {
-        // Arrange: Pow node should map to OpKind::Mul via convert_binary
+        // Arrange: Pow node should map to Op::Mul via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 8],
@@ -37206,20 +37211,20 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Pow should produce OpKind::Mul
+        // Assert: Pow should produce Op::Mul
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce exactly one Mul op");
     }
 
-    // ── 134. Sqrt op maps to Mul OpKind via convert_binary ──────────
+    // ── 134. Sqrt op maps to Mul Op via convert_binary ──────────
 
     #[test]
     fn sqrt_op_produces_mul_opkind_in_graph() {
-        // Arrange: Sqrt node should map to OpKind::Mul via convert_binary
+        // Arrange: Sqrt node should map to Op::Mul via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![32, 16],
@@ -37237,11 +37242,11 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Sqrt should produce OpKind::Mul
+        // Assert: Sqrt should produce Op::Mul
         let mul_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .collect();
         assert_eq!(mul_ops.len(), 1, "Sqrt should produce exactly one Mul op");
     }
@@ -37325,7 +37330,7 @@ mod tests {
         );
     }
 
-    // ── 137. Tanh op produces correct OpKind ──────────────────────
+    // ── 137. Tanh op produces correct Op ──────────────────────
 
     #[test]
     fn tanh_op_produces_tanh_opkind() {
@@ -37351,7 +37356,7 @@ mod tests {
         let tanh_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Tanh))
+            .find(|op| matches!(op.op, Op::Tanh))
             .expect("Tanh op");
         assert_eq!(tanh_op.inputs.len(), 1, "Tanh should have 1 input");
         assert_eq!(tanh_op.outputs.len(), 1, "Tanh should have 1 output");
@@ -37405,7 +37410,7 @@ mod tests {
         let gather_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .filter(|op| matches!(op.op, Op::Gather { .. }))
             .collect();
         assert_eq!(gather_ops.len(), 2, "Should have exactly 2 Gather ops");
         for g in &gather_ops {
@@ -37413,7 +37418,7 @@ mod tests {
                 table_rows,
                 embed_dim,
                 ..
-            } = &g.op_v2
+            } = &g.op
             {
                 assert_eq!(*table_rows, 500, "table_rows should be 500");
                 assert_eq!(*embed_dim, 128, "embed_dim should be 128");

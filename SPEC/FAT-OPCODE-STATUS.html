@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="">
+<head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="FAT-OPCODE-STATUS">
+  <meta name="spec-category" content="status">
+  <title>FAT-OPCODE 实施状态（非规范）</title>
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"FAT-OPCODE-STATUS", "dependencies":["FAT-OPCODE-ARCHITECTURE-V2"], "children":[] }
+  </script>
+</head>
+<body>
+<header data-spec-header="">
+<h1>FAT-OPCODE 实施状态（非规范）</h1>
+<nav data-spec-breadcrumb=""><a href="./00-INDEX.html">SPEC</a> &gt; <span>FAT-OPCODE-STATUS</span></nav>
+</header>
+<main data-spec-content="">
+<section id="s0" data-section="0">
+<h2>0. 文档定位</h2>
+<p>本文档是 <a href="./FAT-OPCODE-ARCHITECTURE-V2.html">FAT-OPCODE-ARCHITECTURE-V2</a> 的实施状态记录，<strong>非规范内容</strong>。规范性定义见主 SPEC（§1-§5 + §10-§15 REQ/Entity/Decision/Dataflow/Module/Test）。</p>
+</section>
+<section id="s1" data-section="1">
+<h2>1. Phase 0-2 完成状态（2026-06-14）</h2>
+<p>Phase 0: FAT-OPCODE-ARCHITECTURE-V2.html SPEC + architect audit (82/100) + 反馈修正</p>
+<p>Phase 1: KvSource enum 内化到 MHA/CachedGQA/MlaAttention（op-level 自描述）</p>
+<p>Phase 2: CompileSession 提取（13 字段从 LoweringContext 搬出）</p>
+</section>
+<section id="s2" data-section="2">
+<h2>2. Phase 3-7 完成状态</h2>
+<p>Phase 3: Op 新 enum + from_op_kind 适配层</p>
+<p>Phase 4-7: 81 OpKind → 41 Op 类别全迁移（norm_activation/gemm_quant/attention_moe/structural）</p>
+</section>
+<section id="s3" data-section="3">
+<h2>3. Phase 8 完整实现（commit 3d5849ff）</h2>
+<p>VmInstr 复合指令完整自描述：</p>
+<ul>
+<li>VecLoad/VecStore：加 predicate: Option&lt;Predicate&gt; 字段（masked load/store）</li>
+<li>GatherLoad/ScatterStore：加 dtype + predicate 字段</li>
+<li>MemCopy：加 dtype + guard + effect 三字段</li>
+<li>新类型：Predicate（基于 GprCondition）+ MemEffect（Read/Write/ReadWrite）</li>
+<li>构造点批量注入：193 VecLoad/VecStore + 22 GatherLoad/ScatterStore + 10 MemCopy</li>
+<li>GatherLoad/ScatterStore dtype 从 default_dtype 推导（非硬编码 F32）</li>
+</ul>
+<p>JIT cache 失效：OPCODE_VERSION 从 v1 bump 到 v2。</p>
+</section>
+<section id="s4" data-section="4">
+<h2>4. Phase 9 op_v2 缓存基础设施（commit cfbdb152 + a6fcdb32）</h2>
+<p>Step 1: CompilerOp.op_v2 缓存字段。add_op 内部一次性翻译并缓存。</p>
+<p>Step 2: lowering 路径优先读 op_v2 缓存（消除重复 from_op_kind 调用）。</p>
+</section>
+<section id="s5" data-section="5">
+<h2>5. 测试基线</h2>
+<ul>
+<li>gllm-kernels: 6863 passed</li>
+<li>gllm: 44201 passed</li>
+<li>总计: 51064 passed, 0 failures</li>
+</ul>
+</section>
+<section id="s6" data-section="6"><h2>6. Phase 10 完成 — OpKind 物理删除（2026-06-17）</h2>
+<p>Phase 10 全部完成。OpKind enum 已物理删除，Op 是唯一 IR。</p>
+<ol>
+<li>✅ add_op 接受 Op 类型（API 层切换）— add_op(op: Op) / add_op_guarded(op: Op)</li>
+<li>✅ graph builder 直接构造 Op — gllm 侧 build_graph 153处 + audio 28处 + vision 148处 + onnx + profiler + small_graph + intent_tracker</li>
+<li>✅ OpKind 构造点逐个迁移到 Op 构造 — gllm-kernels 全部 37 文件 -4120 行</li>
+<li>✅ 删除 OpKind enum 与 from_op_kind 适配层 — 5 translator 函数物理删除</li>
+<li>✅ KvCacheWrite op 删除 — attention FromCache 内部覆盖 KV 写入</li>
+<li>✅ KvSource BUILD 阶段 family 驱动 — 符合 BUILD-COMPILE-BOUNDARY 铁律</li>
+<li>✅ OPCODE_VERSION v3 — JIT cache 失效</li>
+<li>✅ op_v2.inc.rs → op.inc.rs 重命名 — 唯一 IR 命名统一</li>
+</ol>
+<p>测试基线：gllm-kernels 6838 + gllm 44199 = 112037 passed, 0 failures</p></section>
+</main>
+<footer data-spec-footer=""><p>状态文档 — 自动生成于 2026-06-14</p></footer>
+</body>
+</html>

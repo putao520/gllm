@@ -16,7 +16,7 @@ pub mod executor_compile;
 pub mod executor_step;
 pub mod mega_kernel;
 pub mod mega_kernel_callback;
-pub mod mega_kernel_v2;
+pub mod mega_kernel_gpu;
 pub mod mtp_executor;
 pub mod callbacks;
 

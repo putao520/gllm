@@ -614,12 +614,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     pub fn rerank_pair(&mut self, query: &str, document: &str) -> ExecutorResult<Vec<f32>> {
-        // Generative reranker: uses token generation (yes/no) for scoring.
-        // Derived from manifest.kind (service mode), not arch_family.
-        // A decoder-based reranker generates yes/no tokens; an encoder-based reranker
-        // uses a classifier head. The distinction is service-mode driven, not architecture driven.
+        // ARCH-RERANKER-CLASSIFY: Determine rerank path from weight topology, not just arch_family.
+        // has_classifier = true → classification path (MeanPool → Gemm(classifier) → [num_labels])
+        // has_classifier = false → generative path (lm_head → Argmax → yes/no token scoring)
+        // A decoder-based reranker WITH a classifier head (e.g. Qwen3-Reranker GGUF where
+        // score.weight maps to classifier) should use the classification path, not the
+        // generative path, because the classifier weight has shape [num_labels, hidden]
+        // (not [vocab_size, hidden]) and produces [num_labels] output directly.
         let is_generative = matches!(self.model_ctx.manifest.kind, crate::manifest::ModelKind::Reranker)
-            && self.model_ctx.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
+            && self.model_ctx.forward_config.arch_family == crate::manifest::ArchFamily::Decoder
+            && !self.model_ctx.forward_config.has_classifier;
         let tokens = if is_generative {
             self.model_ctx.tokenizer.encode(&format!("{} {}", query, document), self.model_ctx.add_special_tokens)?
         } else {

@@ -3505,24 +3505,24 @@ mod tests {
 
     #[test]
     fn dispatch_coordinator_compact_op_kind_eligibility() {
-        // Arrange: test OpKind compact eligibility
-        use crate::scheduler::compact::OpKind;
+        // Arrange: test CompactOpCategory compact eligibility
+        use crate::scheduler::compact::CompactOpCategory;
 
         // Assert: only GEMM is compact-eligible
-        assert!(OpKind::Gemm.is_compact_eligible());
-        assert!(!OpKind::Attention.is_compact_eligible());
-        assert!(!OpKind::Norm.is_compact_eligible());
-        assert!(!OpKind::Elementwise.is_compact_eligible());
+        assert!(CompactOpCategory::Gemm.is_compact_eligible());
+        assert!(!CompactOpCategory::Attention.is_compact_eligible());
+        assert!(!CompactOpCategory::Norm.is_compact_eligible());
+        assert!(!CompactOpCategory::Elementwise.is_compact_eligible());
 
         // Assert: only GEMM is compute-bound
-        assert!(OpKind::Gemm.is_compute_bound());
-        assert!(!OpKind::Attention.is_compute_bound());
+        assert!(CompactOpCategory::Gemm.is_compute_bound());
+        assert!(!CompactOpCategory::Attention.is_compute_bound());
     }
 
     #[test]
     fn dispatch_coordinator_compact_evaluate_empty_batch() {
         // Arrange: empty BatchManifest
-        use crate::scheduler::compact::{evaluate_compact, CompactConfig, CompactReason, OpKind};
+        use crate::scheduler::compact::{evaluate_compact, CompactConfig, CompactReason, CompactOpCategory};
         let manifest = crate::scheduler::chunked_prefill::BatchManifest {
             slots: vec![],
             total_tokens: 0,
@@ -3533,7 +3533,7 @@ mod tests {
         };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &CompactConfig::default());
 
         // Assert: empty batch returns EmptyBatch reason
         assert!(!decision.should_compact);
@@ -3545,7 +3545,7 @@ mod tests {
     #[test]
     fn dispatch_coordinator_compact_evaluate_attention_not_eligible() {
         // Arrange: high-waste manifest but Attention op (not eligible)
-        use crate::scheduler::compact::{evaluate_compact, CompactConfig, CompactReason, OpKind};
+        use crate::scheduler::compact::{evaluate_compact, CompactConfig, CompactReason, CompactOpCategory};
         let manifest = crate::scheduler::chunked_prefill::BatchManifest {
             slots: vec![
                 crate::scheduler::chunked_prefill::BatchSlot {
@@ -3592,7 +3592,7 @@ mod tests {
         };
 
         // Act: evaluate with Attention (memory-bound, not eligible)
-        let decision = evaluate_compact(&manifest, OpKind::Attention, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Attention, &CompactConfig::default());
 
         // Assert: should not compact because Attention is not eligible
         assert!(!decision.should_compact);
@@ -3602,7 +3602,7 @@ mod tests {
     #[test]
     fn dispatch_coordinator_compact_evaluate_gemm_triggered() {
         // Arrange: high-waste GEMM manifest with sufficient active elements
-        use crate::scheduler::compact::{evaluate_compact, CompactConfig, CompactReason, OpKind};
+        use crate::scheduler::compact::{evaluate_compact, CompactConfig, CompactReason, CompactOpCategory};
         let slots: Vec<_> = (0..10)
             .map(|i| crate::scheduler::chunked_prefill::BatchSlot {
                 request_id: i,
@@ -3622,7 +3622,7 @@ mod tests {
         };
 
         // Act: evaluate with GEMM (compute-bound, eligible)
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &CompactConfig::default());
 
         // Assert: compact triggered
         assert!(decision.should_compact);
@@ -3930,7 +3930,7 @@ mod tests {
         // Arrange: build a manifest where waste is below threshold (all active)
         use crate::scheduler::chunked_prefill::{BatchManifest, BatchSlot, SlotType};
         use crate::scheduler::compact::{
-            evaluate_compact, CompactConfig, CompactReason, OpKind,
+            evaluate_compact, CompactConfig, CompactReason, CompactOpCategory,
         };
         let manifest = BatchManifest {
             slots: vec![
@@ -3947,7 +3947,7 @@ mod tests {
         };
 
         // Act
-        let decision = evaluate_compact(&manifest, OpKind::Gemm, &CompactConfig::default());
+        let decision = evaluate_compact(&manifest, CompactOpCategory::Gemm, &CompactConfig::default());
 
         // Assert: not triggered, reason is BelowThreshold (waste = 0% < 25%)
         assert!(!decision.should_compact);

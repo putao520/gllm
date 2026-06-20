@@ -1521,13 +1521,16 @@ impl Client {
         }
 
         // ── 4. 提取 token embedding 字节 → EmbedLookupOnlyGraph ──
+        // BCE-20260619-001: Pass model_kind to name_map so Reranker models
+        // correctly resolve classifier (not lm_head) if needed.
+        let model_kind = self.manifest()?.kind;
         let name_map = {
             let weights = executor.weights().map_err(|e| {
                 ClientError::RuntimeError(format!(
                     "semantic gatekeeper: weights accessor failed: {e}"
                 ))
             })?;
-            weights.name_map()
+            weights.name_map_with_kind(Some(model_kind))
         };
         let (embed_bytes, embed_dtype) = {
             let weights = executor.weights().map_err(|e| {

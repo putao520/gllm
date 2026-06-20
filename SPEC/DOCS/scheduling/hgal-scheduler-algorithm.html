@@ -1,0 +1,1557 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="hgal-scheduler-algorithm">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"hgal-scheduler-algorithm", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>HGAL 调度算法详细设计</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>hgal-scheduler-algorithm</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-hgal-调度算法详细设计" data-section="null">
+      <h2>HGAL 调度算法详细设计</h2>
+      <p>&gt; <strong>关联需求</strong>: REQ-SCHED-001, REQ-SCHED-002, REQ-SCHED-003, REQ-SCHED-007, REQ-SCHED-009</p>
+      <p>&gt; <strong>版本</strong>: 2.0</p>
+      <p>&gt; <strong>状态</strong>: 已实现 (v1.0), 扩展设计中 (v2.0 - 2024 优化)</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 设计目标</h3>
+      <p>解决 VLLM 分页调度中的两个核心问题：</p>
+      <table>
+        <tr>
+          <th>问题</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>影响</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>页面序列错乱</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>同一 Sequence 的页面被分散换出/换入</td>
+        </tr>
+        <tr>
+          <td>内存碎片、预取失效、多次 swap-in</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Cache Thrashing</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>刚 swap-in 的页面立即被换出</td>
+        </tr>
+        <tr>
+          <td>浪费 PCIe 带宽、端到端延迟增加</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-禁止行为" data-section="null">
+      <h4>禁止行为</h4>
+      <table>
+        <tr>
+          <th>禁止项</th>
+        </tr>
+        <tr>
+          <td>原因</td>
+        </tr>
+        <tr>
+          <td>检测方法</td>
+        </tr>
+        <tr>
+          <td>禁止序列内页面分散换出</td>
+        </tr>
+        <tr>
+          <td>破坏 Gang Scheduling 一致性</td>
+        </tr>
+        <tr>
+          <td>检查 </td>
+          <td>select_victim_pages</td>
+          <td> 是否返回单个页面</td>
+        </tr>
+        <tr>
+          <td>禁止新换入页立即换出</td>
+        </tr>
+        <tr>
+          <td>Cache Thrashing</td>
+        </tr>
+        <tr>
+          <td>检查 Warm 状态页面是否被选中</td>
+        </tr>
+        <tr>
+          <td>禁止使用纯 LRU</td>
+        </tr>
+        <tr>
+          <td>无法区分扫描型和重复型访问</td>
+        </tr>
+        <tr>
+          <td>检查优先级计算是否仅基于时间</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 算法概述</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 HGAL (Hybrid Gang-Aware LIRS) 组成</h4>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────────────┐</p>
+      <p>│                    HGAL (Hybrid Gang-Aware LIRS)                    │</p>
+      <p>├─────────────────────────────────────────────────────────────────────┤</p>
+      <p>│                                                                     │</p>
+      <p>│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐ │</p>
+      <p>│  │ Gang-Aware      │    │ LIRS Priority   │    │ Warm-up         │ │</p>
+      <p>│  │ Eviction        │ +  │ Calculation     │ +  │ Protection      │ │</p>
+      <p>│  │                 │    │                 │    │                 │ │</p>
+      <p>│  │ 序列组整体换出   │    │ IRR 优先级      │    │ 新页保护期      │ │</p>
+      <p>│  └─────────────────┘    └─────────────────┘    └─────────────────┘ │</p>
+      <p>│                                                                     │</p>
+      <p>│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐ │</p>
+      <p>│  │ Working Set     │    │ CLOCK-Pro       │    │ Chunked         │ │</p>
+      <p>│  │ Detection       │    │ Approximation   │    │ Prefill         │ │</p>
+      <p>│  │                 │    │                 │    │                 │ │</p>
+      <p>│  │ 热页自动锁定     │    │ 低成本实现      │    │ 计算与内存平衡  │ │ │</p>
+      <p>│  └─────────────────┘    └─────────────────┘    └─────────────────┘ │</p>
+      <p>│                                                                     │</p>
+      <p>└─────────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 设计原则</h4>
+      <table>
+        <tr>
+          <th>原则</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>来源</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Gang-Aware</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>序列组作为换出单位，保持页面连续性</td>
+        </tr>
+        <tr>
+          <td>vLLM Sequence Group 设计</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>LIRS 优先级</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>使用 IRR (Inter-Reference Recency) 替代纯 LRU</td>
+        </tr>
+        <tr>
+          <td>操作系统 LIRS 算法</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Warm-up 保护</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>新换入页面保护期，禁止立即换出</td>
+        </tr>
+        <tr>
+          <td>CLOCK-Pro 热页保护</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Working Set</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>自动检测热页并锁定保护</td>
+        </tr>
+        <tr>
+          <td>2Q/LIRS 工作集检测</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CLOCK-Pro 近似</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>低成本的 LIRS 实现</td>
+        </tr>
+        <tr>
+          <td>CLOCK-Pro 论文</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 数据结构定义</h3>
+    </section>
+    <section id="artifact-state-machine" data-artifact-type="state-machine" data-section="3.1">
+      <h4>3.1 页面状态机</h4>
+      <p>```</p>
+      <p>                    ┌─────────────────┐</p>
+      <p>                    │   Swapped        │</p>
+      <p>                    └────────┬────────┘</p>
+      <p>                             │ swap-in</p>
+      <p>                             ▼</p>
+      <p>                    ┌─────────────────┐</p>
+      <p>                    │      Warm        │ ◄─── 保护期 (禁止换出)</p>
+      <p>                    └────────┬─────────┘</p>
+      <p>                             │ 访问 + 时间</p>
+      <p>                             ▼</p>
+      <p>┌───────────────┐   ┌─────────────────┐</p>
+      <p>│   Protected    │◄──│     Active       │</p>
+      <p>└───────┬───────┘   └────────┬─────────┘</p>
+      <p>        │                   │ 访问频率下降</p>
+      <p>        │                   ▼</p>
+      <p>        │             ┌─────────────────┐</p>
+      <p>        └────────────►│     Standby      │</p>
+      <p>                      └─────────────────┘</p>
+      <p>```</p>
+      <strong>状态定义表</strong>：
+      <table>
+        <tr>
+          <th>状态</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>换出条件</td>
+        </tr>
+        <tr>
+          <td>保护等级</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Active</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>在 GPU 且正在使用</td>
+        </tr>
+        <tr>
+          <td>变为 Standby</td>
+        </tr>
+        <tr>
+          <td>正常</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Standby</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>在 GPU 但未使用</td>
+        </tr>
+        <tr>
+          <td>可被换出</td>
+        </tr>
+        <tr>
+          <td>正常</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Swapped</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>已换出到 CPU</td>
+        </tr>
+        <tr>
+          <td>swap-in</td>
+        </tr>
+        <tr>
+          <td>最高</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Warm</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>刚 swap-in，保护期</td>
+        </tr>
+        <tr>
+          <td>保护期结束</td>
+        </tr>
+        <tr>
+          <td>高</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Protected</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>工作集保护</td>
+        </tr>
+        <tr>
+          <td>访问频率下降</td>
+        </tr>
+        <tr>
+          <td>中</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 序列组 (SequenceGroup)</h4>
+      <strong>设计依据</strong>: vLLM 的 Sequence Group 概念
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>id</td>
+        </tr>
+        <tr>
+          <td>RequestId</td>
+        </tr>
+        <tr>
+          <td>序列组唯一标识</td>
+        </tr>
+        <tr>
+          <td>pages</td>
+        </tr>
+        <tr>
+          <td>Vec</td>
+        </tr>
+        <tr>
+          <td>该序列的所有页面</td>
+        </tr>
+        <tr>
+          <td>state</td>
+        </tr>
+        <tr>
+          <td>GroupState</td>
+        </tr>
+        <tr>
+          <td>Running / Swapped / Paused</td>
+        </tr>
+        <tr>
+          <td>access_count</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>访问计数 (用于 LFU)</td>
+        </tr>
+        <tr>
+          <td>last_access</td>
+        </tr>
+        <tr>
+          <td>Instant</td>
+        </tr>
+        <tr>
+          <td>最后访问时间</td>
+        </tr>
+        <tr>
+          <td>is_pinned</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>是否锁定 (优先级高)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 页面元数据 (PageMetadata)</h4>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>page_id</td>
+        </tr>
+        <tr>
+          <td>PageId</td>
+        </tr>
+        <tr>
+          <td>页面唯一标识</td>
+        </tr>
+        <tr>
+          <td>定位</td>
+        </tr>
+        <tr>
+          <td>sequence_id</td>
+        </tr>
+        <tr>
+          <td>Option</td>
+        </tr>
+        <tr>
+          <td>所属序列</td>
+        </tr>
+        <tr>
+          <td>Gang-Aware</td>
+        </tr>
+        <tr>
+          <td>state</td>
+        </tr>
+        <tr>
+          <td>PageState</td>
+        </tr>
+        <tr>
+          <td>当前状态</td>
+        </tr>
+        <tr>
+          <td>换出决策</td>
+        </tr>
+        <tr>
+          <td>recency</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>IRR 值</td>
+        </tr>
+        <tr>
+          <td>LIRS 优先级</td>
+        </tr>
+        <tr>
+          <td>is_lir</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>是否为 LIR 页面</td>
+        </tr>
+        <tr>
+          <td>长期驻留</td>
+        </tr>
+        <tr>
+          <td>swap_in_time</td>
+        </tr>
+        <tr>
+          <td>Option</td>
+        </tr>
+        <tr>
+          <td>换入时间</td>
+        </tr>
+        <tr>
+          <td>Warm-up 计算</td>
+        </tr>
+        <tr>
+          <td>warm_until</td>
+        </tr>
+        <tr>
+          <td>Option</td>
+        </tr>
+        <tr>
+          <td>保护期结束</td>
+        </tr>
+        <tr>
+          <td>换出保护</td>
+        </tr>
+        <tr>
+          <td>access_count</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>访问计数</td>
+        </tr>
+        <tr>
+          <td>频率检测</td>
+        </tr>
+        <tr>
+          <td>last_access</td>
+        </tr>
+        <tr>
+          <td>Instant</td>
+        </tr>
+        <tr>
+          <td>最后访问</td>
+        </tr>
+        <tr>
+          <td>LRU 计算</td>
+        </tr>
+        <tr>
+          <td>kv_quant_strategy</td>
+        </tr>
+        <tr>
+          <td>KvQuantStrategy</td>
+        </tr>
+        <tr>
+          <td>Key: PerChannel / Value: PerToken</td>
+        </tr>
+        <tr>
+          <td>非对称量化 (KIVI)</td>
+        </tr>
+        <tr>
+          <td>is_attention_sink</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>是否为 Sink Token（保留 FP16）</td>
+        </tr>
+        <tr>
+          <td>Attention Sink 保护</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 核心算法设计</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 Gang-Aware 受害者选择</h4>
+      <strong>目标</strong>: 选择要换出的序列组，而非单个页面
+      <strong>输入</strong>: 需要换出的页面数量 <code>count</code>
+      <strong>输出</strong>: 要换出的序列组 ID 列表
+      <strong>算法步骤</strong>:
+      <strong>优先级计算公式</strong>:
+      <p>```</p>
+      <p>priority(group) = time_penalty + recency_penalty - freq_bonus - pin_bonus</p>
+      <p>其中:</p>
+      <p>  time_penalty = now - group.last_access</p>
+      <p>  recency_penalty = sum(page.recency for page in group.pages)</p>
+      <p>  freq_bonus = group.access_count * FREQUENCY_WEIGHT</p>
+      <p>  pin_bonus = group.is_pinned ? PIN_BONUS : 0</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>操作</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>排除筛选</td>
+        </tr>
+        <tr>
+          <td>排除 Warm、Protected、Pinned 状态的页面</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>计算优先级</td>
+        </tr>
+        <tr>
+          <td>对每个序列组计算优先级分数</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>排序</td>
+        </tr>
+        <tr>
+          <td>按优先级从低到高排序</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>选择</td>
+        </tr>
+        <tr>
+          <td>选择最少数量的序列组满足 </td>
+          <td>count</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 LIRS 优先级计算</h4>
+      <strong>目标</strong>: 综合 IRR 和访问频率，识别真正的冷页面
+      <strong>输入</strong>: 页面元数据
+      <strong>输出</strong>: 优先级分数 (越低越应该被换出)
+      <strong>计算逻辑</strong>：
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>操作</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>计算时间衰减</td>
+        </tr>
+        <tr>
+          <td>time_since_access = now - last_access</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>应用 IRR 惩罚</td>
+        </tr>
+        <tr>
+          <td>recency_penalty = page.recency</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>应用频率奖励</td>
+        </tr>
+        <tr>
+          <td>freq_bonus = access_count × 频率权重</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>应用保护加成</td>
+        </tr>
+        <tr>
+          <td>Warm 状态 +1000，Protected 状态 +2000</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>计算最终优先级</td>
+        </tr>
+        <tr>
+          <td>time_since_access + recency_penalty - freq_bonus - protection_bonus</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 Warm-up 保护机制</h4>
+      <strong>目标</strong>: 防止刚 swap-in 的页面立即被换出
+      <strong>触发时机</strong>: 页面 swap-in 完成时
+      <strong>保护期计算</strong>:
+      <strong>状态转换</strong>:
+      <p>```</p>
+      <p>Swapped --(swap-in)--&gt; Warm --(时间到期 OR 访问2次)--&gt; Active</p>
+      <p>                              └--(访问频率高)--&gt; Protected</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>配置项</th>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>warmup_duration</td>
+        </tr>
+        <tr>
+          <td>100ms</td>
+        </tr>
+        <tr>
+          <td>保护期时长</td>
+        </tr>
+        <tr>
+          <td>min_access_count</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>最小访问次数保护</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 Working Set 自动检测</h4>
+      <strong>目标</strong>: 自动识别高频访问页面并锁定保护
+      <strong>检测周期</strong>: 每 N 个 generation tick
+      <strong>热页判定条件</strong>:
+      <strong>保护解除</strong>: 热页在 <code>working_set_window</code> 时间内未被访问则解除保护
+      <table>
+        <tr>
+          <th>条件</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>阈值</td>
+        </tr>
+        <tr>
+          <td>访问频率</td>
+        </tr>
+        <tr>
+          <td>单位时间内访问次数</td>
+        </tr>
+        <tr>
+          <td>access_count &gt;= hot_threshold</td>
+        </tr>
+        <tr>
+          <td>最近访问</td>
+        </tr>
+        <tr>
+          <td>最后访问时间距离现在</td>
+        </tr>
+        <tr>
+          <td>now - last_access &lt; working_set_window</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.5" data-section="4.5">
+      <h4>4.5 CLOCK-Pro 风格近似实现</h4>
+      <strong>目标</strong>: 低成本的 LIRS 近似实现
+      <strong>数据结构</strong>:
+      <strong>扫描算法</strong>:
+      <p>```</p>
+      <p>1. 从 clock_hand 开始扫描</p>
+      <p>2. 对于每个页面:</p>
+      <p>   a. 如果页面被访问:</p>
+      <li>如果在 cold_pages → 移到 hot_pages</li>
+      <li>如果在 hot_pages → 保持在 hot_pages</li>
+      <p>   b. 如果页面未被访问:</p>
+      <li>如果在 hot_pages → 移到 cold_pages</li>
+      <li>如果在 cold_pages → 保持在 cold_pages</li>
+      <p>3. clock_hand 前进</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>结构</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>clock_hand</td>
+        </tr>
+        <tr>
+          <td>扫描指针位置</td>
+        </tr>
+        <tr>
+          <td>cold_pages</td>
+        </tr>
+        <tr>
+          <td>冷页面候选集合</td>
+        </tr>
+        <tr>
+          <td>hot_pages</td>
+        </tr>
+        <tr>
+          <td>热页面集合 (类似 LIR)</td>
+        </tr>
+        <tr>
+          <td>test_pages</td>
+        </tr>
+        <tr>
+          <td>测试页面 (用于检测访问模式变化)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 与 VLLM 的对比</h3>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>VLLM V1 (RECOMPUTE)</td>
+        </tr>
+        <tr>
+          <td>HGAL 方案</td>
+        </tr>
+        <tr>
+          <td>换出粒度</td>
+        </tr>
+        <tr>
+          <td>序列级 (gang)</td>
+        </tr>
+        <tr>
+          <td>序列组级 (gang)</td>
+        </tr>
+        <tr>
+          <td>抢占模式</td>
+        </tr>
+        <tr>
+          <td>Recompute (重算)</td>
+        </tr>
+        <tr>
+          <td>Swap (换出) + Warm-up 保护</td>
+        </tr>
+        <tr>
+          <td>优先级</td>
+        </tr>
+        <tr>
+          <td>FCFS</td>
+        </tr>
+        <tr>
+          <td>IRR + 频率 + 状态</td>
+        </tr>
+        <tr>
+          <td>新页保护</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>Warm-up 期</td>
+        </tr>
+        <tr>
+          <td>工作集</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>自动检测</td>
+        </tr>
+        <tr>
+          <td>序列错乱</td>
+        </tr>
+        <tr>
+          <td>禁止</td>
+        </tr>
+        <tr>
+          <td>禁止</td>
+        </tr>
+        <tr>
+          <td>Cache Thrashing</td>
+        </tr>
+        <tr>
+          <td>可能</td>
+        </tr>
+        <tr>
+          <td>避免</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. 配置参数</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 调度器配置 (SchedulerConfig)</h4>
+      <table>
+        <tr>
+          <th>配置项</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>page_size</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>128</td>
+        </tr>
+        <tr>
+          <td>每页 token 数</td>
+        </tr>
+        <tr>
+          <td>total_pages</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>2048</td>
+        </tr>
+        <tr>
+          <td>总页面数</td>
+        </tr>
+        <tr>
+          <td>max_batch</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>最大批大小</td>
+        </tr>
+        <tr>
+          <td>max_tokens</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>4096</td>
+        </tr>
+        <tr>
+          <td>最大 token 数</td>
+        </tr>
+        <tr>
+          <td>warmup_duration</td>
+        </tr>
+        <tr>
+          <td>Duration</td>
+        </tr>
+        <tr>
+          <td>100ms</td>
+        </tr>
+        <tr>
+          <td>Warm-up 保护期</td>
+        </tr>
+        <tr>
+          <td>working_set_window</td>
+        </tr>
+        <tr>
+          <td>Duration</td>
+        </tr>
+        <tr>
+          <td>1s</td>
+        </tr>
+        <tr>
+          <td>工作集时间窗</td>
+        </tr>
+        <tr>
+          <td>hot_threshold</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>热页访问阈值</td>
+        </tr>
+        <tr>
+          <td>lir_ratio</td>
+        </tr>
+        <tr>
+          <td>f32</td>
+        </tr>
+        <tr>
+          <td>0.3</td>
+        </tr>
+        <tr>
+          <td>LIR 页面比例</td>
+        </tr>
+        <tr>
+          <td>enable_clock_pro</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>启用 CLOCK-Pro 近似</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 性能调优建议</h4>
+      <table>
+        <tr>
+          <th>场景</th>
+        </tr>
+        <tr>
+          <td>建议配置</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>高并发短请求</td>
+        </tr>
+        <tr>
+          <td>warmup_duration = 50ms</td>
+        </tr>
+        <tr>
+          <td>缩短保护期</td>
+        </tr>
+        <tr>
+          <td>长上下文推理</td>
+        </tr>
+        <tr>
+          <td>hot_threshold = 5</td>
+        </tr>
+        <tr>
+          <td>提高热页阈值</td>
+        </tr>
+        <tr>
+          <td>内存受限</td>
+        </tr>
+        <tr>
+          <td>lir_ratio = 0.2</td>
+        </tr>
+        <tr>
+          <td>减少 LIR 页面</td>
+        </tr>
+        <tr>
+          <td>计算/内存混合</td>
+        </tr>
+        <tr>
+          <td>max_tokens</td>
+          <td> 适当调整</td>
+        </tr>
+        <tr>
+          <td>平衡吞吐和延迟</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 验收标准</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 功能验收</h4>
+      <table>
+        <tr>
+          <th>标准</th>
+        </tr>
+        <tr>
+          <td>检测方法</td>
+        </tr>
+        <tr>
+          <td>序列组整体换出</td>
+        </tr>
+        <tr>
+          <td>单元测试验证 </td>
+          <td>select_victim_groups</td>
+          <td> 返回序列组 ID</td>
+        </tr>
+        <tr>
+          <td>新页不被立即换出</td>
+        </tr>
+        <tr>
+          <td>单元测试验证 Warm 状态页面不被选中</td>
+        </tr>
+        <tr>
+          <td>热页自动锁定</td>
+        </tr>
+        <tr>
+          <td>单元测试验证高频访问页面变为 Protected</td>
+        </tr>
+        <tr>
+          <td>显存碎片率 &lt; 5%</td>
+        </tr>
+        <tr>
+          <td>性能测试验证</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 性能验收</h4>
+      <table>
+        <tr>
+          <th>指标</th>
+        </tr>
+        <tr>
+          <td>目标值</td>
+        </tr>
+        <tr>
+          <td>测量方法</td>
+        </tr>
+        <tr>
+          <td>Thrashing 率</td>
+        </tr>
+        <tr>
+          <td>&lt; 1%</td>
+        </tr>
+        <tr>
+          <td>统计 swap-in 后立即 swap-out 的比例</td>
+        </tr>
+        <tr>
+          <td>平均换出延迟</td>
+        </tr>
+        <tr>
+          <td>&lt; 10ms</td>
+        </tr>
+        <tr>
+          <td>基准测试</td>
+        </tr>
+        <tr>
+          <td>Working Set 命中率</td>
+        </tr>
+        <tr>
+          <td>&gt; 90%</td>
+        </tr>
+        <tr>
+          <td>热页访问命中率</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 2024 vLLM 优化扩展 (v2.0)</h3>
+      <p>&gt; <strong>关联需求</strong>: REQ-SCHED-007, REQ-SCHED-008, REQ-SCHED-009</p>
+      <p>&gt; <strong>JIT 兼容性</strong>: ✅ 所有优化均为调度/算法级别，不涉及 JIT 编译器管线</p>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 Chunked Prefill / SplitFuse 调度</h4>
+    </section>
+    <section id="s8.1.1" data-section="8.1.1">
+      <h5>8.1.1 问题定义</h5>
+      <strong>传统 Continuous Batching 阶段隔离问题</strong>：
+      <p>```</p>
+      <p>问题场景：同时存在 Prefill 请求和 Decode 请求</p>
+      <p>传统调度（阶段隔离）:</p>
+      <p>┌─────────────────────────────────────────────────────────────┐</p>
+      <p>│ Batch 1: [Prefill-512, Prefill-256]                         │</p>
+      <p>│   → GPU 利用率 ~60% (Memory Bound)                          │</p>
+      <p>│   → Decode 请求必须等待 (Tail Latency 恶化)                 │</p>
+      <p>├─────────────────────────────────────────────────────────────┤</p>
+      <p>│ Batch 2: [Decode-1, Decode-1, ..., Decode-1] (×32)         │</p>
+      <p>│   → GPU 利用率 ~95% (Compute Bound)                         │</p>
+      <p>│   → Prefill 请求必须等待 (吞吐浪费)                         │</p>
+      <p>└─────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+      <strong>问题量化</strong>：
+      <table>
+        <tr>
+          <th>指标</th>
+        </tr>
+        <tr>
+          <td>传统方式</td>
+        </tr>
+        <tr>
+          <td>期望目标</td>
+        </tr>
+        <tr>
+          <td>Tail Latency (P99)</td>
+        </tr>
+        <tr>
+          <td>~200ms</td>
+        </tr>
+        <tr>
+          <td>&lt;50ms</td>
+        </tr>
+        <tr>
+          <td>GPU 利用率方差</td>
+        </tr>
+        <tr>
+          <td>35%</td>
+        </tr>
+        <tr>
+          <td>&lt;15%</td>
+        </tr>
+        <tr>
+          <td>批次切换开销</td>
+        </tr>
+        <tr>
+          <td>5-10ms</td>
+        </tr>
+        <tr>
+          <td>&lt;1ms</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.1.2" data-section="8.1.2">
+      <h5>8.1.2 Chunked Prefill 算法</h5>
+      <strong>核心思想</strong>：将长 Prefill 请求切分为多个 Chunk，与 Decode Token 交织调度。
+      <p>```</p>
+      <p>Chunked 调度（交织）:</p>
+      <p>┌─────────────────────────────────────────────────────────────┐</p>
+      <p>│ Batch 1:                                                    │</p>
+      <p>│   [Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1,      │</p>
+      <p>│    Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1]      │</p>
+      <p>│    ↑ Chunk 1       ↑ Decode 插槽 (优先)    ↑ Chunk 2        │</p>
+      <p>└─────────────────────────────────────────────────────────────┘</p>
+      <p>优势:</p>
+      <li>Decode 请求无需等待 (低延迟保证)</li>
+      <li>GPU 利用率平滑 (Memory + Compute 混合)</li>
+      <li>批次连续 (无切换开销)</li>
+      <p>```</p>
+      <strong>切分策略</strong>：
+      <table>
+        <tr>
+          <th>策略</th>
+        </tr>
+        <tr>
+          <td>Chunk Size</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>固定切分</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>64/128 tokens</td>
+        </tr>
+        <tr>
+          <td>通用场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>自适应切分</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>根据内存压力动态调整</td>
+        </tr>
+        <tr>
+          <td>显存受限</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>优先级切分</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>高优先级请求更大 Chunk</td>
+        </tr>
+        <tr>
+          <td>SLA 保障</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.1.3" data-section="8.1.3">
+      <h5>8.1.3 调度算法</h5>
+      <strong>数据结构</strong>：
+      <strong>调度流程</strong>：
+      <strong>返回结果</strong>：<code>ChunkedBatch</code> 包含 decode_slots 和 prefill_chunks 列表
+      <table>
+        <tr>
+          <th>结构</th>
+        </tr>
+        <tr>
+          <td>字段</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>ChunkedScheduler</td>
+        </tr>
+        <tr>
+          <td>config, prefill_queue, decode_queue</td>
+        </tr>
+        <tr>
+          <td>调度器主体</td>
+        </tr>
+        <tr>
+          <td>PrefillRequest</td>
+        </tr>
+        <tr>
+          <td>id, total_tokens, completed_tokens, pending_chunks</td>
+        </tr>
+        <tr>
+          <td>Prefill 请求状态</td>
+        </tr>
+        <tr>
+          <td>ChunkedConfig</td>
+        </tr>
+        <tr>
+          <td>chunk_size, decode_slots, max_chunks_per_batch</td>
+        </tr>
+        <tr>
+          <td>配置参数</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>操作</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>收集 Decode 请求</td>
+        </tr>
+        <tr>
+          <td>填充 decode_slots 直到达到配置上限</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>计算剩余预算</td>
+        </tr>
+        <tr>
+          <td>remaining_budget = max_tokens - decode_tokens</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>填入 Prefill Chunk</td>
+        </tr>
+        <tr>
+          <td>从 prefill_queue 取出请求，按 chunk_size 切分</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>更新请求进度</td>
+        </tr>
+        <tr>
+          <td>完成的 Chunk 从 pending 减少</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>请求状态转换</td>
+        </tr>
+        <tr>
+          <td>Prefill 完成后转为 Decode 请求</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.1.5" data-section="8.1.5">
+      <h5>8.1.5 验收标准</h5>
+      <table>
+        <tr>
+          <th>标准</th>
+        </tr>
+        <tr>
+          <td>测试方法</td>
+        </tr>
+        <tr>
+          <td>目标值</td>
+        </tr>
+        <tr>
+          <td>Tail Latency (P99)</td>
+        </tr>
+        <tr>
+          <td>混合负载测试</td>
+        </tr>
+        <tr>
+          <td>&lt;50ms</td>
+        </tr>
+        <tr>
+          <td>GPU 利用率方差</td>
+        </tr>
+        <tr>
+          <td>性能监控</td>
+        </tr>
+        <tr>
+          <td>&lt;15%</td>
+        </tr>
+        <tr>
+          <td>吞吐提升</td>
+        </tr>
+        <tr>
+          <td>对比纯 Decode Batch</td>
+        </tr>
+        <tr>
+          <td>+30-50%</td>
+        </tr>
+        <tr>
+          <td>内存开销</td>
+        </tr>
+        <tr>
+          <td>显存监控</td>
+        </tr>
+        <tr>
+          <td>&lt;5% 额外</td>
+        </tr>
+      </table>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="8.4">
+      <h4>8.4 三项优化集成数据流</h4>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  新请求到达                                                         │</p>
+      <p>└─────────────────────────────┬───────────────────────────────────────┘</p>
+      <p>                              │</p>
+      <p>                              ▼</p>
+      <p>                    ┌─────────────────────┐</p>
+      <p>                    │  SessionKvCache     │</p>
+      <p>                    │  前缀缓存查询       │</p>
+      <p>                    └─────────┬───────────┘</p>
+      <p>                              │</p>
+      <p>              ┌───────────────┴───────────────┐</p>
+      <p>              │ 命中                         │ 未命中</p>
+      <p>              ▼                               ▼</p>
+      <p>        ┌───────────┐                 ┌──────────────┐</p>
+      <p>        │ Prefix Hit│                 │ Chunked      │</p>
+      <p>        │ (部分跳过)│                 │ Prefill      │</p>
+      <p>        │  Prefix)  │                 │ (交织调度)   │</p>
+      <p>        └─────┬─────┘                 └──────┬───────┘</p>
+      <p>              │                               │</p>
+      <p>              ▼                               ▼</p>
+      <p>        ┌─────────────┐              ┌────────────────┐</p>
+      <p>        │ Decode      │              │ PageSwap       │</p>
+      <p>        │ Loop        │              │ (拓扑级页框交换)│</p>
+      <p>        └─────────────┘              └────────┬───────┘</p>
+      <p>                                             │</p>
+      <p>                                             ▼</p>
+      <p>                                    ┌────────────────┐</p>
+      <p>                                    │ KV Cache 写入  │</p>
+      <p>                                    │ (L1/L2/L3)     │</p>
+      <p>                                    └────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s8.5" data-section="8.5">
+      <h4>8.5 配置参数汇总</h4>
+    </section>
+    <section id="s8.5.1" data-section="8.5.1">
+      <h5>8.5.1 Chunked Prefill 配置</h5>
+      <table>
+        <tr>
+          <th>配置项</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>chunk_size</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>64</td>
+        </tr>
+        <tr>
+          <td>Chunk 大小 (tokens)</td>
+        </tr>
+        <tr>
+          <td>decode_slots</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>每批保留的 Decode 插槽</td>
+        </tr>
+        <tr>
+          <td>enable_splitfuse</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>true</td>
+        </tr>
+        <tr>
+          <td>⛔ 已废弃 (REQ-SCHED-007) — SplitFuse 混批路径已移除</td>
+        </tr>
+        <tr>
+          <td>max_chunks_per_batch</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>每批最大 Chunk 数</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 参考文献</h3>
+      <p>1. <a data-xref-type="section" href="https://www.usenix.org/legacyurl/clock-pro-effective-improvement-clock-replacement">CLOCK-Pro: An Effective Improvement of the CLOCK Replacement</a> - USENIX 2005</p>
+      <p>2. <a data-xref-type="section" href="https://zhuanlan.zhihu.com/p/28180951363">vLLM 架构及源码 - Scheduling</a> - Sequence Group 设计</p>
+      <p>3. <a data-xref-type="section" href="https://arxiv.org/abs/2502.07115">Online Scheduling for LLM Inference with KV Cache Constraints</a> - arXiv:2502.07115</p>
+      <p>4. <a data-xref-type="section" href="https://www.arxiv.org/pdf/2511.21958">Clock2Q+: A Simple and Efficient Replacement Algorithm</a> - arXiv:2511.21958</p>
+      <p>5. <a data-xref-type="section" href="https://iclr.cc/virtual/2025/poster/30707">2D Management of KV-Cache via Layer-wise Optimization</a> - ICLR 2025</p>
+    </section>
+  
+    <section id="s-req" data-section="req">
+      <h2>需求 (REQ)</h2>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+        <section data-entity-ref="ENT-PAGED-SCHEDULER ENT-OBSERVER" <h3="" data-req-api="POST /internal/scheduler/build_batch" data-req-entity="ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="sched" data-req-status="implemented" data-req="REQ-SCHED-004" id="req-sched-004">REQ-SCHED-004: HGAL 调度算法核心逻辑<p>HGAL 调度算法核心逻辑实现</p><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section>
+<section data-entity-ref="ENT-PAGED-SCHEDULER ENT-OBSERVER" <h3="" data-req-api="POST /internal/scheduler/build_batch" data-req-entity="ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="sched" data-req-status="implemented" data-req="REQ-SCHED-010" id="req-sched-010">运行时观测 (REQ-SCHED-10)
+      <p>RuntimeObserver 运行时观测器：采集调度决策指标（页面命中率、Thrashing 率、换出延迟、Working Set 命中率等），提供实时可观测的调度健康状态，支持性能调优和异常诊断。</p>
+      <div data-criteria="">
+        <h5>REQ-SCHED-010 前缀索引与 KV Cache 共享 — 序列前缀去重与页面复用</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">RuntimeObserver 指标采集正确</li>
+        <li id="id-2" data-criterion="2">调度决策指标实时可观测</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+      
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      </div>
+    </section>
+
+    
+</section></main>
+    <section id="testing" data-tests-section="">
+      <h2>测试用例</h2>
+      <section id="TEST-SCHED-004" data-test="TEST-SCHED-004" data-req-ref="REQ-SCHED-004" data-test-categories="unit">
+        <h3>TEST-SCHED-004: HGAL 调度算法核心逻辑测试</h3>
+        <p>验证REQ-SCHED-004相关功能正确性</p>
+      </section>
+    <div id="TEST-SCHED-010" data-test="TEST-SCHED-010" data-req-ref="REQ-SCHED-010" data-test-categories="unit" <h4="">TEST-SCHED-010: REQ-SCHED-010 单元测试<p>TODO: 为 REQ-SCHED-010 编写测试用例</p></div></section>
+</body></html>

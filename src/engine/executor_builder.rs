@@ -70,6 +70,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 precompute: true,
             },
             arch_family: manifest.family(),
+            has_classifier: false, // Updated below after compile_mega_kernel
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: manifest.moe_config,
@@ -305,12 +306,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Compile mega-kernel
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        let mega_kernel = Self::compile_mega_kernel(
+        let (mega_kernel, has_classifier) = Self::compile_mega_kernel(
             &backend, &manifest, &ctx.model_config, &ctx.geometry,
             &ctx.tokenizer, &mut ctx.weights, &ctx.qtap_cfg,
         )?;
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda")))]
         let mega_kernel: Option<super::mega_kernel::MegaKernelExecutor> = None;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda")))]
+        let has_classifier = false;
+
+        // ARCH-RERANKER-CLASSIFY: Propagate has_classifier from weight topology
+        // analysis to forward_config so rerank_pair() can choose the correct path.
+        ctx.forward_config.has_classifier = has_classifier;
 
         let (moe_thermal, moe_fault_handler, moe_dispatcher, moe_prefetcher, jit_director, hot_patch_manager) =
             Self::init_moe_subsystem(&ctx.geometry, ctx.moe_config.as_ref());

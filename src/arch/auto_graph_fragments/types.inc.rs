@@ -135,13 +135,23 @@ pub fn analyze_architecture(
     let has_output_head = role_index.contains_key(&(TensorRole::OutputHead, None));
     let has_classifier = role_index.contains_key(&(TensorRole::ClassifierDense, None))
         || role_index.contains_key(&(TensorRole::ClassifierOutProj, None));
-    let has_final_norm = role_index.contains_key(&(TensorRole::FinalNorm, None));
+    let _has_final_norm = role_index.contains_key(&(TensorRole::FinalNorm, None));
 
-    // Weight-topology heuristic: OutputHead/FinalNorm present → Decoder family
-    // (generate-loop graph strategy); absent → Encoder family (single-pass strategy).
-    // This selects which ops the builder emits (MeanPool vs Argmax, etc.),
-    // NOT which code path the compiler takes — SPEC/39: compiler = feed graph → JIT.
-    let family = if has_output_head || has_final_norm {
+    // Weight-topology heuristic:
+    //   OutputHead (lm_head) → Decoder (generate loop, KV cache FromCache)
+    //   No OutputHead → Encoder (single pass, KV cache FromTensor)
+    //
+    //   FinalNorm alone is ambiguous: present in both decoder base models
+    //   (e.g. Qwen3-0.6B-Base) and encoder models (e.g. Qwen3-Embedding).
+    //   The disambiguator is OutputHead: only decoders have lm_head.
+    //   Encoder/embedding/reranker models have FinalNorm (output_norm) but
+    //   no OutputHead — they produce embeddings, not tokens.
+    //
+    //   OE-4 root cause: Qwen3-Embedding has output_norm.weight (FinalNorm)
+    //   but no lm_head.weight (OutputHead). The old heuristic treated
+    //   FinalNorm alone as Decoder, causing kv_source=FromCache and
+    //   MemCopy to NULL kv_cache_ptr → SIGSEGV.
+    let family = if has_output_head {
         Family::Decoder
     } else {
         Family::Encoder

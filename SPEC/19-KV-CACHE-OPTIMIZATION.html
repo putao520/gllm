@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="19-KV-CACHE-OPTIMIZATION">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"19-KV-CACHE-OPTIMIZATION", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>KV Cache 智能优化 — Epilogue 驱动的动态稀疏 + 混合精度 + 页级表达 (SSOT)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>19-KV-CACHE-OPTIMIZATION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-kv-cache-智能优化-epilogue-驱动的动态稀疏-混合精度-页级表达-ssot" data-section="null">
+      <h2>KV Cache 智能优化 — Epilogue 驱动的动态稀疏 + 混合精度 + 页级表达 (SSOT)</h2>
+      <p>&gt; <strong>铁律</strong>: 所有 KV Cache 优化信号由 Epilogue 白嫖网络零开销产出（§5）。不存在独立的信号采集通道。</p>
+      <p>&gt; 所有优化决策在 Rust 调度器的 <code>build_batch</code> 阶段执行（非 JIT 内部），编译时按 precision tier 生成 Variant，运行时零 dtype 分支。</p>
+      <p>&gt; <strong>与现有设计的关系</strong>: 本文档是 <code>06-RUNTIME.md §4 KV Cache 管理</code> 和 <code>05-OPTIMIZATIONS.md §4.3 KIVI / §5 Epilogue 白嫖</code> 的深化，不替代已有设计。</p>
+    </section>
+    <section id="s-参考文献" data-section="null">
+      <h3>参考文献</h3>
+      <table>
+        <tr>
+          <th>ID</th>
+        </tr>
+        <tr>
+          <td>论文</td>
+        </tr>
+        <tr>
+          <td>会议</td>
+        </tr>
+        <tr>
+          <td>gllm 借鉴点</td>
+        </tr>
+        <tr>
+          <td>LeanKV</td>
+        </tr>
+        <tr>
+          <td>Unifying KV Cache Compression with Hetero-KV</td>
+        </tr>
+        <tr>
+          <td>2024/2025</td>
+        </tr>
+        <tr>
+          <td>per-head 动态稀疏 + K/V 异构量化 3-11x 压缩</td>
+        </tr>
+        <tr>
+          <td>ChunkKV</td>
+        </tr>
+        <tr>
+          <td>Semantic-Preserving KV Cache Compression</td>
+        </tr>
+        <tr>
+          <td>NeurIPS 2025</td>
+        </tr>
+        <tr>
+          <td>page 语义分组 + attention weight 重要性评分 + 跨层 index 复用</td>
+        </tr>
+        <tr>
+          <td>MUSTAFAR</td>
+        </tr>
+        <tr>
+          <td>Promoting Unstructured Sparsity for KV Cache Pruning</td>
+        </tr>
+        <tr>
+          <td>NeurIPS 2025</td>
+        </tr>
+        <tr>
+          <td>非结构化稀疏 70% 零损失 + bitmap 格式</td>
+        </tr>
+        <tr>
+          <td>KVTuner</td>
+        </tr>
+        <tr>
+          <td>Sensitivity-Aware Layer-Wise Mixed-Precision</td>
+        </tr>
+        <tr>
+          <td>ICML 2025</td>
+        </tr>
+        <tr>
+          <td>层间敏感度差异 → 混合精度 3.25-bit 近乎无损</td>
+        </tr>
+        <tr>
+          <td>MiniKV</td>
+        </tr>
+        <tr>
+          <td>2-Bit KV Cache via Compression and Token Eviction</td>
+        </tr>
+        <tr>
+          <td>ACL 2025</td>
+        </tr>
+        <tr>
+          <td>量化 + eviction 混合 &gt;80% 压缩</td>
+        </tr>
+        <tr>
+          <td>KVzip</td>
+        </tr>
+        <tr>
+          <td>Query-Agnostic KV Cache Compression</td>
+        </tr>
+        <tr>
+          <td>NeurIPS 2025 Oral</td>
+        </tr>
+        <tr>
+          <td>查询无关压缩，system prompt 压缩一次复用</td>
+        </tr>
+        <tr>
+          <td>Lexico</td>
+        </tr>
+        <tr>
+          <td>Extreme Compression via Sparse Coding</td>
+        </tr>
+        <tr>
+          <td>ICML 2025</td>
+        </tr>
+        <tr>
+          <td>通用字典稀疏编码 KV 极端压缩</td>
+        </tr>
+        <tr>
+          <td>KVmix</td>
+        </tr>
+        <tr>
+          <td>Gradient-Based Layer Importance-Aware Mixed-Precision</td>
+        </tr>
+        <tr>
+          <td>2025</td>
+        </tr>
+        <tr>
+          <td>梯度驱动层间精度分配</td>
+        </tr>
+        <tr>
+          <td>MixKVQ</td>
+        </tr>
+        <tr>
+          <td>Query-Aware Mixed-Precision KV Quantization</td>
+        </tr>
+        <tr>
+          <td>2025</td>
+        </tr>
+        <tr>
+          <td>查询感知 + 通道量化难度双因子</td>
+        </tr>
+        <tr>
+          <td>PagedEviction</td>
+        </tr>
+        <tr>
+          <td>Structured Block-wise KV Cache Pruning</td>
+        </tr>
+        <tr>
+          <td>EACL 2026</td>
+        </tr>
+        <tr>
+          <td>块级结构化 eviction（与 gllm page 对齐）</td>
+        </tr>
+        <tr>
+          <td>CacheSlide</td>
+        </tr>
+        <tr>
+          <td>Cross Position-Aware KV Cache Reuse</td>
+        </tr>
+        <tr>
+          <td>FAST 2026</td>
+        </tr>
+        <tr>
+          <td>位置编码对齐解决前缀复用位置漂移</td>
+        </tr>
+        <tr>
+          <td>IceCache</td>
+        </tr>
+        <tr>
+          <td>Semantic Token Clustering KV Management</td>
+        </tr>
+        <tr>
+          <td>ICLR 2026</td>
+        </tr>
+        <tr>
+          <td>语义聚类 token 组替代逐 token 管理</td>
+        </tr>
+        <tr>
+          <td>SinkQ</td>
+        </tr>
+        <tr>
+          <td>Dynamic Sink Token Protection</td>
+        </tr>
+        <tr>
+          <td>2025</td>
+        </tr>
+        <tr>
+          <td>sink token 动态识别 + FP16 不可量化</td>
+        </tr>
+        <tr>
+          <td>ThinKV</td>
+        </tr>
+        <tr>
+          <td>Thought-Adaptive KV Cache Compression</td>
+        </tr>
+        <tr>
+          <td>2025</td>
+        </tr>
+        <tr>
+          <td>思维步重要性分级 + 量化 eviction 混合</td>
+        </tr>
+        <tr>
+          <td>SHMQ+</td>
+        </tr>
+        <tr>
+          <td>Token-Aware Static Hierarchical Mixed-Precision</td>
+        </tr>
+        <tr>
+          <td>2025</td>
+        </tr>
+        <tr>
+          <td>outlier 量级驱动的 token 级分层精度</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 核心洞察</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 三层正交压缩维度</h4>
+      <p>最新研究（2025-2026）揭示 KV Cache 压缩存在三个正交维度，可以独立组合：</p>
+      <p>```</p>
+      <p>维度 1: Token 维度（哪些 token 保留）</p>
+      <p>  → Eviction: 丢弃不重要 token 的 KV</p>
+      <p>  → 稀疏: 保留但置零不重要通道</p>
+      <p>  → 来源: ChunkKV (语义分组), PagedEviction (块级), IceCache (聚类)</p>
+      <p>维度 2: 精度维度（保留的 token 用多少 bit）</p>
+      <p>  → 量化: FP16 / FP8 / 4-bit / 2-bit</p>
+      <p>  → 异构: K 和 V 不同量化策略</p>
+      <p>  → 来源: KVTuner (层间), KVmix (梯度), MixKVQ (查询感知), LeanKV (per-head)</p>
+      <p>维度 3: 表示维度（KV 向量的编码方式）</p>
+      <p>  → 原始: 直接存储</p>
+      <p>  → 稀疏编码: 字典 + 稀疏系数</p>
+      <p>  → 来源: Lexico (通用字典), MUSTAFAR (bitmap)</p>
+      <p>```</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 gllm 的 Epilogue 白嫖优势</h4>
+      <p>所有论文的核心挑战是：<strong>如何获取 token 重要性信号</strong>。现有方案需要额外前向传播（KVzip）、离线校准（KVTuner）、训练（KVmix）。gllm 的 Epilogue 白嫖网络在推理过程中零开销产出了所有信号：</p>
+      <p>```</p>
+      <p>论文需要额外计算 ←→ gllm 已有信号（零开销）</p>
+      <p>ChunkKV: "计算 attention weight 之和评分"</p>
+      <p>  = gllm Epilogue softmax_max + centroid（已在 Softmax Epilogue 写入 KvPageHeader）</p>
+      <p>MUSTAFAR: "分析 channel 方差确定稀疏模式"</p>
+      <p>  = gllm Epilogue row_l1_norm + row_max（已在 FFN GEMM Epilogue 写入）</p>
+      <p>SinkQ: "识别 attention sink token"</p>
+      <p>  = gllm Epilogue entropy（低 entropy = sink） + softmax_max（高峰值 = sink）</p>
+      <p>KVTuner: "离线测算层间 KV 敏感度"</p>
+      <p>  = gllm Epilogue delta_rho（Residual Epilogue 跨层能量差）+ dead_neuron_count</p>
+      <p>LeanKV: "per-head 动态稀疏"</p>
+      <p>  = gllm Softmax Epilogue per-head entropy（已在 KvPageHeader 按页记录）</p>
+      <p>```</p>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 Page = 自然压缩单元</h4>
+      <table>
+        <tr>
+          <th>论文粒度</th>
+        </tr>
+        <tr>
+          <td>gllm 对应</td>
+        </tr>
+        <tr>
+          <td>优势</td>
+        </tr>
+        <tr>
+          <td>ChunkKV 10-token chunk</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>page (默认 128 tokens)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>更大的语义单元，重要性评估更稳定</td>
+        </tr>
+        <tr>
+          <td>PagedEviction block</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>page</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>完全对齐，块级 eviction = page 级淘汰</td>
+        </tr>
+        <tr>
+          <td>MUSTAFAR per-element bitmap</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KvPageHeader.channel_bitmap</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>page header 携带稀疏掩码</td>
+        </tr>
+        <tr>
+          <td>Lexico dictionary coding</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>PagedKvPool + 字典页</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>pool 内可分配字典页</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 Page 级混合精度存储模型</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 KvPageHeader 遥测与量化语义</h4>
+      <p>&gt; <strong>📌 物理布局 SSOT</strong>: <code>KvPageHeader (56B)</code> 完整物理布局定义在 <code>03-DATA-STRUCTURE §8.0</code>。</p>
+      <p>&gt; 本节仅描述 Epilogue 遥测区域和量化元数据区域的<strong>语义</strong>，不重复物理布局。</p>
+      <p>Epilogue 遥测区域 (offset 8..24, 16B) — Softmax/Residual/FFN Epilogue 白嫖写入：</p>
+      <li><code>entropy_avg</code>: 注意力分散度（Softmax Epilogue 写入）</li>
+      <li><code>centroid_pos</code>: 注意力重心位置（Softmax Epilogue 写入）</li>
+      <li><code>softmax_max_avg</code>: 注意力峰值（Softmax Epilogue 写入）</li>
+      <li><code>delta_rho_avg</code>: 跨层能量差（Residual Epilogue 写入）</li>
+      <li><code>dead_ratio</code>: 死神经元比例（FFN Epilogue 写入）</li>
+      <li><code>importance_score</code>: 综合重要性评分 0-255</li>
+      <li><code>head_entropy_max/min</code>: per-head 最大/最小 entropy</li>
+      <p>量化元数据区域 (offset 24..36, 12B) — Rust 调度器写入：</p>
+      <li><code>precision_tier</code>: 精度等级（见 §2.2）</li>
+      <li><code>sink_mask</code>: page 内 sink token 位掩码</li>
+      <li><code>channel_bitmap_lo</code>: 通道稀疏掩码低 32 位 (MUSTAFAR)</li>
+      <li><code>k_scale_offset</code>: per-channel K scale 在页内偏移</li>
+      <li><code>v_scale_factor</code>: per-token V scale 指数</li>
+      <p>调度元数据区域 (offset 36..44, 8B):</p>
+      <li><code>pipeline_id</code>: 所属管线 (Conversation/Working)</li>
+      <li><code>layer_mask</code>: 有效层位掩码（跨层共享页时标识）</li>
+      <li><code>tier_age</code>: 精度等级赋值后的 tick 计数</li>
+      <li><code>deopt_flags</code>: Deopt 标志</li>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 PrecisionTier — 页级精度等级</h4>
+      <p>```rust</p>
+      <p>#[repr(u8)]</p>
+      <p>pub enum PrecisionTier {</p>
+      <p>    /// 全精度 — sink token / 刚 prefill 的页</p>
+      <p>    /// KV 数据: [f16; page_size * 2 * num_kv_heads * head_dim]</p>
+      <p>    FP16 = 0,</p>
+      <p>    /// 8-bit 量化 — 高重要性正常 token</p>
+      <p>    /// KV 数据: [u8; page_size * 2 * num_kv_heads * head_dim] + scale metadata</p>
+      <p>    FP8 = 1,</p>
+      <p>    /// 4-bit KIVI 量化 — 正常 token (默认)</p>
+      <p>    /// K: per-channel 4-bit + scale[f16; num_kv_heads * head_dim]</p>
+      <p>    /// V: per-token 4-bit + scale[f16; page_size]</p>
+      <p>    KIVI4 = 2,</p>
+      <p>    /// 2-bit 激进量化 — 低重要性 / Working 管线</p>
+      <p>    /// K: per-channel 2-bit + scale</p>
+      <p>    /// V: per-token 2-bit + scale</p>
+      <p>    KIVI2 = 3,</p>
+      <p>    /// 非结构化稀疏 (MUSTAFAR) — channel_bitmap 标记零通道</p>
+      <p>    /// 仅存储非零通道 (bitmap + compressed data)</p>
+      <p>    Sparse = 4,</p>
+      <p>    /// 字典稀疏编码 (Lexico) — KV 向量 = 字典系数</p>
+      <p>    /// 存储: [dict_id: u16; num_codes] + [coefficient: f16; num_codes]</p>
+      <p>    Dictionary = 5,</p>
+      <p>    /// 已 eviction — 页数据无效，可被回收</p>
+      <p>    Evicted = 6,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 Page 内数据布局（按 tier 变体）</h4>
+      <p>```</p>
+      <p>FP16 page (基准):</p>
+      <p>  [K_layer0_head0..headN | K_layer1_... | ... | V_layer0_head0..headN | ...]</p>
+      <p>  总大小 = page_size * num_layers * 2 * num_kv_heads * head_dim * 2 bytes</p>
+      <p>KIVI4 page (默认):</p>
+      <p>  [K_data: 4bit packed | K_scales: f16[num_channels] | V_data: 4bit packed | V_scales: f16[page_size]]</p>
+      <p>  总大小 ≈ FP16 * 0.3</p>
+      <p>KIVI2 page:</p>
+      <p>  [K_data: 2bit packed | K_scales: f16[num_channels] | V_data: 2bit packed | V_scales: f16[page_size]]</p>
+      <p>  总大小 ≈ FP16 * 0.18</p>
+      <p>Sparse page (MUSTAFAR):</p>
+      <p>  [channel_bitmap: u32 | nonzero_K_data | nonzero_V_data | offset_table]</p>
+      <p>  总大小 ≈ FP16 * (1 - sparsity_ratio) * 0.5</p>
+      <p>Dictionary page (Lexico):</p>
+      <p>  [dict_id: u16[num_codes] | coefficients: f16[num_codes]]</p>
+      <p>  总大小 ≈ FP16 * 0.05</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 动态稀疏 + 量化协同</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 Epilogue 信号 → Page 重要性评分</h4>
+      <p>每个 decode step 结束后，Softmax Epilogue 已经将遥测数据写入该 page 对应的 KvPageHeader。Rust 调度器在 <code>build_batch</code> 时消费这些信号：</p>
+      <p>```</p>
+      <p>importance_score 计算 (0-255):</p>
+      <p>  // 信号来源: 全部来自 Epilogue 白嫖 (§5), 零额外计算</p>
+      <p>  let attention_concentration = 1.0 - (entropy_avg / max_entropy);  // 高集中度 = 重要</p>
+      <p>  let sink_indicator = softmax_max_avg &gt; SINK_THRESHOLD;            // 峰值 = sink</p>
+      <p>  let stability = 1.0 - delta_rho_avg;                              // 低 Δρ = 稳定 = 可降级</p>
+      <p>  let active_heads = head_entropy_max - head_entropy_min;           // 头间差异 = 语义丰富</p>
+      <p>  importance_score = clamp(</p>
+      <p>    attention_concentration * 120       // 0-120: 注意力集中度权重最高</p>
+      <p>    + sink_indicator * 80               // +80: sink token 额外加成</p>
+      <p>    + active_heads * 30                 // +30: 语义丰富度</p>
+      <li>stability * 40,                   // -40: 过于稳定的可降级</li>
+      <p>    0, 255</p>
+      <p>  )</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 PrecisionTier 自动升降级</h4>
+      <p>Rust 调度器在每个 wave 间执行 tier 升降决策：</p>
+      <p>```</p>
+      <p>tier_upgrade/page 降级决策 (在 build_batch 中执行):</p>
+      <p>  if importance_score &gt; 200 || sink_mask != 0:</p>
+      <p>      target_tier = FP16      // 高重要性 / sink → 全精度</p>
+      <p>  else if importance_score &gt; 150:</p>
+      <p>      target_tier = FP8       // 中高重要性 → 8-bit</p>
+      <p>  else if importance_score &gt; 80:</p>
+      <p>      target_tier = KIVI4     // 正常 → 4-bit (默认)</p>
+      <p>  else if importance_score &gt; 40:</p>
+      <p>      target_tier = KIVI2     // 低重要性 → 2-bit</p>
+      <p>  else if importance_score &gt; 15:</p>
+      <p>      target_tier = Sparse    // 很低 → 稀疏</p>
+      <p>  else:</p>
+      <p>      target_tier = Evicted   // 极低 → eviction 候选</p>
+      <p>层间精度调制 (KVTuner/KVmix 启发):</p>
+      <p>  浅层 [0..L/3]:    tier 不可低于 FP8 (理解层对精度敏感)</p>
+      <p>  中层 [L/3..2L/3]: tier 不可低于 KIVI4</p>
+      <p>  深层 [2L/3..L]:   无下限 (生成层钝感)</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 Per-Head 动态稀疏 (LeanKV 启发)</h4>
+      <p>```</p>
+      <p>head_entropy_max - head_entropy_min &gt; HEAD_SPARSITY_THRESHOLD</p>
+      <p>  → 该 page 的某些 attention head 几乎无贡献</p>
+      <p>  → channel_bitmap 中标记这些 head 对应的通道</p>
+      <p>  → Attention decode 时跳过这些 head 的 KV 读取</p>
+      <p>  → 节省: 50-70% KV 读取带宽 (MUSTAFAR 验证)</p>
+      <p>JIT 实现:</p>
+      <p>  Compact→Execute→Scatter 分组时:</p>
+      <p>    Sparse tier 的 page 打包到同一 Mega-Kernel Variant</p>
+      <p>    该 Variant 的 Attention kernel 使用 channel_bitmap mask 跳过零通道</p>
+      <p>  非 Sparse tier 的 page 走标准 Variant</p>
+      <p>  → 运行时零分支，编译时 Variant 隔离</p>
+      <p>```</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 精度分级存储</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 四维交叉决策矩阵</h4>
+      <p>gllm 已有的三个分类维度 + 新增的精度维度，形成四维决策：</p>
+      <p>```</p>
+      <p>维度 1: KvPipeline (§4.4 已有)</p>
+      <p>  Conversation → 跨轮保留 → 最低 FP8</p>
+      <p>  Working      → 单轮释放 → 可 Sparse/Evicted</p>
+      <p>维度 2: PageState (§2.1 已有)</p>
+      <p>  Active    → 正在参与计算 → FP16</p>
+      <p>  Standby   → 等待使用     → KIVI4 (节省内存)</p>
+      <p>  Protected → 工作集保护   → KIVI4</p>
+      <p>  Swapped   → 换出到 CPU   → KIVI2 (压缩传输)</p>
+      <p>  Warm      → 刚换入保护期 → FP16</p>
+      <p>维度 3: 层位置 (KVTuner/KVmix 启发)</p>
+      <p>  浅层理解区  → FP16/FP8</p>
+      <p>  中层过渡区  → FP8/KIVI4</p>
+      <p>  深层生成区  → KIVI4/KIVI2/Sparse</p>
+      <p>维度 4: Token 类型 (SinkQ/ChunkKV 启发)</p>
+      <p>  Sink token (Epilogue 检测)    → FP16 锁定</p>
+      <p>  Heavy hitter (centroid 检测)  → FP8</p>
+      <p>  Normal token                  → KIVI4</p>
+      <p>  Filler token (低 entropy)     → KIVI2/Sparse</p>
+      <p>```</p>
+      <strong>决策优先级</strong>: Token 类型 &gt; Pipeline &gt; 层位置 &gt; PageState
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 System Prompt 压缩复用 (KVzip + CacheSlide 启发)</h4>
+      <p>```</p>
+      <p>场景: 100 个请求共享 system prompt "你是一个有用的AI助手..." (128 tokens)</p>
+      <p>传统: 每请求独立 prefill → 128 × 100 = 12,800 token 重复计算</p>
+      <p>KvPrefixIndex: 前缀命中 → 复用 page → 零重复计算</p>
+      <p>KVzip 增强:</p>
+      <p>  system prompt 页在首次 prefill 后标记为 query-agnostic</p>
+      <p>  → 执行一次 KVzip importance scoring</p>
+      <p>  → 保留高重要性 page (FP16)</p>
+      <p>  → 压缩低重要性 page (KIVI2/Sparse)</p>
+      <p>  → 压缩后 page 的 ref_count = 活跃请求数</p>
+      <p>  → 后续请求直接引用压缩后的 page</p>
+      <p>CacheSlide 增强:</p>
+      <p>  问题: 不同请求的 system prompt 位置不同 → RoPE 注入不同位置编码 → KV 不同</p>
+      <p>  解决: ChunkKV 式 CCPE (Chunked Contextual Position Encoding)</p>
+      <p>    → system prompt page 使用 position-agnostic 编码</p>
+      <p>    → Weighted Correction Attention 在 decode 时修正位置偏移</p>
+      <p>    → gllm 实现: RoPE Epilogue 检测到 system prompt range → 跳过 RoPE 注入</p>
+      <p>                  → 在 attention 计算时通过 Correction Add 补偿</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>§4.3 跨层 Index 复用 (ChunkKV 启发)</h4>
+      <p>```</p>
+      <p>观察: 相邻层的 attention pattern 高度相似 (相关性 &gt; 0.95)</p>
+      <p>推论: layer N 的 page importance_score 近似等于 layer N+1</p>
+      <p>优化:</p>
+      <p>  1. 仅在关键层 (每 K 层) 完整评估 importance_score</p>
+      <p>  2. 中间层复用最近关键层的评分</p>
+      <p>  3. 减少 Epilogue → Rust 的遥测读取频率</p>
+      <p>关键层选择: 由 Epilogue inter-layer similarity 检测决定</p>
+      <p>  每个模型只需要一次离线校准，确定 K 值（通常 K=4，即每 4 层评估一次）</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 Epilogue 白嫖信号 → KV 优化消费链</h3>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="5.1">
+      <h4>§5.1 信号产出到消费的完整数据流</h4>
+      <p>```</p>
+      <p>JIT 推理 (每个 decode step):</p>
+      <p>  Softmax Epilogue 尾段 (~5 条 SIMD 指令):</p>
+      <p>    → 计算 entropy, centroid, softmax_max, head_entropy_range</p>
+      <p>    → STG 写入当前 page 的 KvPageHeader.telemetry 区域</p>
+      <p>  Residual Epilogue 尾段 (~3 条 SIMD 指令):</p>
+      <p>    → 计算 delta_rho, cosine_similarity</p>
+      <p>    → STG 写入 KvPageHeader.telemetry</p>
+      <p>  FFN Gate Epilogue 尾段 (~3 条 SIMD 指令):</p>
+      <p>    → 计算 dead_neuron_count, row_l1_norm, row_max</p>
+      <p>    → STG 写入 KvPageHeader.telemetry</p>
+      <p>Rust 调度器 (wave 间, build_batch 阶段):</p>
+      <p>  1. 读取所有 active page 的 KvPageHeader.telemetry</p>
+      <p>  2. 计算 importance_score (§3.1)</p>
+      <p>  3. 执行 tier 升降决策 (§3.2)</p>
+      <p>  4. 执行数据格式转换 (如 KIVI4 → KIVI2 需要 requantize)</p>
+      <p>  5. 更新 channel_bitmap (per-head 稀疏)</p>
+      <p>  6. 按 tier 分组 → 选择对应 Mega-Kernel Variant</p>
+      <p>  7. Compact→Execute→Scatter 启动下一 wave</p>
+      <p>JIT 消费 (下一 wave 的 Mega-Kernel 内):</p>
+      <p>  Attention decode 读取 KV page:</p>
+      <p>    → 根据 Variant (编译时 bake) 使用对应的 dequant 逻辑</p>
+      <p>    → FP16 Variant: 直接 load</p>
+      <p>    → KIVI4 Variant: load 4-bit + scale → dequant to f32 in registers</p>
+      <p>    → KIVI2 Variant: load 2-bit + scale → dequant to f32</p>
+      <p>    → Sparse Variant: load bitmap + nonzero data → scatter to f32</p>
+      <p>  所有 dequant 在 GEMM/Attention 计算的 load 微内核中完成 (寄存器内)</p>
+      <p>  → 零额外内存搬运</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 量化写回路径</h4>
+      <p>```</p>
+      <p>Prefill / Decode KV 写入:</p>
+      <p>  QKV GEMM 输出 (f32 寄存器) → Epilogue 尾段:</p>
+      <p>    1. 计算 per-channel max (K) 或 per-token max (V)</p>
+      <p>    2. 量化到目标精度 (由当前页 tier 决定)</p>
+      <p>    3. STG 写入 page data 区域</p>
+      <p>    4. STG 写入 KvPageHeader.telemetry</p>
+      <p>关键: 量化在 Epilogue 尾段的寄存器中完成，不经过中间 buffer</p>
+      <p>  → 与现有 Epilogue 白嫖架构一致 (§5 核心原则)</p>
+      <p>  → 新增开销: ~10 条 SIMD 指令/层 (量化 + 写 scale)</p>
+      <p>```</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 Mega-Kernel Variant 编译策略</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 编译时 Variant 矩阵</h4>
+      <p>每个 PrecisionTier 对应一个独立的 Mega-Kernel Variant。Variant 间的差异仅在 Attention 层的 KV load 微内核：</p>
+      <p>```</p>
+      <p>Variant 名称           | Attention KV load    | FFN/GEMM/其他 | 编译产物大小</p>
+      <p>FP16_VARIANT          | 直接 f16 load        | 不变          | 基准</p>
+      <p>FP8_VARIANT           | f16 load + dequant   | 不变          | 基准 + ~2KB</p>
+      <p>KIVI4_VARIANT         | 4-bit load + dequant | 不变          | 基准 + ~4KB</p>
+      <p>KIVI2_VARIANT         | 2-bit load + dequant | 不变          | 基准 + ~4KB</p>
+      <p>SPARSE_VARIANT        | bitmap + scatter     | 不变          | 基准 + ~6KB</p>
+      <p>```</p>
+      <strong>L1i 预算</strong> (<a href="http://05-OPTIMIZATIONS.md">05-OPTIMIZATIONS.md</a> §3.5):
+      <li>所有 Variant 共享 FFN/Norm/RoPE/Embed/lm_head 代码段</li>
+      <li>仅 Attention KV load 部分不同 (~2-6KB 差异)</li>
+      <li>每次只执行一个 Variant → 不超出 L1i 80% 预算</li>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 Variant 选择 = Compact 分组</h4>
+      <p>```</p>
+      <p>build_batch 阶段:</p>
+      <p>  let pages = collect_all_active_pages();</p>
+      <p>  let tiers: HashMap&lt;PrecisionTier, Vec<pageid>&gt; = group_by_tier(pages);</pageid></p>
+      <p>  // 按优先级选择 Variant (最多占 60% decode budget)</p>
+      <p>  // 混合 tier 的请求通过 Scatter 机制还原位置</p>
+      <p>  let variant = select_variant_by_majority(tiers);</p>
+      <p>  // Compact: 按 variant 的 KV load 逻辑重排 batch</p>
+      <p>  // Execute: 运行对应 Variant 的 Mega-Kernel</p>
+      <p>  // Scatter: 还原原始 batch 位置</p>
+      <p>```</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>§6.3 混合 tier 请求处理</h4>
+      <p>当同一 batch 内有不同 tier 的 page 时：</p>
+      <p>```</p>
+      <p>方案 A (简单): 多次 launch</p>
+      <p>  按 tier 分组 → 每个 tier 独立 Mega-Kernel launch</p>
+      <p>  → 简单但多次 launch 有驱动开销</p>
+      <p>方案 B (推荐): 主 Variant + 通用 dequant 桥接</p>
+      <p>  选择数量最多的 tier 作为主 Variant</p>
+      <p>  少数 tier 的 page 在 build_batch 阶段预 dequant 到临时 FP16 buffer</p>
+      <p>  → 单次 launch，少数 page 有额外搬运，但保持 L1i 预算</p>
+      <p>方案 C (远期): Variant 内嵌 tier switch</p>
+      <p>  JIT 编译的 Attention KV load 中嵌入有限 tier 分支</p>
+      <p>  通过 Compact 将相同 tier 的 page 连续排列 → cache line 友好</p>
+      <p>  → 复杂但最优，留作 Phase 2</p>
+      <p>```</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 REQ 清单</h3>
+    </section>
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="001" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-001" id="req-kv-opt-001">REQ-KV-OPT-001: KvPageHeader 扩展 48B
+      <p>KvPageHeader 从 40B 扩展为 48B，新增 quant_meta 区域（precision_tier, sink_mask, channel_bitmap_lo, k_scale_offset, v_scale_factor）和调度元数据区域（pipeline_id, layer_mask, tier_age, deopt_flags）。</p>
+      <strong>文件</strong>: <code>src/kv_cache/mod.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-001" data-test="TEST-KV-OPT-001" id="test-kv-opt-001">TEST-KV-OPT-001: KV Cache智能优化测试<p>验证REQ-KV-OPT-001相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="002" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-002" id="req-kv-opt-002">REQ-KV-OPT-002: Epilogue 遥测 → importance_score 评分
+      <p>Rust 调度器在 wave 间读取 KvPageHeader.telemetry，计算 0-255 的 importance_score，回写到 KvPageHeader.importance_score 字段。</p>
+      <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code> (新增)
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-002" data-test="TEST-KV-OPT-002" id="test-kv-opt-002">TEST-KV-OPT-002: KV Cache智能优化测试<p>验证REQ-KV-OPT-002相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="003" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-003" id="req-kv-opt-003">REQ-KV-OPT-003: PrecisionTier 自动升降级
+      <p>基于 importance_score + 层位置 + KvPipeline + PageState 四维交叉决策，自动升级/降级 page 的 precision_tier。升降级时执行 requantize 数据转换。</p>
+      <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-003" data-test="TEST-KV-OPT-003" id="test-kv-opt-003">TEST-KV-OPT-003: KV Cache智能优化测试<p>验证REQ-KV-OPT-003相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="004" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-004" id="req-kv-opt-004">REQ-KV-OPT-004: KIVI4/2 量化写回 Epilogue
+      <p>QKV GEMM Epilogue 尾段扩展：在 KV 写入 page 时根据当前页 precision_tier 执行 KIVI 异构量化（K per-channel + V per-token），量化在寄存器内完成，STG 写入压缩数据 + scale。</p>
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code> Epilogue 尾段
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-004" data-test="TEST-KV-OPT-004" id="test-kv-opt-004">TEST-KV-OPT-004: KV Cache智能优化测试<p>验证REQ-KV-OPT-004相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="005" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-005" id="req-kv-opt-005">REQ-KV-OPT-005: Per-Head 稀疏 Bitmap (MUSTAFAR)
+      <p>Epilogue head_entropy_range 差异大于阈值时，设置 KvPageHeader.channel_bitmap 标记低活跃 head。Sparse Variant 的 Attention KV load 使用 bitmap 跳过零通道。</p>
+      <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code> + <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-005" data-test="TEST-KV-OPT-005" id="test-kv-opt-005">TEST-KV-OPT-005: KV Cache智能优化测试<p>验证REQ-KV-OPT-005相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="006" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-006" id="req-kv-opt-006">REQ-KV-OPT-006: Sink Token 动态保护 (SinkQ)
+      <p>importance_score &gt; 200 或 softmax_max_avg &gt; SINK_THRESHOLD 的 page 标记 sink_mask。sink_mask 非零的 page precision_tier 锁定为 FP16，禁止降级。Epilogue 首次写入时检测。</p>
+      <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-006" data-test="TEST-KV-OPT-006" id="test-kv-opt-006">TEST-KV-OPT-006: KV Cache智能优化测试<p>验证REQ-KV-OPT-006相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="007" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-007" id="req-kv-opt-007">REQ-KV-OPT-007: System Prompt 压缩复用 (KVzip)
+      <p>KvPrefixIndex 匹配的 system prompt 页在首次 prefill 后执行 KVzip importance scoring。高重要性页保持 FP16，低重要性页降级到 KIVI2/Sparse。标记为 query-agnostic，ref_count 引用管理。</p>
+      <strong>文件</strong>: <code>src/scheduler/prefix_index.rs</code> + <code>kv_optimizer.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-007" data-test="TEST-KV-OPT-007" id="test-kv-opt-007">TEST-KV-OPT-007: KV Cache智能优化测试<p>验证REQ-KV-OPT-007相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="008" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-008" id="req-kv-opt-008">REQ-KV-OPT-008: 跨层 Index 复用 (ChunkKV)
+      <p>仅在关键层（每 K 层）完整评估 importance_score，中间层复用最近关键层评分。K 值由离线校准确定。</p>
+      <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-008" data-test="TEST-KV-OPT-008" id="test-kv-opt-008">TEST-KV-OPT-008: KV Cache智能优化测试<p>验证REQ-KV-OPT-008相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="009" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-009" id="req-kv-opt-009">REQ-KV-OPT-009: Mega-Kernel Variant 矩阵编译
+      <p>为每个 PrecisionTier 编译独立 Attention KV load Variant。Variant 间共享 FFN/Norm/RoPE/Embed/lm_head 代码。build_batch 阶段按 tier 分组选择 Variant。</p>
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code> + <code>src/engine/mega_kernel.rs</code>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-009" data-test="TEST-KV-OPT-009" id="test-kv-opt-009">TEST-KV-OPT-009: KV Cache智能优化测试<p>验证REQ-KV-OPT-009相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="010" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-010" id="req-kv-opt-010">REQ-KV-OPT-010: Position-Agnostic System Prompt (CacheSlide)
+      <p>System prompt 页使用 position-agnostic 编码（跳过 RoPE 注入），decode 时通过 Weighted Correction Attention 补偿位置偏移。实现跨请求 KV 复用不受位置编码影响。</p>
+      <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code> RoPE Epilogue + Attention
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">KV cache 数据结构实现完整</li>
+        <li id="id-2" data-criterion="2">PagedAttention 内存管理正确</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-010" data-test="TEST-KV-OPT-010" id="test-kv-opt-010">TEST-KV-OPT-010: KV Cache智能优化测试<p>验证REQ-KV-OPT-010相关功能正确性</p>
+      <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
+      <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s8" data-section="8">
+      <h3>§8 实施阶段</h3>
+      <p>```</p>
+      <p>Phase 1: 基础设施 (与 PagedAttention 接通并行)</p>
+      <p>  → REQ-KV-OPT-001: KvPageHeader 48B</p>
+      <p>  → REQ-KV-OPT-002: importance_score 评分</p>
+      <p>  → REQ-KV-OPT-006: Sink Token 保护</p>
+      <p>Phase 2: 量化写回 (REQ-PA 端到端接通后)</p>
+      <p>  → REQ-KV-OPT-004: KIVI4/2 Epilogue 量化写回</p>
+      <p>  → REQ-KV-OPT-009: Variant 矩阵编译</p>
+      <p>Phase 3: 动态稀疏 + 自动升降级</p>
+      <p>  → REQ-KV-OPT-003: PrecisionTier 自动升降级</p>
+      <p>  → REQ-KV-OPT-005: Per-Head 稀疏 Bitmap</p>
+      <p>Phase 4: 跨请求复用优化</p>
+      <p>  → REQ-KV-OPT-007: System Prompt 压缩复用</p>
+      <p>  → REQ-KV-OPT-008: 跨层 Index 复用</p>
+      <p>  → REQ-KV-OPT-010: Position-Agnostic 编码</p>
+      <p>```</p>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>§9 验证</h3>
+      <p>```bash</p>
+      <p>cargo test --lib scheduler::kv_optimizer</p>
+      <p>cargo test --test test_e2e_generator -- --test-threads=1</p>
+      <p>cargo test --lib scheduler::kv_optimizer -- sparse_tier</p>
+      <p>cargo test --lib &amp;&amp; cargo test --test test_e2e_generator -- --test-threads=1</p>
+      <p>```</p>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>§10 预期压缩效果</h3>
+      <p>基于论文基准数据 + gllm 四维交叉决策的预期：</p>
+      <table>
+        <tr>
+          <th>场景</th>
+        </tr>
+        <tr>
+          <td>FP16 基准</td>
+        </tr>
+        <tr>
+          <td>预期压缩比</td>
+        </tr>
+        <tr>
+          <td>近似精度影响</td>
+        </tr>
+        <tr>
+          <td>短上下文 (&lt;4K)</td>
+        </tr>
+        <tr>
+          <td>1.0x</td>
+        </tr>
+        <tr>
+          <td>1.0x (全 FP16)</td>
+        </tr>
+        <tr>
+          <td>零损失</td>
+        </tr>
+        <tr>
+          <td>中上下文 (4K-32K)</td>
+        </tr>
+        <tr>
+          <td>1.0x</td>
+        </tr>
+        <tr>
+          <td>2-3x (KIVI4 默认)</td>
+        </tr>
+        <tr>
+          <td>近乎无损 (KVTuner: &lt;0.1 ppl)</td>
+        </tr>
+        <tr>
+          <td>长上下文 (32K-128K)</td>
+        </tr>
+        <tr>
+          <td>1.0x</td>
+        </tr>
+        <tr>
+          <td>4-6x (KIVI4 + Sparse + Eviction)</td>
+        </tr>
+        <tr>
+          <td>近乎无损 (MUSTAFAR: 70% 稀疏零损失)</td>
+        </tr>
+        <tr>
+          <td>超长上下文 (&gt;128K)</td>
+        </tr>
+        <tr>
+          <td>1.0x</td>
+        </tr>
+        <tr>
+          <td>8-12x (KIVI2 + Sparse + Dictionary)</td>
+        </tr>
+        <tr>
+          <td>&lt;5% 质量退化 (LeanKV 验证)</td>
+        </tr>
+        <tr>
+          <td>System prompt 复用</td>
+        </tr>
+        <tr>
+          <td>1.0x</td>
+        </tr>
+        <tr>
+          <td>3-4x (KVzip 压缩 + 复用)</td>
+        </tr>
+        <tr>
+          <td>零损失 (query-agnostic)</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-epilogue-policy" data-entity="ENT-EPILOGUE-POLICY" data-req-ref="REQ-OBS-001 REQ-OBS-002 REQ-OBS-003 REQ-EPILOGUE-001 REQ-EPILOGUE-002" data-entity-model-type="relational" data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-TELEMETRY-OFFSET" data-xref="REQ-OBS-001 REQ-OBS-002 REQ-OBS-003 REQ-EPILOGUE-001 REQ-EPILOGUE-002"><h4>ENT-EPILOGUE-POLICY</h4><p>AbsolutePolicy — Epilogue强制策略</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="pressure_emergency" data-type="number" data-required="true" <td="">pressure_emergency<td>number</td><td>是</td><td>f32, default 0.9</td><td>Memory pressure emergency threshold (triggers batch reduction)</td></tr>
+<tr data-field="frag_defrag_threshold" data-type="number" data-required="true" <td="">frag_defrag_threshold<td>number</td><td>是</td><td>f32, default 0.5</td><td>KV fragmentation defrag threshold</td></tr><tr data-field="batch_safe" data-type="number" data-required="true" <td="">batch_safe<td>number</td><td>是</td><td>usize, default 32</td><td>Safe mode max batch size</td></tr><tr data-field="batch_normal" data-type="number" data-required="true" <td="">batch_normal<td>number</td><td>是</td><td>
+usize, default 32</td><td>Normal mode max batch size</td></tr><tr data-field="batch_aggressive" data-type="number" data-required="true" <td="">batch_aggressive<td>number</td><td>是</td><td>usize, default 32</td><td>Aggressive mode max batch size</td></tr><tr data-field="policy_type" data-type="string" data-required="true" <td="">policy_type<td>string</td><td>是</td><td>(synced)</td></tr><tr data-field="clip_min" data-type="number" data-required="false" <td="">clip_min<td>number</td><td>否</td>
+<td>(synced)</td></tr><tr data-field="clip_max" data-type="number" data-required="false" <td="">clip_max<td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="quant_bits" data-type="number" data-required="false" <td="">quant_bits<td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="telemetry_key" data-type="string" data-required="false" <td="">telemetry_key<td>string</td><td>否</td><td>(synced)</td></tr></table></section>
+      <section id="ent-kv-cache" data-entity="ENT-KV-CACHE" data-req-ref="REQ-KV-001 REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-SYMDIM-001" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-EMA-TRACKER ENT-EPILOGUE-POLICY ENT-EXPERT-WEIGHT-PREFETCHER ENT-KV-PAGE-HEADER ENT-MEGA-KERNEL-FN ENT-MLA-CONFIG" data-xref="REQ-KV-001 REQ-KV-ADDR-001 REQ-KV-ADDR-002 REQ-KV-ADDR-003 REQ-SYMDIM-001">
+        <h4>ENT-KV-CACHE</h4>
+        <p>KvCache — KV缓存数据结构</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="num_kv_heads" data-type="number" data-required="true" <td="">num_kv_heads<td>number</td><td>是</td><td>usize</td><td>KV注意力头数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">
+head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度</td></tr><tr data-field="kv_dtype" data-type="string" data-required="true" <td="">kv_dtype<td>string</td><td>是</td><td>DType</td><td>KV cache元素dtype</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>usize</td><td>
+页大小 (tokens per page)</td></tr><tr data-field="num_kv_shared_layers" data-type="number" data-required="true" <td="">num_kv_shared_layers<td>number</td><td>是</td><td>usize</td><td>SharedKvRef共享KV层数</td></tr><tr data-field="is_mla" data-type="boolean" data-required="true" <td="">is_mla<td>boolean</td><td>是</td><td></td><td>是否为MLA模型</td></tr></table>
+      </section>
+      <section id="ent-kv-page-header" data-entity="ENT-KV-PAGE-HEADER" data-req-ref="REQ-OBS-001 REQ-OBS-002 REQ-OBS-003 REQ-KV-001 REQ-KV-OPT-001" data-entity-model-type="relational" data-entity-ref="ENT-COMPRESSION-CODEC ENT-EPILOGUE-POLICY ENT-EVICTION-SCORER ENT-KV-CACHE ENT-PAGE-MIGRATION-ACTOR ENT-PAGE-TABLE ENT-PAGED-SCHEDULER ENT-STORAGE-TIER" data-xref="REQ-OBS-001 REQ-OBS-002 REQ-OBS-003 REQ-KV-001 REQ-KV-OPT-001"><h4>ENT-KV-PAGE-HEADER</h4><p>KvPageHeader — KV Cache 页头（struct KvPageHeader in gllm/src/kv_cache/mod.rs, 56 字节）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="page_id" data-type="number" data-required="true" <td="">page_id<td>number</td><td>是</td><td>u32</td><td>物理页唯一标识</td></tr><tr data-field="ref_count" data-type="number" data-required="true" <td="">
+ref_count<td>number</td><td>是</td><td>u16, 共享页 &gt; 1</td><td>引用计数（多请求共享时）</td></tr><tr data-field="importance_score" data-type="number" data-required="true" <td="">importance_score<td>number</td><td>是</td><td>u8, 0-255</td><td>综合重要性评分（kv_optimizer 计算）</td></tr><tr data-field="codec" data-type="string" data-required="true" <td="">codec<td>string</td><td>是</td><td>None|Lz4|BitPackRle|NvcompAns|ZstdDict</td><td>压缩编解码器</td></tr>
+<tr data-field="storage_tier" data-type="string" data-required="true" <td="">storage_tier<td>string</td><td>是</td><td>GpuHbm|CpuDram|Nvme</td><td>当前存储层级</td></tr><tr data-field="precision_tier" data-type="number" data-required="false" <td="">precision_tier<td>number</td><td>否</td><td>u8</td><td>精度等级</td></tr><tr data-field="compressed_size" data-type="number" data-required="false" <td="">compressed_size<td>number</td><td>否</td><td>u32, 0=未压缩</td><td>压缩后字节数</td></tr>
+<tr data-field="pipeline_id" data-type="number" data-required="false" <td="">pipeline_id<td>number</td><td>否</td><td>u8, 0=Conversation, 1=Working</td><td>所属管线</td></tr><tr data-field="sequence_id" data-type="number" data-required="true" <td="">sequence_id<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="logical_index" data-type="number" data-required="true" <td="">logical_index<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="last_access_seq" data-type="number" data-required="true" <td="">last_access_seq<td>number</td><td>是</td><td>(synced)</td></tr></table></section>
+      <section id="ent-paged-scheduler" data-entity="ENT-PAGED-SCHEDULER" data-req-ref="REQ-KV-001 REQ-PA-001 REQ-PA-008 REQ-PA-007 REQ-PA-002" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-EPILOGUE-POLICY ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-MEGA-KERNEL-FN ENT-MLA-CONFIG" data-xref="REQ-KV-001 REQ-PA-001 REQ-PA-008 REQ-PA-007 REQ-PA-002">
+        <h4>ENT-PAGED-SCHEDULER</h4>
+        <p>PagedScheduler — PagedAttention调度器</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>usize</td><td>页大小 (tokens per block)</td></tr><tr data-field="total_blocks" data-type="number" data-required="true" <td="">total_blocks<td>number</td><td>是</td><td>usize</td><td>总物理页数</td></tr>
+<tr data-field="used_blocks" data-type="number" data-required="true" <td="">used_blocks<td>number</td><td>是</td><td>usize</td><td>已使用页数</td></tr><tr data-field="num_block_tables" data-type="number" data-required="true" <td="">num_block_tables<td>number</td><td>是</td><td>usize</td><td>活跃请求块表数量</td></tr><tr data-field="hgal" data-type="string" data-required="true" <td="">hgal<td>string</td><td>是</td><td>HGALScheduler</td><td>HGAL调度器实例</td></tr>
+<tr data-field="prefix_index" data-type="string" data-required="true" <td="">prefix_index<td>string</td><td>是</td><td>KvPrefixIndex</td><td>KV前缀索引 (trie)</td></tr><tr data-field="memory_manager" data-type="string" data-required="true" <td="">memory_manager<td>string</td><td>是</td><td>GlobalMemoryManager</td><td>三级内存管理器 (L1 GPU/L2 CPU/L3 NVMe)</td></tr><tr data-field="vllm_state" data-type="string" data-required="false" <td="">vllm_state<td>string</td><td>否</td><td>
+Option&lt;Scheduler2024State&gt;</td><td>vLLM 2024调度器状态</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+      
+    </section>
+<section id="api-kv-optimizer" data-api="POST /internal/kv/optimize" data-req-ref="REQ-KV-OPT-001 REQ-KV-OPT-002 REQ-KV-OPT-003 REQ-KV-OPT-004 REQ-KV-OPT-005" data-api-name="API-KV-OPTIMIZER" data-api-type="internal" data-xref="REQ-KV-OPT-001 REQ-KV-OPT-002 REQ-KV-OPT-003 REQ-KV-OPT-004 REQ-KV-OPT-005"><h4>POST /internal/kv/optimize — KV Cache optimizer</h4><p>KV Cache 智能优化接口，动态稀疏注意力、混合精度 KV 存储、页级表达压缩。根据序列长度和注意力模式自适应选择优化策略。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="KvOptimizationPlan"><td>200</td><td>成功</td><td>KvOptimizationPlan</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：19-KV-CACHE-OPTIMIZATION.html</address>
+  </footer>
+</body>
+</html>

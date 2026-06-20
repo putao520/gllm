@@ -111,55 +111,8 @@ fn pack_weights_from_graph(
             (false, false) => 3, // full_large
         }
     }
-    if false && !raw_floats.is_empty() {
-        // ARCH-JIT-DATA-YIELDS: BUILD-stage dtype dispatch — weight packing requires
-        // per-dtype copy logic at model load time. This is NOT a JIT compile-time branch;
-        // different weight dtypes genuinely require different deserialization paths.
-        for (cn, offset) in named_offsets {
-            if cn.contains("qkv_proj") || cn.contains("gate_proj") {
-                let ext = name_map.resolve_external_to_string(cn);
-                if let Some(raw) = raw_floats.get(&ext) {
-                    let esz = match raw.dtype {
-                        ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
-                        _ => 4,
-                    };
-                    let numel = raw.data.len() / esz;
-                    eprintln!(
-                        "[pack] {} -> {} dtype={:?} numel={} f32_bytes={} offset={}",
-                        cn,
-                        ext,
-                        raw.dtype,
-                        numel,
-                        numel * 4,
-                        offset
-                    );
-                }
-            }
-        }
-    }
-
     for (canonical_name, offset) in named_offsets {
         let ext_name = name_map.resolve_external_to_string(canonical_name);
-        // Debug: trace norm weight packing path
-        if canonical_name.contains("q_norm") || canonical_name.contains("k_norm") || canonical_name.contains("input_norm") {
-            let in_raw = raw_floats.get(&ext_name).is_some();
-            let in_ptr = weight_ptrs.get(canonical_name).is_some();
-            eprintln!("[PACK-TRACE] {} ext={} raw_floats={} weight_ptrs={}", canonical_name, ext_name, in_raw, in_ptr);
-            if in_raw {
-                if let Some(raw) = raw_floats.get(&ext_name) {
-                    match raw.dtype {
-                        ::safetensors::Dtype::BF16 => {
-                            let src = unsafe {
-                                std::slice::from_raw_parts(raw.data.as_ptr() as *const half::bf16, raw.data.len() / 2)
-                            };
-                            let first_4: Vec<f32> = src.iter().take(4).map(|v| v.to_f32()).collect();
-                            eprintln!("[PACK-RAW] {} dtype=BF16 first_4=[{:.6},{:.6},{:.6},{:.6}]", canonical_name, first_4[0], first_4[1], first_4[2], first_4[3]);
-                        }
-                        other => { eprintln!("[PACK-RAW] {} dtype={:?}", canonical_name, other); }
-                    }
-                }
-            }
-        }
         if let Some(raw) = raw_floats.get(&ext_name) {
             let elem_size = match raw.dtype {
                 ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
@@ -284,11 +237,6 @@ fn pack_weights_from_graph(
                                         let mut f = v.to_f32();
                                         if is_gemma_norm { f += 1.0; }
                                         dst[i] = f;
-                                    }
-                                    if is_gemma_norm && layer_idx == 0 && dst.len() >= 4 {
-                                        eprintln!("[PACK-SHIFT] {} layer={} gemma_norm={} first_4=[{:.4},{:.4},{:.4},{:.4}]",
-                                            canonical_name, layer_idx, is_gemma_norm,
-                                            dst[0], dst[1], dst[2], dst[3]);
                                     }
                                 }
                                 ::safetensors::Dtype::F16 => {
@@ -484,9 +432,6 @@ fn pack_weights_from_graph(
                 let is_gemma_norm_hetero = gemma_norm_residual
                     && (suffix.ends_with(".q_norm")
                         || suffix.ends_with(".k_norm"));
-                if canonical_name.contains("q_norm") {
-                    eprintln!("[HETERO-NORM] {} suffix={} is_gemma={} gemma_norm_residual={}", canonical_name, suffix, is_gemma_norm_hetero, gemma_norm_residual);
-                }
 
                 for layer_idx in 0..num_layers {
                     if hetero_type_index(layer_idx, hcfg) != type_idx { continue; }
@@ -556,19 +501,6 @@ fn pack_weights_from_graph(
                     continue;
                 }
 
-                // DIAG: verify Q4_1 weight data at packing for q_proj L0
-                if layer_idx == 0 && canonical_name.contains("q_proj") && copy_size >= 20 {
-                    let src_first = unsafe { std::slice::from_raw_parts(ptr, 20) };
-                    let d_bits = u16::from_le_bytes([src_first[0], src_first[1]]);
-                    let m_bits = u16::from_le_bytes([src_first[2], src_first[3]]);
-                    let d_val = half::f16::from_bits(d_bits).to_f32();
-                    let m_val = half::f16::from_bits(m_bits).to_f32();
-                    let nib0 = src_first[4] & 0x0F;
-                    let nib1 = (src_first[4] >> 4) & 0x0F;
-                    eprintln!("[PACK-Q41-CHECK] {} off={} size={} block0: d={:.6}(0x{:04x}) m={:.6}(0x{:04x}) nib[0]={} nib[16]={}",
-                        canonical_name, abs_off, copy_size, d_val, d_bits, m_val, m_bits, nib0, nib1);
-                }
-
                 if layer_idx == 0 {
                     let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
                     blob[abs_off..abs_off + copy_size].copy_from_slice(src);
@@ -606,23 +538,15 @@ fn pack_weights_from_graph(
                                         // nibbles = same
                                         dst[d_off + 4..d_off + 20].copy_from_slice(&src[s_off + 2..s_off + 18]);
                                     }
-                                    if canonical_name.contains("down_proj") && layer_idx <= 4 {
-                                        eprintln!("[PACK-REQUANT] {} L{} Q4_0→Q4_1: {} blocks at off={}",
-                                            canonical_name, layer_idx, num_blocks, abs_off);
-                                    }
                                     continue; // skip the raw copy below
                                 }
-                                eprintln!("[PACK-WARN] {} L{} size mismatch: layer_size={} copy_size={} — no requant handler",
+                                log::warn!("{} L{} size mismatch: layer_size={} copy_size={} — no requant handler",
                                     canonical_name, layer_idx, layer_size, copy_size);
                             }
                             let src = unsafe { std::slice::from_raw_parts(layer_ptr, layer_copy) };
                             blob[abs_off..abs_off + layer_copy].copy_from_slice(src);
                         }
                     } else {
-                        if canonical_name.contains("down_proj") && layer_idx <= 4 {
-                            eprintln!("[PACK-DIAG] {} L{} NOT found in weight_ptrs, reusing L0 data copy_size={}",
-                                canonical_name, layer_idx, copy_size);
-                        }
                         let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
                         blob[abs_off..abs_off + copy_size].copy_from_slice(src);
                     }

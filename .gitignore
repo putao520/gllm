@@ -65,6 +65,5 @@ tests/e2e_alignment/data/
 gllm-nccl/
 gllm-kernels/
 
-# SPEC and project docs — tracked locally, excluded from remote push
-SPEC/
+# SPEC is SSOT, tracked in git for rollback guarantee
 CLAUDE.md

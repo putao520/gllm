@@ -1,0 +1,3105 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="01-JIT-PIPELINE">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"01-JIT-PIPELINE", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>四阶段 JIT 编译管线</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>01-JIT-PIPELINE</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-四阶段-jit-编译管线" data-section="null">
+      <h2>四阶段 JIT 编译管线</h2>
+      <p>&gt; <strong>SSOT</strong>: 本文件定义 gllm-kernels JIT 编译器的四阶段管线架构、融合规则、缓存协议。硬件探测与 DeviceProfile 定义见 <code>SPEC/02-HARDWARE.md</code>。核心铁律见 <code>SPEC/00-PHILOSOPHY.md</code>。</p>
+      <p>&gt; 交叉引用: <code>37-HARDWARE-ACCELERATION.md</code> §3 定义了 DynamicPrecisionSelect TraceOp 的完整语义和 auto_select 映射。</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>0. CompilerGraph 来源 (ARCH-UNIFIED-GRAPH-SOURCE)</h3>
+      <strong>铁律：CompilerGraph 的唯一来源是 gllm 侧 auto_graph 系统。gllm-kernels 不包含独立的图构建逻辑。</strong>
+      <p>```</p>
+      <p>gllm: config.json → ModelConfig → ResolvedConfig</p>
+      <p>    ↓</p>
+      <p>gllm: auto_graph (tensor-name-driven) → CompilerGraph</p>
+      <p>    ↓</p>
+      <p>gllm-kernels: Phase 0-3 JIT 管线 (§1)</p>
+      <p>```</p>
+      <p>详细设计见 <code>SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §2.4-2.6</code>。</p>
+      <strong>禁止</strong>：
+      <li>❌ 在 <code>graph_builders.rs</code> 中手写 <code>decoder_model()</code> / <code>decoder_model_hetero()</code> / <code>build_layer_body()</code></li>
+      <li>❌ 手写 <code>compute_per_layer_bytes()</code> 硬编码权重布局</li>
+      <li>❌ 新增模型时修改 gllm-kernels 代码（只需在 ARCH_TABLE 注册 token + auto_graph 添加特征检测 + 标量算子注册）</li>
+      <strong>量化架构 (ARCH-COMPUTE-TIME-DEQUANT)</strong>:
+      <li>权重在加载时保持原始压缩格式 (Q4_K, Q8_0, BF16, MXFP4...)，不进行全量 dequant</li>
+      <li>JIT 生成融合 dequant+compute 代码 (DequantComputeVariant)</li>
+      <li>硬件支持隐式 dequant 时 (如 GFX12 a4w8 WMMA) 优先使用硬件路径</li>
+      <li>TensorDesc 携带 <code>source_quant: QuantType</code> 元数据，StrategySelector 据此选择策略</li>
+      <li>已废弃: ARCH-COMPUTE-F32 (load-time 全量 dequant 到 F32)</li>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 管线总览</h3>
+      <p>算子的唯一定义来源是 <code>extern "C"</code> 纯标量函数。编译器通过二进制符号执行自动提取计算结构（OpTrace），然后根据 DeviceProfile 生成最优融合 SIMD/GPU 代码。</p>
+      <p>```</p>
+      <p>标量函数注册表 (ScalarOpRegistry)</p>
+      <p>    │</p>
+      <p>    ▼</p>
+      <p>┌──────────────────────────────────────────────────────────────┐</p>
+      <p>│  Phase 0: 标量参考实现                                        │</p>
+      <p>│  · extern "C" 纯标量函数 → iced-x86 反汇编 → 符号执行        │</p>
+      <p>│  · 输出: OpTrace (ComputePattern + TraceOp SSA 序列)         │</p>
+      <p>│  · 首次分析后缓存 (OpKind → OpTrace HashMap)                 │</p>
+      <p>└──────────────────────────┬───────────────────────────────────┘</p>
+      <p>                           │</p>
+      <p>CompilerGraph + DeviceProfile + OpTrace 缓存 + TensorDesc.source_quant</p>
+      <p>                           │</p>
+      <p>                           ▼</p>
+      <p>┌──────────────────────────────────────────────────────────────┐</p>
+      <p>│  Phase 1: 语义 DAG 构筑 (SemanticDAG)                        │</p>
+      <p>│  · OpTrace.pattern → OpClass 自动推导                        │</p>
+      <p>│  · 张量 def-use 链 + 后支配树                                │</p>
+      <p>│  · 瓶颈分析 (Compute / Memory / Mixed)                       │</p>
+      <p>└──────────────────────────┬───────────────────────────────────┘</p>
+      <p>                           │</p>
+      <p>                           ▼</p>
+      <p>┌──────────────────────────────────────────────────────────────┐</p>
+      <p>│  Phase 2: Profile-Driven 融合决策 (FusionPlan)               │</p>
+      <p>│  · 9 条 FusionRule + DeviceProfile 约束检查                  │</p>
+      <p>│  · 分块配置 + 并行策略 + Buffer 规划                          │</p>
+      <p>└──────────────────────────┬───────────────────────────────────┘</p>
+      <p>                           │</p>
+      <p>                           ▼</p>
+      <p>┌──────────────────────────────────────────────────────────────┐</p>
+      <p>│  Phase 2.5: StrategySelector (硬件策略选择)                  │</p>
+      <p>│  · 三路匹配: OpClass × DeviceProfile × QuantFormat           │</p>
+      <p>│  · 输出: ImplementationPlan (ComputeStrategy per group)      │</p>
+      <p>│  · 可缓存 / 可审计 / 可独立测试                               │</p>
+      <p>└──────────────────────────┬───────────────────────────────────┘</p>
+      <p>                           │</p>
+      <p>                           ▼</p>
+      <p>┌──────────────────────────────────────────────────────────────┐</p>
+      <p>│  Phase 3: ISA Lowering (代码生成)                            │</p>
+      <p>│  · 根据 ImplementationPlan 中的 ComputeStrategy 发射指令      │</p>
+      <p>│  · x86_64: iced-x86 CodeAssembler                           │</p>
+      <p>│  · AArch64: dynasm-rs Assembler                             │</p>
+      <p>│  · GPU: PtxCodeGen / HipCodeGen / AirCodeGen                │</p>
+      <p>│  · 输出: MegaKernel binary (mmap RWX 或 GPU module)          │</p>
+      <p>└──────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. Phase 0: 标量参考实现</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>2.1 ScalarOpRegistry</h4>
+      <p>所有算子以 <code>extern "C"</code> 纯标量函数注册。<code>fn_ptr</code> 同时是执行入口（golden reference）和分析入口（符号执行反汇编起点）。</p>
+      <p>```rust</p>
+      <p>pub struct ScalarOpRegistry {</p>
+      <p>    entries: HashMap&lt;OpKind, ScalarFnSignature&gt;,</p>
+      <p>    trace_cache: HashMap&lt;OpKind, OpTrace&gt;,</p>
+      <p>}</p>
+      <p>impl ScalarOpRegistry {</p>
+      <p>    pub fn register(&amp;mut self, op: OpKind, sig: ScalarFnSignature);</p>
+      <p>    pub fn get_trace(&amp;mut self, op: &amp;OpKind) -&gt; Result&lt;&amp;OpTrace, CompileError&gt;;</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 标量函数约束</h4>
+      <p>编译器可分析的前提：</p>
+      <li><code>extern "C"</code> ABI — 无 Rust name mangling</li>
+      <li>只用标量算术：<code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>, <code>exp()</code>, <code>sqrt()</code>, <code>tanh()</code></li>
+      <li>不调用其他自定义函数（libm 除外）</li>
+      <li>不做堆分配</li>
+      <li>循环结构清晰：<code>for i in 0..n</code> 或等价 while 循环</li>
+      <li>编译时 <code>-C opt-level=1</code>（保留循环结构，不做向量化）</li>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>2.3 标量函数示例</h4>
+      <p>```rust</p>
+      <p>/// SiLU: out[i] = x[i] / (1 + exp(-x[i]))</p>
+      <p>#[no_mangle]</p>
+      <p>pub extern "C" fn scalar_silu(x: *const f32, out: *mut f32, n: usize) {</p>
+      <p>    for i in 0..n {</p>
+      <p>        unsafe {</p>
+      <p>            let v = *x.add(i);</p>
+      <p>            *out.add(i) = v / (1.0 + (-v).exp());</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>/// RMSNorm: two-pass — sum_squares then scale</p>
+      <p>#[no_mangle]</p>
+      <p>pub extern "C" fn scalar_rms_norm(</p>
+      <p>    x: *const f32, weight: *const f32, out: *mut f32, n: usize, eps: f32,</p>
+      <p>) {</p>
+      <p>    unsafe {</p>
+      <p>        let mut ss: f32 = 0.0;</p>
+      <p>        for i in 0..n { let v = *x.add(i); ss += v * v; }</p>
+      <p>        let inv_rms = 1.0 / ((ss / n as f32) + eps).sqrt();</p>
+      <p>        for i in 0..n { *out.add(i) = *x.add(i) * inv_rms * *weight.add(i); }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>2.4 禁止运行时调用 (NO_SCALAR)</h4>
+      <code>scalar_ops.rs</code> 中的函数仅作为 Phase 0 的算子语义定义，供 SymExec trace 提取使用。
+      <li>禁止在运行时推理路径中调用任何 <code>scalar_*</code> 函数</li>
+      <li>禁止在单元测试中调用 <code>scalar_*</code> 函数验证算子正确性</li>
+      <li>测试必须通过 JIT 编译图验证正确性</li>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Phase 1: 符号执行与语义 DAG</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 符号执行流程</h4>
+      <p>1. <strong>反汇编</strong>: iced-x86 Decoder 从函数地址开始反汇编到 <code>ret</code></p>
+      <p>2. <strong>循环检测</strong>: backward jump = back-edge = 循环</p>
+      <p>3. <strong>符号执行</strong>: <code>SymState</code>（寄存器 → <code>SymValue</code> 映射）逐指令推进</p>
+      <p>4. <strong>libm 调用识别</strong>: <code>call</code> 目标解析为 <code>expf</code>, <code>sqrtf</code>, <code>tanhf</code> 等</p>
+      <p>5. <strong>归约模式识别</strong>: 循环内 <code>addss xmm_acc, xmm_temp</code> 跨迭代存活 → 归约累加器</p>
+      <p>6. <strong>GEMM 模式识别</strong>: 三重嵌套循环 + FMA 累加 → <code>ComputePattern::Gemm</code></p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 OpTrace</h4>
+      <p>Phase 0 输出的完整计算结构描述：</p>
+      <p>```rust</p>
+      <p>pub struct OpTrace {</p>
+      <p>    pub op_kind: OpKind,</p>
+      <p>    pub pattern: ComputePattern,</p>
+      <p>    pub signature: ScalarFnSignature,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 ComputePattern</h4>
+      <p>从标量函数的循环结构和数据流自动识别：</p>
+      <table>
+        <tr>
+          <th>ComputePattern</th>
+        </tr>
+        <tr>
+          <td>识别特征</td>
+        </tr>
+        <tr>
+          <td>OpClass 推导</td>
+        </tr>
+        <tr>
+          <td>Elementwise { body }</td>
+        </tr>
+        <tr>
+          <td>单循环，load 1 → compute → store 1</td>
+        </tr>
+        <tr>
+          <td>ElemWise</td>
+        </tr>
+        <tr>
+          <td>BinaryElementwise { body }</td>
+        </tr>
+        <tr>
+          <td>单循环，load 2 → compute → store 1</td>
+        </tr>
+        <tr>
+          <td>ElemWise</td>
+        </tr>
+        <tr>
+          <td>Injective { body, num_inputs, num_outputs }</td>
+        </tr>
+        <tr>
+          <td>多输入/多输出逐元素变换</td>
+        </tr>
+        <tr>
+          <td>Injective</td>
+        </tr>
+        <tr>
+          <td>Reduction { identity, combine }</td>
+        </tr>
+        <tr>
+          <td>循环内累加器跨迭代存活</td>
+        </tr>
+        <tr>
+          <td>Reduction</td>
+        </tr>
+        <tr>
+          <td>NormLike { reduce, finalize, transform }</td>
+        </tr>
+        <tr>
+          <td>两个连续循环，第二循环使用第一循环归约结果</td>
+        </tr>
+        <tr>
+          <td>Reduction</td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>三层嵌套循环 + FMA 累加</td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>QuantDecode { block_size, decode }</td>
+        </tr>
+        <tr>
+          <td>块级循环 + 位操作解包</td>
+        </tr>
+        <tr>
+          <td>Opaque</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 TraceOp (SSA)</h4>
+      <p>Phase 3 代码生成时，每个 TraceOp 映射到对应 SIMD/GPU 指令。</p>
+      <p>实现位于 <code>gllm-kernels/src/compiler/trace.rs</code>，自动指令选择器位于 <code>codegen/vm/auto_select.rs</code>。</p>
+      <p>```rust</p>
+      <p>pub enum TraceOp {</p>
+      <p>    // ── 数据访问 ──</p>
+      <p>    Input(u32),               // 加载第 i 个输入</p>
+      <p>    Const(f64),               // 浮点常量</p>
+      <p>    // ── 二元算术 (→ VecBinOp) ──</p>
+      <p>    Add(u32, u32), Sub(u32, u32), Mul(u32, u32), Div(u32, u32),</p>
+      <p>    Fma(u32, u32, u32),       // a * b + c → VmInstr::Fma</p>
+      <p>    Max(u32, u32), Min(u32, u32),</p>
+      <p>    // ── 一元算术 (→ VecUnaryOp / Transcendental) ──</p>
+      <p>    Neg(u32), Abs(u32), Sqrt(u32), Rsqrt(u32), Recip(u32),</p>
+      <p>    Exp(u32), Tanh(u32), Log(u32),</p>
+      <p>    ConditionalBranch(u32, u32, u32),  // (mask, true_val, false_val) → 条件选择</p>
+      <p>    // ── 量化混合精度 (§11 TurboQuant / §13.12 硬件拓扑) ──</p>
+      <p>    // 后端: gfx950 mfma_scale / SM100 tcgen05 / AMX-FP8 TDPFP8PS</p>
+      <p>    QuantFma {</p>
+      <p>        acc: u32, act: u32, weight: u32,</p>
+      <p>        act_dtype: QuantPrecision, weight_dtype: QuantPrecision,</p>
+      <p>    },</p>
+      <p>    BlockScale { data: u32, scale: u32, block_size: usize },  // CDNA4 mfma_scale 原生</p>
+      <p>    Cast { src: u32, from: QuantPrecision, to: QuantPrecision },  // F16C vcvtph2ps / ARM fcvtl / PTX cvt</p>
+      <p>    // ── 水平归约 (§13 Epilogue 白嫖) ──</p>
+      <p>    // 后端: x86 shuffle+hadd / ARM faddp+addv / GPU shfl.sync warp reduce</p>
+      <p>    HReduce { src: u32, op: ReduceKind },  // ReduceKind: Sum/Max/Min/Prod/Count/ArgMax</p>
+      <p>    // ── 内存层级控制 (§13.2 质心预取 / §11 TurboQuant) ──</p>
+      <p>    Prefetch { level: CacheLevel },         // prefetcht0/t1/nta / prfm / prefetch.global.L2</p>
+      <p>    NonTemporalStore,                        // vmovntps / stnp / st.global.cs</p>
+      <p>    // ── 位操作 (量化解包) ──</p>
+      <p>    BitExtract { src: u32, offset: u32, width: u32 },  // shift+mask / ubfx / bfe</p>
+      <p>    // ── 向量排列/洗牌 ──</p>
+      <p>    Permute { src: u32, indices: u32 },     // vpshufb/vpermd / tbl/tbx / prmt</p>
+      <p>    // ── 比较和掩码 (§13.1 Gate-First / §13.3 残差旁路) ──</p>
+      <p>    Compare { a: u32, b: u32, op: CmpOp },  // AVX-512 k-mask / SVE predicate / GPU predicate</p>
+      <p>    MaskedOp { op: Box<traceop>, mask: u32 },  // 仅对 mask=true 的 lane 执行</traceop></p>
+      <p>    // ── 原子操作 (§13.6 MoE 命中计数) ──</p>
+      <p>    AtomicAdd { addr: u32, val: u32 },       // lock xadd / ldadd / atomicAdd</p>
+      <p>    // ── 信号处理 (§11.1 TurboQuant FWHT) ──</p>
+      <p>    FWHT { src: u32, dim: usize },           // 展开的 butterfly 加减指令序列</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>辅助枚举定义</strong>:
+      <p>```rust</p>
+      <p>pub enum QuantPrecision {  // 覆盖三代硬件所有精度格式</p>
+      <p>    F32, F16, BF16, TF32,       // 标准: Intel AMX-TF32</p>
+      <p>    FP8E4M3, FP8E5M2,           // NVIDIA/AMD FP8</p>
+      <p>    FP6E2M3, FP6E3M2,           // AMD CDNA4</p>
+      <p>    FP4E2M1,                    // AMD CDNA4 / NVIDIA Blackwell</p>
+      <p>    INT8, INT4, INT2, INT1,     // 整数量化 (QJL 1-bit §11.5)</p>
+      <p>}</p>
+      <p>pub enum ReduceKind { Sum, Max, Min, Prod, Count, ArgMax }</p>
+      <p>pub enum CacheLevel { L1, L2, L3, NonTemporal }</p>
+      <p>pub enum CmpOp { Eq, Ne, Lt, Le, Gt, Ge }</p>
+      <p>```</p>
+      <strong>TraceOp → VmInstr 自动查表实现状态</strong> (auto_select.rs):
+      <strong>TraceOp 扩展解锁矩阵</strong>:
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>VmInstr</td>
+        </tr>
+        <tr>
+          <td>辅助函数</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>Input(n)</td>
+        </tr>
+        <tr>
+          <td>直接返回 inputs[n]</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Const(val)</td>
+        </tr>
+        <tr>
+          <td>Broadcast</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Add/Sub/Mul/Div/Max/Min</td>
+        </tr>
+        <tr>
+          <td>VecBinOp</td>
+        </tr>
+        <tr>
+          <td>emit_binop()</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Fma</td>
+        </tr>
+        <tr>
+          <td>Fma</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Neg/Abs/Sqrt/Rsqrt/Recip</td>
+        </tr>
+        <tr>
+          <td>VecUnaryOp</td>
+        </tr>
+        <tr>
+          <td>emit_unary()</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Exp/Tanh/Log</td>
+        </tr>
+        <tr>
+          <td>Transcendental</td>
+        </tr>
+        <tr>
+          <td>emit_transcendental()</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Compare { .. }</td>
+        </tr>
+        <tr>
+          <td>VecCmp</td>
+        </tr>
+        <tr>
+          <td>emit_cmp()</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>Cast { .. }</td>
+        </tr>
+        <tr>
+          <td>VecCast</td>
+        </tr>
+        <tr>
+          <td>quant_precision_bits()</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>HReduce { .. }</td>
+        </tr>
+        <tr>
+          <td>HReduce</td>
+        </tr>
+        <tr>
+          <td>— (Sum/Max/Min/Prod)</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>ConditionalBranch</td>
+        </tr>
+        <tr>
+          <td>VecConditional</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>✅ auto_select.rs 已实现</td>
+        </tr>
+        <tr>
+          <td>QuantFma / BlockScale</td>
+        </tr>
+        <tr>
+          <td>专用 VmInstr</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 走 StrategySelector 专用路径</td>
+        </tr>
+        <tr>
+          <td>Prefetch / NonTemporalStore</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 内存提示指令</td>
+        </tr>
+        <tr>
+          <td>BitExtract</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 量化解包专用</td>
+        </tr>
+        <tr>
+          <td>Permute</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 向量重排</td>
+        </tr>
+        <tr>
+          <td>MaskedOp</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 掩码操作</td>
+        </tr>
+        <tr>
+          <td>AtomicAdd</td>
+        </tr>
+        <tr>
+          <td>AtomicAddU32</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ MoE 专用</td>
+        </tr>
+        <tr>
+          <td>FWHT</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ TurboQuant 专用</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>解锁的算子</td>
+        </tr>
+        <tr>
+          <td>对应的 VmInstr</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>Compare</td>
+        </tr>
+        <tr>
+          <td>if-else 条件, SelectOp, Gate-First 掩码</td>
+        </tr>
+        <tr>
+          <td>VecCmp</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td>Cast</td>
+        </tr>
+        <tr>
+          <td>dtype 转换 (f32↔f16↔bf16↔FP8)</td>
+        </tr>
+        <tr>
+          <td>VecCast</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现</td>
+        </tr>
+        <tr>
+          <td>HReduce</td>
+        </tr>
+        <tr>
+          <td>softmax, norm 归约, 质心距离</td>
+        </tr>
+        <tr>
+          <td>HReduce</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 (Sum/Max/Min/Prod)</td>
+        </tr>
+        <tr>
+          <td>ConditionalBranch</td>
+        </tr>
+        <tr>
+          <td>条件执行路径, SelectOp 替代</td>
+        </tr>
+        <tr>
+          <td>VecConditional</td>
+        </tr>
+        <tr>
+          <td>✅ auto_select.rs 已实现</td>
+        </tr>
+        <tr>
+          <td>QuantFma</td>
+        </tr>
+        <tr>
+          <td>混合精度 GEMM (TurboQuant)</td>
+        </tr>
+        <tr>
+          <td>专用 path via StrategySelector</td>
+        </tr>
+        <tr>
+          <td>❌ 走专用 lower</td>
+        </tr>
+        <tr>
+          <td>BlockScale</td>
+        </tr>
+        <tr>
+          <td>块缩放 (CDNA4 mfma_scale)</td>
+        </tr>
+        <tr>
+          <td>专用 path</td>
+        </tr>
+        <tr>
+          <td>❌ 走专用 lower</td>
+        </tr>
+        <tr>
+          <td>Prefetch</td>
+        </tr>
+        <tr>
+          <td>质心预取, 权重预热</td>
+        </tr>
+        <tr>
+          <td>PrefetchInstr</td>
+        </tr>
+        <tr>
+          <td>✅ 占位 (ISA lowering 层 emit prefetch)</td>
+        </tr>
+        <tr>
+          <td>NonTemporalStore</td>
+        </tr>
+        <tr>
+          <td>KV 连续写入绕缓存</td>
+        </tr>
+        <tr>
+          <td>NonTemporalStoreInstr</td>
+        </tr>
+        <tr>
+          <td>✅ 占位 (ISA lowering 层 emit nontemporal)</td>
+        </tr>
+        <tr>
+          <td>BitExtract</td>
+        </tr>
+        <tr>
+          <td>量化解包 (nibbles→f32)</td>
+        </tr>
+        <tr>
+          <td>BitExtractInstr</td>
+        </tr>
+        <tr>
+          <td>✅ Error (量化解包用 QuantBlockLoad)</td>
+        </tr>
+        <tr>
+          <td>Permute</td>
+        </tr>
+        <tr>
+          <td>向量重排 (shuffle, RoPE)</td>
+        </tr>
+        <tr>
+          <td>VecPermute</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 (VecShuffle)</td>
+        </tr>
+        <tr>
+          <td>MaskedOp</td>
+        </tr>
+        <tr>
+          <td>尾部掩码, 不对齐访问</td>
+        </tr>
+        <tr>
+          <td>MaskedLoad/Store</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 (ConditionalSelect)</td>
+        </tr>
+        <tr>
+          <td>AtomicAdd</td>
+        </tr>
+        <tr>
+          <td>MoE expert 命中计数</td>
+        </tr>
+        <tr>
+          <td>AtomicAddU32</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 (VmInstr::AtomicAdd)</td>
+        </tr>
+        <tr>
+          <td>FWHT</td>
+        </tr>
+        <tr>
+          <td>TurboQuant 在线旋转</td>
+        </tr>
+        <tr>
+          <td>butterfly 序列</td>
+        </tr>
+        <tr>
+          <td>✅ 已实现 (VecShuffle+Add/Sub+ConditionalSelect)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.5" data-section="3.5">
+      <h4>3.5 SemanticDAG</h4>
+      <p>CompilerGraph + 语义标注 + 数据流分析：</p>
+      <p>```rust</p>
+      <p>pub struct SemanticDAG {</p>
+      <p>    pub nodes: Vec<semanticnode>,</semanticnode></p>
+      <p>    pub tensor_edges: Vec<tensoredge>,</tensoredge></p>
+      <p>    pub inputs: Vec<tensorid>,</tensorid></p>
+      <p>    pub outputs: Vec<tensorid>,</tensorid></p>
+      <p>    pub post_dominator_tree: PostDomTree,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>每个 <code>SemanticNode</code> 携带 <code>OpTrace</code>（完整计算结构）、<code>OpClass</code>、<code>Bottleneck</code>（Compute/Memory/Mixed）、算术强度等。后支配树用于 Phase 2 融合组划分。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. Phase 2: 融合决策与硬件约束</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 入口签名</h4>
+      <p>```rust</p>
+      <p>pub fn fuse(graph: &amp;CompilerGraph, profile: &amp;DeviceProfile) -&gt; FusionPlan;</p>
+      <p>```</p>
+      <p>融合决策由 <code>HwOptEngine</code>（<code>SPEC/02-HARDWARE.md</code> §10）统一求解的 <code>HwOptPlan.fusion</code> 驱动。<code>HwOptEngine</code> 内部消费 <code>DeviceProfile</code> + <code>CompilerConstraints</code> + <code>ProbeResult</code>，通过 CostModel 评估候选策略，输出不可变 <code>HwOptPlan</code>。本阶段不再直接读取 <code>DeviceProfile</code> 做策略决策。</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 融合组划分规则</h4>
+      <p>基于 TVM 融合规则，在后支配树上从叶子向根遍历：</p>
+      <p>额外约束：</p>
+      <li>生产者有多个消费者 → 不融合</li>
+      <li>融合后寄存器压力 &gt; <code>profile.num_simd_regs()</code> → 拒绝</li>
+      <li>Epilogue scratch 寄存器 &gt; 微内核剩余 → 拒绝 epilogue injection</li>
+      <table>
+        <tr>
+          <th>生产者</th>
+        </tr>
+        <tr>
+          <td>消费者</td>
+        </tr>
+        <tr>
+          <td>融合规则</td>
+        </tr>
+        <tr>
+          <td>ElemWise / Injective</td>
+        </tr>
+        <tr>
+          <td>任意</td>
+        </tr>
+        <tr>
+          <td>可融合进消费者</td>
+        </tr>
+        <tr>
+          <td>Reduction</td>
+        </tr>
+        <tr>
+          <td>ElemWise / Injective</td>
+        </tr>
+        <tr>
+          <td>消费者作为 epilogue</td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>ElemWise</td>
+        </tr>
+        <tr>
+          <td>Epilogue Injection</td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>Reduction</td>
+        </tr>
+        <tr>
+          <td>不融合</td>
+        </tr>
+        <tr>
+          <td>Opaque</td>
+        </tr>
+        <tr>
+          <td>任意</td>
+        </tr>
+        <tr>
+          <td>不融合</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 九种融合模式</h4>
+      <p>```rust</p>
+      <p>pub enum FusionStrategy {</p>
+      <p>    Single,</p>
+      <p>    LoopFusion { chain_nodes: Vec&lt;usize&gt; },</p>
+      <p>    EpilogueInjection { gemm_node: usize, epilogue_ops: Vec<epilogueop> },</epilogueop></p>
+      <p>    TileLevelFusion { gemm_node: usize, tiled_predecessor: usize, tile_rows: usize, epilogue_ops: Vec<epilogueop> },</epilogueop></p>
+      <p>    ComputeRoot { predecessor: usize, gemm_node: usize },</p>
+      <p>    QkvSharedInput,</p>
+      <p>    NormIntoGemm,</p>
+      <p>    FFNBlock,</p>
+      <p>    CrossLayerResidual,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 EpilogueInjection</h4>
+      <p>GEMM 微内核累加完毕后，取消费者算子的 <code>OpTrace.body</code>（Vec<traceop>），对每个 TraceOp 生成 SIMD 指令，在累加器寄存器上原地执行。数据不落地内存。</traceop></p>
+      <p>```</p>
+      <p>未融合: GEMM 写回 → Bias 读+写 → SiLU 读+写 = 3 次写 + 2 次读</p>
+      <p>融合后: GEMM K-loop → [累加器原地执行 Bias+SiLU] → 1 次写</p>
+      <p>```</p>
+    </section>
+    <section id="s4.5" data-section="4.5">
+      <h4>4.5 LoopFusion</h4>
+      <p>多个 elemwise 算子合并为单循环，数据在寄存器中流过整个链：</p>
+      <p>```</p>
+      <p>未融合: SiLU 写 → VecMul 读+写 → VecAdd 读+写 = 3 读 + 3 写</p>
+      <p>融合后: 单循环 ymm0 = silu(load) * load → +load → store = 3 读 + 1 写</p>
+      <p>```</p>
+    </section>
+    <section id="s4.6" data-section="4.6">
+      <h4>4.6 TileLevelFusion vs ComputeRoot</h4>
+      <p>由 DeviceProfile 的 cache 层级数据驱动：</p>
+      <p>```</p>
+      <p>if predecessor_output_bytes &gt; profile.l1_cache_bytes * 0.75 {</p>
+      <p>    // 输出超过 L1 75% → 先算完再读已被逐出</p>
+      <p>    // 必须嵌入 GEMM MC 循环，每次只算 MC 行</p>
+      <p>    TileLevelFusion { tile_rows: mc }</p>
+      <p>} else {</p>
+      <p>    // 输出 ≤ L1 75% → 先算完，结果整体留在 L1</p>
+      <p>    ComputeRoot</p>
+      <p>}</p>
+      <p>```</p>
+      <p>TileLevelFusion scratch buffer: MC 行的前驱结果写入 scratchpad 的 normed 区域，紧接着被 pack_a 消费。前驱算子逐行独立，按 MC 行切分不影响正确性。</p>
+    </section>
+    <section id="s4.7" data-section="4.7">
+      <h4>4.7 QkvSharedInput</h4>
+      <p>Q/K/V 三个 GEMM 共享 pack_a（输入矩阵相同），消除 3 次重复 pack。</p>
+    </section>
+    <section id="s4.8" data-section="4.8">
+      <h4>4.8 NormIntoGemm</h4>
+      <p>RmsNorm 输出直接喂入 GEMM（无中间写回）。与 TileLevelFusion 的区别：NormIntoGemm 是 Norm 输出直接作为 GEMM 输入的语义级融合。</p>
+    </section>
+    <section id="s4.9" data-section="4.9">
+      <h4>4.9 FFNBlock</h4>
+      <p>Gate GEMM + Up GEMM 的 Gate/Up 结果融合激活（如 SiLU）+ 乘法，合并为单次计算块。</p>
+    </section>
+    <section id="s4.10" data-section="4.10">
+      <h4>4.10 CrossLayerResidual</h4>
+      <p>Add → RmsNorm scratchpad 直通融合。残差连接的 Add 结果直接传入下一层 RmsNorm，避免中间写回。</p>
+    </section>
+    <section id="s4.11" data-section="4.11">
+      <h4>4.11 融合输出</h4>
+      <p>```rust</p>
+      <p>pub struct FusionPlan {</p>
+      <p>    pub groups: Vec<fusiongroup>,</fusiongroup></p>
+      <p>    pub tile_configs: Vec<tileconfig>,</tileconfig></p>
+      <p>    pub buffer_plan: BufferPlan,</p>
+      <p>}</p>
+      <p>```</p>
+      <code>TileConfig</code> 包含 GEMM BLIS 三级分块（KC/MC/NC 适配 L1/L2/L3）+ 并行策略 + 预取距离。<code>BufferPlan</code> 通过张量活性分析 + 区间图着色贪心算法最大化 buffer 原地复用。
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. StrategySelector (硬件策略选择)</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 定位</h4>
+      <p>StrategySelector 是 Phase 2 (FusionPlan) 和 Phase 3 (ISA Lowering) 之间的显式策略选择层。它接收 FusionPlan + DeviceProfile + 量化元数据，输出 ImplementationPlan——每个融合组的最优算法变体。</p>
+      <p>```</p>
+      <p>Phase 2 FusionPlan</p>
+      <p>    +</p>
+      <p>DeviceProfile (硬件能力)</p>
+      <p>    +</p>
+      <p>TensorDesc.source_quant (每个输入张量的原始量化格式)</p>
+      <p>    ↓</p>
+      <p>StrategySelector (三路匹配: OpClass × HW × QuantFormat)</p>
+      <p>    ↓</p>
+      <p>ImplementationPlan (每个融合组的 ComputeStrategy)</p>
+      <p>    ↓</p>
+      <p>Phase 3 ISA Codegen (dumb translator — 按策略发射指令)</p>
+      <p>```</p>
+      <strong>核心原则</strong>:
+      <li>标量层定义数学语义 (ONE correct implementation) — 不表达硬件差异</li>
+      <li>StrategySelector 选择算法变体 (N hardware-specific variants)</li>
+      <li>ISA Codegen 是 "哑翻译器" — 按策略对象发射机器码，不内嵌策略决策逻辑</li>
+      <li>策略是一等公民对象: 可日志、可缓存、可独立测试、可 A/B 比较</li>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 入口签名</h4>
+      <p>```rust</p>
+      <p>pub fn select_strategy(</p>
+      <p>    plan: &amp;FusionPlan,</p>
+      <p>    profile: &amp;DeviceProfile,</p>
+      <p>) -&gt; ImplementationPlan;</p>
+      <p>```</p>
+      <p>量化元数据通过 <code>FusionPlan</code> → <code>FusionGroup</code> → 节点的 <code>TensorDesc.source_quant</code> 隐式提供，不需要单独参数。<code>DeviceProfile</code> 携带硬件能力矩阵（ISA 级别、tensor core 代数、WMMA 格式支持等）。</p>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 ImplementationPlan</h4>
+      <p>```rust</p>
+      <p>pub struct ImplementationPlan {</p>
+      <p>    pub groups: Vec<groupstrategy>,</groupstrategy></p>
+      <p>}</p>
+      <p>pub struct GroupStrategy {</p>
+      <p>    pub fusion_group_id: usize,</p>
+      <p>    pub compute: ComputeStrategy,</p>
+      <p>    pub rationale: String,  // "GFX12 WMMA a4w8: Q4_K×Q8_0 inputs, hardware dequant"</p>
+      <p>}</p>
+      <p>pub enum ComputeStrategy {</p>
+      <p>    Gemm(GemmVariant),</p>
+      <p>    Attention(AttentionVariant),</p>
+      <p>    Norm(NormVariant),</p>
+      <p>    MoE(MoeVariant),</p>
+      <p>    Elementwise(ElementwiseVariant),</p>
+      <p>    Gather(GatherVariant),</p>
+      <p>    DequantCompute(DequantComputeVariant),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.4" data-section="5.4">
+      <h4>5.4 GemmVariant (V1-V14)</h4>
+      <p>同一个数学操作 (C += A×B) 在不同硬件和量化格式下的算法变体：</p>
+      <strong>多 wave 并发</strong>: <code>Sm90WgmmaTma { num_waves: 2 }</code> 表示 2 个 wave 协作处理同一 GEMM tile。<code>cluster_dims</code> 控制 Thread Block Cluster 维度。
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>核心技术</td>
+        </tr>
+        <tr>
+          <td>输入精度</td>
+        </tr>
+        <tr>
+          <td>累加精度</td>
+        </tr>
+        <tr>
+          <td>ScalarLoop</td>
+        </tr>
+        <tr>
+          <td>任意 (fallback)</td>
+        </tr>
+        <tr>
+          <td>三重循环</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Avx2Fma { mr, nr }</td>
+        </tr>
+        <tr>
+          <td>x86 AVX2</td>
+        </tr>
+        <tr>
+          <td>VFMA 微核, 6×4 寄存器分块</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Avx512F32 { mr, nr }</td>
+        </tr>
+        <tr>
+          <td>x86 AVX-512</td>
+        </tr>
+        <tr>
+          <td>zmm 微核, 32 寄存器</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Avx512Bf16 { mr, nr }</td>
+        </tr>
+        <tr>
+          <td>x86 AVX-512 + VDPBF16PS</td>
+        </tr>
+        <tr>
+          <td>原生 BF16 输入</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>AmxTile { tile_m, tile_n }</td>
+        </tr>
+        <tr>
+          <td>x86 AMX</td>
+        </tr>
+        <tr>
+          <td>TDPBF16PS 矩阵扩展</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>NeonFmla { mr, nr }</td>
+        </tr>
+        <tr>
+          <td>AArch64 NEON</td>
+        </tr>
+        <tr>
+          <td>FMLA 微核</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>SveFmla { mr, nr }</td>
+        </tr>
+        <tr>
+          <td>AArch64 SVE</td>
+        </tr>
+        <tr>
+          <td>可变长度 FMLA</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Sm70Wmma { stages }</td>
+        </tr>
+        <tr>
+          <td>NVIDIA SM70</td>
+        </tr>
+        <tr>
+          <td>WMMA tensor core v1</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Sm80MmaAsync { stages, split_k }</td>
+        </tr>
+        <tr>
+          <td>NVIDIA SM80</td>
+        </tr>
+        <tr>
+          <td>MMA.sync + cp.async 多 stage</td>
+        </tr>
+        <tr>
+          <td>BF16/F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Sm90WgmmaTma { num_waves, cluster_dims }</td>
+        </tr>
+        <tr>
+          <td>NVIDIA SM90</td>
+        </tr>
+        <tr>
+          <td>TMA + wgmma 协作式多 wave</td>
+        </tr>
+        <tr>
+          <td>BF16/F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Sm100Tcgen05 { ... }</td>
+        </tr>
+        <tr>
+          <td>NVIDIA SM100+</td>
+        </tr>
+        <tr>
+          <td>tcgen05 下一代 tensor core</td>
+        </tr>
+        <tr>
+          <td>BF16/FP8</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Rdna3WmmaF16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD RDNA 3 (gfx11)</td>
+        </tr>
+        <tr>
+          <td>WMMA F16</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Rdna3WmmaBf16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD RDNA 3 (gfx11)</td>
+        </tr>
+        <tr>
+          <td>WMMA BF16</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Rdna4WmmaF16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD RDNA 4 (GFX12)</td>
+        </tr>
+        <tr>
+          <td>WMMA F16</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Rdna4WmmaBf16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD RDNA 4 (GFX12)</td>
+        </tr>
+        <tr>
+          <td>WMMA BF16</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Rdna4WmmaA4W8 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD RDNA 4 (GFX12)</td>
+        </tr>
+        <tr>
+          <td>WMMA a4w8 硬件隐式 dequant</td>
+        </tr>
+        <tr>
+          <td>A4+W8</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Cdna2MfmaBf16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD CDNA 2 (gfx90a, MI250)</td>
+        </tr>
+        <tr>
+          <td>MFMA 32×32×8 BF16, Wave64</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Cdna2MfmaF16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD CDNA 2 (gfx90a, MI250)</td>
+        </tr>
+        <tr>
+          <td>MFMA 32×32×16 F16, Wave64</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Cdna3MfmaBf16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD CDNA 3 (gfx942, MI300X)</td>
+        </tr>
+        <tr>
+          <td>MFMA 32×32×16 BF16, Wave64</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Cdna3MfmaF16 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD CDNA 3 (gfx942, MI300X)</td>
+        </tr>
+        <tr>
+          <td>MFMA 32×32×32 F16, Wave64</td>
+        </tr>
+        <tr>
+          <td>F16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>Cdna3MfmaInt8 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD CDNA 3 (gfx942, MI300X)</td>
+        </tr>
+        <tr>
+          <td>IMMA 32×32×32 INT8, Wave64</td>
+        </tr>
+        <tr>
+          <td>INT8</td>
+        </tr>
+        <tr>
+          <td>INT32</td>
+        </tr>
+        <tr>
+          <td>Cdna3MfmaFp8 { ... }</td>
+        </tr>
+        <tr>
+          <td>AMD CDNA 3 (gfx942, MI300X)</td>
+        </tr>
+        <tr>
+          <td>FP8 BF8×BF8 MFMA, Wave64</td>
+        </tr>
+        <tr>
+          <td>FP8 BF8</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>MetalSimdMM { tile_m, tile_n }</td>
+        </tr>
+        <tr>
+          <td>Apple GPU 8+ (M3/M4)</td>
+        </tr>
+        <tr>
+          <td>simd_matrix_multiply</td>
+          <td> 8×8×8</td>
+        </tr>
+        <tr>
+          <td>FP16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>MetalSimdMmBf16 { tile_m, tile_n }</td>
+        </tr>
+        <tr>
+          <td>Apple GPU 9+ (M4)</td>
+        </tr>
+        <tr>
+          <td>simd_matrix_multiply</td>
+          <td> BF16</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>F32</td>
+        </tr>
+        <tr>
+          <td>MetalTiled { tile_m, tile_n }</td>
+        </tr>
+        <tr>
+          <td>Apple GPU 7 (M1/M2)</td>
+        </tr>
+        <tr>
+          <td>Tiled GEMM + SIMD 向量化</td>
+        </tr>
+        <tr>
+          <td>FP32</td>
+        </tr>
+        <tr>
+          <td>FP32</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.5" data-section="5.5">
+      <h4>5.5 DequantComputeVariant (Fused Dequant + Compute)</h4>
+      <strong>架构决策 ARCH-COMPUTE-TIME-DEQUANT</strong>: 权重在加载时保持原始压缩格式 (Q4_K, Q8_0, BF16, MXFP4...)，JIT 生成融合 dequant+compute 代码。替代已废弃的 ARCH-COMPUTE-F32 (load-time 全量 dequant)。
+      <strong>内存节省对比</strong>:
+      <p>```</p>
+      <p>已废弃 (ARCH-COMPUTE-F32):</p>
+      <p>  Load: GGUF Q4_K → 全量 dequant 到 F32 → 存入 weight blob</p>
+      <p>  Compute: GEMM(F32 × F32)</p>
+      <p>  内存: elements × 4 bytes (全 F32)</p>
+      <p>  例: 4096×4096 权重 = 64 MB</p>
+      <p>当前 (ARCH-COMPUTE-TIME-DEQUANT):</p>
+      <p>  Load: GGUF Q4_K → 原始格式直接存入 weight blob (+ scale/zp 元数据)</p>
+      <p>  Compute: FusedDequantCompute(读 Q4 → 解包 → F32 乘累加)</p>
+      <p>  内存: elements × 0.5 bytes (保持 Q4) + scales</p>
+      <p>  例: 4096×4096 权重 = 8 MB + 0.5 MB scales = 8.5 MB (7.5× 节省)</p>
+      <p>```</p>
+      <strong>MXFP4 分离格式</strong>: blocks 和 scales 存储在相邻但独立的内存区域，JIT 双指针读取，不需要预先合并（参见 <code>gllm/SPEC/07-LOADER.md §2.5 ARCH-MXFP4-SEPARATE</code>）。
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>量化格式</td>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>机制</td>
+        </tr>
+        <tr>
+          <td>FusedQ4Gemm { block_size }</td>
+        </tr>
+        <tr>
+          <td>Q4_K / Q4_0</td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+        </tr>
+        <tr>
+          <td>微核内循环: 读 4bit → 解包 → F32 乘累加</td>
+        </tr>
+        <tr>
+          <td>FusedQ8Gemm { block_size }</td>
+        </tr>
+        <tr>
+          <td>Q8_0 / Q8_K</td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+        </tr>
+        <tr>
+          <td>微核内循环: 读 8bit × scale → F32 乘累加</td>
+        </tr>
+        <tr>
+          <td>FusedMxfp4Gemm { block_size }</td>
+        </tr>
+        <tr>
+          <td>MXFP4 (blocks+scales 分离)</td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+        </tr>
+        <tr>
+          <td>双指针读取: blocks + scales → 解码 → 乘累加</td>
+        </tr>
+        <tr>
+          <td>FusedBf16Gemm</td>
+        </tr>
+        <tr>
+          <td>BF16</td>
+        </tr>
+        <tr>
+          <td>CPU AVX-512</td>
+        </tr>
+        <tr>
+          <td>VDPBF16PS 原生路径 (等价 Avx512Bf16)</td>
+        </tr>
+        <tr>
+          <td>Rdna4A4W8Wmma</td>
+        </tr>
+        <tr>
+          <td>Q4×Q8 混合</td>
+        </tr>
+        <tr>
+          <td>AMD GFX12</td>
+        </tr>
+        <tr>
+          <td>硬件隐式 dequant (a4w8 WMMA) — 零软件 dequant</td>
+        </tr>
+        <tr>
+          <td>Sm80Int8TensorCore</td>
+        </tr>
+        <tr>
+          <td>INT8 / UINT8</td>
+        </tr>
+        <tr>
+          <td>NVIDIA SM80+</td>
+        </tr>
+        <tr>
+          <td>IMMA tensor core</td>
+        </tr>
+        <tr>
+          <td>Sm90Fp8TensorCore</td>
+        </tr>
+        <tr>
+          <td>FP8 E4M3 / E5M2</td>
+        </tr>
+        <tr>
+          <td>NVIDIA SM90+</td>
+        </tr>
+        <tr>
+          <td>FP8 tensor core</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.6" data-section="5.6">
+      <h4>5.6 AttentionVariant</h4>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>机制</td>
+        </tr>
+        <tr>
+          <td>KV Cache</td>
+        </tr>
+        <tr>
+          <td>ScalarTiled { tile_q, tile_k }</td>
+        </tr>
+        <tr>
+          <td>任意 (fallback)</td>
+        </tr>
+        <tr>
+          <td>Cache-blocking 分块</td>
+        </tr>
+        <tr>
+          <td>无特殊要求</td>
+        </tr>
+        <tr>
+          <td>Avx2Tiled { tile_q, tile_k }</td>
+        </tr>
+        <tr>
+          <td>x86 AVX2</td>
+        </tr>
+        <tr>
+          <td>SIMD 向量化分块</td>
+        </tr>
+        <tr>
+          <td>连续内存</td>
+        </tr>
+        <tr>
+          <td>Avx512Tiled { tile_q, tile_k }</td>
+        </tr>
+        <tr>
+          <td>x86 AVX-512</td>
+        </tr>
+        <tr>
+          <td>zmm 向量化分块</td>
+        </tr>
+        <tr>
+          <td>连续内存</td>
+        </tr>
+        <tr>
+          <td>FlashV1 { block_q, block_k }</td>
+        </tr>
+        <tr>
+          <td>GPU SM80+</td>
+        </tr>
+        <tr>
+          <td>Shared memory tiling</td>
+        </tr>
+        <tr>
+          <td>Paged</td>
+        </tr>
+        <tr>
+          <td>FlashV2 { block_q, block_k }</td>
+        </tr>
+        <tr>
+          <td>GPU SM90+</td>
+        </tr>
+        <tr>
+          <td>TMA + swizzle</td>
+        </tr>
+        <tr>
+          <td>Paged</td>
+        </tr>
+        <tr>
+          <td>PagedTiled { block_q, page_size }</td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+        </tr>
+        <tr>
+          <td>Page-aware cache-blocking</td>
+        </tr>
+        <tr>
+          <td>PagedAttention</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.7" data-section="5.7">
+      <h4>5.7 NormVariant</h4>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>机制</td>
+        </tr>
+        <tr>
+          <td>ScalarLoop</td>
+        </tr>
+        <tr>
+          <td>任意 (fallback)</td>
+        </tr>
+        <tr>
+          <td>两遍扫描: 平方和 → 缩放</td>
+        </tr>
+        <tr>
+          <td>SimdVectorized { width }</td>
+        </tr>
+        <tr>
+          <td>AVX2/AVX-512/NEON/SVE</td>
+        </tr>
+        <tr>
+          <td>向量化 reduce + scale, width 由 DeviceProfile 驱动</td>
+        </tr>
+        <tr>
+          <td>FusedNormGemm</td>
+        </tr>
+        <tr>
+          <td>任意</td>
+        </tr>
+        <tr>
+          <td>Norm 输出直接喂入 GEMM (NormIntoGemm 融合模式)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.8" data-section="5.8">
+      <h4>5.8 MoeVariant</h4>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>机制</td>
+        </tr>
+        <tr>
+          <td>ScalarDispatch</td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+        </tr>
+        <tr>
+          <td>逐 token 逐专家循环</td>
+        </tr>
+        <tr>
+          <td>GpuBlockRouting { num_experts, top_k }</td>
+        </tr>
+        <tr>
+          <td>GPU</td>
+        </tr>
+        <tr>
+          <td>Thread Block 级路由 + 汇编 jmp 跳转</td>
+        </tr>
+        <tr>
+          <td>FusedDequantExpert { quant_format }</td>
+        </tr>
+        <tr>
+          <td>CPU</td>
+        </tr>
+        <tr>
+          <td>融合 dequant + expert FFN (compute-time dequant)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.9" data-section="5.9">
+      <h4>5.9 ElementwiseVariant</h4>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>机制</td>
+        </tr>
+        <tr>
+          <td>SimdLoop { width }</td>
+        </tr>
+        <tr>
+          <td>任意</td>
+        </tr>
+        <tr>
+          <td>向量化循环，width 由 </td>
+          <td>DeviceProfile.simd_width()</td>
+          <td> 决定</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.10" data-section="5.10">
+      <h4>5.10 GatherVariant</h4>
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>硬件</td>
+        </tr>
+        <tr>
+          <td>机制</td>
+        </tr>
+        <tr>
+          <td>ScalarLookup</td>
+        </tr>
+        <tr>
+          <td>任意 (fallback)</td>
+        </tr>
+        <tr>
+          <td>标量索引循环: 读 index → 计算偏移 → 加载行</td>
+        </tr>
+        <tr>
+          <td>SimdGather { width }</td>
+        </tr>
+        <tr>
+          <td>AVX2/AVX-512</td>
+        </tr>
+        <tr>
+          <td>vgatherdps</td>
+          <td> 向量化 gather</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.11" data-section="5.11">
+      <h4>5.11 策略选择算法</h4>
+      <p>策略选择基于三路匹配: <strong>OpClass × DeviceProfile × QuantFormat</strong></p>
+      <p>```rust</p>
+      <p>fn select_gemm_strategy(</p>
+      <p>    hw: &amp;DeviceProfile,</p>
+      <p>    quant_a: QuantType,</p>
+      <p>    quant_b: QuantType,</p>
+      <p>) -&gt; GemmVariant {</p>
+      <p>    match (hw.gpu_arch(), quant_a, quant_b) {</p>
+      <p>        // ── GPU 硬件 dequant 路径 (最高优先级) ──</p>
+      <p>        (Gfx12, Q4_K | Q4_0, Q8_0 | Q8_K) if hw.has_wmma_a4w8()</p>
+      <p>            =&gt; Rdna4WmmaA4W8,</p>
+      <p>        (Sm90, FP8, FP8) if hw.has_fp8_tensor_cores()</p>
+      <p>            =&gt; Sm90Fp8TensorCore,</p>
+      <p>        (Sm80, INT8 | UINT8, INT8 | UINT8) if hw.has_int8_tensor_cores()</p>
+      <p>            =&gt; Sm80Int8TensorCore,</p>
+      <p>        (Gfx942, INT8, INT8) if hw.has_mfma_int8()</p>
+      <p>            =&gt; Cdna3MfmaInt8,</p>
+      <p>        (Gfx942, FP8, FP8) if hw.has_mfma_fp8()</p>
+      <p>            =&gt; Cdna3MfmaFp8,</p>
+      <p>        // ── GPU 标准 tensor core / MFMA 路径 — 参数由 DeviceProfile 属性推导 ──</p>
+      <p>        (Sm100, BF16, BF16)</p>
+      <p>            =&gt; Sm100Tcgen05 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Sm90, BF16 | F16, BF16 | F16)</p>
+      <p>            =&gt; Sm90WgmmaTma { num_waves: hw.optimal_waves(), cluster_dims: hw.optimal_cluster() },</p>
+      <p>        (Sm80, BF16 | F16, BF16 | F16)</p>
+      <p>            =&gt; Sm80MmaAsync { stages: hw.smem_stages(), split_k: 1 },</p>
+      <p>        (Sm70, F16, F16)</p>
+      <p>            =&gt; Sm70Wmma { stages: hw.smem_stages() },</p>
+      <p>        (Gfx12, F16, F16)</p>
+      <p>            =&gt; Rdna4WmmaF16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx12, BF16, BF16)</p>
+      <p>            =&gt; Rdna4WmmaBf16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx11, F16, F16)</p>
+      <p>            =&gt; Rdna3WmmaF16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx11, BF16, BF16)</p>
+      <p>            =&gt; Rdna3WmmaBf16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx942, BF16, BF16)</p>
+      <p>            =&gt; Cdna3MfmaBf16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx942, F16, F16)</p>
+      <p>            =&gt; Cdna3MfmaF16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx90A, BF16, BF16)</p>
+      <p>            =&gt; Cdna2MfmaBf16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (Gfx90A, F16, F16)</p>
+      <p>            =&gt; Cdna2MfmaF16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        // ── Apple GPU 路径 — tile 参数由 DeviceProfile 属性推导 ──</p>
+      <p>        (AppleGpu, BF16, BF16) if hw.apple_gpu_gen() &gt;= 9</p>
+      <p>            =&gt; MetalSimdMmBf16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (AppleGpu, F16, F16) if hw.apple_gpu_gen() &gt;= 8</p>
+      <p>            =&gt; MetalSimdMM { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (AppleGpu, F32, F32) if hw.apple_gpu_gen() &gt;= 7</p>
+      <p>            =&gt; MetalTiled { tile: hw.gemm_tile_sizes() },</p>
+      <p>        // ── CPU 量化路径 — 由参数化微核处理，dot_product_cap 决定计算指令 ──</p>
+      <p>        (_, qa, F32) if qa.is_quantized() =&gt; FusedQuantGemm {</p>
+      <p>            quant_type: qa,</p>
+      <p>            dot_cap: hw.dot_product_cap(),</p>
+      <p>            tile: hw.gemm_tile_sizes(),</p>
+      <p>        },</p>
+      <p>        // ── CPU 标准路径 — tile 参数由 DeviceProfile.gemm_tile_sizes() 推导 ──</p>
+      <p>        (_, F32, F32) if hw.has_amx()          =&gt; AmxTile { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (_, BF16, F32) if hw.has_avx512_bf16() =&gt; Avx512Bf16 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (_, F32, F32) if hw.has_avx512()        =&gt; Avx512F32 { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (_, F32, F32) if hw.has_avx2()          =&gt; Avx2Fma { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (_, F32, F32) if hw.has_neon()          =&gt; NeonFmla { tile: hw.gemm_tile_sizes() },</p>
+      <p>        (_, F32, F32) if hw.has_sve()           =&gt; SveFmla { tile: hw.gemm_tile_sizes() },</p>
+      <p>        // ── Fallback ──</p>
+      <p>        _ =&gt; ScalarLoop,</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.12" data-section="5.12">
+      <h4>5.12 策略属性</h4>
+      <table>
+        <tr>
+          <th>属性</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>可缓存</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>同模型 + 同硬件 → 命中 </td>
+          <td>ImplementationPlan</td>
+          <td> 缓存，跳过策略选择</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>可审计</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>每个策略携带 </td>
+          <td>rationale: String</td>
+          <td>，日志输出 "选了哪个策略、为什么"</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>可测试</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>单元测试 </td>
+          <td>select_strategy()</td>
+          <td> 不需要跑 E2E，不需要生成机器码</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>可比较</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>A/B 测试不同策略变体，评估性能差异</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>可扩展</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>新增硬件变体只需在 </td>
+          <td>DeviceProfile</td>
+          <td> 中注册能力属性（</td>
+          <td>gemm_tile_sizes()</td>
+          <td>、</td>
+          <td>smem_stages()</td>
+          <td>、</td>
+          <td>optimal_waves()</td>
+          <td> 等），策略选择和 codegen 自动适配，无需新增 enum variant 或 match arm</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.13" data-section="5.13">
+      <h4>5.13 与 Phase 3 的交互</h4>
+      <p>Phase 3 ISA Codegen 根据 <code>ImplementationPlan</code> 中每个 <code>GroupStrategy.compute</code> 发射机器码。Phase 3 是"哑翻译器"——不内嵌策略决策逻辑，只根据 <code>ComputeStrategy</code> 枚举值发射对应的指令序列:</p>
+      <p>```rust</p>
+      <p>// Phase 3 codegen 入口</p>
+      <p>fn emit_group(group: &amp;GroupStrategy, emitter: &amp;mut impl MachineCodeEmitter) {</p>
+      <p>    match &amp;group.compute {</p>
+      <p>        ComputeStrategy::Gemm(Rdna4WmmaA4W8 { .. }) =&gt; emit_rdna4_wmma_a4w8(emitter),</p>
+      <p>        ComputeStrategy::Gemm(Avx2Fma { tile }) =&gt; emit_avx2_fma_gemm(emitter, tile),</p>
+      <p>        ComputeStrategy::DequantCompute(FusedQuantGemm { quant_type, dot_cap, tile }) =&gt;</p>
+      <p>            emit_fused_quant_gemm(emitter, quant_type, dot_cap, tile),</p>
+      <p>        ComputeStrategy::Attention(ScalarTiled { tile_q, tile_k }) =&gt; emit_tiled_attention(emitter, *tile_q, *tile_k),</p>
+      <p>        ComputeStrategy::Norm(SimdVectorized { width }) =&gt; emit_simd_norm(emitter, *width),</p>
+      <p>        // ... 所有变体</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>收益</strong>: 策略选择与代码生成解耦。修改策略逻辑不影响 codegen，修改 codegen 不影响策略选择。
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. Phase 3: ISA Lowering</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 自动指令选择器 (Auto Instruction Selection)</h4>
+    </section>
+    <section id="s5.1.1" data-section="5.1.1">
+      <h5>5.1.1 设计原则</h5>
+      <p>Phase 3 的 TraceOp → VmInstr → ISA 映射必须是<strong>完全自动的</strong>，类似 LLVM SelectionDAG。禁止在 <code>emit_standalone_op</code> 中手写 <code>OpKind::*</code> match arm。</p>
+      <p>```</p>
+      <p>正确架构:</p>
+      <p>  Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowering → Machine Code</p>
+      <p>                                      ↑</p>
+      <p>                                 类似 LLVM SelectionDAG</p>
+      <p>                                 由 ComputePattern 驱动，算法保证正确性</p>
+      <p>```</p>
+      <strong>错误架构（已废弃）</strong>:
+      <p>```</p>
+      <p>  Scalar → SymExec → TraceOp → [plan_lower.rs 手写 emit] → VmInstr → ISA Lowering</p>
+      <p>                                      ↑</p>
+      <p>                                 人肉指令选择，bug 源头</p>
+      <p>```</p>
+    </section>
+    <section id="s5.1.2" data-section="5.1.2">
+      <h5>5.1.2 自动分发规则 — 三层分类体系</h5>
+      <code>emit_standalone_op</code> 必须按 <code>ComputePattern</code>（或等价的 <code>OpSemantics</code>）分类分发，不允许逐个 <code>OpKind</code> 手写 match arm。
+      <strong>三层分类</strong>:
+      <table>
+        <tr>
+          <th>层级</th>
+        </tr>
+        <tr>
+          <td>ComputePattern</td>
+        </tr>
+        <tr>
+          <td>分发策略</td>
+        </tr>
+        <tr>
+          <td>自动化级别</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 1: 全自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Elementwise / BinaryElementwise</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace(body)</td>
+          <td> → VmInstr</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>100% 自动</td>
+          <td> — 零手写代码</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 1: 全自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Injective { body, num_inputs, num_outputs }</td>
+        </tr>
+        <tr>
+          <td>emit_injective_inline</td>
+          <td> + </td>
+          <td>auto_lower_trace_multi</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>100% 自动</td>
+          <td> — trace 驱动，多输入多输出</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 1: 全自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Reduction { identity, combine, normalize }</td>
+        </tr>
+        <tr>
+          <td>emit_reduction_inline</td>
+          <td> + </td>
+          <td>auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>100% 自动</td>
+          <td> — trace 驱动，归约+归一化</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 1: 全自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NormLike { reduce, finalize, transform }</td>
+        </tr>
+        <tr>
+          <td>emit_normlike_inline</td>
+          <td> + </td>
+          <td>auto_lower_trace</td>
+          <td> / </td>
+          <td>auto_lower_trace_multi</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>100% 自动</td>
+          <td> — trace 驱动</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 2: 骨架手写 + 算术自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Gemm</td>
+        </tr>
+        <tr>
+          <td>emit_gemm_inline_with_hook</td>
+        </tr>
+        <tr>
+          <td>分块策略手写，内层 FMA via TraceOp</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 2: 骨架手写 + 算术自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TiledAttention</td>
+        </tr>
+        <tr>
+          <td>emit_tiled_attention_inline</td>
+        </tr>
+        <tr>
+          <td>循环骨架手写，softmax/V-accum via TraceOp</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 2: 骨架手写 + 算术自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MoEDispatch</td>
+        </tr>
+        <tr>
+          <td>emit_moe_packed_inline</td>
+        </tr>
+        <tr>
+          <td>5-phase 骨架手写，router/softmax/topk/SwiGLU via TraceOp</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 2: 骨架手写 + 算术自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>QuantGemm</td>
+        </tr>
+        <tr>
+          <td>emit_quant_gemm_inline</td>
+        </tr>
+        <tr>
+          <td>分块策略手写，dequant/FMA via TraceOp</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 2: 骨架手写 + 算术自动</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Gather / ColumnSlice</td>
+        </tr>
+        <tr>
+          <td>emit_*_inline</td>
+        </tr>
+        <tr>
+          <td>索引偏移手写，数据搬运 via TraceOp</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Tier 3: 纯控制流</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Structural (StoreToken/WriteLogits/Guardrail/...)</td>
+        </tr>
+        <tr>
+          <td>dispatch_structural</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>100% 手写</td>
+          <td>（无算术）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.1.2.1" data-section="5.1.2.1">
+      <h6>5.1.2.1 "控制流骨架" 与 "算术计算体" 精确定义</h6>
+      <strong>控制流骨架（允许手写）</strong>:
+      <li><code>emit_loop(BoundExpr, step, |prog, ctr, off|)</code> — 循环结构</li>
+      <li><code>VmInstr::ConditionalSkip</code> — 条件跳过（如 causal mask）</li>
+      <li><code>VmInstr::IndirectJump</code> — 间接跳转（如 hook 分发）</li>
+      <li><code>VmInstr::ScopeBegin / ScopeEnd</code> — 作用域管理</li>
+      <li><code>alloc_vreg(...)</code> — 虚拟寄存器分配</li>
+      <li><code>VmInstr::VecLoad / VecStore</code> — 纯数据加载/存储（无计算）</li>
+      <li><code>VmInstr::Broadcast { src: ScalarExpr::Param(...) }</code> — 参数广播</li>
+      <strong>算术计算体（禁止手写，必须通过 <code>auto_lower_trace_raw</code>）</strong>:
+      <li>所有 <code>VecBinOp { Add/Sub/Mul/Div/Max/Min }</code> — 算术运算</li>
+      <li>所有 <code>VecUnaryOp { Neg/Abs/Sqrt/Rsqrt/Recip }</code> — 一元运算</li>
+      <li>所有 <code>Transcendental { Exp/Log/Tanh/Sigmoid }</code> — 超越函数</li>
+      <li>所有 <code>Fma { acc, a, b }</code> — 融合乘加</li>
+      <li>所有 <code>VecCmp { pred }</code> — 比较</li>
+      <li>所有 <code>ConditionalSelect</code> — 条件选择</li>
+      <li>所有 <code>HReduce</code> — 水平归约</li>
+      <li>所有 <code>BroadcastScalar</code> + 后续运算 — 标量广播+计算</li>
+      <li>所有 <code>Mxfp4VecDequant</code> — 量化解量化</li>
+      <strong>核心原则</strong>: 控制流骨架 = "决定在哪里计算"，算术计算体 = "计算什么"。后者必须是算法生成的。
+      <strong>关键约束</strong>：每个 ComputePattern 变体对应<strong>一个</strong>通用处理器函数，同类型的所有 OpKind 共享该处理器。禁止为特定 OpKind 创建 <code>emit_xxx_auto</code> 或 <code>lower_xxx</code> 等独立函数。
+    </section>
+    <section id="s5.1.2.2" data-section="5.1.2.2">
+      <h6>5.1.2.2 ARCH-AUTO-INSTR-FULL 需求</h6>
+      <p>```</p>
+      <p>REQ-AIS-FULL-001: 所有 Tier 2 算子的算术计算体必须通过 auto_lower_trace_raw 生成，</p>
+      <p>                  禁止在循环骨架内直接 emit(VmInstr::VecBinOp/VecUnaryOp/Transcendental/Fma/VecCmp/...)。</p>
+      <p>                  验证方式: grep emit_*_inline 函数中的 prog.emit(VmInstr::VecBinOp) 等，</p>
+      <p>                  结果必须为 0 或仅存在于 auto_select.rs 内部。</p>
+      <p>REQ-AIS-FULL-002: emit_loop 支持 Result 返回值（emit_loop_try），</p>
+      <p>                  使 auto_lower_trace_raw 可以在循环体内安全调用并传播错误。</p>
+      <p>REQ-AIS-FULL-003: TraceOp 枚举必须包含 Sigmoid 变体，</p>
+      <p>                  SwiGLU (x * sigmoid(gate)) 的 sigmoid 通过 auto_lower_trace_raw 生成，</p>
+      <p>                  禁止直接 emit(VmInstr::Transcendental { Sigmoid })。</p>
+      <p>```</p>
+    </section>
+    <section id="s5.1.3" data-section="5.1.3">
+      <h5>5.1.3 自动分发实现要求</h5>
+      <p>1. <strong>函数入口</strong>: <code>emit_standalone_op</code> 函数顶部首先尝试 <code>try_auto_dispatch_by_pattern()</code></p>
+      <p>2. <strong>ComputePattern 路由</strong>: 按 ComputePattern 类型路由到通用处理器（<code>emit_normlike_inline</code> / <code>emit_reduction_inline</code> / <code>emit_injective_inline</code> / <code>emit_gemm_inline_with_hook</code>）</p>
+      <p>3. <strong>禁止手写 OpKind match</strong>: 不允许 <code>OpKind::Xxx =&gt; { ... }</code> 形式的逐算子分发（仅 Opaque 类 <code>dispatch_structural</code> 允许按语义特征分组）</p>
+      <p>4. <strong>禁止 per-OpKind 手写函数</strong>: 不允许创建 <code>emit_layernorm_auto</code> / <code>emit_meanpool_auto</code> / <code>emit_rope_auto</code> / <code>lower_layernorm</code> / <code>lower_rope_full</code> / <code>lower_meanpool</code> 等按 OpKind 命名的手写 VmInstr 发射函数。所有算术表达式必须通过 <code>auto_lower_trace</code> / <code>auto_lower_trace_multi</code> 自动生成。现有 <code>emit_layernorm_auto</code> 为过渡实现，后续应并入 <code>emit_normlike_inline</code></p>
+      <p>5. <strong>新增算子</strong>: 注册 scalar impl → SymExec 提取 trace → ComputePattern 自动分类 → 自动路由到对应通用处理器。无需编写任何额外代码</p>
+      <p>6. <strong>缺失算子</strong>: 走到 catch-all 时返回 <code>Err</code>，禁止静默 NOP（NO_SILENT_FALLBACK）</p>
+    </section>
+    <section id="s5.1.4" data-section="5.1.4">
+      <h5>5.1.4 TraceOp → VmInstr 自动查表</h5>
+      <code>auto_lower_trace()</code> 实现完全自动的 TraceOp → VmInstr 映射（<code>codegen/vm/auto_select.rs</code>）。
+      <p>每个 TraceOp 变体自带映射语义，通过辅助函数消除重复代码：</p>
+      <strong>已实现 (auto_lower_trace dispatch_trace_op)</strong>:
+      <strong>未实现（auto_lower_trace 返回 Err）</strong>:
+      <strong>关键保证</strong>: 新增 TraceOp 变体只需在 <code>auto_lower_trace</code> 的 match 中添加<strong>一行</strong>映射，不需要修改任何其他 lower 函数。
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>VmInstr</td>
+        </tr>
+        <tr>
+          <td>辅助函数</td>
+        </tr>
+        <tr>
+          <td>Input(n)</td>
+        </tr>
+        <tr>
+          <td>直接返回 inputs[n]</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>Const(val)</td>
+        </tr>
+        <tr>
+          <td>Broadcast { ScalarExpr::Const(val) }</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>Add(a,b) / Sub / Mul / Div / Max / Min</td>
+        </tr>
+        <tr>
+          <td>VecBinOp { op }</td>
+        </tr>
+        <tr>
+          <td>emit_binop()</td>
+          <td> — 6 变体共享</td>
+        </tr>
+        <tr>
+          <td>Neg / Abs / Sqrt / Rsqrt / Recip</td>
+        </tr>
+        <tr>
+          <td>VecUnaryOp { op }</td>
+        </tr>
+        <tr>
+          <td>emit_unary()</td>
+          <td> — 5 变体共享</td>
+        </tr>
+        <tr>
+          <td>Fma(a,b,c)</td>
+        </tr>
+        <tr>
+          <td>Fma { acc, a, b }</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>Exp / Tanh / Log</td>
+        </tr>
+        <tr>
+          <td>Transcendental { func }</td>
+        </tr>
+        <tr>
+          <td>emit_transcendental()</td>
+          <td> — 3 变体共享</td>
+        </tr>
+        <tr>
+          <td>Compare { a, b, op }</td>
+        </tr>
+        <tr>
+          <td>VecCmp { pred }</td>
+        </tr>
+        <tr>
+          <td>emit_cmp()</td>
+          <td> — CmpOp→CmpPredicate 映射</td>
+        </tr>
+        <tr>
+          <td>Cast { src, from, to }</td>
+        </tr>
+        <tr>
+          <td>VecCast { from_bits, to_bits }</td>
+        </tr>
+        <tr>
+          <td>quant_precision_bits()</td>
+          <td> — 13 种精度格式</td>
+        </tr>
+        <tr>
+          <td>HReduce { src, op }</td>
+        </tr>
+        <tr>
+          <td>HReduce { op }</td>
+        </tr>
+        <tr>
+          <td>— 支持 Sum/Max/Min/Prod</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>需要的 VmInstr</td>
+        </tr>
+        <tr>
+          <td>解锁能力</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>ConditionalBranch</td>
+        </tr>
+        <tr>
+          <td>VecConditional</td>
+        </tr>
+        <tr>
+          <td>条件选择 (mask ? a : b)</td>
+        </tr>
+        <tr>
+          <td>当前 Silu/Sigmoid 通过 Exp+Add+Div 替代</td>
+        </tr>
+        <tr>
+          <td>QuantFma</td>
+        </tr>
+        <tr>
+          <td>专用 path via StrategySelector</td>
+        </tr>
+        <tr>
+          <td>混合精度 GEMM</td>
+        </tr>
+        <tr>
+          <td>TurboQuant 专用，不走 auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>BlockScale</td>
+        </tr>
+        <tr>
+          <td>专用 path</td>
+        </tr>
+        <tr>
+          <td>块缩放 (CDNA4)</td>
+        </tr>
+        <tr>
+          <td>走 StrategySelector 专用 lower</td>
+        </tr>
+        <tr>
+          <td>Prefetch</td>
+        </tr>
+        <tr>
+          <td>PrefetchInstr</td>
+        </tr>
+        <tr>
+          <td>质心预取</td>
+        </tr>
+        <tr>
+          <td>内存提示指令</td>
+        </tr>
+        <tr>
+          <td>NonTemporalStore</td>
+        </tr>
+        <tr>
+          <td>NonTemporalStoreInstr</td>
+        </tr>
+        <tr>
+          <td>KV 连续写入绕缓存</td>
+        </tr>
+        <tr>
+          <td>内存提示指令</td>
+        </tr>
+        <tr>
+          <td>BitExtract</td>
+        </tr>
+        <tr>
+          <td>BitExtractInstr</td>
+        </tr>
+        <tr>
+          <td>量化解包 (nibbles→f32)</td>
+        </tr>
+        <tr>
+          <td>shift+mask / ubfx / bfe</td>
+        </tr>
+        <tr>
+          <td>Permute</td>
+        </tr>
+        <tr>
+          <td>VecPermute</td>
+        </tr>
+        <tr>
+          <td>向量重排 (shuffle)</td>
+        </tr>
+        <tr>
+          <td>vpshufb / tbl / prmt</td>
+        </tr>
+        <tr>
+          <td>MaskedOp</td>
+        </tr>
+        <tr>
+          <td>MaskedVmInstr</td>
+        </tr>
+        <tr>
+          <td>掩码操作</td>
+        </tr>
+        <tr>
+          <td>条件 lane 操作</td>
+        </tr>
+        <tr>
+          <td>AtomicAdd</td>
+        </tr>
+        <tr>
+          <td>AtomicAddU32 (已存在)</td>
+        </tr>
+        <tr>
+          <td>MoE 命中计数</td>
+        </tr>
+        <tr>
+          <td>lock xadd / ldadd / atomicAdd</td>
+        </tr>
+        <tr>
+          <td>FWHT</td>
+        </tr>
+        <tr>
+          <td>butterfly 序列</td>
+        </tr>
+        <tr>
+          <td>TurboQuant FWHT</td>
+        </tr>
+        <tr>
+          <td>展开的加减指令序列</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.1.5" data-section="5.1.5">
+      <h5>5.1.5 TraceOp 扩展路线图</h5>
+      <p>当前 17 种 TraceOp 中，10 种已在 <code>auto_lower_trace</code> 中实现（基础算术 + Compare + Cast + HReduce）。剩余 7 种走专用路径或待实现：</p>
+      <strong>ConditionalBranch 替代路径</strong>: 当前 Silu/Sigmoid/Gelu 等 trace 不使用 ConditionalBranch，而是通过 Exp+Add+Div 算术等价实现。这使得这些算子的全自动 lowering 不依赖 ConditionalBranch 的实现。
+      <table>
+        <tr>
+          <th>类别</th>
+        </tr>
+        <tr>
+          <td>TraceOp</td>
+        </tr>
+        <tr>
+          <td>路径</td>
+        </tr>
+        <tr>
+          <td>依赖</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>控制流</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ConditionalBranch</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace + VecConditional</td>
+        </tr>
+        <tr>
+          <td>新增 VmInstr::VecConditional</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>量化专用</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>QuantFma / BlockScale</td>
+        </tr>
+        <tr>
+          <td>StrategySelector 专用 lower</td>
+        </tr>
+        <tr>
+          <td>不走 auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>内存优化</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Prefetch / NonTemporalStore</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace + 内存提示</td>
+        </tr>
+        <tr>
+          <td>新增对应 VmInstr</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>位操作</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>BitExtract</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>量化解包场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>向量操作</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Permute</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>向量重排场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>掩码</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>MaskedOp</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace</td>
+        </tr>
+        <tr>
+          <td>条件 lane 操作</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>原子</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>AtomicAdd</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace (VmInstr 已存在)</td>
+        </tr>
+        <tr>
+          <td>MoE 命中计数</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>信号处理</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FWHT</td>
+        </tr>
+        <tr>
+          <td>auto_lower_trace (butterfly 展开)</td>
+        </tr>
+        <tr>
+          <td>TurboQuant 专用</td>
+        </tr>
+      </table>
+    </section>
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE" <h4="" data-section="5.1.7" data-req-api="POST /compile" data-req-entity="ENT-COMPILER-GRAPH,ENT-COMPUTE-PATTERN,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="ais" data-req-status="implemented" data-req="REQ-AIS-001" id="req-ais-001">5.1.7 Category D 消除 (REQ-AIS-001)
+      <code>emit_standalone_op</code> 当前仍存在 ~13 个手写 <code>OpKind::Xxx =&gt;</code> match arm（Category D）。REQ-AIS-005 要求全部消除，改为 ComputePattern 驱动路由。
+      <strong>消除策略矩阵</strong>:
+      <strong>目标架构</strong>:
+      <p>```</p>
+      <p>emit_standalone_op(op_id)</p>
+      <p>  │</p>
+      <p>  ├─ 1. try_auto_dispatch_by_pattern()</p>
+      <p>  │    ├─ Elementwise / BinaryElementwise</p>
+      <p>  │    │    → auto_lower_trace() 自动完成</p>
+      <p>  │    │    覆盖: Silu, Residual, LogitSoftcap, 所有激活函数</p>
+      <p>  │    │</p>
+      <p>  │    ├─ Injective { body, num_inputs, num_outputs }</p>
+      <p>  │    │    → emit_injective_inline + auto_lower_trace_multi</p>
+      <p>  │    │    覆盖: RoPE, 所有多输入多输出逐元素变换</p>
+      <p>  │    │</p>
+      <p>  │    └─ Reduction { identity, combine, normalize }</p>
+      <p>  │         → emit_reduction_inline + auto_lower_trace</p>
+      <p>  │         覆盖: MeanPool, L2Normalize, Argmax, 所有归约算子</p>
+      <p>  │</p>
+      <p>  ├─ 2. dispatch_compute_pattern()</p>
+      <p>  │    ComputePattern::NormLike → emit_normlike_inline</p>
+      <p>  │    ComputePattern::Gemm → emit_gemm_inline_with_hook</p>
+      <p>  │    ComputePattern::QuantDecode → lower_quant_decode</p>
+      <p>  │    (路由键是 ComputePattern，不是 OpKind)</p>
+      <p>  │</p>
+      <p>  └─ 3. structural_ops()</p>
+      <p>       Reshape/Transpose/SliceView → NOP</p>
+      <p>       StoreToken/WriteLogits → VecStore (带偏移)</p>
+      <p>       CheckStopCondition/EarlyExit/GuardrailCheck → 控制流 VmInstr</p>
+      <p>       SgInject/SgDetect/CotStepCheck → 共享内存 VmInstr</p>
+      <p>       未匹配 → Err (NO_SILENT_FALLBACK)</p>
+      <p>```</p>
+      <strong>关键约束</strong>:
+      <li>每个 ComputePattern 变体对应一个<strong>通用处理器</strong>（不是 per-OpKind 函数）</li>
+      <li>禁止创建 <code>emit_layernorm_auto</code> / <code>emit_meanpool_auto</code> / <code>emit_rope_auto</code> / <code>lower_layernorm</code> 等 per-OpKind 手写函数</li>
+      <li>新增 OpKind 只需注册 scalar impl → SymExec 提取 ComputePattern → 自动路由到对应通用处理器</li>
+      <li><code>structural_ops</code> 按 OpKind 语义特征（内存/控制流/元数据）分发，非逐个 OpKind 手写</li>
+      <table>
+        <tr>
+          <th>OpKind</th>
+        </tr>
+        <tr>
+          <td>消除策略</td>
+        </tr>
+        <tr>
+          <td>目标路径</td>
+        </tr>
+        <tr>
+          <td>依赖</td>
+        </tr>
+        <tr>
+          <td>Silu</td>
+        </tr>
+        <tr>
+          <td>auto elementwise</td>
+        </tr>
+        <tr>
+          <td>已有 scalar 注册，SymExec trace 含 Exp+Add+Div</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>Residual</td>
+        </tr>
+        <tr>
+          <td>auto elementwise (BinaryElementwise)</td>
+        </tr>
+        <tr>
+          <td>Add 操作，已有 scalar 注册</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>LogitSoftcap</td>
+        </tr>
+        <tr>
+          <td>auto elementwise</td>
+        </tr>
+        <tr>
+          <td>tanh + mul，已有 scalar 注册</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>Argmax</td>
+        </tr>
+        <tr>
+          <td>Reduction pattern</td>
+        </tr>
+        <tr>
+          <td>VmInstr::Argmax 已存在</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>StoreToken</td>
+        </tr>
+        <tr>
+          <td>structural VecStore</td>
+        </tr>
+        <tr>
+          <td>带 output buffer 偏移计算的 VecStore</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>WriteLogits</td>
+        </tr>
+        <tr>
+          <td>structural VecStore</td>
+        </tr>
+        <tr>
+          <td>带 logits buffer 偏移的 VecStore</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>CheckStopCondition</td>
+        </tr>
+        <tr>
+          <td>structural 控制流</td>
+        </tr>
+        <tr>
+          <td>比较+条件跳转 VmInstr</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>EarlyExit</td>
+        </tr>
+        <tr>
+          <td>structural 控制流</td>
+        </tr>
+        <tr>
+          <td>ConditionalSkip/ConditionalExit VmInstr 已存在</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>GuardrailCheck</td>
+        </tr>
+        <tr>
+          <td>structural 控制流</td>
+        </tr>
+        <tr>
+          <td>比较共享内存 veto 标志 + ConditionalSkip</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>CotStepCheck</td>
+        </tr>
+        <tr>
+          <td>structural 共享内存</td>
+        </tr>
+        <tr>
+          <td>读共享内存 step counter + 条件跳转</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>SgInject</td>
+        </tr>
+        <tr>
+          <td>structural 共享内存</td>
+        </tr>
+        <tr>
+          <td>写共享内存 ring buffer</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>SgDetect</td>
+        </tr>
+        <tr>
+          <td>structural 共享内存</td>
+        </tr>
+        <tr>
+          <td>读共享内存 ring buffer + 计算</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>Reshape/Transpose/SliceView</td>
+        </tr>
+        <tr>
+          <td>NOP</td>
+        </tr>
+        <tr>
+          <td>纯元数据操作</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+      </table>
+    
+      <div data-criteria="">
+        <h5>REQ-AIS-001 自动指令选择器 — ComputePattern 驱动 TraceOp→VmInstr 自动路由</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">自动指令选择器实现完整</li>
+        <li id="id-2" data-criterion="2">ComputePattern 驱动自动分发</li>
+        <li id="id-3" data-criterion="3">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AIS-001" data-test="TEST-AIS-001" id="TEST-AIS-001">TEST-AIS-001: 自动指令选择器测试<p>验证REQ-AIS-001相关功能正确性</p>
+      <div id="自动指令选择器实现完整" data-criterion="自动指令选择器实现完整">自动指令选择器实现完整</div>
+      <div id="computepattern-驱动自动分发" data-criterion="ComputePattern 驱动自动分发">ComputePattern 驱动自动分发</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s5.1.6" data-section="5.1.6">
+      <h4>5.1.6 TraceOp → ISA 指令映射</h4>
+      <p>Phase 3 从 OpTrace 的 <code>Vec&lt;TraceOp&gt;</code> 直接映射到平台指令。不硬编码算子语义。</p>
+      <strong>x86_64 (iced-x86)</strong>:
+      <strong>AArch64 (dynasm-rs)</strong>:
+      <strong>GPU (PTX)</strong>:
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>AVX2 (ymm) / AVX-512 (zmm)</td>
+        </tr>
+        <tr>
+          <td>Add(a,b)</td>
+        </tr>
+        <tr>
+          <td>vaddps</td>
+        </tr>
+        <tr>
+          <td>Mul(a,b)</td>
+        </tr>
+        <tr>
+          <td>vmulps</td>
+        </tr>
+        <tr>
+          <td>Fma(a,b,c)</td>
+        </tr>
+        <tr>
+          <td>vfmadd231ps</td>
+        </tr>
+        <tr>
+          <td>Exp(a)</td>
+        </tr>
+        <tr>
+          <td>多项式逼近 ~12 条</td>
+        </tr>
+        <tr>
+          <td>Sqrt(a)</td>
+        </tr>
+        <tr>
+          <td>vsqrtps</td>
+        </tr>
+        <tr>
+          <td>Recip(a)</td>
+        </tr>
+        <tr>
+          <td>vrcpps + Newton</td>
+        </tr>
+        <tr>
+          <td>Compare(a,b,op)</td>
+        </tr>
+        <tr>
+          <td>vcmpps{k} → k-mask (AVX-512) / vcmpps + movemask (AVX2)</td>
+        </tr>
+        <tr>
+          <td>Cast(a, F16→F32)</td>
+        </tr>
+        <tr>
+          <td>vcvtph2ps (F16C)</td>
+        </tr>
+        <tr>
+          <td>Cast(a, BF16→F32)</td>
+        </tr>
+        <tr>
+          <td>vdpbf16ps 输入侧 (AVX-512 BF16)</td>
+        </tr>
+        <tr>
+          <td>HReduce(a, Sum)</td>
+        </tr>
+        <tr>
+          <td>vhaddps + vperm + vadd (4 级)</td>
+        </tr>
+        <tr>
+          <td>HReduce(a, Max)</td>
+        </tr>
+        <tr>
+          <td>vmaxps + vperm + vcmp + blend (4 级)</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>NEON (v.4s) / SVE</td>
+        </tr>
+        <tr>
+          <td>Add(a,b)</td>
+        </tr>
+        <tr>
+          <td>fadd</td>
+        </tr>
+        <tr>
+          <td>Fma(a,b,c)</td>
+        </tr>
+        <tr>
+          <td>fmla</td>
+        </tr>
+        <tr>
+          <td>Exp(a)</td>
+        </tr>
+        <tr>
+          <td>多项式逼近</td>
+        </tr>
+        <tr>
+          <td>Sqrt(a)</td>
+        </tr>
+        <tr>
+          <td>fsqrt</td>
+        </tr>
+        <tr>
+          <td>Compare(a,b,op)</td>
+        </tr>
+        <tr>
+          <td>fcmp → fcsel / SVE whilelo + fcm (predicate)</td>
+        </tr>
+        <tr>
+          <td>Cast(a, F16→F32)</td>
+        </tr>
+        <tr>
+          <td>fcvtl</td>
+        </tr>
+        <tr>
+          <td>Cast(a, BF16→F32)</td>
+        </tr>
+        <tr>
+          <td>bfdot 输入侧 / bfmmla</td>
+        </tr>
+        <tr>
+          <td>HReduce(a, Sum)</td>
+        </tr>
+        <tr>
+          <td>faddp (pairwise) + addv (SVE)</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>TraceOp</th>
+        </tr>
+        <tr>
+          <td>PTX</td>
+        </tr>
+        <tr>
+          <td>Add</td>
+        </tr>
+        <tr>
+          <td>add.f32</td>
+        </tr>
+        <tr>
+          <td>Fma</td>
+        </tr>
+        <tr>
+          <td>fma.rn.f32</td>
+        </tr>
+        <tr>
+          <td>Exp</td>
+        </tr>
+        <tr>
+          <td>ex2.approx.f32 + 多项式修正</td>
+        </tr>
+        <tr>
+          <td>Compare(a,b,op)</td>
+        </tr>
+        <tr>
+          <td>setp.{eq/ne/lt/le/gt/ge}.f32 → predicate reg</td>
+        </tr>
+        <tr>
+          <td>Cast(a, F16→F32)</td>
+        </tr>
+        <tr>
+          <td>cvt.f32.f16</td>
+        </tr>
+        <tr>
+          <td>Cast(a, BF16→F32)</td>
+        </tr>
+        <tr>
+          <td>cvt.f32.bf16</td>
+        </tr>
+        <tr>
+          <td>HReduce(a, Sum)</td>
+        </tr>
+        <tr>
+          <td>shfl.sync ↓ + add (warp reduce)</td>
+        </tr>
+        <tr>
+          <td>HReduce(a, Max)</td>
+        </tr>
+        <tr>
+          <td>shfl.sync ↓ + max (warp reduce)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 PlatformBackend 统一接口</h4>
+      <p>Phase 1-2 完全平台无关。平台差异封装在 <code>MachineCodeEmitter</code> trait 中。</p>
+      <p>```rust</p>
+      <p>pub trait PlatformBackend {</p>
+      <p>    type Emitter: MachineCodeEmitter;</p>
+      <p>    fn new_emitter(&amp;self) -&gt; Self::Emitter;</p>
+      <p>    fn platform(&amp;self) -&gt; Platform;</p>
+      <p>    fn num_simd_regs(&amp;self) -&gt; usize;</p>
+      <p>}</p>
+      <p>```</p>
+      <p>微内核规格（MR×NR）、GEMM 代码结构、融合策略硬件差异矩阵、算子实现硬件差异矩阵详见 <code>SPEC/04-OPERATORS.md</code> §8-10。</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 禁止事项</h4>
+      <li>禁止跳过 Lifting 阶段直接手写 ISA 汇编（如直接写 AVX2 Softmax）</li>
+      <li>禁止在 JIT 代码中通过 <code>call</code> 指令调用预编译的 Rust/C 函数</li>
+      <li>禁止写死特定 ISA，必须通过 DeviceProfile 参数化</li>
+      <li>禁止 emit_nop() 作为未实现 op 的 catch-all（见 <code>00-PHILOSOPHY.md</code> NO_SILENT_FALLBACK）</li>
+      <li>硬件差异体现在 codegen 层的指令选择，不是 fusion 层的算子拆分（见 <code>00-PHILOSOPHY.md</code> NO_HW_DEGRADATION）</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. JIT 缓存协议</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 编译时机</h4>
+      <li>编译只发生在模型加载时</li>
+      <li>推理热路径（decode step 层循环）中禁止任何编译行为</li>
+      <li><code>InferenceCompiler::new()</code> / <code>compile()</code> / <code>build_*_graph()</code> 只在模型加载时调用</li>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 SymDim 动态维度</h4>
+      <p>动态维度（seq_len, total_seq）通过 <code>SymDim::Symbolic</code> + <code>ShapeBinding</code> 运行时绑定，不触发重编译。</p>
+      <p>```rust</p>
+      <p>pub enum SymDim {</p>
+      <p>    Concrete(usize),</p>
+      <p>    Symbolic(String),</p>
+      <p>}</p>
+      <p>pub struct ShapeBinding {</p>
+      <p>    pub bindings: HashMap&lt;String, usize&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>铁律：</p>
+      <li>禁止在图构建时将 <code>total_seq</code>、<code>batch_size</code> 等动态维度硬编码为具体数值</li>
+      <li>禁止因 shape 变化而重新调用 <code>compile_and_run</code> 构建新图</li>
+      <li>编译一次，通过 <code>ShapeBinding</code> 在每个 decode step 传入当前值</li>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 三级缓存</h4>
+      <p>Debug 模式（<code>cargo test</code> / <code>cargo build</code>）: L3 磁盘缓存完全禁用。</p>
+      <p>Release 模式（<code>cargo build --release</code>）: L3 正常工作。</p>
+      <table>
+        <tr>
+          <th>级别</th>
+        </tr>
+        <tr>
+          <td>作用域</td>
+        </tr>
+        <tr>
+          <td>存储位置</td>
+        </tr>
+        <tr>
+          <td>生命周期</td>
+        </tr>
+        <tr>
+          <td>L1</td>
+        </tr>
+        <tr>
+          <td>模型级</td>
+        </tr>
+        <tr>
+          <td>内存</td>
+        </tr>
+        <tr>
+          <td>模型卸载时释放</td>
+        </tr>
+        <tr>
+          <td>L2</td>
+        </tr>
+        <tr>
+          <td>全局 LRU</td>
+        </tr>
+        <tr>
+          <td>内存</td>
+        </tr>
+        <tr>
+          <td>进程退出时释放</td>
+        </tr>
+        <tr>
+          <td>L3</td>
+        </tr>
+        <tr>
+          <td>持久化</td>
+        </tr>
+        <tr>
+          <td>~/.gllm/jit_cache/</td>
+        </tr>
+        <tr>
+          <td>7 天 TTL 自动清理</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.4" data-section="7.4">
+      <h4>7.4 CPU/GPU 统一 (ARCH-CPU-GPU-UNIFIED)</h4>
+      <p>CPU 和 GPU 后端共享完全一致的 <code>CompilerGraph</code> IR 和 <code>GraphType</code>。</p>
+      <li>禁止以 <code>Cpu</code>/<code>Gpu</code>/后端名称为前缀的 <code>GraphType</code> 变体（如 <code>CpuDecoderLayer</code>）</li>
+      <li>禁止 CPU 专用图构建器（如 <code>build_decoder_layer_graph()</code>）</li>
+      <li>禁止子算子级 <code>GraphType</code>（如 <code>KvProjection</code>、<code>QRope</code>）</li>
+      <li>CPU 和 GPU 给定相同输入和权重，输出必须在浮点精度范围内一致</li>
+    </section>
+    <section id="s7.5" data-section="7.5">
+      <h4>7.5 编译粒度</h4>
+      <p>缓存粒度 = 全层融合图：</p>
+      <li><code>FusedAttentionLayer</code>（RmsNorm + Q/K/V GEMM + RoPE + Attention + O GEMM）</li>
+      <li><code>FusedFfnLayer</code>（RmsNorm + Gate/Up GEMM + Activation + Down GEMM）</li>
+      <p>禁止子算子级缓存（如单独缓存一个 RmsNorm 或一个 GEMM）。</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. CompilerGraph 接口边界</h3>
+      <code>auto_graph</code> 直接构建 CompilerGraph（OpKind 序列），传入 gllm-kernels 编译为 Mega-Kernel。
+      <p>```</p>
+      <p>gllm: auto_graph (tensor-name-driven) → CompilerGraph (OpKind 序列)</p>
+      <p>gllm-kernels: compile(graph, config) → 单一 Mega-Kernel 机器码</p>
+      <p>```</p>
+    </section>
+    <section id="s-compilergraph" data-section="null">
+      <h4>CompilerGraph</h4>
+      <p>```rust</p>
+      <p>pub struct CompilerGraph {</p>
+      <p>    pub nodes: Vec<compilernode>,</compilernode></p>
+      <p>    pub inputs: Vec<tensordesc>,</tensordesc></p>
+      <p>    pub outputs: Vec<tensordesc>,</tensordesc></p>
+      <p>}</p>
+      <p>pub enum CompilerOp {</p>
+      <p>    MatMul { m, n, k, transpose_b },</p>
+      <p>    RmsNorm { hidden_size, eps },</p>
+      <p>    LayerNorm { hidden_size, eps },</p>
+      <p>    Activation(OpKind),</p>
+      <p>    Add, Mul,</p>
+      <p>    Rope { head_dim, max_seq_len, theta },</p>
+      <p>    Softmax { axis },</p>
+      <p>    QuantMatMul { quant_type, m, n, k },</p>
+      <p>    Reshape { target_shape },</p>
+      <p>    Transpose { perm },</p>
+      <p>}</p>
+      <p>```</p>
+      <code>auto_graph</code> 根据 tensor names 推导架构特征，直接构建 OpKind 序列。OpKind 定义在 <code>gllm-kernels/src/compiler/graph.rs</code>，完整清单见 <code>SPEC/04-OPERATORS.md</code>。
+      <strong>关键 OpKind 的子图展开</strong>（由 auto_graph 在构建时直接生成，无中间 FusedGraph 层）：
+      <table>
+        <tr>
+          <th>OpKind</th>
+        </tr>
+        <tr>
+          <td>子图组成</td>
+        </tr>
+        <tr>
+          <td>MultiHeadAttention</td>
+        </tr>
+        <tr>
+          <td>RmsNorm → Gemm(Wq) → Gemm(Wk) → Gemm(Wv) → RoPE(Q) → RoPE(K) → Attention(Q,K,V) → Gemm(Wo)</td>
+        </tr>
+        <tr>
+          <td>FFN (SwiGLU)</td>
+        </tr>
+        <tr>
+          <td>Gemm(gate) → Silu → Gemm(up) → Mul → Gemm(down)</td>
+        </tr>
+        <tr>
+          <td>MoERouter</td>
+          <td> + </td>
+          <td>MoEDispatchPacked</td>
+        </tr>
+        <tr>
+          <td>Gemm(gate) → Softmax → TopK → [专家分支] → Add(聚合)</td>
+        </tr>
+        <tr>
+          <td>Gather</td>
+        </tr>
+        <tr>
+          <td>索引查找（embedding lookup），JIT 编译为循环内索引加载</td>
+        </tr>
+        <tr>
+          <td>SliceView</td>
+        </tr>
+        <tr>
+          <td>零拷贝视图（指针偏移），JIT NOP（已授权 SPEC 例外）</td>
+        </tr>
+        <tr>
+          <td>PerLayerEmbed</td>
+        </tr>
+        <tr>
+          <td>Slice(ple_weight) → Linear → Add</td>
+        </tr>
+        <tr>
+          <td>QkNorm</td>
+        </tr>
+        <tr>
+          <td>L2 归一化 + √head_dim 缩放</td>
+        </tr>
+        <tr>
+          <td>ValueNorm</td>
+        </tr>
+        <tr>
+          <td>RMSNorm（无学习参数）</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-compiler-graph" data-entity="ENT-COMPILER-GRAPH" data-req-ref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-BUFFER-LAYOUT ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-FUSION-PLAN ENT-GRAPH-RESOURCE-PLAN" data-xref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-compute-pattern" data-entity="ENT-COMPUTE-PATTERN" data-req-ref="REQ-AIS-001 REQ-OPKIND-REG-001 REQ-OPKIND-REG-002 REQ-OPKIND-REG-003 REQ-SCALAR-REF-001" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-FUSION-PLAN" data-xref="REQ-AIS-001 REQ-OPKIND-REG-001 REQ-OPKIND-REG-002 REQ-OPKIND-REG-003 REQ-SCALAR-REF-001"><h4>ENT-COMPUTE-PATTERN</h4><p>ComputePattern — 计算模式（决定ISA Lowering向量化策略）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>Elementwise/BinaryElementwise/Injective/Reduction/NormLike/Gemm/QuantDecode</td><td>计算模式变体</td></tr>
+<tr data-field="body" data-type="string" data-required="false" <td="">body<td>string</td><td>否</td><td></td><td>Vec&lt;TraceOp&gt; 主要计算体</td></tr><tr data-field="num_inputs" data-type="number" data-required="false" <td="">num_inputs<td>number</td><td>否</td><td>Injective 专属</td><td>多输入数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="false" <td="">num_outputs<td>number</td><td>否</td><td>Injective 专属</td><td>多输出数量</td></tr>
+<tr data-field="identity" data-type="number" data-required="false" <td="">identity<td>number</td><td>否</td><td>Reduction 专属</td><td>归约单位元</td></tr><tr data-field="block_size" data-type="number" data-required="false" <td="">block_size<td>number</td><td>否</td><td>QuantDecode 专属</td><td>量化解码块大小</td></tr></table></section>
+      <section id="ent-device-profile" data-entity="ENT-DEVICE-PROFILE" data-req-ref="REQ-AIS-001 REQ-LOADER-001 REQ-LOADER-002 REQ-OP-HWMATRIX-001 REQ-OP-HWMATRIX-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-COMPUTE-PATTERN ENT-FUSION-PLAN ENT-HW-OPT-ENGINE ENT-ISA-PROFILE ENT-MEGA-KERNEL-FN" data-xref="REQ-AIS-001 REQ-LOADER-001 REQ-LOADER-002 REQ-OP-HWMATRIX-001 REQ-OP-HWMATRIX-002">
+        <h4>ENT-DEVICE-PROFILE</h4>
+        <p>DeviceProfile — 硬件能力探测 (12 Profile)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="arch" data-type="string" data-required="true" <td="">arch<td>string</td><td>是</td><td>MicroArch</td><td>检测到的微架构</td></tr><tr data-field="isa" data-type="string" data-required="true" <td="">isa<td>string</td><td>是</td><td>IsaLevel</td><td>ISA级别 (Scalar/Avx2/Avx512/Avx512Amx/Neon/Sve/Sve2/NeonAmx)</td></tr>
+<tr data-field="peak_gflops_f32" data-type="number" data-required="true" <td="">peak_gflops_f32<td>number</td><td>是</td><td>f64</td><td>峰值单精度GFLOPS</td></tr><tr data-field="peak_bandwidth_gbs" data-type="number" data-required="true" <td="">peak_bandwidth_gbs<td>number</td><td>是</td><td>f64</td><td>峰值内存带宽 (GB/s)</td></tr><tr data-field="physical_cores" data-type="number" data-required="true" <td="">physical_cores<td>number</td><td>是</td><td>usize</td><td>物理核心数</td></tr>
+<tr data-field="logical_cores" data-type="number" data-required="true" <td="">logical_cores<td>number</td><td>是</td><td>usize</td><td>逻辑核心数 (含HT/SMT)</td></tr><tr data-field="quant_capabilities" data-type="string" data-required="true" <td="">quant_capabilities<td>string</td><td>是</td><td>QuantCapability</td><td>量化能力声明</td></tr><tr data-field="isv" data-type="string" data-required="true" <td="">isv<td>string</td><td>是</td><td>IsvCapabilities</td><td>ISV库可用性</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+</main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：01-JIT-PIPELINE.html</address>
+  </footer>
+</body>
+</html>

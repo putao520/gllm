@@ -39,7 +39,13 @@ impl TensorNameMap {
     /// Uses `match_tensor_role()` from loader to classify each name,
     /// then `TensorRole::to_canonical_name()` to produce the canonical form.
     /// Also maps bias tensors: for `foo.weight` → canonical `X`, maps `foo.bias` → `X.bias`.
-    pub fn build_from_names(names: &[String], _tie_word_embeddings: bool) -> Self {
+    ///
+    /// When `model_kind` is `Some(ModelKind::Reranker)`, GGUF's `output.weight`
+    /// (which is GGUF's rename of `score.weight`) is remapped from `lm_head` to
+    /// `classifier`. Reranker models never have a true language model head — their
+    /// "output" tensor is always a classification head with shape [num_labels, hidden]
+    /// (typically [2, hidden]), not [vocab_size, hidden].
+    pub fn build_from_names(names: &[String], model_kind: Option<crate::manifest::ModelKind>) -> Self {
         let mut mapping = HashMap::new();
         let mut canonical_to_external = HashMap::new();
         let name_set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
@@ -191,6 +197,40 @@ impl TensorNameMap {
             }
         }
 
+        // ARCH-RERANKER-CLASSIFY: For Reranker models, GGUF renames `score.weight`
+        // to `output.weight`, which maps to `lm_head`. But rerankers never have a
+        // true language model head — their "output" tensor is always a classification
+        // head with shape [num_labels, hidden] (typically [2, hidden]), not
+        // [vocab_size, hidden]. Remap `lm_head` → `classifier` so the graph builder
+        // and executor take the classification path instead of the generative path.
+        //
+        // IMPORTANT: Only remap when lm_head is a *separate* tensor (not tied to
+        // embeddings). If lm_head is tied to embed (same external name), the model
+        // lacks a classification head entirely — the GGUF converter omitted score.weight.
+        // In this case, the generative path (lm_head tied to embed → vocab-sized logits)
+        // is the only viable option, and remapping would break it by producing a
+        // vocab-sized "classifier" output.
+        if matches!(model_kind, Some(crate::manifest::ModelKind::Reranker)) {
+            let embed_ext = canonical_to_external.get("embed").cloned();
+            let lm_head_ext = canonical_to_external.get("lm_head").cloned();
+            let is_separate_lm_head = lm_head_ext.as_ref() != embed_ext.as_ref();
+            if is_separate_lm_head {
+                // Remap canonical "lm_head" → "classifier" in the mapping dict.
+                // Find all external names that currently map to "lm_head".
+                let reranker_remap: Vec<String> = mapping.iter()
+                    .filter(|(_, cn)| *cn == "lm_head")
+                    .map(|(ext, _)| ext.clone())
+                    .collect();
+                for ext in reranker_remap {
+                    mapping.insert(ext, "classifier".to_string());
+                }
+                // Update reverse mapping too
+                if let Some(ext) = canonical_to_external.remove("lm_head") {
+                    canonical_to_external.insert("classifier".to_string(), ext);
+                }
+            }
+        }
+
         Self { mapping, canonical_to_external }
     }
 
@@ -255,7 +295,7 @@ mod tests {
             "model.norm.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.embed_tokens.weight"), Some("embed"));
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.weight"), Some("L0.q_proj"));
@@ -282,7 +322,7 @@ mod tests {
             "output_norm.weight".into(),
             "output.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("token_embd.weight"), Some("embed"));
         assert_eq!(map.to_canonical("blk.0.attn_q.weight"), Some("L0.q_proj"));
@@ -303,7 +343,7 @@ mod tests {
             "model.layers.3.experts.7.down_proj.weight".into(),
             "model.layers.3.mlp.gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.3.experts.0.gate_proj.weight"), Some("L3.expert.0.gate_proj"));
         assert_eq!(map.to_canonical("model.layers.3.experts.0.up_proj.weight"), Some("L3.expert.0.up_proj"));
@@ -325,7 +365,7 @@ mod tests {
             "blk.3.ffn_gate_ex7.weight".into(),
             "blk.3.ffn_gate_inp.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.3.ffn_gate_ex0.weight"), Some("L3.expert.0.gate_proj"));
         assert_eq!(map.to_canonical("blk.3.ffn_up_ex0.weight"), Some("L3.expert.0.up_proj"));
@@ -340,7 +380,7 @@ mod tests {
             "model.layers.0.self_attn.q_proj.weight".into(),
             "model.layers.0.self_attn.q_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.weight"), Some("L0.q_proj"));
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.bias"), Some("L0.q_proj.bias"));
@@ -353,7 +393,7 @@ mod tests {
             "model.layers.3.mlp.shared_experts.up_proj.weight".into(),
             "model.layers.3.mlp.shared_experts.down_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.3.mlp.shared_experts.gate_proj.weight"), Some("L3.shared_expert.gate_proj"));
         assert_eq!(map.to_canonical("model.layers.3.mlp.shared_experts.up_proj.weight"), Some("L3.shared_expert.up_proj"));
@@ -371,7 +411,7 @@ mod tests {
             "model.mtp_head.1.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // DeepSeek V3 global MTP weights: model.mtp_head.{k}.weight → mtp_proj.{k}
         assert_eq!(map.to_canonical("model.mtp_head.0.weight"), Some("mtp_proj.0"));
@@ -389,7 +429,7 @@ mod tests {
             "model.mtp.0.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // Qwen3 global MTP: model.mtp.{k}.weight → mtp_proj.{k}
         assert_eq!(map.to_canonical("model.mtp.0.weight"), Some("mtp_proj.0"));
@@ -404,7 +444,7 @@ mod tests {
             "model.layers.5.mtp_proj.1.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // Per-layer variant: model.layers.{N}.mtp_proj.{k}.weight → L{N}.mtp_proj.{k}
         assert_eq!(map.to_canonical("model.layers.5.mtp_proj.0.weight"), Some("L5.mtp_proj.0"));
@@ -430,7 +470,7 @@ mod tests {
     #[test]
     fn to_canonical_returns_none_for_unknown() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("nonexistent.weight"), None);
         assert_eq!(map.to_canonical(""), None);
     }
@@ -438,7 +478,7 @@ mod tests {
     #[test]
     fn to_external_returns_none_for_unknown() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_external("nonexistent"), None);
         assert_eq!(map.to_external(""), None);
     }
@@ -446,7 +486,7 @@ mod tests {
     #[test]
     fn resolve_external_to_string_falls_back() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         // Known canonical → returns external name
         assert_eq!(map.resolve_external_to_string("embed"), "model.embed_tokens.weight");
         // Unknown canonical → returns the canonical name itself
@@ -460,7 +500,7 @@ mod tests {
             "model.norm.weight".into(),
             // No lm_head.weight — should tie to embed
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_external("lm_head"), Some("model.embed_tokens.weight"));
     }
 
@@ -470,7 +510,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         // lm_head exists separately, no tie
         assert_eq!(map.to_external("lm_head"), Some("lm_head.weight"));
         assert_eq!(map.to_external("embed"), Some("model.embed_tokens.weight"));
@@ -482,7 +522,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         let canonicals = map.all_canonical_for("model.embed_tokens.weight");
         assert!(canonicals.contains(&"embed"));
         assert_eq!(canonicals.len(), 1);
@@ -494,7 +534,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         let canonicals = map.all_canonical_for("model.embed_tokens.weight");
         // embed + lm_head (tied)
         assert!(canonicals.contains(&"embed"));
@@ -505,7 +545,7 @@ mod tests {
     #[test]
     fn all_canonical_for_unknown_returns_empty() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         let canonicals = map.all_canonical_for("nonexistent");
         assert!(canonicals.is_empty());
     }
@@ -516,7 +556,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.layers.0.self_attn.q_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         let pairs: Vec<_> = map.iter().collect();
         assert!(pairs.len() >= 2);
         assert!(pairs.iter().any(|(ext, canon)| *ext == "model.embed_tokens.weight" && *canon == "embed"));
@@ -525,7 +565,7 @@ mod tests {
 
     #[test]
     fn empty_names_produces_empty_map() {
-        let map = TensorNameMap::build_from_names(&[], false);
+        let map = TensorNameMap::build_from_names(&[], None);
         assert_eq!(map.to_canonical("anything"), None);
         assert_eq!(map.to_external("anything"), None);
         let pairs: Vec<_> = map.iter().collect();
@@ -551,7 +591,7 @@ mod tests {
             "blk.0.ffn_up_ex0.weight".into(),
             "blk.0.ffn_down_ex0.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("blk.0.ffn_gate_ex0.weight"), Some("L0.expert.0.gate_proj"));
         assert_eq!(map.to_canonical("blk.0.ffn_up_ex0.weight"), Some("L0.expert.0.up_proj"));
         assert_eq!(map.to_canonical("blk.0.ffn_down_ex0.weight"), Some("L0.expert.0.down_proj"));
@@ -563,7 +603,7 @@ mod tests {
             "model.layers.0.self_attn.q_proj.bias".into(),
             // No matching .weight → bias should not be mapped
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.bias"), None);
     }
 
@@ -574,7 +614,7 @@ mod tests {
             "model.layers.1.self_attn.q_proj.weight".into(),
             "model.layers.15.self_attn.q_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.weight"), Some("L0.q_proj"));
         assert_eq!(map.to_canonical("model.layers.1.self_attn.q_proj.weight"), Some("L1.q_proj"));
         assert_eq!(map.to_canonical("model.layers.15.self_attn.q_proj.weight"), Some("L15.q_proj"));
@@ -586,7 +626,7 @@ mod tests {
             "token_embd.weight".into(),
             "output_norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("output_norm.weight"), Some("final_norm"));
         assert_eq!(map.to_external("final_norm"), Some("output_norm.weight"));
     }
@@ -604,7 +644,7 @@ mod tests {
             "encoder.layer.0.attention.output.layernorm.weight".into(),
             "encoder.layer.0.output.layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("encoder.layer.0.attention.self.query.weight"), Some("L0.q_proj"));
         assert_eq!(map.to_canonical("encoder.layer.0.attention.self.key.weight"), Some("L0.k_proj"));
@@ -624,7 +664,7 @@ mod tests {
             "model.layers.0.self_attn.wo.weight".into(),
             "model.layers.0.ffn_gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.wq.weight"), Some("L0.q_proj"));
         assert_eq!(map.to_canonical("model.layers.0.self_attn.wk.weight"), Some("L0.k_proj"));
@@ -640,7 +680,7 @@ mod tests {
             "model.layers.0.self_attn.q_norm.weight".into(),
             "model.layers.0.self_attn.k_norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_norm.weight"), Some("L0.q_norm"));
         assert_eq!(map.to_canonical("model.layers.0.self_attn.k_norm.weight"), Some("L0.k_norm"));
@@ -656,7 +696,7 @@ mod tests {
             "classifier.dense.weight".into(),
             "classifier.out_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("classifier.dense.weight"), Some("classifier.dense"));
         assert_eq!(map.to_canonical("classifier.out_proj.weight"), Some("classifier"));
@@ -669,7 +709,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "score.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("score.weight"), Some("classifier"));
         assert_eq!(map.to_external("classifier"), Some("score.weight"));
@@ -683,7 +723,7 @@ mod tests {
             "blk.0.ffn_up.weight".into(),
             "blk.0.ffn_down.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.0.ffn_gate.weight"), Some("L0.gate_proj"));
         assert_eq!(map.to_canonical("blk.0.ffn_up.weight"), Some("L0.up_proj"));
@@ -697,7 +737,7 @@ mod tests {
             "blk.0.attn_norm.weight".into(),
             "blk.0.ffn_norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.0.attn_norm.weight"), Some("L0.input_norm"));
         assert_eq!(map.to_canonical("blk.0.ffn_norm.weight"), Some("L0.post_attn_norm"));
@@ -710,7 +750,7 @@ mod tests {
             "encoder.layer.0.layer_norm1.weight".into(),
             "encoder.layer.0.layer_norm2.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("encoder.layer.0.layer_norm1.weight"), Some("L0.input_norm"));
         assert_eq!(map.to_canonical("encoder.layer.0.layer_norm2.weight"), Some("L0.post_attn_norm"));
@@ -723,7 +763,7 @@ mod tests {
             "model.layers.0.self_attn.qkv_proj.weight".into(),
             "model.layers.0.self_attn.o_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.qkv_proj.weight"), Some("L0.qkv_proj"));
         assert_eq!(map.to_external("L0.qkv_proj"), Some("model.layers.0.self_attn.qkv_proj.weight"));
@@ -737,7 +777,7 @@ mod tests {
             "model.position_embedding.weight".into(),
             "model.rope.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.position_embedding.weight"), Some("position_embed"));
         assert_eq!(map.to_canonical("model.rope.weight"), Some("rope"));
@@ -752,7 +792,7 @@ mod tests {
             "model.layers.2.experts.1.gate_proj.weight".into(),
             "model.layers.2.mlp.gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // Shared expert has its own canonical name
         assert_eq!(map.to_canonical("model.layers.2.mlp.shared_experts.gate_proj.weight"), Some("L2.shared_expert.gate_proj"));
@@ -771,7 +811,7 @@ mod tests {
             "model.layers.1.experts.0.up_proj.weight".into(),
             "model.layers.1.experts.0.down_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.1.experts.0.gate.weight"), Some("L1.expert.0.gate_proj"));
         assert_eq!(map.to_canonical("model.layers.1.experts.0.up_proj.weight"), Some("L1.expert.0.up_proj"));
@@ -784,7 +824,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.4.experts.2.gate_up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.4.experts.2.gate_up_proj.weight"), Some("L4.expert.2.gate_proj"));
     }
@@ -800,7 +840,7 @@ mod tests {
             "model.layers.0.self_attn.v_b_proj.weight".into(),
             "model.layers.0.self_attn.k_pe_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_a_proj.weight"), Some("L0.q_a_proj"));
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_b_proj.weight"), Some("L0.q_b_proj"));
@@ -817,7 +857,7 @@ mod tests {
             "model.mtp_head.0.weight".into(),
             "model.mtp_head.0.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.mtp_head.0.weight"), Some("mtp_proj.0"));
         // Bias should be derived: .weight→canonical, .bias→canonical.bias
@@ -831,7 +871,7 @@ mod tests {
             "model.layers.59.experts.63.down_proj.weight".into(),
             "blk.59.ffn_down_ex63.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.59.experts.63.down_proj.weight"), Some("L59.expert.63.down_proj"));
         assert_eq!(map.to_canonical("blk.59.ffn_down_ex63.weight"), Some("L59.expert.63.down_proj"));
@@ -845,7 +885,7 @@ mod tests {
             "output_norm.weight".into(),
             // No output.weight → embed ties to lm_head
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("embed"), Some("token_embd.weight"));
         assert_eq!(map.to_external("lm_head"), Some("token_embd.weight"));
@@ -863,7 +903,7 @@ mod tests {
             "blk.2.ffn_down_ex4.weight".into(),
             "blk.2.ffn_gate_inp.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // Expert 3
         assert_eq!(map.to_canonical("blk.2.ffn_gate_ex3.weight"), Some("L2.expert.3.gate_proj"));
@@ -885,7 +925,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.word_embeddings.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // Both should map to "embed" canonically
         assert_eq!(map.to_canonical("model.embed_tokens.weight"), Some("embed"));
@@ -976,7 +1016,7 @@ mod tests {
     #[test]
     fn build_from_names_single_tensor() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.embed_tokens.weight"), Some("embed"));
         assert_eq!(map.to_external("embed"), Some("model.embed_tokens.weight"));
@@ -993,7 +1033,7 @@ mod tests {
             "model.norm.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let pairs: std::collections::HashMap<&str, &str> =
             map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -1019,7 +1059,7 @@ mod tests {
             "output_norm.weight".into(),
             "output.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.0.attn_v.weight"), Some("L0.v_proj"));
         assert_eq!(map.to_canonical("blk.0.attn_output.weight"), Some("L0.o_proj"));
@@ -1034,7 +1074,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.resolve_external_to_string("embed"), "model.embed_tokens.weight");
         assert_eq!(map.resolve_external_to_string("lm_head"), "lm_head.weight");
@@ -1043,7 +1083,7 @@ mod tests {
     #[test]
     fn resolve_external_to_string_unknown_returns_input() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.resolve_external_to_string("does_not_exist"), "does_not_exist");
     }
@@ -1051,7 +1091,7 @@ mod tests {
     #[test]
     fn resolve_external_to_string_empty_input() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.resolve_external_to_string(""), "");
     }
@@ -1060,14 +1100,14 @@ mod tests {
 
     #[test]
     fn to_canonical_empty_map() {
-        let map = TensorNameMap::build_from_names(&[], false);
+        let map = TensorNameMap::build_from_names(&[], None);
         assert_eq!(map.to_canonical(""), None);
         assert_eq!(map.to_canonical("anything"), None);
     }
 
     #[test]
     fn to_external_empty_map() {
-        let map = TensorNameMap::build_from_names(&[], false);
+        let map = TensorNameMap::build_from_names(&[], None);
         assert_eq!(map.to_external(""), None);
         assert_eq!(map.to_external("embed"), None);
     }
@@ -1075,7 +1115,7 @@ mod tests {
     #[test]
     fn to_canonical_input_not_in_mapping() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         // A name that exists but was not recognized by match_tensor_role
         assert_eq!(map.to_canonical("model.unknown_tensor.weight"), None);
     }
@@ -1084,7 +1124,7 @@ mod tests {
 
     #[test]
     fn all_canonical_for_empty_map() {
-        let map = TensorNameMap::build_from_names(&[], false);
+        let map = TensorNameMap::build_from_names(&[], None);
         let result = map.all_canonical_for("anything");
         assert!(result.is_empty());
     }
@@ -1092,7 +1132,7 @@ mod tests {
     #[test]
     fn all_canonical_for_empty_name() {
         let names: Vec<String> = vec!["model.embed_tokens.weight".into()];
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         let result = map.all_canonical_for("");
         assert!(result.is_empty());
     }
@@ -1103,7 +1143,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // embed maps only to "embed", not to "lm_head" since lm_head has its own tensor
         let canonicals = map.all_canonical_for("model.embed_tokens.weight");
@@ -1121,7 +1161,7 @@ mod tests {
             "model.layers.0.self_attn.k_proj.weight".into(),
             "model.layers.0.self_attn.k_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.bias"), Some("L0.q_proj.bias"));
         assert_eq!(map.to_canonical("model.layers.0.self_attn.k_proj.bias"), Some("L0.k_proj.bias"));
@@ -1135,7 +1175,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.gate_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("model.layers.0.mlp.gate_proj.bias"), None);
     }
 
@@ -1147,7 +1187,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // lm_head canonical → embed's external name
         assert_eq!(map.to_external("lm_head"), Some("model.embed_tokens.weight"));
@@ -1160,7 +1200,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.embed_tokens.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("model.embed_tokens.weight");
         assert!(canonicals.contains(&"embed"));
@@ -1174,7 +1214,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // embed and lm_head point to different external names
         assert_eq!(map.to_external("embed"), Some("model.embed_tokens.weight"));
@@ -1188,7 +1228,7 @@ mod tests {
         let names: Vec<String> = vec![
             "blk.0.ffn_gate_ex0.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.0.ffn_gate_ex0.weight"), Some("L0.expert.0.gate_proj"));
     }
@@ -1205,7 +1245,7 @@ mod tests {
             "model.layers.0.experts.0.w3.weight".into(),
             "model.layers.0.experts.0.w2.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // w1 → FfnGate → gate_proj, w3 → FfnUp → up_proj, w2 → FfnDown → down_proj
         assert_eq!(map.to_canonical("model.layers.0.experts.0.w1.weight"), Some("L0.gate_proj"));
@@ -1225,7 +1265,7 @@ mod tests {
             "model.layers.1.mlp.shared_experts.down_proj.weight".into(),
             "model.layers.1.mlp.shared_experts.gate_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.1.mlp.shared_experts.up_proj.weight"), Some("L1.shared_expert.up_proj"));
         assert_eq!(map.to_canonical("model.layers.1.mlp.shared_experts.down_proj.weight"), Some("L1.shared_expert.down_proj"));
@@ -1239,7 +1279,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.1.mlp.shared_experts.gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // No suffix pattern matches "mlp.shared_experts.gate" → None
         assert_eq!(map.to_canonical("model.layers.1.mlp.shared_experts.gate.weight"), None);
@@ -1253,7 +1293,7 @@ mod tests {
             "model.layers.127.self_attn.q_proj.weight".into(),
             "blk.255.attn_q.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.127.self_attn.q_proj.weight"), Some("L127.q_proj"));
         assert_eq!(map.to_canonical("blk.255.attn_q.weight"), Some("L255.q_proj"));
@@ -1263,7 +1303,7 @@ mod tests {
 
     #[test]
     fn iter_empty_map() {
-        let map = TensorNameMap::build_from_names(&[], false);
+        let map = TensorNameMap::build_from_names(&[], None);
         let count = map.iter().count();
         assert_eq!(count, 0);
     }
@@ -1276,7 +1316,7 @@ mod tests {
             "model.layers.0.mlp.gate_proj.weight".into(),
             "model.norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let iter_count = map.iter().count();
         // embed, L0.q_proj, L0.gate_proj, final_norm = 4 entries
@@ -1291,7 +1331,7 @@ mod tests {
         let names: Vec<String> = vec![
             "blk.abc.ffn_gate_ex0.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("blk.abc.ffn_gate_ex0.weight"), None);
     }
 
@@ -1302,7 +1342,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.experts.0.unknown_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
         assert_eq!(map.to_canonical("model.layers.0.experts.0.unknown_proj.weight"), None);
     }
 
@@ -1314,7 +1354,7 @@ mod tests {
             "blk.1.ffn_down_ex2.weight".into(),
             "blk.1.ffn_up_ex2.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.1.ffn_down_ex2.weight"), Some("L1.expert.2.down_proj"));
         assert_eq!(map.to_canonical("blk.1.ffn_up_ex2.weight"), Some("L1.expert.2.up_proj"));
@@ -1342,7 +1382,7 @@ mod tests {
             "model.norm.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // MLA
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_a_proj.weight"), Some("L0.q_a_proj"));
@@ -1379,7 +1419,7 @@ mod tests {
             "model.layers.3.mtp_proj.0.weight".into(),
             "model.layers.3.mtp_proj.0.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.3.mtp_proj.0.weight"), Some("L3.mtp_proj.0"));
         assert_eq!(map.to_canonical("model.layers.3.mtp_proj.0.bias"), Some("L3.mtp_proj.0.bias"));
@@ -1394,7 +1434,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.mtp.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // mtp is recognized as MtpProjection at global level
         assert!(map.to_canonical("model.mtp.weight").is_some());
@@ -1409,7 +1449,7 @@ mod tests {
             "blk.1.attn_q.weight".into(),
             "blk.2.attn_q.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.0.attn_q.weight"), Some("L0.q_proj"));
         assert_eq!(map.to_canonical("blk.1.attn_q.weight"), Some("L1.q_proj"));
@@ -1429,7 +1469,7 @@ mod tests {
             "encoder.layer.0.output.dense.weight".into(),
             "encoder.layer.0.output.layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("encoder.layer.0.attention.self.query.weight"), Some("L0.q_proj"));
         // BERT output.dense maps based on match_tensor_role classification
@@ -1446,7 +1486,7 @@ mod tests {
             "some.random.tensor.weight".into(),
             "another.weird.name.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("some.random.tensor.weight"), None);
         assert_eq!(map.to_canonical("another.weird.name.weight"), None);
@@ -1461,7 +1501,7 @@ mod tests {
             "output_norm.weight".into(),
             // No output.weight → embed ties to lm_head
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("embed"), Some("token_embd.weight"));
         assert_eq!(map.to_external("final_norm"), Some("output_norm.weight"));
@@ -1475,7 +1515,7 @@ mod tests {
         let names: Vec<String> = vec![
             "token_embd.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("token_embd.weight");
         assert!(canonicals.contains(&"embed"));
@@ -1496,7 +1536,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, true);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("lm_head"), Some("model.embed_tokens.weight"));
         assert_eq!(map.to_external("embed"), Some("model.embed_tokens.weight"));
@@ -1509,7 +1549,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, true);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("lm_head"), Some("lm_head.weight"));
         assert_eq!(map.to_external("embed"), Some("model.embed_tokens.weight"));
@@ -1521,7 +1561,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("lm_head"), None);
         assert_eq!(map.to_external("embed"), None);
@@ -1534,7 +1574,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.embed_tokens.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.embed_tokens.weight"), Some("embed"));
         assert_eq!(map.iter().count(), 1);
@@ -1547,7 +1587,7 @@ mod tests {
         for i in 0..5 {
             names.push(format!("model.layers.{i}.self_attn.q_proj.weight"));
         }
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.iter().count(), 6); // 1 embed + 5 q_proj
     }
@@ -1560,7 +1600,7 @@ mod tests {
             "model.layers.0.self_attn.q_proj.weight".into(),
             "model.output_layer.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.output_layer.weight"), Some("lm_head"));
     }
@@ -1570,7 +1610,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.final_layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.final_layernorm.weight"), Some("final_norm"));
     }
@@ -1580,7 +1620,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.post_layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.post_layernorm.weight"), Some("final_norm"));
     }
@@ -1590,7 +1630,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.word_embeddings.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.word_embeddings.weight"), Some("embed"));
     }
@@ -1600,7 +1640,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.post_attention_layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.post_attention_layernorm.weight"),
@@ -1613,7 +1653,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.pre_feedforward_layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.pre_feedforward_layernorm.weight"),
@@ -1626,7 +1666,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.post_feedforward_layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.post_feedforward_layernorm.weight"),
@@ -1640,7 +1680,7 @@ mod tests {
             "model.layers.0.ln_1.weight".into(),
             "model.layers.0.ln_2.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.ln_1.weight"), Some("L0.input_norm"));
         assert_eq!(map.to_canonical("model.layers.0.ln_2.weight"), Some("L0.post_attn_norm"));
@@ -1653,7 +1693,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.embed_tokens.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("L0.q_proj"), None);
         assert_eq!(map.to_external("nonexistent"), None);
@@ -1664,7 +1704,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_external("L0.moe_gate"), Some("model.layers.0.mlp.gate.weight"));
     }
@@ -1674,7 +1714,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.router.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.mlp.router.weight"), Some("L0.moe_gate"));
         assert_eq!(map.to_external("L0.moe_gate"), Some("model.layers.0.mlp.router.weight"));
@@ -1685,7 +1725,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.conv_module.depthwise_conv.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.conv_module.depthwise_conv.weight"),
@@ -1702,7 +1742,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.self_attn.sinks.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.self_attn.sinks.weight"),
@@ -1717,7 +1757,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.self_attn.q_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.resolve_external_to_string("L0.q_proj"),
@@ -1730,7 +1770,7 @@ mod tests {
         let names: Vec<String> = vec![
             "token_embd.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.resolve_external_to_string("lm_head"), "token_embd.weight");
         assert_eq!(map.resolve_external_to_string("embed"), "token_embd.weight");
@@ -1741,7 +1781,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.experts.5.gate_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.resolve_external_to_string("L0.expert.5.gate_proj"),
@@ -1754,7 +1794,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.embed_tokens.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let result: String = map.resolve_external_to_string("nonexistent_canonical");
         assert_eq!(result, "nonexistent_canonical");
@@ -1768,7 +1808,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "lm_head.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("lm_head.weight");
         assert!(canonicals.contains(&"lm_head"));
@@ -1780,7 +1820,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.1.experts.3.up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("model.layers.1.experts.3.up_proj.weight");
         assert!(canonicals.contains(&"L1.expert.3.up_proj"));
@@ -1792,7 +1832,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.shared_experts.up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("model.layers.0.mlp.shared_experts.up_proj.weight");
         assert!(canonicals.contains(&"L0.shared_expert.up_proj"));
@@ -1805,7 +1845,7 @@ mod tests {
             "model.layers.0.self_attn.q_proj.weight".into(),
             "model.layers.0.self_attn.q_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("model.layers.0.self_attn.q_proj.bias");
         assert!(canonicals.contains(&"L0.q_proj.bias"));
@@ -1819,7 +1859,7 @@ mod tests {
             "model.layers.0.self_attn.q_proj.weight".into(),
             "model.layers.0.self_attn.q_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let pairs: std::collections::HashMap<&str, &str> =
             map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -1832,7 +1872,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.embed_tokens.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // mapping should have embed entry; tied lm_head adds via canonical_to_external
         // but does NOT create a new mapping entry for embed_ext→lm_head if embed already exists.
@@ -1846,7 +1886,7 @@ mod tests {
             "model.layers.0.experts.0.gate_proj.weight".into(),
             "model.layers.0.experts.1.up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let pairs: Vec<_> = map.iter().collect();
         assert!(pairs.iter().any(|(ext, canon)| {
@@ -1866,7 +1906,7 @@ mod tests {
             "model.blocks.3.experts.0.gate_proj.weight".into(),
             "model.h.5.experts.2.up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.blocks.3.experts.0.gate_proj.weight"),
@@ -1884,7 +1924,7 @@ mod tests {
         let names: Vec<String> = vec![
             "blk.notanumber.ffn_gate_ex0.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.notanumber.ffn_gate_ex0.weight"), None);
     }
@@ -1895,7 +1935,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.experts.0.w3.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // w3 is matched by Pass 1 as FfnUp (via match_tensor_role), not Pass 1.5
         // because w3 is in SUFFIX_PATTERNS
@@ -1909,7 +1949,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.2.experts.0.gate_up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.2.experts.0.gate_up_proj.weight"),
@@ -1922,7 +1962,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.experts.0.down_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.experts.0.down_proj.weight"),
@@ -1939,7 +1979,7 @@ mod tests {
             "encoder.layer.0.intermediate.dense.weight".into(),
             "encoder.layer.0.output.dense.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("encoder.layer.0.intermediate.dense.weight"),
@@ -1957,7 +1997,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.gate_up_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // gate_up_proj matches FfnGate in SUFFIX_PATTERNS
         let canonical = map.to_canonical("model.layers.0.mlp.gate_up_proj.weight");
@@ -1970,7 +2010,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.self_attention.query_key_value.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("model.layers.0.self_attention.query_key_value.weight");
         assert!(canonical.is_some());
@@ -1983,7 +2023,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.self_attn.out_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.self_attn.out_proj.weight"),
@@ -2003,7 +2043,7 @@ mod tests {
             "blk.0.attn_q_norm.weight".into(),
             "blk.0.attn_k_norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.0.attn_q_norm.weight"), Some("L0.q_norm"));
         assert_eq!(map.to_canonical("blk.0.attn_k_norm.weight"), Some("L0.k_norm"));
@@ -2016,7 +2056,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.patch_embed.proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.patch_embed.proj.weight"), Some("patch_embed"));
     }
@@ -2026,7 +2066,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.vision_tower.patch_embed.proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.vision_tower.patch_embed.proj.weight"),
@@ -2041,7 +2081,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.embeddings.position_embedding.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.embeddings.position_embedding.weight"),
@@ -2086,7 +2126,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.shared_experts.gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // "shared_experts.gate" is NOT in SUFFIX_PATTERNS → None
         assert_eq!(map.to_canonical("model.layers.0.mlp.shared_experts.gate.weight"), None);
@@ -2104,8 +2144,8 @@ mod tests {
             "blk.0.attn_q.weight".into(),
         ].into_iter().collect();
 
-        let st_map = TensorNameMap::build_from_names(&st_names, false);
-        let gguf_map = TensorNameMap::build_from_names(&gguf_names, false);
+        let st_map = TensorNameMap::build_from_names(&st_names, None);
+        let gguf_map = TensorNameMap::build_from_names(&gguf_names, None);
 
         assert_eq!(st_map.to_canonical("model.layers.0.self_attn.q_proj.weight"), Some("L0.q_proj"));
         assert_eq!(gguf_map.to_canonical("blk.0.attn_q.weight"), Some("L0.q_proj"));
@@ -2125,7 +2165,7 @@ mod tests {
             "model.layers.0.experts.0.gate_proj.weight".into(),
             "model.layers.0.experts.0.gate_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.experts.0.gate_proj.bias"),
@@ -2139,7 +2179,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.self_attn.q_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // No matching .weight → bias not auto-mapped
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.bias"), None);
@@ -2152,7 +2192,7 @@ mod tests {
             "model.layers.0.input_layernorm.weight".into(),
             "model.layers.0.input_layernorm.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // input_layernorm.weight maps to L0.input_norm
         // Bias is derived: L0.input_norm.bias
@@ -2167,7 +2207,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.rope.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.rope.weight"), Some("rope"));
         assert_eq!(map.to_external("rope"), Some("model.rope.weight"));
@@ -2183,7 +2223,7 @@ mod tests {
             "blk.0.attn_q.weight".into(),
             "model.layers.1.self_attn.q_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.embed_tokens.weight"), Some("embed"));
         assert_eq!(map.to_canonical("blk.0.attn_q.weight"), Some("L0.q_proj"));
@@ -2200,7 +2240,7 @@ mod tests {
             "model.layers.1.self_attn.q_proj.weight".into(),
             "model.layers.1.self_attn.q_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.self_attn.q_proj.bias"), Some("L0.q_proj.bias"));
         assert_eq!(map.to_canonical("model.layers.1.self_attn.q_proj.bias"), Some("L1.q_proj.bias"));
@@ -2217,7 +2257,7 @@ mod tests {
         let names: Vec<String> = vec![
             "blk.4.ffn_up_ex15.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("blk.4.ffn_up_ex15.weight"), Some("L4.expert.15.up_proj"));
     }
@@ -2229,7 +2269,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.7.self_attn.q_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("model.layers.7.self_attn.q_proj.weight").unwrap();
         let external = map.to_external(canonical).unwrap();
@@ -2241,7 +2281,7 @@ mod tests {
         let names: Vec<String> = vec![
             "blk.2.ffn_gate.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("blk.2.ffn_gate.weight").unwrap();
         let external = map.to_external(canonical).unwrap();
@@ -2253,7 +2293,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.3.experts.2.down_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("model.layers.3.experts.2.down_proj.weight").unwrap();
         assert_eq!(canonical, "L3.expert.2.down_proj");
@@ -2267,7 +2307,7 @@ mod tests {
             "model.layers.0.mlp.gate_proj.weight".into(),
             "model.layers.0.mlp.gate_proj.bias".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("model.layers.0.mlp.gate_proj.bias").unwrap();
         assert_eq!(canonical, "L0.gate_proj.bias");
@@ -2283,7 +2323,7 @@ mod tests {
             "model.embed_tokens.weight".into(),
             "model.layers.0.input_layernorm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // For each canonical, resolve_external_to_string should match to_external
         for (canonical, _) in map.canonical_to_external.iter().take(5) {
@@ -2302,7 +2342,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.shared_experts.up.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.mlp.shared_experts.up.weight"),
@@ -2316,7 +2356,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.mlp.shared_experts.down.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("model.layers.0.mlp.shared_experts.down.weight"),
@@ -2328,7 +2368,7 @@ mod tests {
 
     #[test]
     fn resolve_external_to_string_empty_map_returns_input() {
-        let map = TensorNameMap::build_from_names(&[], false);
+        let map = TensorNameMap::build_from_names(&[], None);
 
         assert_eq!(map.resolve_external_to_string("anything"), "anything");
         assert_eq!(map.resolve_external_to_string(""), "");
@@ -2342,7 +2382,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.experts.5.gate_proj".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // Too few segments → not matched by Pass 1.5
         assert_eq!(map.to_canonical("model.layers.0.experts.5.gate_proj"), None);
@@ -2356,7 +2396,7 @@ mod tests {
         let names: Vec<String> = vec![
             "ffn_gate_ex0.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("ffn_gate_ex0.weight"), None);
     }
@@ -2365,7 +2405,7 @@ mod tests {
 
     #[test]
     fn build_from_names_tie_word_embeddings_empty_names() {
-        let map = TensorNameMap::build_from_names(&[], true);
+        let map = TensorNameMap::build_from_names(&[], None);
 
         assert_eq!(map.to_canonical("anything"), None);
         assert_eq!(map.to_external("embed"), None);
@@ -2380,7 +2420,7 @@ mod tests {
             "token_embd.weight".into(),
             "output_norm.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonicals = map.all_canonical_for("token_embd.weight");
         assert!(canonicals.contains(&"embed"));
@@ -2395,7 +2435,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.2.mlp.shared_experts.gate_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("model.layers.2.mlp.shared_experts.gate_proj.weight").unwrap();
         assert_eq!(canonical, "L2.shared_expert.gate_proj");
@@ -2411,7 +2451,7 @@ mod tests {
             "model.mtp_head.0.weight".into(),
             "model.embed_tokens.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         let canonical = map.to_canonical("model.mtp_head.0.weight").unwrap();
         assert_eq!(canonical, "mtp_proj.0");
@@ -2427,7 +2467,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.foo.0.experts.0.gate_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         // "foo" is not a valid layer prefix → l_idx remains None → skip
         assert_eq!(map.to_canonical("model.foo.0.experts.0.gate_proj.weight"), None);
@@ -2443,8 +2483,8 @@ mod tests {
         let names_gate_proj: Vec<String> = vec![
             "model.layers.0.mlp.gate_proj.weight".into(),
         ].into_iter().collect();
-        let map_gate = TensorNameMap::build_from_names(&names_gate, false);
-        let map_gate_proj = TensorNameMap::build_from_names(&names_gate_proj, false);
+        let map_gate = TensorNameMap::build_from_names(&names_gate, None);
+        let map_gate_proj = TensorNameMap::build_from_names(&names_gate_proj, None);
 
         assert_eq!(map_gate.to_canonical("model.layers.0.mlp.gate.weight"), Some("L0.moe_gate"));
         // gate_proj matches FfnGate, not MoEGate — they are different roles
@@ -2464,7 +2504,7 @@ mod tests {
         let names: Vec<String> = vec![
             "blk.1.ffn_down_ex3.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(
             map.to_canonical("blk.1.ffn_down_ex3.weight"),
@@ -2482,7 +2522,7 @@ mod tests {
         let names: Vec<String> = vec![
             "model.layers.0.experts.abc.gate_proj.weight".into(),
         ].into_iter().collect();
-        let map = TensorNameMap::build_from_names(&names, false);
+        let map = TensorNameMap::build_from_names(&names, None);
 
         assert_eq!(map.to_canonical("model.layers.0.experts.abc.gate_proj.weight"), None);
     }

@@ -2,6 +2,13 @@
 //!
 //! 实现 SPEC §12.4 "硬件感知型黄金装筒规则" 规定的 Latency Probe —
 //! 模型加载时通过真实 micro-benchmark 探测硬件物理拐点。
+// @trace REQ-FATOP-016 cargo check + cargo test --lib 全绿
+// @trace REQ-FATOP-017 51064 测试基线维持
+// @trace REQ-FATOP-021 5 处 lowering OpKind 反查消除（已完成，OpKind 已删除）
+// @trace REQ-FATOP-028 op → 唯一 IR 命名统一（已完成）
+// @trace REQ-FATOP-029 OpKind 删除后测试基线 — 0 failures
+// @trace REQ-FATOP-030 from_op_kind translator 物理删除 — 零 OpKind 反查
+// @trace REQ-FATOP-031 CompilerOp.kind 删除 — op 成为唯一 IR 字段（已完成）
 //!
 //! ## 核心原则
 //!

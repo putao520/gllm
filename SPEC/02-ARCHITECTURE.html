@@ -1,0 +1,4815 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="02-ARCHITECTURE">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"02-ARCHITECTURE", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>gllm 架构设计</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>02-ARCHITECTURE</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-gllm-架构设计" data-section="null">
+      <h2>gllm 架构设计</h2>
+    </section>
+    <section id="s-定位" data-section="null">
+      <h3>定位</h3>
+      <strong>gllm = 推理客户端库</strong>
+      <p>负责模型管理、配置、分词、权重加载，调用 gllm-kernels 后端执行计算。</p>
+    </section>
+    <section id="s-硬性约束-hard-constraints" data-section="null">
+      <h3>硬性约束 (Hard Constraints)</h3>
+    </section>
+    <section id="s1" data-section="1">
+      <h4>1. 静态编译 (NO_DYNAMIC_LOADING)</h4>
+      <li><strong>要求</strong>：gllm 自身的所有模块必须<strong>静态编译</strong>并链接到主程序。</li>
+      <li><strong>禁止</strong>：gllm 层使用 <code>dlopen</code>, <code>libloading</code> 或任何形式的运行时动态库加载。</li>
+      <li><strong>例外</strong>：gllm-kernels GPU 后端通过 <code>dlopen</code> 加载 GPU driver API（<code>libcuda.so</code> / <code>libamdhip64.so</code> / <code>Metal.framework</code>），这是 gllm-kernels 的内部实现细节，不违反本约束。gllm 不直接调用 <code>dlopen</code>。</li>
+      <li><strong>目的</strong>：确保 gllm 部署原子性。GPU driver 由操作系统/驱动安装提供，不属于应用依赖。</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h4>2. 真实性原则 (Ω1: TRUTH)</h4>
+      <li><strong>要求</strong>：所有架构/量化/精度信息必须从模型文件自身提供的 <strong>metadata</strong> 读取。</li>
+      <li><strong>禁止</strong>：</li>
+      <li>基于 <strong>Model ID</strong> 推断架构类型</li>
+      <li>基于 <strong>文件名</strong> 推测量化类型 (GGUF) 或精度 (ONNX)</li>
+      <li>使用 <code>contains()</code> 模糊匹配进行架构推测</li>
+      <li>使用硬编码默认值代替模型元数据（如 rope_theta 默认 10000.0，head_dim 默认 128）</li>
+      <li><strong>目的</strong>：避免错误的推测导致模型加载失败，确保系统行为可预测。</li>
+      <li><strong>关联需求</strong>: REQ-LOADER-014, REQ-LOADER-015, REQ-LOADER-019</li>
+      <strong>正确做法示例</strong>:
+      <p>```rust</p>
+      <p>// ✅ 正确: 从 GGUF 元数据读取</p>
+      <p>let arch = gguf_metadata.get("general.architecture");</p>
+      <p>// ✅ 正确: 从 ONNX tensor dtype 读取</p>
+      <p>let precision = tensor.data_type;</p>
+      <p>// ✅ 正确: 从 config.json 读取</p>
+      <p>let arch = config.get("model_type");</p>
+      <p>// ✅ 正确: 从实际权重张量形状推导 head_dim</p>
+      <p>let head_dim = loader.detect_head_dim_from_tensor()</p>
+      <p>    .ok_or_else(|| Error::MissingMetadata)?;</p>
+      <p>```</p>
+      <strong>错误做法示例</strong>:
+      <p>```rust</p>
+      <p>// ❌ 错误: 基于 Model ID 推断</p>
+      <p>if model_id.contains("llama") { return LlamaArchitecture; }</p>
+      <p>// ❌ 错误: 基于文件名推测量化类型</p>
+      <p>if filename.contains("Q4_0") { return Quantization::Q4_0; }</p>
+      <p>// ❌ 错误: 模糊匹配架构</p>
+      <p>if token.contains("mistral") { return MistralArchitecture; }</p>
+      <p>// ❌ 错误: 使用硬编码默认值</p>
+      <p>let rope_theta = config.get("rope_theta").unwrap_or(10000.0);</p>
+      <p>let head_dim = config.get("head_dim").unwrap_or(128);</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>3. 量化元数据格式 (ARCH-QUANT-METADATA)</h4>
+      <p>&gt; <strong>关联需求</strong>: REQ-LOADER-014, Ω1 真实性原则</p>
+      <p>&gt; <strong>实现位置</strong>: <code>src/loader/mod.rs::QuantizationMetadata</code></p>
+      <p>为了支持完全元数据驱动的量化加载，gllm 定义了 <code>gllm.quantization</code> 扩展字段格式，存储在 SafeTensors 文件的元数据中。</p>
+    </section>
+    <section id="s-元数据格式" data-section="null">
+      <h5>元数据格式</h5>
+      <p>```json</p>
+      <p>{</p>
+      <p>  "gllm.quantization": {</p>
+      <p>    "qweight": {</p>
+      <p>      "bits": 4,</p>
+      <p>      "signed": false,</p>
+      <p>      "block_size": 128,</p>
+      <p>      "companions": {</p>
+      <p>        "scales": "scales",</p>
+      <p>        "zeros": "qzeros"</p>
+      <p>      }</p>
+      <p>    },</p>
+      <p>    "qweight_2": {</p>
+      <p>      "bits": 8,</p>
+      <p>      "signed": true,</p>
+      <p>      "block_size": 256,</p>
+      <p>      "companions": {</p>
+      <p>        "scales": "scales_2"</p>
+      <p>      }</p>
+      <p>    }</p>
+      <p>  }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s-字段说明" data-section="null">
+      <h5>字段说明</h5>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>必填</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>bits</td>
+        </tr>
+        <tr>
+          <td>u8</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>权重物理精度 (如 4 或 8)</td>
+        </tr>
+        <tr>
+          <td>signed</td>
+        </tr>
+        <tr>
+          <td>bool</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>是否为有符号量化</td>
+        </tr>
+        <tr>
+          <td>block_size</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td>量化块大小（不可再使用默认值）</td>
+        </tr>
+        <tr>
+          <td>companions.scales</td>
+        </tr>
+        <tr>
+          <td>String</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>scales 张量名称模式</td>
+        </tr>
+        <tr>
+          <td>companions.zeros</td>
+        </tr>
+        <tr>
+          <td>String</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>zeros 张量名称模式</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-验证规则" data-section="null">
+      <h5>验证规则</h5>
+      <p>1. <strong>bits 必须为 4 或 8</strong></p>
+      <p>2. <strong>block_size 必须大于 0</strong></p>
+      <p>3. <strong>scales 张量必须存在</strong>（如果指定）</p>
+      <p>4. <strong>zeros 张量可选</strong>（某些量化格式不需要）</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h5>Ω1 合规性</h5>
+      <li><strong>禁止</strong>基于文件名推断 <code>bits</code>（如 <code>Q4_K_M</code> → 4 bits）</li>
+      <li><strong>禁止</strong>基于张量形状计算 <code>block_size</code></li>
+      <li><strong>禁止</strong>假设 <code>signed</code> 值</li>
+      <li><strong>必须</strong>从 <code>gllm.quantization</code> 读取所有量化参数</li>
+    </section>
+    <section id="s-缺失元数据处理" data-section="null">
+      <h5>缺失元数据处理</h5>
+      <p>如果模型文件缺少 <code>gllm.quantization</code> 元数据：</p>
+      <p>```rust</p>
+      <p>// ❌ 错误: 使用默认值推测</p>
+      <p>let block_size = metadata.block_size.unwrap_or(128);</p>
+      <p>// ✅ 正确: 返回明确错误</p>
+      <p>let metadata = loader.quantization_metadata()?</p>
+      <p>    .ok_or_else(|| LoaderError::MissingMetadata(</p>
+      <p>        "模型缺少量化元数据。请在 safetensors 文件中包含 gllm.quantization 字段"</p>
+      <p>    ))?;</p>
+      <p>```</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h5>已知 Ω1 违规问题</h5>
+      <strong>问题1: Phi4 QKV 分割硬编码</strong> (ARCH-QUANT-METADATA-001)
+      <li><strong>状态</strong>: 🟢 已修复 — <code>split_phi4_qkv</code> 函数已在架构重构中移除，Phi4 现在走 auto_graph tensor-name-driven 驱动，维度从 <code>ModelConfig</code> 动态读取</li>
+    </section>
+    <section id="s-三种推理任务" data-section="null">
+      <h4>三种推理任务</h4>
+      <table>
+        <tr>
+          <th>任务</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>模型示例</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Embedding</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>文本向量化</td>
+        </tr>
+        <tr>
+          <td>BGE-M3/M4, Qwen3-Embed, E5, Jina v4</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Rerank</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>文本重排序</td>
+        </tr>
+        <tr>
+          <td>BGE-Reranker-v3, Qwen3-Rerank</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Generator</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>文本生成</td>
+        </tr>
+        <tr>
+          <td>Qwen3, Llama 4, GLM-5, Mistral 3, Phi-4</td>
+        </tr>
+      </table>
+    </section>
+    <section id="artifact-pipeline" data-artifact-type="pipeline" data-section="null">
+      <h4>多模型推理管线 (ARCH-MULTI-MODEL-PIPELINE)</h4>
+      <p>Client 支持可选挂载最多三个模型，组成透明管线。用户调用 embed API，内部自动执行 rerank 和/或 LLM 生成。</p>
+    </section>
+    <section id="s-管线层级" data-section="null">
+      <h5>管线层级</h5>
+      <p>```</p>
+      <p>Level 1: Embed only (单模型)</p>
+      <p>  texts → [Embedder Encoder] → MeanPool → L2Norm → embeddings</p>
+      <p>Level 2: Embed + Rerank (双模型)</p>
+      <p>  texts → [Embedder Encoder] → MeanPool → L2Norm → embeddings</p>
+      <p>  query + texts → [Reranker] → scores → 按 score 重排 embeddings</p>
+      <p>Level 3: Embed + Rerank + LLM (三模型，完整 RAG)</p>
+      <p>  texts → [Embedder Encoder] → embeddings</p>
+      <p>  query + texts → [Reranker] → scores → top-n 筛选</p>
+      <p>  query + top-n docs → [Generator LLM] → answer</p>
+      <p>```</p>
+    </section>
+    <section id="s-模型挂载与共享" data-section="null">
+      <h5>模型挂载与共享</h5>
+      <strong>编码器共享 (REQ-PIPELINE-001)</strong>：当 embedder 和 reranker 共享相同 <code>ModelArchitecture</code>（如都是 XLM-R），编码器权重只加载一份。Reranker 只额外加载分类器 head 权重。不同架构时各自独立加载。
+      <strong>数据流零拷贝 (REQ-PIPELINE-002)</strong>：管线内部的 hidden_states/embeddings 在阶段间通过引用传递，不做内存拷贝。Reranker 直接消费 embedder encoder 的 hidden_states 输出。
+      <table>
+        <tr>
+          <th>挂载点</th>
+        </tr>
+        <tr>
+          <td>模型类型</td>
+        </tr>
+        <tr>
+          <td>必需</td>
+        </tr>
+        <tr>
+          <td>ArchFamily</td>
+        </tr>
+        <tr>
+          <td>共享条件</td>
+        </tr>
+        <tr>
+          <td>embedder</td>
+        </tr>
+        <tr>
+          <td>Embedding</td>
+        </tr>
+        <tr>
+          <td>是</td>
+        </tr>
+        <tr>
+          <td>Encoder/Decoder</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>reranker</td>
+        </tr>
+        <tr>
+          <td>Reranker</td>
+        </tr>
+        <tr>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>Encoder/Decoder</td>
+        </tr>
+        <tr>
+          <td>与 embedder 同架构时共享编码器权重</td>
+        </tr>
+        <tr>
+          <td>generator</td>
+        </tr>
+        <tr>
+          <td>Chat</td>
+        </tr>
+        <tr>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>Decoder</td>
+        </tr>
+        <tr>
+          <td>独立权重</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-archfamily-感知图融合-arch-family-aware-fusion" data-section="null">
+      <h5>ArchFamily 感知图融合 (ARCH-FAMILY-AWARE-FUSION)</h5>
+      <strong>REQ-PIPELINE-003</strong>: 图优化器必须感知 <code>ArchFamily</code>，在融合算子中正确设置注意力 mask 类型：
+      <strong>禁止</strong>: <code>FlashAttentionConfig.causal</code> 硬编码 <code>true</code>。必须从 <code>OptimizationContext.arch_family</code> 读取。
+      <strong>实现位置</strong>: <code>auto_graph</code> 构建时直接生成 <code>CompilerGraph</code>，Attention 节点由 <code>OpKind::MultiHeadAttention</code> 表达，JIT 管线 Phase 2 Fusion Engine 处理融合。
+      <table>
+        <tr>
+          <th>ArchFamily</th>
+        </tr>
+        <tr>
+          <td>FlashAttention.causal</td>
+        </tr>
+        <tr>
+          <td>注意力模式</td>
+        </tr>
+        <tr>
+          <td>位置编码</td>
+        </tr>
+        <tr>
+          <td>Encoder</td>
+        </tr>
+        <tr>
+          <td>false</td>
+          <td> (双向)</td>
+        </tr>
+        <tr>
+          <td>全注意力矩阵</td>
+        </tr>
+        <tr>
+          <td>绝对位置</td>
+        </tr>
+        <tr>
+          <td>Decoder</td>
+        </tr>
+        <tr>
+          <td>true</td>
+          <td> (因果)</td>
+        </tr>
+        <tr>
+          <td>下三角 mask</td>
+        </tr>
+        <tr>
+          <td>RoPE</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-多模态接入架构-arch-multimodal-req-arch-multimodal" data-section="null">
+      <h4>多模态接入架构 (ARCH-MULTIMODAL) — REQ-ARCH-MULTIMODAL</h4>
+      <p>多模态 generator (Gemma 4 31B/E4B 等) 的 image / audio 输入通过<strong>独立 encoder + token routing + decoder fusion</strong> 三阶段接入,不破坏纯文本路径。</p>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="null">
+      <h5>数据流</h5>
+      <p>```</p>
+      <p>[text prompt]           ────┐</p>
+      <p>[MediaInput::Image]  → SigLIP ViT encoder  → (virtual image tokens, embeddings)</p>
+      <p>[MediaInput::Audio]  → USM Conformer encoder → (virtual audio tokens, embeddings)</p>
+      <p>                            ↓</p>
+      <p>                    route_multimodal_tokens</p>
+      <p>                            ↓</p>
+      <p>             RoutedSequence { tokens, embeddings, span_map }</p>
+      <p>                            ↓</p>
+      <p>                    [Decoder-side fusion]          ← ARCH-MULTIMODAL-FUSION</p>
+      <p>                            ↓</p>
+      <p>                    Mega-Kernel CALL</p>
+      <p>                            ↓</p>
+      <p>                          answer</p>
+      <p>```</p>
+    </section>
+    <section id="s-三阶段接入契约" data-section="null">
+      <h5>三阶段接入契约</h5>
+      <table>
+        <tr>
+          <th>阶段</th>
+        </tr>
+        <tr>
+          <td>模块</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>输出</td>
+        </tr>
+        <tr>
+          <td>SPEC ID</td>
+        </tr>
+        <tr>
+          <td>1. Encoding</td>
+        </tr>
+        <tr>
+          <td>MultimodalEncoder</td>
+          <td> trait</td>
+        </tr>
+        <tr>
+          <td>EncoderMedia</td>
+          <td> (File/Base64/Raw/Url)</td>
+        </tr>
+        <tr>
+          <td>MultimodalEncoded { tokens, embeddings, kind }</td>
+        </tr>
+        <tr>
+          <td>REQ-API-MULTIMODAL-ENCODER</td>
+        </tr>
+        <tr>
+          <td>2. Routing</td>
+        </tr>
+        <tr>
+          <td>route_multimodal_tokens</td>
+          <td> (纯函数)</td>
+        </tr>
+        <tr>
+          <td>prompt_tokens + MultimodalContext + MultimodalTokenIds</td>
+        </tr>
+        <tr>
+          <td>RoutedSequence</td>
+          <td> (virtual tokens 扩展 + per-span embedding 引用)</td>
+        </tr>
+        <tr>
+          <td>REQ-ARCH-MULTIMODAL-ROUTING</td>
+        </tr>
+        <tr>
+          <td>3. Fusion</td>
+        </tr>
+        <tr>
+          <td>Decoder embedding lookup</td>
+        </tr>
+        <tr>
+          <td>RoutedSequence + 文本 embedding 表</td>
+        </tr>
+        <tr>
+          <td>拼接的 hidden_state 序列输入第一层 transformer</td>
+        </tr>
+        <tr>
+          <td>REQ-ARCH-MULTIMODAL-FUSION</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-routing-规则-req-arch-multimodal-routing" data-section="null">
+      <h5>Routing 规则 (REQ-ARCH-MULTIMODAL-ROUTING)</h5>
+      <li>Prompt 中遇到 <code>image_token_id</code> → 消费下一个 <code>MultimodalEncoded(kind=Image)</code> 并插入其 <code>tokens</code> 序列</li>
+      <li>遇到 <code>audio_token_id</code> → 同上消费 Audio</li>
+      <li>其他 → 保留原 token</li>
+      <li><code>MultimodalContext</code> 按 push 顺序 FIFO,缺媒体抛 <code>SlotUnderflow</code></li>
+      <li>多次 image/audio 交错:按 prompt 中特殊 token 出现顺序严格匹配</li>
+    </section>
+    <section id="s-fusion-契约-arch-multimodal-fusion" data-section="null">
+      <h5>Fusion 契约 (ARCH-MULTIMODAL-FUSION)</h5>
+      <li><strong>注入点</strong>: Mega-Kernel 内部 embedding lookup(Gather op 之后,第一个 transformer 层之前)</li>
+      <li><strong>实现方式</strong>: virtual token 对应位置直接用 encoder 的 <code>embeddings</code> 覆盖 embed_tokens 查表结果,不过 text embedding 表</li>
+      <li><strong>shape 契约</strong>: encoder 产出的 <code>embeddings</code> 必须为 <code>[num_tokens, hidden_size]</code> row-major,hidden_size 与 decoder 一致</li>
+      <li><strong>零拷贝要求</strong>: 当 encoder 和 decoder 在同一后端(CPU/GPU)时,embeddings buffer 直接注入 decoder 输入张量,不做中间拷贝</li>
+    </section>
+    <section id="artifact-state-machine" data-artifact-type="state-machine" data-section="null">
+      <h5>状态机约束 (REQ-ARCH-MULTIMODAL-NO-SILENT)</h5>
+      <li>用户传 <code>.image()</code> 但未 <code>set_multimodal_encoder</code> → <code>ClientError::InvalidModelType</code> (立即 Err,不 fallback 到 text-only)</li>
+      <li>模型不声明 <code>multimodal_token_ids</code> → <code>InvalidModelType</code> 拒绝</li>
+      <li>encoder 成功但 decoder-side fusion 未实现 → <code>RuntimeError("multimodal decoder fusion not yet implemented")</code> (NO_SILENT_FALLBACK;不允许 silent drop media input)</li>
+      <li>纯文本调用(无媒体)绕过整条多模态路径,与既有 text-only 语义 100% 相同(零回归)</li>
+    </section>
+    <section id="s-实现位置" data-section="null">
+      <h5>实现位置</h5>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>文件</td>
+        </tr>
+        <tr>
+          <td>Encoder trait + EncoderMedia + MultimodalEncoded + MultimodalContext + route_multimodal_tokens</td>
+        </tr>
+        <tr>
+          <td>src/compat/multimodal.rs</td>
+        </tr>
+        <tr>
+          <td>MultimodalTokenIds config 解析(image_token_id / boi_token_id / audio_token_id / boa_token_id + Gemma 4 fallback)</td>
+        </tr>
+        <tr>
+          <td>src/model_config.rs::from_value</td>
+        </tr>
+        <tr>
+          <td>Client.set_multimodal_encoder + execute_generation_multimodal 分派</td>
+        </tr>
+        <tr>
+          <td>src/client.rs</td>
+        </tr>
+        <tr>
+          <td>GenerationBuilder.image/.audio + MediaInput enum</td>
+        </tr>
+        <tr>
+          <td>src/generation.rs</td>
+        </tr>
+        <tr>
+          <td>Decoder-side fusion(已接入)</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel JIT 内部融合</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-公共-api" data-section="null">
+      <h4>公共 API</h4>
+      <strong>同步/异步客户端</strong>：提供 <code>Client</code> 和 <code>AsyncClient</code> 两种接口类型
+      <strong>Builder 模式</strong>：支持链式调用配置生成参数
+      <li><code>embed([texts])</code> - 批量文本向量化（可选 rerank + generate）</li>
+      <li><code>rerank(query, docs)</code> - 文本重排序</li>
+      <li><code>generate(prompt).max_tokens(n)</code> - 文本生成</li>
+    </section>
+    <section id="s-架构总览-grand-unified-architecture" data-section="null">
+      <h3>架构总览 (Grand Unified Architecture)</h3>
+      <p>为了有效管理多模型、多后端、高性能的复杂需求，系统采用严格的 <strong>4层抽象体系</strong>：</p>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  Layer 1: Manifest (静态定义层) - "What is it?"                         │</p>
+      <p>│  组件: ModelManifest (SSOT)                                             │</p>
+      <p>│  职责: 定义模型身份、下载源、物理架构、默认参数。                       │</p>
+      <p>│  特性: 纯静态数据 (const), 无逻辑。                                     │</p>
+      <p>└───────────────────────────────────┬─────────────────────────────────────┘</p>
+      <p>                                    │ 驱动</p>
+      <p>                                    ▼</p>
+      <p>┌─────────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  Layer 2: Adapter (逻辑适配层) - "How to interpret?"                    │</p>
+      <p>│  组件: ModelAdapter Trait (Qwen3Adapter, Llama4Adapter)                 │</p>
+      <p>│  职责:                                                                  │</p>
+      <p>│    1. WeightMapper: 将 safetensors 映射到标准计算图输入。               │</p>
+      <p>│    2. TokenizerAdapter: 提供 Tokenizer 实例和编码/解码接口。           │</p>
+      <p>│  特性: 无状态 (Stateless), 策略模式。                                   │</p>
+      <p>└───────────────────────────────────┬─────────────────────────────────────┘</p>
+      <p>                                    │ 生成</p>
+      <p>                                    ▼</p>
+      <p>┌─────────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  Layer 3: Engine (运行时调度层) - "When &amp; Where?"                       │</p>
+      <p>│  组件: Executor, Scheduler (PagedAttention), GraphBuilder               │</p>
+      <p>│  职责:                                                                  │</p>
+      <p>│    1. 批处理 (Continuous Batching)。                                    │</p>
+      <p>│    2. 显存管理 (KV Cache Allocation)。                                  │</p>
+      <p>│    3. 算子编排 (Operator Graph Recording)。                             │</p>
+      <p>│  特性: 有状态 (Stateful), 管理资源生命周期。                            │</p>
+      <p>└───────────────────────────────────┬─────────────────────────────────────┘</p>
+      <p>                                    │ 指令 (L3 API)</p>
+      <p>                                    ▼</p>
+      <p>┌─────────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  Layer 4: Driver (硬件执行层) - "Just Do It."                           │</p>
+      <p>│  组件: gllm-kernels (Backend Trait)                                     │</p>
+      <p>│  职责:                                                                  │</p>
+      <p>│    1. CpuBackend (JIT 编译器: 标量→符号执行→融合→SIMD 代码生成).        │</p>
+      <p>│    2. GpuBackend (JIT 编译器: 同一管线, Phase 3 生成 PTX/AMDGPU/AIR).   │</p>
+      <p>│  特性: 零拷贝 (Zero-Copy), 物理阻断数据回流, Driver API Only。          │</p>
+      <p>│  桥接: <code>src/compat.rs</code> 提供类型兼容层，统一 gllm-kernels 导出路径。     │</p>
+      <p>│  量化: JIT 内核直接读取量化权重块，编译时生成硬件原生量化 GEMM 机器码。  │</p>
+      <p>│        TurboQuant FWHT 旋转矩阵作为编译时常量嵌入，无运行时反量化。      │</p>
+      <p>└─────────────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>3. 模型缓存 (ARCH-MODEL-CACHE)</h4>
+      <p>&gt; <strong>关联需求</strong>: REQ-LOADER-002, REQ-LOADER-005, REQ-LOADER-016</p>
+      <strong>缓存根目录</strong>: <code>~/.gllm/models/</code>
+      <strong>源头隔离结构</strong> (ARCH-MODEL-CACHE-001):
+      <p>```</p>
+      <p>~/.gllm/models/</p>
+      <p>├── huggingface/    # HuggingFace 下载的模型</p>
+      <p>└── modelscope/     # ModelScope 下载的模型</p>
+      <p>```</p>
+      <strong>隔离原则</strong>:
+      <li>不同下载源的模型文件<strong>互不干扰</strong></li>
+      <li>即使同名模型，从不同源下载也存储在不同目录</li>
+      <li>禁止跨源混用文件（config 从 HF 读，weights 从 MS 读）</li>
+      <strong>环境变量</strong>:
+      <p>&gt; <strong>自动回退</strong>: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定模型来源。</p>
+      <strong>环境变量铁律 (ARCH-ENV-001)</strong>:
+      <li>❌ AI 禁止擅自引入新的环境变量</li>
+      <li>❌ AI 禁止为"灵活性"或"可配置性"添加环境变量</li>
+      <li>✅ 新增环境变量必须由用户明确要求</li>
+      <li>✅ 环境变量必须有明确的、不可替代的使用场景</li>
+      <table>
+        <tr>
+          <th>源</th>
+        </tr>
+        <tr>
+          <td>缓存子目录</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>HuggingFace</td>
+        </tr>
+        <tr>
+          <td>huggingface/</td>
+        </tr>
+        <tr>
+          <td>HF 专用缓存，使用 hf-hub crate 管理</td>
+        </tr>
+        <tr>
+          <td>ModelScope</td>
+        </tr>
+        <tr>
+          <td>modelscope/</td>
+        </tr>
+        <tr>
+          <td>MS 专用缓存，使用 git-like 结构</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>变量</th>
+        </tr>
+        <tr>
+          <td>默认值</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>GLLM_CACHE_DIR</td>
+        </tr>
+        <tr>
+          <td>~/.gllm/models</td>
+        </tr>
+        <tr>
+          <td>覆盖缓存根目录</td>
+        </tr>
+        <tr>
+          <td>HF_TOKEN</td>
+        </tr>
+        <tr>
+          <td>(空)</td>
+        </tr>
+        <tr>
+          <td>HuggingFace 认证 token</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h4>4. 软件工程抽象模式 (ARCH-SOFTWARE-PATTERNS)</h4>
+      <p>Client 端采用以下模式管理模型多样性与调度复杂性：</p>
+    </section>
+    <section id="s-a-模型适配器模式-model-adapter" data-section="null">
+      <h5>A. 模型适配器模式 (Model Adapter)</h5>
+      <p>将不同模型的加载、分词、后处理差异封装在 Adapter 中，主流程对具体模型无感知。</p>
+      <strong>接口契约</strong>：
+      <li><code>supports(manifest)</code> - 判断适配器是否支持该模型</li>
+      <li><strong>架构匹配</strong>: <code>manifest.arch == ModelArchitecture::Qwen3</code></li>
+      <li><strong>用途匹配</strong>: <code>manifest.kind == ModelKind::Chat</code></li>
+      <li><strong>Ω1 约束</strong>: 禁止基于 Model ID 推断用途（如 <code>model_id.contains("embed")</code>）</li>
+      <li><code>load_weights()</code> - 差异化加载逻辑（如 Qwen3 Thinking Head）</li>
+      <li><strong>静态注册表</strong> - 使用常量表存储所有适配器实例</li>
+      <strong>适配器用途区分 (ModelKind)</strong>：
+      <table>
+        <tr>
+          <th>ModelKind</th>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>适配器示例</td>
+        </tr>
+        <tr>
+          <td>Chat</td>
+        </tr>
+        <tr>
+          <td>文本生成/对话</td>
+        </tr>
+        <tr>
+          <td>Qwen3Adapter</td>
+          <td>, </td>
+          <td>Llama4Adapter</td>
+        </tr>
+        <tr>
+          <td>Embedding</td>
+        </tr>
+        <tr>
+          <td>文本向量化</td>
+        </tr>
+        <tr>
+          <td>Qwen3EmbedAdapter</td>
+        </tr>
+        <tr>
+          <td>Reranker</td>
+        </tr>
+        <tr>
+          <td>文本重排序</td>
+        </tr>
+        <tr>
+          <td>Qwen3RerankAdapter</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-b-执行器模式-executor-pattern" data-section="null">
+      <h5>B. 执行器模式 (Executor Pattern)</h5>
+      <p>将推理调度（Scheduler）与硬件执行（Backend）解耦。</p>
+      <strong>组件结构</strong>：
+      <li><code>backend</code> - 硬件后端实例</li>
+      <li><code>scheduler</code> - 调度器实例</li>
+      <strong>统一入口</strong>：<code>step()</code> 方法内部自动处理 PagedAttention 和 Continuous Batching
+    </section>
+    <section id="s5" data-section="5">
+      <h4>5. 运行时模型管理 (ARCH-LIFECYCLE)</h4>
+      <p>为了支持运行时动态切换模型 (Hot Swap)，Client 不再持有静态的 Executor，而是管理其生命周期。</p>
+    </section>
+    <section id="s-核心机制-arch-lifecycle-swap" data-section="null">
+      <h5>核心机制 (ARCH-LIFECYCLE-SWAP)</h5>
+      <strong>State Container</strong>:
+      <code>Client</code> 内部持有 <code>Arc&lt;RwLock&lt;Option&lt;Executor&gt;&gt;&gt;</code>。
+      <li><code>Arc</code>: 允许在多线程中克隆 Client。</li>
+      <li><code>RwLock</code>: 允许并发读取（推理），但独占写入（切换模型）。</li>
+      <li><code>Option</code>: 允许卸载模型进入"空闲状态"。</li>
+      <strong>切换流程 (Stop-the-World)</strong>:
+      <p>1. <strong>Acquire Lock</strong>: <code>client.swap_model()</code> 请求写锁。这会阻塞所有新的推理请求，并等待当前正在进行的 <code>generate().next()</code> 步骤释放读锁。</p>
+      <p>2. <strong>Drop Old Executor</strong>: 获得写锁后，将 <code>Option</code> 置为 <code>None</code>。Rust 的 <code>Drop</code> 机制自动触发：</p>
+      <li>释放 <code>Executor</code></li>
+      <li>释放 <code>Backend</code> (CUDA Context / Memory)</li>
+      <li>释放 <code>Scheduler</code> (KV Cache 显存)</li>
+      <li><strong>关键</strong>: 确保 GPU 显存完全释放。</li>
+      <p>3. <strong>Load New Model</strong>: 调用 <code>Loader</code> 加载新模型权重（此时 GPU 应为空闲）。</p>
+      <p>4. <strong>Create New Executor</strong>: 初始化新后端，分配新的 KV Cache（基于新模型的维度配置）。</p>
+      <p>5. <strong>Release Lock</strong>: 将新 Executor 放入 <code>Option</code>，释放写锁，恢复服务。</p>
+      <strong>KV Cache 联动</strong>:
+      <p>KV Cache 的生命周期严格绑定于 <code>Executor</code>。</p>
+      <li><strong>不可复用</strong>: 不同模型的 <code>head_dim</code>, <code>num_layers</code>, <code>num_heads</code> 不同，KV Cache 物理结构不同。</li>
+      <li><strong>全量销毁</strong>: 切换模型必须销毁整个 Cache Pool，重新分配。</li>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="null">
+      <h3>数据流</h3>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="null">
+      <h4>GPU 后端数据流（🚨 核心原则）</h4>
+      <p>```</p>
+      <p>tokens → upload一次 → [GPU全程计算] → readback一次 → 结果</p>
+      <p>                      ↑                            ↑</p>
+      <p>                      └──── 全程 GPU 显存 ─────────┘</p>
+      <p>```</p>
+      <strong>禁止</strong>：中途 GPU→CPU→GPU 往返
+    </section>
+    <section id="s-模型加载流程" data-section="null">
+      <h4>模型加载流程</h4>
+      <p>```</p>
+      <p>Client::new_embedding("BAAI/bge-m3")</p>
+      <p>    → 检查 ~/.gllm/models/ 是否存在</p>
+      <p>    → 不存在则 hf-hub 下载</p>
+      <p>    → SafeTensors 解析权重</p>
+      <p>    → 初始化模型 → 返回 Client</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h4>3. 模型配置覆盖 (ARCH-MANIFEST)</h4>
+      <p>&gt; <strong>📌 重构中 (REQ-LOADER-006/007/008)</strong>: Manifest 从"模型注册表"重构为"配置覆盖层"</p>
+      <strong>重构目标</strong>：
+      <li>❌ <strong>旧设计</strong>: 每个模型必须在 <code>KnownModel</code> 枚举中注册，硬编码 <code>hf_repo</code>、<code>aliases</code> 等</li>
+      <li>✅ <strong>新设计</strong>: 用户直接使用 HF Model ID，系统自动下载并识别架构</li>
+      <strong>重构后流程</strong>：
+      <p>```</p>
+      <p>Client::new_chat("Qwen/Qwen3-0.6B")</p>
+      <p>    ↓</p>
+      <p>1. 构造 HF 地址: <a href="http://huggingface.co/Qwen/Qwen3-0.6B">huggingface.co/Qwen/Qwen3-0.6B</a></p>
+      <p>2. 下载模型文件 (config.json, tokenizer.json, safetensors)</p>
+      <p>3. 读取 config.json → 识别架构 (Qwen3)</p>
+      <p>4. 匹配 Qwen3Adapter → 加载权重</p>
+      <p>5. (可选) 应用 Manifest 中的配置覆盖</p>
+      <p>```</p>
+      <strong>Manifest 重新定位</strong>：
+      <strong>架构识别规则</strong>：
+      <strong>约束</strong>：
+      <p>1. ✅ 支持任意有效的 HF Model ID</p>
+      <p>2. ✅ 自动回退 ModelScope（HF 失败时）</p>
+      <p>3. ✅ 新模型无需修改代码即可使用</p>
+      <p>4. ✅ Manifest 仅用于特殊配置覆盖（如非标准 RoPE base）</p>
+      <table>
+        <tr>
+          <th>旧定位 (模型注册表)</th>
+        </tr>
+        <tr>
+          <td>新定位 (配置覆盖层)</td>
+        </tr>
+        <tr>
+          <td>每个模型必须注册</td>
+        </tr>
+        <tr>
+          <td>仅用于特殊配置覆盖</td>
+        </tr>
+        <tr>
+          <td>model_id</td>
+          <td> 枚举值</td>
+        </tr>
+        <tr>
+          <td>移除（由用户输入指定）</td>
+        </tr>
+        <tr>
+          <td>aliases</td>
+          <td> 别名列表</td>
+        </tr>
+        <tr>
+          <td>移除（用户直接用 HF ID）</td>
+        </tr>
+        <tr>
+          <td>hf_repo</td>
+          <td> 硬编码仓库</td>
+        </tr>
+        <tr>
+          <td>移除（由用户输入构造）</td>
+        </tr>
+        <tr>
+          <td>model_scope_repo</td>
+          <td> 硬编码</td>
+        </tr>
+        <tr>
+          <td>移除（自动回退）</td>
+        </tr>
+        <tr>
+          <td>arch</td>
+          <td> 架构类型</td>
+        </tr>
+        <tr>
+          <td>从 config.json 自动识别</td>
+        </tr>
+        <tr>
+          <td>tensor_rules</td>
+          <td> 命名规则</td>
+        </tr>
+        <tr>
+          <td>从架构类型推断</td>
+        </tr>
+        <tr>
+          <td>rope_base_override</td>
+        </tr>
+        <tr>
+          <td>✅ 保留（特殊配置）</td>
+        </tr>
+        <tr>
+          <td>max_context_override</td>
+        </tr>
+        <tr>
+          <td>✅ 保留（特殊配置）</td>
+        </tr>
+        <tr>
+          <td>moe_config</td>
+        </tr>
+        <tr>
+          <td>✅ 保留（特殊配置）</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>config.json 字段</th>
+        </tr>
+        <tr>
+          <td>架构识别</td>
+        </tr>
+        <tr>
+          <td>model_type == "qwen3"</td>
+        </tr>
+        <tr>
+          <td>Qwen3</td>
+        </tr>
+        <tr>
+          <td>model_type == "llama"</td>
+        </tr>
+        <tr>
+          <td>Llama4</td>
+        </tr>
+        <tr>
+          <td>model_type == "ministral"</td>
+          <td> / </td>
+          <td>mistral</td>
+        </tr>
+        <tr>
+          <td>Ministral/Mistral3</td>
+        </tr>
+        <tr>
+          <td>model_type == "glm"</td>
+        </tr>
+        <tr>
+          <td>GLM4/GLM5</td>
+        </tr>
+        <tr>
+          <td>architectures[0]["type"]</td>
+        </tr>
+        <tr>
+          <td>回退字段</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-权重加载策略-arch-loader" data-section="null">
+      <h5>权重加载策略 (ARCH-LOADER)</h5>
+      <p>1.  <strong>架构自适应 (ARCH-LOADER-ADAPTIVE)</strong></p>
+      <li>Loader 必须根据 <code>Architecture</code> 枚举自动选择权重命名策略。</li>
+      <li>支持前缀探测（如 <code>bert.</code> vs 无前缀）。</li>
+      <p>2.  <strong>文件选择策略 (ARCH-LOADER-FILE-SELECT)</strong></p>
+      <li><strong>Ω1 约束</strong>: 禁止基于文件名推测量化类型或精度，禁止"智能排序"</li>
+      <li><strong>策略</strong>: 首个匹配 (First Match)</li>
+      <li>GGUF: 按字母排序选择第一个 <code>.gguf</code> 文件</li>
+      <li>ONNX: 按字母排序选择第一个 <code>.onnx</code> 文件</li>
+      <li>SafeTensors: 使用 <code>model.safetensors.index.json</code> 中的分片列表</li>
+      <li><strong>理由</strong>: 模型元数据（量化类型、精度）在文件内部，无需从文件名推测</li>
+      <p>3.  <strong>融合权重处理 (ARCH-LOADER-FUSED)</strong></p>
+      <li>针对 <strong>Qwen3 / Llama 4</strong> 等模型，必须支持 Fused QKV (e.g. <code>W_pack</code>) 和 Fused MLP (e.g. <code>gate_up_proj</code>) 的自动拆分。</li>
+      <li><strong>禁止</strong>：运行时动态拆分（这会破坏零拷贝原则）。</li>
+      <li><strong>禁止</strong>：将拆分逻辑下沉至 GPU Backend。Backend 接口应保持数学上的纯净（独立 Q/K/V），格式适配由 Loader 层负责。</li>
+      <li><strong>要求</strong>：在权重加载阶段（CPU -&gt; GPU Upload 前）完成权重的拆分和重排，确保 GPU 内核接收到的是标准的 Q/K/V 和 Gate/Up/Down 格式。</li>
+      <p>4.  <strong>并行加载机制 (ARCH-LOADER-PARALLEL)</strong></p>
+      <li><strong>瓶颈识别</strong>：串行加载会导致 CPU 计算（权重拆分/重排）和磁盘 I/O 交替阻塞，无法跑满 NVMe 带宽。例如 40GB+ 的 GPT-OSS/MoE 模型，串行加载速度（~700MB/s）远低于 NVMe 理论极限。</li>
+      <li><strong>策略</strong>：使用并行框架进行层级（Layer-level）并行迭代加载。</li>
+      <li><strong>约束</strong>：<strong>MoE 模型必须使用并行加载</strong>。因为 MoE 的 Fused Weight 拆分（如 Gate/Up/Down 投影）是 CPU 密集型操作，必须通过并行化来掩盖 I/O 延迟。</li>
+      <li><strong>核心逻辑</strong>：利用多线程同时触发 Page Fault 和 CPU 处理，每个层独立并行加载。</li>
+      <li><strong>收益</strong>：多线程同时触发缺页中断（Page Fault），操作系统能更有效地调度磁盘 I/O 队列；同时利用多核 CPU 并行处理 Fused 拆分。</li>
+      <p>5.  <strong>通用张量抽象 (ARCH-LOADER-003)</strong></p>
+      <li><strong>目的</strong>: 摆脱对特定 Model Adapter 的依赖，实现 "Universal Loader"。</li>
+      <li><strong>TensorProvider</strong>: 统一 SafeTensors/ONNX/GGUF 的底层接口，屏蔽文件格式差异。</li>
+      <li><strong>TensorRole</strong>: 引入语义化角色（Embedding, AttentionQuery, FfnGate 等），通过 Regex 规则表将物理张量名映射到逻辑角色。</li>
+      <li><strong>Shape Heuristics</strong>:</li>
+      <li><code>vocab_size</code> = <code>Embedding</code> 张量的较大维度</li>
+      <li><code>head_dim</code> = <code>AttentionQuery</code> 张量维度 / <code>num_heads</code></li>
+      <li><code>num_layers</code> = 匹配到的最大 <code>layer_idx</code> + 1</li>
+      <li><strong>DType Adapter</strong>: <strong>(已弃用)</strong> Loader 层不再根据硬件进行动态类型分发。</li>
+      <p>6.  <strong>权重加载与 TurboQuant 运行时优化 (ARCH-LOADER-TURBO-QUANT)</strong></p>
+      <li><strong>职责边界</strong>: gllm 是纯推理引擎，支持加载 SafeTensors/GGUF/ONNX 全格式权重文件。Loader 负责读取权重文件、解包张量、提取元数据，并将结果交给 JIT 执行引擎。</li>
+      <li><strong>QuantType 驱动 JIT</strong>: 加载时检测到的 QuantType 直接驱动 JIT 生成对应的硬件原生内核。推理过程中无类型判断分支，无 Amax 动态探测。</li>
+      <li><strong>TurboQuant 运行时优化</strong>: gllm 在前向传播中执行在线 FWHT 旋转、KV 非对称量化、RaBitQ 无偏修正等数学优化，使推理精度逼近无损。详见 §11。</li>
+      <li><strong>Backend::dequantize 废除</strong>: 不再提供反量化能力。JIT 内核直接读取定点网格点，数学运算基于整数/微字节累加器进行，零分支执行。</li>
+    </section>
+    <section id="s-onnx-adapter-architecture-arch-onnx" data-section="null">
+      <h5>ONNX Adapter Architecture (ARCH-ONNX)</h5>
+      <strong>核心架构: Matcher -&gt; Mapper -&gt; Kernel</strong>
+      <p>ONNX 加载器<strong>严禁</strong>进行 Naive 的 1:1 算子翻译（如将 <code>MatMul</code> + <code>Add</code> 分别执行）。必须采用图模式匹配（Graph Pattern Matching）将子图融合为高性能算子。</p>
+      <strong>处理流程</strong>:
+      <p>1.  <strong>Proto Parsing</strong>: 解析 <code>.onnx</code> 文件，构建原始计算图。</p>
+      <p>2.  <strong>Pattern Matching</strong>: 使用子图同构算法识别融合模式（如 <code>MatMul</code> + <code>Add</code> + <code>Gelu</code>）。</p>
+      <p>3.  <strong>Kernel Mapping</strong>: 将匹配到的子图映射为单一的 <code>FusedKernel</code> 调用（如 <code>GemmGelu</code>）。</p>
+      <p>4.  <strong>Fallback</strong>: 仅当无法匹配任何模式时，降级为 Atomic Kernel 执行。</p>
+      <strong>关键融合模式</strong>:
+      <li><code>Linear</code> + <code>Bias</code> -&gt; <code>FusedGemm</code></li>
+      <li><code>Gemm</code> + <code>Gelu</code>/<code>Silu</code> -&gt; <code>FusedGemmAct</code></li>
+      <li><code>Attention</code> Subgraph -&gt; <code>FlashAttention</code></li>
+      <li><code>LayerNorm</code> Subgraph -&gt; <code>FusedLayerNorm</code></li>
+    </section>
+    <section id="s-推理流程" data-section="null">
+      <h4>推理流程</h4>
+      <p>```</p>
+      <p>client.embeddings(["text"]).generate()</p>
+      <p>    → Tokenizer 编码</p>
+      <p>    → 移交至 Executor 队列</p>
+      <p>    → Scheduler 批量装载 (Continuous Batching)</p>
+      <p>    → MegaKernelExecutor 单次 CALL 进入预编译 Mega-Kernel</p>
+      <p>    → 物理硬件进行 [Embedding → (Layer N × RmsNorm/QKV/Attn/FFN) → Pooling] 等端到端计算</p>
+      <p>    → Tokenizer 解码 / Tensor 取回</p>
+      <p>```</p>
+    </section>
+    <section id="s-目录结构" data-section="null">
+      <h3>目录结构</h3>
+      <p>```</p>
+      <p>src/</p>
+      <p>├── <a href="http://lib.rs">lib.rs</a>              # 公共 API 导出</p>
+      <p>├── <a href="http://compat.rs">compat.rs</a>           # 兼容层: 桥接 gllm-kernels 类型 (Backend, CpuBackend, Element 等)</p>
+      <p>├── <a href="http://client.rs">client.rs</a>           # Client / AsyncClient</p>
+      <p>├── <a href="http://embeddings.rs">embeddings.rs</a>       # Embeddings API</p>
+      <p>├── <a href="http://rerank.rs">rerank.rs</a>           # Rerank API</p>
+      <p>├── <a href="http://generation.rs">generation.rs</a>       # 生成循环</p>
+      <p>├── <a href="http://tokenizer.rs">tokenizer.rs</a>        # Tokenizer 集成</p>
+      <p>├── model_config.rs     # 张量驱动模型配置 (Ω1)</p>
+      <p>├── weight_loader.rs    # 权重加载工具</p>
+      <p>├── kv_cache.rs         # KV Cache 结构</p>
+      <p>├── <a href="http://quantization.rs">quantization.rs</a>     # 量化支持</p>
+      <p>├── loader/             # 模型加载 (HF/MS/GGUF/ONNX/SafeTensors)</p>
+      <p>│   ├── <a href="http://mod.rs">mod.rs</a>          # 统一加载入口</p>
+      <p>│   ├── gguf/           # GGUF 解析器 (零拷贝)</p>
+      <p>│   ├── onnx/           # ONNX protobuf 解析器</p>
+      <p>│   └── ...             # downloader, format_detector, adapter 等</p>
+      <p>├── arch/               # 架构自动检测 (tensor-name-driven auto_graph)</p>
+      <p>├── graph/              # DAG 优化器 (统一表示)</p>
+      <p>│   └── optimizer/      # 优化 Pass (模式融合/硬件融合/DCE)</p>
+      <p>├── engine/             # 推理引擎 (executor, pipeline)</p>
+      <p>├── scheduler/          # 调度器 (HGAL, PagedAttention, Continuous Batching)</p>
+      <p>├── backend/            # 后端检测与越界截断 (OOM Halt)</p>
+      <p>└── manifest/           # 模型 Manifest 类型</p>
+      <p>```</p>
+    </section>
+    <section id="s-存储结构" data-section="null">
+      <h3>存储结构</h3>
+      <p>```</p>
+      <p>~/.gllm/models/</p>
+      <p>├── BAAI--bge-m3/</p>
+      <p>│   ├── model.safetensors</p>
+      <p>│   ├── config.json</p>
+      <p>│   └── tokenizer.json</p>
+      <p>└── Qwen--Qwen3-7B/</p>
+      <p>    └── ...</p>
+      <p>```</p>
+    </section>
+    <section id="s-调度器架构-arch-sched" data-section="null">
+      <h3>调度器架构 (ARCH-SCHED)</h3>
+      <p>&gt; <strong>详细设计</strong>: 见 </p>
+      <p>&gt; <strong>📌 SSOT</strong>: 后端架构约束见 </p>
+    </section>
+    <section id="s001" data-section="001">
+      <h4>调度器定位 (ARCH-SCHED-001)</h4>
+      <p>调度器位于 Layer 3 (Engine)，负责：</p>
+      <p>1. <strong>PagedAttention 管理</strong>: 页面分配、换出、换入</p>
+      <p>2. <strong>Continuous Batching</strong>: 动态批处理，序列加入/移除</p>
+      <p>3. <strong>KV Cache 管理</strong>: GPU/CPU 内存协调</p>
+    </section>
+    <section id="s-核心约束-arch-sched-constraints" data-section="null">
+      <h4>核心约束 (ARCH-SCHED-CONSTRAINTS)</h4>
+      <table>
+        <tr>
+          <th>约束</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>违规后果</td>
+        </tr>
+        <tr>
+          <td>SSOT位置</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>禁止序列内页面分散</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>必须以序列组 (SequenceGroup) 为单位换出</td>
+        </tr>
+        <tr>
+          <td>序列错乱、内存碎片</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>禁止新换入页立即换出</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Warm-up 保护期内禁止换出</td>
+        </tr>
+        <tr>
+          <td>Cache Thrashing</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>禁止纯 LRU</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>必须使用 LIRS 或 CLOCK-Pro 算法</td>
+        </tr>
+        <tr>
+          <td>无法区分访问模式</td>
+        </tr>
+        <tr>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>零拷贝原则</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Swap 操作不介入生成循环数据流</td>
+        </tr>
+        <tr>
+          <td>数据回流到 CPU</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels SPEC/02 ARCH-SCOPE</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>JIT 统一路径</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPU kernel 由 JIT 编译器生成（PTX/AMDGPU/AIR）</td>
+        </tr>
+        <tr>
+          <td>违反 ARCH-JIT-FIRST</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels SPEC/04 §1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Driver API Only</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>仅依赖 </td>
+          <td>libcuda.so</td>
+          <td> / </td>
+          <td>libamdhip64.so</td>
+          <td> / Metal.framework</td>
+        </tr>
+        <tr>
+          <td>运行时依赖问题</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels SPEC/04 §5</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-数据结构约束-arch-sched-data" data-section="null">
+      <h4>数据结构约束 (ARCH-SCHED-DATA)</h4>
+      <table>
+        <tr>
+          <th>结构</th>
+        </tr>
+        <tr>
+          <td>约束</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>PageState</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>必须包含 Warm/Protected 状态</td>
+        </tr>
+        <tr>
+          <td>支持 Warm-up 和 Working Set</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SequenceGroup</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>必须包含 pages 列表</td>
+        </tr>
+        <tr>
+          <td>Gang-Aware 换出</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>PageMetadata</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>必须包含 recency/access_count</td>
+        </tr>
+        <tr>
+          <td>LIRS 优先级计算</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-api-约束-arch-sched-api" data-section="null">
+      <h4>API 约束 (ARCH-SCHED-API)</h4>
+      <p>调度器必须提供以下接口：</p>
+      <table>
+        <tr>
+          <th>接口</th>
+        </tr>
+        <tr>
+          <td>功能</td>
+        </tr>
+        <tr>
+          <td>select_victim_groups(count: usize) -&gt; Vec&lt;RequestId&gt;</td>
+        </tr>
+        <tr>
+          <td>Gang-Aware 受害者选择</td>
+        </tr>
+        <tr>
+          <td>handle_page_fault(page_id, sequence_id) -&gt; PageLocation</td>
+        </tr>
+        <tr>
+          <td>页面错误处理</td>
+        </tr>
+        <tr>
+          <td>get_batch_page_table(request_ids) -&gt; BatchPageTable</td>
+        </tr>
+        <tr>
+          <td>批次页表获取</td>
+        </tr>
+        <tr>
+          <td>update_batch(batch, results) -&gt; BatchAction</td>
+        </tr>
+        <tr>
+          <td>批次状态更新</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-禁止行为-arch-sched-prohibited" data-section="null">
+      <h4>禁止行为 (ARCH-SCHED-PROHIBITED)</h4>
+      <table>
+        <tr>
+          <th>禁止项</th>
+        </tr>
+        <tr>
+          <td>原因</td>
+        </tr>
+        <tr>
+          <td>检测方法</td>
+        </tr>
+        <tr>
+          <td>禁止单页面换出</td>
+        </tr>
+        <tr>
+          <td>破坏 Gang Scheduling</td>
+        </tr>
+        <tr>
+          <td>检查返回值类型</td>
+        </tr>
+        <tr>
+          <td>禁止在生成循环中 Swap</td>
+        </tr>
+        <tr>
+          <td>违反零拷贝原则</td>
+        </tr>
+        <tr>
+          <td>检查 Swap 调用位置</td>
+        </tr>
+        <tr>
+          <td>禁止硬编码换出阈值</td>
+        </tr>
+        <tr>
+          <td>必须动态计算</td>
+        </tr>
+        <tr>
+          <td>检查魔法数字</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>禁止 while let 无限循环</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CPU 100% 死锁</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>检查 admit_waiting 实现</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-企业级死锁防护-arch-sched-deadlock-free" data-section="null">
+      <h4>企业级死锁防护 (ARCH-SCHED-DEADLOCK-FREE)</h4>
+      <p>&gt; <strong>关联需求</strong>: REQ-CORE-004 (精度优先架构)</p>
+      <strong>问题</strong>: 如果 <code>admit_waiting</code> 使用 <code>while let</code> 循环处理等待队列，当所有序列都无法分配内存时会导致无限循环，CPU 100%。
+      <strong>解决方案</strong> (drain 模式):
+      <p>```rust</p>
+      <p>fn admit_waiting(&amp;mut self, scheduler: &amp;mut PagedScheduler) {</p>
+      <p>    // 1. 使用 drain(..) 一次性收集所有等待序列</p>
+      <p>    let waiting_sequences: Vec&lt;_&gt; = self.waiting.drain(..).collect();</p>
+      <p>    // 2. 尝试 admit 每个序列</p>
+      <p>    for mut sequence in waiting_sequences {</p>
+      <p>        match scheduler.add_sequence(sequence.to_sequence_group()) {</p>
+      <p>            Ok(()) =&gt; {</p>
+      <p>                // 成功：加入 running 队列</p>
+      <p>                self.running.insert(<a href="http://sequence.id">sequence.id</a>, sequence);</p>
+      <p>            }</p>
+      <p>            Err(_) =&gt; {</p>
+      <p>                // 失败：放回 waiting 队列末尾，等待下次 build_batch 重试</p>
+      <p>                // 关键：不在本次调用中重试，避免无限循环</p>
+      <p>                self.waiting.push_back(sequence);</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>关键设计点</strong>:
+      <p>1. <strong><code>drain(..)</code></strong> - 一次性清空等待队列，避免在迭代过程中修改队列</p>
+      <p>2. <strong>失败序列放回末尾</strong> - 下次 <code>build_batch</code> 时会重新尝试</p>
+      <p>3. <strong>本次调用不重试</strong> - 避免无限循环，确保系统始终能响应新请求</p>
+      <strong>验收标准</strong>:
+      <li>CPU 不会因内存不足而 100% 占用</li>
+      <li>系统在 OOM 时仍能接受新请求（即使无法立即处理）</li>
+      <li>失败的序列会在后续批次中自动重试</li>
+    </section>
+    <section id="s2026" data-section="2026">
+      <h3>调度器重构架构 (ARCH-SCHED-REFACTOR-2026)</h3>
+      <p>&gt; <strong>设计来源</strong>: <code>.serena/memories/scheduler_refactor_design.md</code></p>
+      <p>&gt; <strong>目标</strong>: 删除 <code>vllm2024.rs</code> 中冗余 LMCache，实现准确度优先、确定性优先的 KV 复用架构。</p>
+    </section>
+    <section id="s-重构总览-arch-sched-refactor-overview" data-section="null">
+      <h4>重构总览 (ARCH-SCHED-REFACTOR-OVERVIEW)</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>目标</td>
+        </tr>
+        <tr>
+          <td>关键约束</td>
+        </tr>
+        <tr>
+          <td>KvPrefixIndex</td>
+        </tr>
+        <tr>
+          <td>无 Session 场景下的跨请求前缀复用</td>
+        </tr>
+        <tr>
+          <td>O(n) 最长前缀匹配，禁止 hash-only 全量相等匹配</td>
+        </tr>
+        <tr>
+          <td>SessionKvCache</td>
+        </tr>
+        <tr>
+          <td>AI 编程场景的会话级确定性复用</td>
+        </tr>
+        <tr>
+          <td>仅允许 append 前缀 claim，禁止越界复用</td>
+        </tr>
+        <tr>
+          <td>KvPipeline</td>
+        </tr>
+        <tr>
+          <td>Thinking 模型双管线隔离</td>
+        </tr>
+        <tr>
+          <td>Working</td>
+          <td> 可丢弃，</td>
+          <td>Conversation</td>
+          <td> 可跨轮保留</td>
+        </tr>
+        <tr>
+          <td>BatchOrderPolicy</td>
+        </tr>
+        <tr>
+          <td>批处理确定性顺序</td>
+        </tr>
+        <tr>
+          <td>默认 </td>
+          <td>StrictRequestIdOrder</td>
+          <td>，准确度 &gt; 吞吐量</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1" data-section="1">
+      <h4>1. KvPrefixIndex 前缀树索引 (ARCH-SCHED-PREFIX-INDEX)</h4>
+      <strong>问题</strong>: Hash 缓存只能命中完全相同 token 序列，无法识别 append 关系。
+      <strong>方案</strong>: 引入 token 前缀树索引，查找最长可复用前缀。
+      <p>```rust</p>
+      <p>pub struct KvPrefixIndex {</p>
+      <p>    root: TrieNode,</p>
+      <p>}</p>
+      <p>struct TrieNode {</p>
+      <p>    children: HashMap&lt;TokenId, TrieNode&gt;,</p>
+      <p>    page_ref: Option&lt;(VirtualPageId, usize)&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>集成约束</strong>:
+      <p>1. <code>GlobalMemoryManager</code> 负责维护索引生命周期，与页表一致更新。</p>
+      <p>2. <code>prepare_prefill_with_auto_reuse(request_id, tokens)</code> 必须先做最长前缀匹配，再决定是否分配新页面。</p>
+      <p>3. 前缀命中后采用虚拟页映射复用语义，禁止直接共享可写物理页（避免污染）。</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h4>2. SessionKvCache 会话级复用 (ARCH-SCHED-SESSION-KV)</h4>
+      <strong>问题</strong>: AI 编程会话是确定性 append 流，跨请求前缀可预测。
+      <strong>方案</strong>: 引入显式 Session KV 结构，保存会话已确认前缀边界。
+      <p>&gt; <strong>数据结构 SSOT</strong>: <code>SessionKvCache</code> 完整字段定义见 <code>03-DATA-STRUCTURE.md §8.2</code>。</p>
+      <strong>集成约束</strong>:
+      <p>1. <code>register_session(session_id)</code> 创建会话状态。</p>
+      <p>2. <code>claim_session_prefix(session_id, request_id, prefix_tokens)</code> 只能 claim <code>finalized_position</code> 范围内页面。</p>
+      <p>3. <code>finalize_session_tokens(session_id, new_finalized_position)</code> 只能单调递增。</p>
+    </section>
+    <section id="artifact-pipeline" data-artifact-type="pipeline" data-section="3">
+      <h4>3. KvPipeline 多管线分离 (ARCH-SCHED-PIPELINE)</h4>
+      <strong>问题</strong>: Thinking/Reasoning 过程不应污染跨轮会话缓存。
+      <strong>方案</strong>: 将虚拟页命名空间扩展为双管线。
+      <p>```rust</p>
+      <p>pub enum KvPipeline {</p>
+      <p>    Conversation,</p>
+      <p>    Working,</p>
+      <p>}</p>
+      <p>pub struct PipelinedVirtualPageId {</p>
+      <p>    pub pipeline: KvPipeline,</p>
+      <p>    pub sequence_id: RequestId,</p>
+      <p>    pub logical_index: usize,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>集成约束</strong>:
+      <p>1. <code>Working</code> 管线仅用于本轮中间推理，可在 <code>prepare_next_turn</code> 全量释放。</p>
+      <p>2. <code>Conversation</code> 管线用于跨轮上下文保留，不受 <code>Working</code> 释放影响。</p>
+      <p>3. 页表、换出策略、预取逻辑均必须按 <code>pipeline</code> 维度隔离。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h4>4. BatchOrderPolicy 确定性批处理 (ARCH-SCHED-BATCH-ORDER)</h4>
+      <strong>问题</strong>: 吞吐优先重排会改变浮点规约顺序，破坏可复现性。
+      <strong>方案</strong>: 批构建阶段引入顺序策略并默认严格 RequestId 排序。
+      <p>```rust</p>
+      <p>pub enum BatchOrderPolicy {</p>
+      <p>    StrictRequestIdOrder,</p>
+      <p>    FifoOrder,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>集成约束</strong>:
+      <p>1. 默认策略必须为 <code>StrictRequestIdOrder</code>。</p>
+      <p>2. <code>Executor::run_batch_forward</code> 需校验输入序列严格单调递增。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h4>5. GlobalMemoryManager 融合策略 (ARCH-SCHED-GLOBAL-MEM-REFACTOR)</h4>
+      <strong>核心决策</strong>:
+      <p>1. 删除 <code>vllm2024.rs</code> 中冗余 <code>LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel</code>。</p>
+      <p>2. 保留 <code>ChunkedConfig</code>，并融合为 Prefill 阶段的页面规划能力（非 Prefill/Decode 混批）。</p>
+      <strong>统一能力入口</strong>:
+      <li><code>plan_prefill(prompt_tokens, chunk_size) -&gt; PrefillPlan</code></li>
+      <li><code>prepare_prefill_with_auto_reuse(request_id, tokens) -&gt; PrefillPlan</code></li>
+      <li><code>allocate_page_in_pipeline(pipeline, tier) -&gt; Result&lt;PhysicalId, Error&gt;</code></li>
+      <li><code>prepare_next_turn(session_id)</code>（释放 <code>Working</code>，保留 <code>Conversation</code>）</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h4>6. JIT 兼容性声明 (ARCH-SCHED-REFACTOR-JIT)</h4>
+      <strong>结论</strong>: 调度器重构全部位于调度/内存管理层，不涉及 JIT 编译器管线。
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>是否需要新 Kernel</td>
+        </tr>
+        <tr>
+          <td>理由</td>
+        </tr>
+        <tr>
+          <td>KvPrefixIndex</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>纯索引结构，属于调度层</td>
+        </tr>
+        <tr>
+          <td>SessionKvCache</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>会话元数据管理</td>
+        </tr>
+        <tr>
+          <td>KvPipeline</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>页表命名空间扩展</td>
+        </tr>
+        <tr>
+          <td>BatchOrderPolicy</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>批构建顺序策略</td>
+        </tr>
+        <tr>
+          <td>ChunkedConfig</td>
+          <td> 融合</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>页面规划逻辑，不改变算子实现</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7" data-section="7">
+      <h4>7. 张量驱动配置系统 (ARCH-LOADER-TENSOR)</h4>
+      <p>&gt; <strong>关联需求</strong>: REQ-LOADER-022, REQ-LOADER-023</p>
+      <p>&gt; <strong>核心原则</strong>: Ω1 真实性原则 - 物理张量形状是唯一的真理 (Ground Truth)。</p>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h5>7.1 TensorProvider 抽象 (ARCH-LOADER-PROVIDER)</h5>
+      <p>为了屏蔽文件格式差异 (SafeTensors vs GGUF vs ONNX) 并彻底消除动态分发开销，系统定义统一的<strong>静态分发</strong>接口。</p>
+      <strong>接口定义</strong>:
+      <p>```rust</p>
+      <p>pub trait TensorProvider {</p>
+      <p>    fn tensor_info(&amp;self, name: &amp;str) -&gt; Option<tensormeta>;</tensormeta></p>
+      <p>    fn iter_tensors(&amp;self) -&gt; impl Iterator&lt;Item = TensorMeta&gt;; // impl Iterator 确保不可用作 dyn</p>
+      <p>    fn load_tensor_data(&amp;self, name: &amp;str) -&gt; Result&lt;Cow&lt;'_, [u8]&gt;&gt;;</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>约束</strong>:
+      <li><strong>禁止动态分发 (NO_DYN)</strong>: <code>iter_tensors</code> 返回 <code>impl Iterator</code>，这在 Rust 中天然使得 Trait 不具备对象安全性 (Not Object Safe)。这强制所有使用处必须通过泛型 <code>&lt;P: TensorProvider&gt;</code> 进行<strong>静态单态化 (Monomorphization)</strong>，确保零运行时开销。</li>
+      <li><strong>零拷贝数据</strong>: <code>load_tensor_data</code> 返回 <code>Cow&lt;'_, [u8]&gt;</code>，对于 <code>mmap</code> 的 SafeTensors 直接返回引用，对于 GGUF/ONNX 可能需要临时分配（如果不支持 mmap）。</li>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h5>7.2 角色探测 (ARCH-LOADER-ROLE)</h5>
+      <p>不再依赖硬编码的张量名称，而是基于语义模式匹配。</p>
+      <table>
+        <tr>
+          <th>逻辑角色</th>
+        </tr>
+        <tr>
+          <td>匹配模式 (Regex/Contains)</td>
+        </tr>
+        <tr>
+          <td>示例</td>
+        </tr>
+        <tr>
+          <td>Embedding</td>
+        </tr>
+        <tr>
+          <td>embed</td>
+          <td> | </td>
+          <td>wte</td>
+          <td> | </td>
+          <td>word_embeddings</td>
+        </tr>
+        <tr>
+          <td>model.embed_tokens</td>
+          <td>, </td>
+          <td>transformer.wte</td>
+        </tr>
+        <tr>
+          <td>AttnQuery</td>
+        </tr>
+        <tr>
+          <td>q_proj</td>
+          <td> | </td>
+          <td>query</td>
+          <td> | </td>
+          <td>wq</td>
+        </tr>
+        <tr>
+          <td>layers.0.self_attn.q_proj</td>
+        </tr>
+        <tr>
+          <td>AttnKey</td>
+        </tr>
+        <tr>
+          <td>k_proj</td>
+          <td> | </td>
+          <td>key</td>
+          <td> | </td>
+          <td>wk</td>
+        </tr>
+        <tr>
+          <td>layers.0.self_attn.k_proj</td>
+        </tr>
+        <tr>
+          <td>AttnValue</td>
+        </tr>
+        <tr>
+          <td>v_proj</td>
+          <td> | </td>
+          <td>value</td>
+          <td> | </td>
+          <td>wv</td>
+        </tr>
+        <tr>
+          <td>layers.0.self_attn.v_proj</td>
+        </tr>
+        <tr>
+          <td>AttnOutput</td>
+        </tr>
+        <tr>
+          <td>o_proj</td>
+          <td> | </td>
+          <td>output</td>
+          <td> | </td>
+          <td>wo</td>
+        </tr>
+        <tr>
+          <td>layers.0.self_attn.o_proj</td>
+        </tr>
+        <tr>
+          <td>FfnGate</td>
+        </tr>
+        <tr>
+          <td>gate_proj</td>
+          <td> | </td>
+          <td>w1</td>
+          <td> | </td>
+          <td>ffn_gate</td>
+        </tr>
+        <tr>
+          <td>layers.0.mlp.gate_proj</td>
+        </tr>
+        <tr>
+          <td>FfnUp</td>
+        </tr>
+        <tr>
+          <td>up_proj</td>
+          <td> | </td>
+          <td>w3</td>
+          <td> | </td>
+          <td>ffn_up</td>
+        </tr>
+        <tr>
+          <td>layers.0.mlp.up_proj</td>
+        </tr>
+        <tr>
+          <td>FfnDown</td>
+        </tr>
+        <tr>
+          <td>down_proj</td>
+          <td> | </td>
+          <td>w2</td>
+          <td> | </td>
+          <td>ffn_down</td>
+        </tr>
+        <tr>
+          <td>layers.0.mlp.down_proj</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h5>7.3 拓扑推导逻辑 (ARCH-LOADER-TOPOLOGY)</h5>
+      <p>推导必须遵循 <strong>Truth &gt; Hint &gt; Fallback</strong> 优先级。</p>
+      <p>1.  <strong>Vocab Size</strong>: <code>Embedding.shape[0]</code> (或较大维度)。</p>
+      <p>2.  <strong>Hidden Size</strong>: <code>Embedding.shape[1]</code> (或较小维度)。</p>
+      <p>3.  <strong>Head Dim</strong>:</p>
+      <li>计算 <code>Q_out = Q_proj.output_dim</code></li>
+      <li>计算 <code>K_out = K_proj.output_dim</code></li>
+      <li>遍历候选 <code>[32, 64, 80, 96, 128, 256]</code>，找到能同时整除 <code>Q_out</code> 和 <code>K_out</code> 的值。</li>
+      <li><strong>歧义处理</strong>: 如果有多个候选值（如 64 和 128 均合法），则<strong>报错</strong> (InvalidConfig)，除非有显式 Metadata Hint。禁止猜测。</li>
+      <p>4.  <strong>Num Heads</strong>: <code>Q_out / Head Dim</code>。</p>
+      <p>5.  <strong>Num KV Heads</strong>: <code>K_out / Head Dim</code>。</p>
+      <p>6.  <strong>Intermediate Size</strong>: <code>FfnGate.output_dim</code> 或 <code>FfnUp.output_dim</code>。</p>
+      <p>7.  <strong>Num Layers</strong>: 解析所有张量名称中的层索引（如 <code>layers.N</code>），取最大值 + 1。</p>
+    </section>
+    <section id="s7.4" data-section="7.4">
+      <h5>7.4 验证 (ARCH-LOADER-VERIFY)</h5>
+      <li><strong>物理约束验证</strong>:</li>
+      <li><code>Q_out % Head Dim == 0</code></li>
+      <li><code>K_out % Head Dim == 0</code></li>
+      <li><code>Num Heads % Num KV Heads == 0</code> (GQA 约束)</li>
+      <li><strong>Ω1 违规</strong>: 任何推导出的配置与物理张量形状冲突时，以<strong>物理张量</strong>为准，并可能需要覆盖 Config。</li>
+    </section>
+    
+    <section id="s-问题描述" data-section="null">
+      <h5>问题描述</h5>
+      <p>当前 <code>CompilerGraph</code> 在构建时如果将所有张量维度硬编码为具体的 <code>usize</code> 数值，那么在 decoder 推理循环中，<code>total_seq</code>（KV cache 已缓存的序列长度）每个 decode step 递增 1，会导致需要 shape binding 的图（如 <code>AttentionConsume</code>）每步都不同，触发重编译。旧版基于 <code>compile_decode_jit</code> 的代码曾存在此类问题。</p>
+      <p>根据 <strong>ARCH-CPU-GPU-UNIFIED (见 §8)</strong> 规则，CPU 与 GPU 的编译管线在 JIT 缓存策略上必须完全统一，并严格遵守 <code>jit-cache-protocol.md</code> 定义的模型级缓存原则。</p>
+    </section>
+    <section id="s-设计方案-symdim" data-section="null">
+      <h5>设计方案：SymDim</h5>
+      <p>在 <code>gllm-kernels/src/compiler/graph.rs</code> 中新增 <code>SymDim</code> 枚举，替代裸 <code>usize</code> 作为张量维度类型：</p>
+      <p>```rust</p>
+      <p>/// 张量维度：可以是具体值，也可以是符号名（运行时绑定）</p>
+      <p>#[derive(Debug, Clone, PartialEq, Eq, Hash)]</p>
+      <p>pub enum SymDim {</p>
+      <p>    /// 编译时已知的具体维度</p>
+      <p>    Concrete(usize),</p>
+      <p>    /// 运行时绑定的符号维度，名称用于 shape binding 查找</p>
+      <p>    Symbolic(String),</p>
+      <p>}</p>
+      <p>```</p>
+      <code>CompilerGraph::add_tensor</code> 的 shape 参数类型从 <code>&amp;[usize]</code> 改为 <code>&amp;[SymDim]</code>，允许混合具体维度和符号维度：
+      <p>```rust</p>
+      <p>// 示例：hidden_size 是具体值，total_seq 是符号维度</p>
+      <p>graph.add_tensor("kv_cache", &amp;[</p>
+      <p>    SymDim::Concrete(num_layers),</p>
+      <p>    SymDim::Symbolic("total_seq".to_string()),</p>
+      <p>    SymDim::Concrete(kv_dim),</p>
+      <p>]);</p>
+      <p>```</p>
+      <p>JIT mega-kernel 内部通过栈参数（如 <code>[rbp+16]</code> 读取 seq_len）在运行时获取符号维度的具体值。Rust 调用 <code>MegaKernelFn</code> 时传入 prompt_len 等参数，JIT 机器码内部直接使用这些值作为循环 bound（详见 <code>08-EXECUTOR.md §4.1.3 MegaKernelFn ABI</code>）。不需要 Rust 侧维护 ShapeBinding HashMap。</p>
+      <p>```rust</p>
+      <p>// 运行时：Rust 只传参数，JIT 内部自行解析符号维度</p>
+      <p>let num_generated: u32 = unsafe {</p>
+      <p>    (kernel.entry_fn)(</p>
+      <p>        prompt_tokens.as_ptr(),       // rdi</p>
+      <p>        kernel.weight_blob.as_ptr(),  // rsi</p>
+      <p>        kv_cache_k,                   // rdx</p>
+      <p>        positions.as_ptr(),           // rcx</p>
+      <p>        kv_cache_v as *const u8,      // r8</p>
+      <p>        1,                            // r9: batch_size</p>
+      <p>        prompt_tokens.len(),          // [rsp+0]: prompt_len (seq_len 的运行时值)</p>
+      <p>        // ... 其他参数</p>
+      <p>    )</p>
+      <p>};</p>
+      <p>```</p>
+    </section>
+    <section id="s-铁律" data-section="null">
+      <h5>铁律</h5>
+      <li>❌ 禁止在图构建时将 <code>total_seq</code>、<code>batch_size</code> 等动态维度硬编码为具体数值</li>
+      <li>❌ 禁止因 shape 变化而重新调用 <code>compile_and_run</code> 构建新图</li>
+      <li>✅ 动态维度必须声明为 <code>SymDim::Symbolic</code>，名称与 <code>ShapeBinding</code> 的 key 一致</li>
+      <li>✅ 编译一次，通过 <code>ShapeBinding</code> 在每个 decode step 传入当前 <code>total_seq</code></li>
+      <li>✅ <code>Concrete</code> 维度在编译时参与代码生成优化（循环展开、tile 大小等）；<code>Symbolic</code> 维度在运行时从 binding 读取，生成通用循环</li>
+    </section>
+    <section id="s-受影响的图构建函数" data-section="null">
+      <h5>受影响的图构建函数</h5>
+      <table>
+        <tr>
+          <th>函数</th>
+        </tr>
+        <tr>
+          <td>文件</td>
+        </tr>
+        <tr>
+          <td>需要符号化的维度</td>
+        </tr>
+        <tr>
+          <td>compile_decode_jit</td>
+          <td> (CachedGQA 图)</td>
+        </tr>
+        <tr>
+          <td>src/compat/jit_helpers.rs</td>
+        </tr>
+        <tr>
+          <td>total_seq</td>
+        </tr>
+        <tr>
+          <td>compile_decode_jit</td>
+          <td> (RmsNorm+Q+RoPE 图)</td>
+        </tr>
+        <tr>
+          <td>src/compat/jit_helpers.rs</td>
+        </tr>
+        <tr>
+          <td>seq_len</td>
+          <td>（prefill 时动态）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>§8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)</h3>
+      <p>&gt; <strong>实现状态</strong>: ✅ IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)</p>
+      <p>&gt; <strong>动机</strong>: GPU prefill 与 CPU/decode attention 当前使用不同 op（<code>MultiHeadAttention</code> vs <code>CachedGQA</code>），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。</p>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 核心原则：统一 Contract，不统一 Payload</h4>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  ARCH-ATTN-UNIFIED 铁律                                                │</p>
+      <p>│                                                                         │</p>
+      <p>│  ✅ 统一语义契约（AttentionSemantics）                                  │</p>
+      <p>│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │</p>
+      <p>│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │</p>
+      <p>│  ✅ JIT 直接面向 View/Contract codegen                                  │</p>
+      <p>│                                                                         │</p>
+      <p>│  ❌ 禁止为统一而引入公共物理中间格式                                    │</p>
+      <p>│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │</p>
+      <p>│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │</p>
+      <p>│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │</p>
+      <p>│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │</p>
+      <p>└─────────────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 五个核心 Contract</h4>
+    </section>
+    <section id="s8.2.1" data-section="8.2.1">
+      <h5>8.2.1 `AttentionSemantics`</h5>
+      <p>定义 attention 的数学语义，prefill 与 decode 共享。</p>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>mask_mode</td>
+        </tr>
+        <tr>
+          <td>Causal | Bidirectional</td>
+        </tr>
+        <tr>
+          <td>因果/双向</td>
+        </tr>
+        <tr>
+          <td>head_mode</td>
+        </tr>
+        <tr>
+          <td>MHA | GQA { ratio } | MQA</td>
+        </tr>
+        <tr>
+          <td>头映射</td>
+        </tr>
+        <tr>
+          <td>scaling</td>
+        </tr>
+        <tr>
+          <td>1/sqrt(head_dim)</td>
+        </tr>
+        <tr>
+          <td>缩放规则</td>
+        </tr>
+        <tr>
+          <td>rope</td>
+        </tr>
+        <tr>
+          <td>Option&lt;RoPEConfig&gt;</td>
+        </tr>
+        <tr>
+          <td>旋转位置编码配置</td>
+        </tr>
+        <tr>
+          <td>visibility</td>
+        </tr>
+        <tr>
+          <td>Prefill { seq_len } | Decode { total_seq }</td>
+        </tr>
+        <tr>
+          <td>可见范围</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2.2" data-section="8.2.2">
+      <h5>8.2.2 `KvLayoutContract`</h5>
+      <p>描述 KV 的物理布局，不要求转换。</p>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>storage_kind</td>
+        </tr>
+        <tr>
+          <td>DenseSeqMajor | HeadMajorPersistent | PagedHeadMajor</td>
+        </tr>
+        <tr>
+          <td>存储类型</td>
+        </tr>
+        <tr>
+          <td>kv_split</td>
+        </tr>
+        <tr>
+          <td>SplitHalf | Interleaved</td>
+        </tr>
+        <tr>
+          <td>K/V 分离方式</td>
+        </tr>
+        <tr>
+          <td>layer_stride</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>层间步长</td>
+        </tr>
+        <tr>
+          <td>head_stride</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>头间步长</td>
+        </tr>
+        <tr>
+          <td>token_stride</td>
+        </tr>
+        <tr>
+          <td>usize</td>
+        </tr>
+        <tr>
+          <td>token 间步长</td>
+        </tr>
+        <tr>
+          <td>quant_type</td>
+        </tr>
+        <tr>
+          <td>QuantType</td>
+        </tr>
+        <tr>
+          <td>量化格式</td>
+        </tr>
+        <tr>
+          <td>append_semantics</td>
+        </tr>
+        <tr>
+          <td>AppendOnly | Overwrite</td>
+        </tr>
+        <tr>
+          <td>追加语义</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2.3" data-section="8.2.3">
+      <h5>8.2.3 `KvView`</h5>
+      <p>在 <code>KvLayoutContract</code> 之上的具体逻辑视图。</p>
+      <strong>铁律</strong>: attention kernel 的 K/V 输入必须是 <code>KvView</code>，禁止要求调用方先 materialize 成 dense tensor。
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>使用场景</td>
+        </tr>
+        <tr>
+          <td>DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }</td>
+        </tr>
+        <tr>
+          <td>当前层临时 K/V</td>
+        </tr>
+        <tr>
+          <td>Prefill attention</td>
+        </tr>
+        <tr>
+          <td>PersistentCache { base_ptr, contract, layer, visible_range }</td>
+        </tr>
+        <tr>
+          <td>持久 KV cache</td>
+        </tr>
+        <tr>
+          <td>Decode attention</td>
+        </tr>
+        <tr>
+          <td>PagedCache { page_table, contract, layer, visible_range }</td>
+        </tr>
+        <tr>
+          <td>分页 KV cache</td>
+        </tr>
+        <tr>
+          <td>Paged decode</td>
+        </tr>
+        <tr>
+          <td>CompositeView { cached, append }</td>
+        </tr>
+        <tr>
+          <td>cache + 新 token 组合</td>
+        </tr>
+        <tr>
+          <td>Prefill-to-decode 过渡</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2.4" data-section="8.2.4">
+      <h5>8.2.4 `PositionContract`</h5>
+      <p>统一位置来源，支持 RoPE on-the-fly lowering。</p>
+      <strong>目标</strong>: RoPE 不再要求先 materialize <code>q_rope/k_rope</code> 中间张量，允许 lower 到消费时寄存器内变换。
+      <table>
+        <tr>
+          <th>变体</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>ContiguousRange { start, len }</td>
+        </tr>
+        <tr>
+          <td>连续位置（prefill 常见）</td>
+        </tr>
+        <tr>
+          <td>ExplicitArray { ptr, len }</td>
+        </tr>
+        <tr>
+          <td>显式位置数组（decode / 非连续）</td>
+        </tr>
+        <tr>
+          <td>OffsetStride { offset, stride }</td>
+        </tr>
+        <tr>
+          <td>等间距位置</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2.5" data-section="8.2.5">
+      <h5>8.2.5 `WeightView`</h5>
+      <p>统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。</p>
+      <strong>铁律</strong>: JIT 直接根据 <code>WeightView</code> 生成加载逻辑，禁止要求先转成 dense F32。
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>logical_shape</td>
+        </tr>
+        <tr>
+          <td>Vec&lt;usize&gt;</td>
+        </tr>
+        <tr>
+          <td>逻辑形状</td>
+        </tr>
+        <tr>
+          <td>quant_type</td>
+        </tr>
+        <tr>
+          <td>QuantType</td>
+        </tr>
+        <tr>
+          <td>量化格式</td>
+        </tr>
+        <tr>
+          <td>quant_scheme</td>
+        </tr>
+        <tr>
+          <td>Option&lt;QuantScheme&gt;</td>
+        </tr>
+        <tr>
+          <td>量化方案（GGUF block quant 等）</td>
+        </tr>
+        <tr>
+          <td>base_ptr</td>
+        </tr>
+        <tr>
+          <td>*const u8</td>
+        </tr>
+        <tr>
+          <td>数据指针（mmap/device）</td>
+        </tr>
+        <tr>
+          <td>stride</td>
+        </tr>
+        <tr>
+          <td>Vec&lt;usize&gt;</td>
+        </tr>
+        <tr>
+          <td>步长</td>
+        </tr>
+        <tr>
+          <td>packing</td>
+        </tr>
+        <tr>
+          <td>PackingDescriptor</td>
+        </tr>
+        <tr>
+          <td>打包描述（block size, scale/zero layout）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 Attention 统一拆分：Projection + Consume</h4>
+      <p>不再使用分裂的 <code>MultiHeadAttention</code> / <code>CachedGQA</code> 两个 op。</p>
+      <p>统一为两个语义操作：</p>
+    </section>
+    <section id="s-a-attentionprojection" data-section="null">
+      <h5>A. `AttentionProjection`</h5>
+      <p>```</p>
+      <p>input[seq, hidden] + Wq/Wk/Wv + PositionContract</p>
+      <p>    → QView[seq, q_dim]</p>
+      <p>    → KEmit[seq, kv_dim]</p>
+      <p>    → VEmit[seq, kv_dim]</p>
+      <p>    → KvAppendIntent</p>
+      <p>```</p>
+      <li>可选融合 RmsNorm</li>
+      <li>可选融合 RoPE（on-the-fly，不写回中间张量）</li>
+      <li><code>KvAppendIntent</code> 是副作用声明，不是强制 materialization</li>
+    </section>
+    <section id="s-b-attentionconsume" data-section="null">
+      <h5>B. `AttentionConsume`</h5>
+      <p>```</p>
+      <p>QView + KvView + AttentionSemantics</p>
+      <p>    → attn_out[seq, q_dim]</p>
+      <p>```</p>
+      <li>输入是 <code>KvView</code>，不是 dense K/V tensor</li>
+      <li>JIT 根据 <code>KvView</code> 变体生成不同访存逻辑</li>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>8.4 Prefill / Decode 双 Lowering</h4>
+      <p>共享同一 <code>AttentionSemantics</code>，lower 到不同执行计划：</p>
+      <p>```</p>
+      <p>                    AttentionSemantics</p>
+      <p>                          │</p>
+      <p>              ┌───────────┴───────────┐</p>
+      <p>              ▼                       ▼</p>
+      <p>      Prefill Lowering         Decode Lowering</p>
+      <p>              │                       │</p>
+      <p>    ┌─────────┴─────────┐   ┌────────┴────────┐</p>
+      <p>    │ DenseLocal KvView │   │ Persistent/Paged │</p>
+      <p>    │ Full-seq causal   │   │ KvView           │</p>
+      <p>    │ High throughput   │   │ Cached attention  │</p>
+      <p>    │ No cache read     │   │ Low latency      │</p>
+      <p>    └───────────────────┘   └─────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s-prefill-路径-零额外-kv-round-trip" data-section="null">
+      <h5>Prefill 路径（零额外 KV round-trip）</h5>
+      <p>1. <code>AttentionProjection</code> → Q, K, V（临时 buffer）</p>
+      <p>2. <code>AttentionConsume(Q, DenseLocal{K,V})</code> → attn_out</p>
+      <p>3. <strong>并行副作用</strong>: <code>KvAppend(K, V → persistent cache)</code></p>
+      <p>4. 后续 FFN</p>
+      <strong>关键</strong>: attention 直接消费临时 K/V，不经过 cache round-trip。
+    </section>
+    <section id="s-decode-路径-零-kv-重排" data-section="null">
+      <h5>Decode 路径（零 KV 重排）</h5>
+      <p>1. <code>AttentionProjection</code> → Q, K_new, V_new</p>
+      <p>2. <code>KvAppend(K_new, V_new → persistent cache)</code></p>
+      <p>3. <code>AttentionConsume(Q, PersistentKvView{cache})</code> → attn_out</p>
+      <p>4. 后续 FFN</p>
+      <strong>关键</strong>: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+    </section>
+    <section id="s8.5" data-section="8.5">
+      <h4>8.5 JIT + KV 融合边界</h4>
+    </section>
+    <section id="s-融合进-jit-的-kv-access-lowering" data-section="null">
+      <h5>融合进 JIT 的（KV Access Lowering）</h5>
+      <table>
+        <tr>
+          <th>融合项</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>stride addressing</td>
+        </tr>
+        <tr>
+          <td>根据 </td>
+          <td>KvLayoutContract</td>
+          <td> 生成 head/token/layer 索引</td>
+        </tr>
+        <tr>
+          <td>page lookup</td>
+        </tr>
+        <tr>
+          <td>根据 </td>
+          <td>PagedKvView</td>
+          <td> 生成 page table 查找</td>
+        </tr>
+        <tr>
+          <td>append window</td>
+        </tr>
+        <tr>
+          <td>将 append region 合并进可见窗口</td>
+        </tr>
+        <tr>
+          <td>static layout dispatch</td>
+        </tr>
+        <tr>
+          <td>根据 QuantType 生成载入指令</td>
+        </tr>
+        <tr>
+          <td>RoPE on-the-fly</td>
+        </tr>
+        <tr>
+          <td>根据 </td>
+          <td>PositionContract</td>
+          <td> 在消费时做旋转</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-不融合进-jit-的-保留在-engine-scheduler-层" data-section="null">
+      <h5>不融合进 JIT 的（保留在 Engine/Scheduler 层）</h5>
+      <table>
+        <tr>
+          <th>不融合项</th>
+        </tr>
+        <tr>
+          <td>归属层</td>
+        </tr>
+        <tr>
+          <td>page allocation / free</td>
+        </tr>
+        <tr>
+          <td>MemoryManager</td>
+        </tr>
+        <tr>
+          <td>swap / eviction</td>
+        </tr>
+        <tr>
+          <td>Scheduler</td>
+        </tr>
+        <tr>
+          <td>prefix dedup</td>
+        </tr>
+        <tr>
+          <td>KvPrefixIndex</td>
+        </tr>
+        <tr>
+          <td>request lifecycle</td>
+        </tr>
+        <tr>
+          <td>Executor</td>
+        </tr>
+        <tr>
+          <td>scheduling policy</td>
+        </tr>
+        <tr>
+          <td>PolicyEngine</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.6" data-section="8.6">
+      <h4>8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)</h4>
+      <strong>铁律</strong>: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+      <p>已修复路径 (2026-03-22)：</p>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>原违规操作</td>
+        </tr>
+        <tr>
+          <td>修复结果</td>
+        </tr>
+        <tr>
+          <td>GPU decode </td>
+          <td>jit_cached_attention</td>
+        </tr>
+        <tr>
+          <td>下载全量 KV → CPU CachedGQA</td>
+        </tr>
+        <tr>
+          <td>✅ 已改为 GPU native cached attention</td>
+        </tr>
+        <tr>
+          <td>GPU decode </td>
+          <td>download_kv_cache_to_host</td>
+        </tr>
+        <tr>
+          <td>每层下载 ~180MB KV 到 CPU</td>
+        </tr>
+        <tr>
+          <td>✅ 已删除，attention 直接读 GPU KV cache</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.7" data-section="8.7">
+      <h4>8.7 实现路线</h4>
+      <table>
+        <tr>
+          <th>阶段</th>
+        </tr>
+        <tr>
+          <td>内容</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>定义 5 个 core contract 类型</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>P0</td>
+        </tr>
+        <tr>
+          <td>GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>GPU decode: native cached attention kernel（消除 CPU round-trip）</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>P1</td>
+        </tr>
+        <tr>
+          <td>KvView lowering: JIT 直接消费 head-major cache</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <tr>
+          <td>RoPE on-the-fly: 消除 q_rope/k_rope 中间张量</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>P2</td>
+        </tr>
+        <tr>
+          <td>WeightView: GGUF/SafeTensors/ONNX 统一 view</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成</td>
+        </tr>
+        <tr>
+          <td>P3</td>
+        </tr>
+        <tr>
+          <td>PagedKvView: paged attention 原位访问</td>
+        </tr>
+        <tr>
+          <td>✅ 已完成 (2026-03-22)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.9" data-section="8.9">
+      <h4>8.9 (架构变迁) TurboQuant 静态阻塞规约 (ARCH-TQ-BLOCKING)</h4>
+      <p>&gt; <strong>关联</strong>: TurboQuant 架构, Zero-Overhead Memory Pool</p>
+      <p>&gt; <strong>状态</strong>: 已替代旧有的 DType-Aware 性能优化。</p>
+      <p>由于系统全面废除了多态的 <code>DType</code> 运行时分支，所有的 GEMM 阻塞 (Blocking) 逻辑（KC/MC/NC 计算）现在完全基于 <strong>硬件检测 (hw_constraints.rs)</strong> 和 <strong>TurboQuant 特化精度</strong>。</p>
+      <code>device_profile.rs:gemm_blocking()</code> 函数已退役。取而代之的是 <code>TurboQuant</code> 为 W4A4 和 W8A8 场景直接提供的硬连线 (hardwired) 最佳参数：
+      <li>不再包含关于 F16/BF16/F32 的 <code>elem_bytes</code> 动态除法</li>
+      <li>启发式缓存调优 (WisdomDb) 仅使用 <code>QuantConstraint</code> 作为主键查询</li>
+    </section>
+    <section id="s8.10" data-section="8.10">
+      <h4>8.10 GPU 数据通路优化 (ARCH-GPU-DATAPATH)</h4>
+      <p>&gt; <strong>状态</strong>: ✅ 已实现 (REQ-GPU-001~012 全部完成，见 SPEC/15-GPU-HOST-GLUE.md)</p>
+      <p>&gt; <strong>关联</strong>: Zero-Copy (Layer 4), ARCH-ATTN-UNIFIED (§8), <a href="http://08-EXECUTOR.md">08-EXECUTOR.md</a> §4 (Mega-Kernel)</p>
+      <p>&gt; <strong>动机</strong>: GPU 推理路径遵循 ARCH-RUST-IS-CODEGEN 铁律 — Rust 只在模型加载时做一次 JIT codegen + 权重上传，推理热路径 = 一次 GPU kernel launch。所有数据搬运（KV scatter、权重读取、KV cache merge）全部编译进 mega-kernel，不经过 Rust。</p>
+    </section>
+    <section id="s8.10.1" data-section="8.10.1">
+      <h5>8.10.1 核心原则</h5>
+      <p>```</p>
+      <p>┌─────────────────────────────────────────────────────────────────────────┐</p>
+      <p>│  ARCH-GPU-DATAPATH 铁律（Mega-Kernel 架构）                            │</p>
+      <p>│                                                                         │</p>
+      <p>│  ✅ 编译时: Rust 一次性完成 JIT codegen + 权重 htod 上传               │</p>
+      <p>│  ✅ 编译时: KV cache 偏移、权重偏移全部 bake 进 GPU kernel 代码        │</p>
+      <p>│  ✅ 推理时: 一次 GPU kernel launch 完成全部计算                        │</p>
+      <p>│  ✅ KV scatter / 权重读取 / KV cache merge 全部在 GPU kernel 内完成    │</p>
+      <p>│  ✅ Metal shared memory 路径直接指针写入，禁止中间 buffer               │</p>
+      <p>│  ✅ PagedKvView 三后端（CUDA/HIP/Metal）统一支持                       │</p>
+      <p>│                                                                         │</p>
+      <p>│  ❌ 禁止 Rust 在推理热路径中发起任何 GPU API 调用                     │</p>
+      <p>│  ❌ 禁止逐 token 逐 head 发起独立 DtoD API 调用                       │</p>
+      <p>│  ❌ 禁止每 step 重复 htod 上传不变的权重数据                           │</p>
+      <p>│  ❌ 禁止 Metal 路径分配中间 host buffer 做 dtoh→htod 转发              │</p>
+      <p>│  ❌ 禁止 Rust 层循环管理逐层 GPU 操作                                  │</p>
+      <p>└─────────────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s8.10.2" data-section="8.10.2">
+      <h5>8.10.2 GPU Mega-Kernel 编译时数据通路</h5>
+      <p>&gt; <strong>关联</strong>: <a href="http://08-EXECUTOR.md">08-EXECUTOR.md</a> §4.1.2 (Mega-Kernel 编译过程), §4.1.3 (MegaKernelFn ABI)</p>
+      <p>GPU mega-kernel 的编译过程与 CPU 共享相同的 auto_graph → CompilerGraph → Phase 0-3 管线。</p>
+      <p>差异仅在 Phase 3 codegen 生成 PTX/HIP/MSL 而非 x86_64/AArch64 机器码。</p>
+      <p>```</p>
+      <p>编译时 (Rust 活跃):</p>
+      <p>  1. 权重 pack → 连续 weight_blob (与 CPU 相同)</p>
+      <p>  2. weight_blob htod 上传到 GPU → weight_blob_gpu_ptr</p>
+      <p>  3. KV cache 在 GPU 分配 → kv_cache_gpu_ptr</p>
+      <p>  4. activation/scratchpad 在 GPU 分配 → activation_gpu_ptr</p>
+      <p>  5. JIT codegen → GPU kernel binary (PTX/HIP/MSL)</p>
+      <p>     ├── 所有权重偏移 bake 为 kernel 内立即数（与 CPU 相同）</p>
+      <p>     ├── KV cache 偏移 bake 为 kernel 内立即数</p>
+      <p>     ├── KV scatter 逻辑编译进 kernel（per-thread-block 散写）</p>
+      <p>     └── MoE expert 权重偏移 + routing 逻辑编译进 kernel</p>
+      <p>  6. cuModuleLoadData / hipModuleLoadData / MTLDevice.newLibrary</p>
+      <p>运行时 (Rust 不参与):</p>
+      <p>  一次 kernel launch:</p>
+      <p>    kernel&lt;&lt;&lt;grid, block, smem, stream&gt;&gt;&gt;(</p>
+      <p>      weight_blob_gpu_ptr,    // 全部权重（已常驻 GPU）</p>
+      <p>      kv_cache_gpu_ptr,       // KV cache（已常驻 GPU）</p>
+      <p>      activation_gpu_ptr,     // activation 双缓冲（已常驻 GPU）</p>
+      <p>      input_ids_ptr,          // prompt token IDs（GPU 端）</p>
+      <p>      positions_ptr,          // 位置数组（GPU 端）</p>
+      <p>      output_tokens_ptr,      // 输出 token 序列（GPU 端）</p>
+      <p>      temperature, top_k, top_p, max_new_tokens, eos_token_id,  // 采样参数</p>
+      <p>      hook_ctx_ptr,           // hook 上下文（无 hook 时 null）</p>
+      <p>      telemetry_ptr           // 遥测缓冲区</p>
+      <p>    )</p>
+      <p>  kernel 内部完成: 融合组序列（由图拓扑推导, SPEC/39 §1.3.2）→ 采样 → token→text → 循环</p>
+      <p>  kernel 返回后: output_tokens_ptr 中已有完整结果</p>
+      <p>```</p>
+    </section>
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.3" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-002" id="req-arch-002">8.10.3 GPU 权重管理 (REQ-ARCH-002)
+      <p>&gt; <strong>铁律</strong>: 权重在编译时一次性 htod 上传并常驻 GPU。推理热路径中 Rust 不发起任何权重传输操作。</p>
+      <strong>编译时权重布局</strong>:
+      <p>```</p>
+      <p>权重打包 (与 CPU 共享同一逻辑):</p>
+      <p>  weight_blob = [embed_weight | layer_0_attn_weights | layer_0_ffn_weights |</p>
+      <p>                 layer_1_attn_weights | layer_1_ffn_weights | ... | lm_head_weight]</p>
+      <p>  所有偏移在 JIT codegen 时 bake 进 GPU kernel 立即数</p>
+      <p>GPU 权重上传:</p>
+      <p>  编译时: weight_blob_cpu → htod → weight_blob_gpu (一次性)</p>
+      <p>  推理时: kernel 直接从 weight_blob_gpu 读取，无需任何 Rust 介入</p>
+      <p>显存预算控制:</p>
+      <li>小模型 (&lt; 2GB): 全量缓存</li>
+      <li>中模型 (2-8GB): 全量缓存（如果可用显存 &gt; 模型大小 × 2）</li>
+      <li>大模型 (&gt; 8GB): 按需分层加载（编译时按层 pack，运行时 kernel 按层读取）</li>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>REQ-ARCH-002 4 层物理架构 — Client→Engine→Scheduler→JIT 分层边界</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">架构自动检测实现完整</li>
+        <li id="id-2" data-criterion="2">Tensor-Name-Driven Graph Builder 正确</li>
+        <li id="id-3" data-criterion="3">ArchitectureFeatures 推导正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-002" data-test="TEST-ARCH-002" id="TEST-ARCH-002">TEST-ARCH-002: 架构自动检测测试<p>验证REQ-ARCH-002相关功能正确性</p>
+      <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
+      <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
+      <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.4" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-001" id="req-arch-001">8.10.4 KV Cache GPU 管理 (REQ-ARCH-001)
+      <p>&gt; <strong>铁律</strong>: KV cache 在编译时在 GPU 分配。KV scatter/merge 全部在 GPU kernel 内完成。Rust 不参与。</p>
+      <p>```</p>
+      <p>编译时:</p>
+      <p>  kv_cache_gpu = cuMemAlloc / hipMalloc / MTLDevice.newBuffer</p>
+      <p>  每层 KV 偏移 bake 进 kernel 立即数</p>
+      <p>  page_table (paged attention) 在 GPU 分配</p>
+      <p>GPU Kernel 内部 KV 操作:</p>
+      <p>  Prefill: QKV projection → KV scatter write → attention (一次 kernel 完成)</p>
+      <p>  Decode:  QKV projection → KV append → merge history KV → attention (一次 kernel 完成)</p>
+      <p>  Paged:   page_table lookup → gather K/V from physical pages → attention (一次 kernel 完成)</p>
+      <p>三后端统一:</p>
+      <p>  CUDA: cuMemAlloc + cuLaunchKernel + PTX codegen</p>
+      <p>  HIP:  hipMalloc + hipLaunchKernel + AMDGPU codegen</p>
+      <p>  Metal: MTLDevice.newBuffer + MTLCommandBuffer + MSL codegen</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>REQ-ARCH-001 JIT 编译器四阶段管线 — Scalar→SymExec→Fusion→ISA Lowering</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">架构自动检测实现完整</li>
+        <li id="id-2" data-criterion="2">Tensor-Name-Driven Graph Builder 正确</li>
+        <li id="id-3" data-criterion="3">ArchitectureFeatures 推导正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-001" data-test="TEST-ARCH-001" id="TEST-ARCH-001">TEST-ARCH-001: 架构自动检测测试<p>验证REQ-ARCH-001相关功能正确性</p>
+      <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
+      <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
+      <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.5" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-003" id="req-arch-003">8.10.5 Metal KV 直写 (REQ-ARCH-003)
+      <p>Metal 使用 unified memory (shared memory)，KV cache 的 CPU/GPU 指针相同。</p>
+      <p>Mega-kernel 编译时直接使用该指针，无中间 buffer。</p>
+      <p>```</p>
+      <p>编译时:</p>
+      <p>  kv_cache_metal = MTLDevice.newBuffer(size, .storageModeShared)</p>
+      <p>  kv_ptr = kv_cache_metal.contents()  // CPU 和 GPU 共享同一指针</p>
+      <p>  bake kv_ptr 进 kernel 立即数</p>
+      <p>运行时: kernel 直接读写 kv_ptr，零额外传输</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>REQ-ARCH-003 禁止引入外部推理引擎/算法库 — 全部 JIT 自主实现</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">架构自动检测实现完整</li>
+        <li id="id-2" data-criterion="2">Tensor-Name-Driven Graph Builder 正确</li>
+        <li id="id-3" data-criterion="3">ArchitectureFeatures 推导正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-003" data-test="TEST-ARCH-003" id="TEST-ARCH-003">TEST-ARCH-003: 架构自动检测测试<p>验证REQ-ARCH-003相关功能正确性</p>
+      <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
+      <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
+      <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.6" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-004" id="req-arch-004">8.10.6 PagedKvView 三后端统一 (REQ-ARCH-004)
+      <p>Paged attention 的 page_table 管理在编译时由 Rust 构建，上传到 GPU 后 bake 进 kernel。</p>
+      <p>Kernel 内部通过 page_table 查找物理页面地址，不经过 Rust。</p>
+      <p>```</p>
+      <p>编译时:</p>
+      <p>  page_table = build_page_table(request_ids)  // Rust 构建</p>
+      <p>  page_table_gpu = htod(page_table)           // 上传到 GPU</p>
+      <p>  bake page_table_gpu ptr 进 kernel</p>
+      <p>运行时: kernel 内部 page lookup → gather K/V → attention</p>
+      <p>CUDA:</p>
+      <p>  gpu_alloc_paged_kv_cache → cuMemAlloc</p>
+      <p>  gpu_upload_page_table → cuMemcpyHtoD (编译时一次性)</p>
+      <p>  KV scatter: kernel 内 per-thread-block DtoD</p>
+      <p>HIP:</p>
+      <p>  gpu_alloc_paged_kv_cache_hip → hipMalloc</p>
+      <p>  gpu_upload_page_table_hip → hipMemcpyHtoD (编译时一次性)</p>
+      <p>  KV scatter: kernel 内 per-workgroup DtoD</p>
+      <p>Metal:</p>
+      <p>  metal_alloc_paged_kv_cache → MTLDevice.newBuffer (.storageModeShared)</p>
+      <p>  page_table: 直接 memcpy 到 shared buffer (编译时一次性)</p>
+      <p>  KV scatter: kernel 内直接 shared memory 指针写入</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>REQ-ARCH-004 Rust = 代码生成器 — 推理阶段一次 CALL 完成全部计算</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">架构自动检测实现完整</li>
+        <li id="id-2" data-criterion="2">Tensor-Name-Driven Graph Builder 正确</li>
+        <li id="id-3" data-criterion="3">ArchitectureFeatures 推导正确</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      
+      
+      </a></div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-004" data-test="TEST-ARCH-004" id="TEST-ARCH-004">TEST-ARCH-004: 架构自动检测测试<p>验证REQ-ARCH-004相关功能正确性</p>
+      <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
+      <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
+      <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+    <section id="s8.10.7" data-section="8.10.7">
+      <h5>8.10.7 依赖关系</h5>
+      <p>```</p>
+      <p>REQ-ARCH-004 (KV Scatter) ← 无依赖，可立即开始</p>
+      <p>REQ-ARCH-005 (权重缓存)   ← 无依赖，可与 004 并行</p>
+      <p>REQ-ARCH-006 (Metal 直写) ← 无依赖，可并行</p>
+      <p>REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kernel）</p>
+      <p>```</p>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>§9 大一统 JIT 底层物理架构 (ARCH-MEGA-KERNEL)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>定位</strong>: 定义 gllm 极端的 "Zero-Overhead Freeloading" 底层物理法则，作为所有后端执行器的最终约束（SSOT）。</p>
+      <p>&gt; <strong>核心哲学</strong>: JIT 编译只在模型加载与 Autotuning 期发生。推理热路径绝无任何编译机制。</p>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>9.1 Mega-Kernel 块级路由 (In-Kernel Dispatch)</h4>
+      <strong>问题</strong>: 应对大并发下的请求形态分歧（如稀疏/稠密差异），传统引擎依赖控制流引发分支预测惩罚或多次 Kernel Launch。
+      <strong>铁律约束</strong>:
+      <li><strong>仅发射单一内核</strong>: 每一轮 Decode 或 Chunked Prefill，全系统 <strong>仅 Launch 唯一一个 Mega-Kernel</strong>。</li>
+      <li><strong>取消主机条件网</strong>: 禁止在主机侧 (CPU Host) 为 <code>Gate-First-Skip</code> 等建立多线程路调度。</li>
+      <li><strong>块内联路</strong>: SM 核心内的 Thread Block 直接读取 <code>Request_State_Table</code>。条件不满足时，不破坏控制流掩码，直接在 <code>Shared Memory</code> / 寄存器堆通过向量外设掩码（AVX512 <code>vcompress</code> / GPU <code>Prefix Sum</code>）执行<strong>物理挤压聚拢 (Ragged Tensor Compaction)</strong>。</li>
+      <li><strong>Compact→Execute→Scatter 三段式循环</strong>: 挤压聚拢仅仅是第一步（Compact）。在没有 Padding 气泡的连续稠密矩阵中执行完核函数运算后（Execute），必须<strong>按原始 Request 偏移进行原位散射回写（Scatter）</strong>，还原到初始 Batch 位置。整个 Compact→Execute→Scatter 流程在单次 Kernel Launch 内闭环。</li>
+      <li><strong>值域隔离的分组防线 (Range-Aware Compact Grouping)</strong>: 针对极低精度（如 W4A4）下的跨请求数值污染风险，Compact 过程<strong>严禁单纯按 Batch 顺序挤压</strong>。必须利用 §9.5 尾段观测白嫖到的 <code>Entropy</code> 和 <code>Residual Delta</code> 指标，在挤压时将激活值域（Activation Range）相近的请求聚集在同一 GEMM Tile 内。值域悬殊的请求互相物理隔离，防止小信号被大信号的量化噪声静默吞噬，确保 4-bit 有效精度刃尽其用。</li>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2 全域热修补 (Global Consensus Hot JMP Patching)</h4>
+      <strong>问题</strong>: 针对无法通过掩码消除的系统级静滞期（如死寂的冷板凳 MoE 专家，极长的系统前缀树）。
+      <strong>铁律约束</strong>:
+      <li><strong>JIT Director Daemon（后台长臂监控器）</strong>: 后台常驻纯 Rust <code>JIT Director Daemon</code> 线程。定期无损挂载扫描全体 KV Page Headers（被 §9.5 Epilogue 白嫖写入的 telemetry 数据）。利用**半衰期积分池（Decaying Reservoir）<strong>平滑指标变异，配合</strong>卡尔曼平滑器（Kalman Limiters）**在数十万 Token 级别的长尾维度上判定是否达成全局共识不可逆突变（如注意力持续数百个 Batch 趋近静默态、冷专家百万 Token 零命中等）。</li>
+      <li><strong>Trampolines 占位符</strong>: 运行期代码块固定留有 <code>NOP Slide</code> / <code>jmp</code> 占位，分支预测开销为 0。</li>
+      <li><strong>原子覆盖</strong>: 捕获全域共识不可逆突变后，后台在沙盒完成验证并计算新指令绝对偏移量。主系统调用原子写操作（Atomic Overwrite），将 <code>.text</code> 执行内存段上的 5-bytes 长 <code>jmp</code> 立刻热覆盖到新入口，瞬时重构拓扑图（Graph Collapsing/DCE）。整个推理流水线在毫无波澜的一瞬间完成全局拓扑坍缩重构。</li>
+    </section>
+    <section id="s9.3" data-section="9.3">
+      <h4>9.3 残差数据总线物理结构 (The Residual Bus Injection)</h4>
+      <strong>定论</strong>: 残差流 <code>x_out = x_in + Layer(x_in)</code> 必须被编译器重构为一条开放的 <strong>插入端口 (Injection Port)</strong> 与 <strong>召回端口 (Recall Port)</strong>，彻底放开 Transformer 第一性原理。
+      <li><strong>晚期知识融合 (Late-Fusion RAG)</strong>: 外部大体量检索向量可通过指定的锚点直接使用极速的 <code>Vector Add</code> 指令汇编 <code>LDG.E</code> 植入到特定语义深处，拒绝自前置 Embedding 的无效算力爬行。</li>
+      <li><strong>投机截断与通用降维 (Early-Exit &amp; Intent NLU)</strong>: </li>
+      <li>允许在中间层挂载微型 <code>lm_head</code>。概率逼近阈值时直接抛出拦截信标截断计算。</li>
+      <li>支持 <code>Pure_Decode</code> API 模式运行。模型仅提取语义核心区残差特征，化身为超高速多意图识别神塔。</li>
+      <li><strong>零延迟飞行护栏 (In-Flight Guardrail)</strong>: 利用附加极简线性分类探针（Micro Probe）寄生挂载，进行安全护栏瞬时探测。一旦探测到风险特征越过 <code>HaltAndVeto</code> 阈值，Mega-Kernel 在生成下一个 Token 前当场物理切断（Amputate) 熔断管线。</li>
+    </section>
+    <section id="s9.4" data-section="9.4">
+      <h4>9.4 纯逻辑专家解绑与零卡顿置换 (Extreme MoE Disaggregation)</h4>
+      <strong>铁律约束</strong>:
+      <li><strong>核内分发与零启动开销</strong>: 绝不去启动子 Kernel。Thread Block 利用内置字典读取 Gate 路由，汇编内部 <code>jmp</code> 直接跃迁到对应专家的权重读取区。</li>
+      <li><strong>异步预取掩蔽</strong>: 基于 TurboQuant（4-bit 以下压制），系统利用 <code>cuMemPrefetchAsync</code> 将低频/离线专家的高速预取时间通过计算流水完美掩蔽。</li>
+      <li><strong>去优化退回陷阱 (De-optimization Bailout)</strong>: 针对被热修补判定剔除的死寂专家，插入“去优化处理惩罚极 (Uncommon Trap)”。若突遭访问，触发错误的 Thread Block 仅向显存写入 <code>DEOPT_REQUEST</code> 并自觉挂起（不破坏其余请求）。主机发现异常后微冻结管线，唤回权重并单独重放。这用万分之一的局部挂起代价换取平稳期的全域零开销。</li>
+    </section>
+    <section id="s9.5" data-section="9.5">
+      <h4>9.5 尾段就地观测 (Zero-Copy Paged Telemetry)</h4>
+      <li><strong>绝对零数据搬移</strong>: <strong>严禁</strong> 在热路径外由 CPU 启动独立的轮询队列或配置无锁环形队列 (RingBuffer) 同步观测指标。</li>
+      <li><strong>后置收集 (Epilogue Instrumentation)</strong>: 必须在 RmsNorm / Softmax 网尾层级的底层 PTX/ASM 尾段，捎带计算出该 Batch 的 <code>系统熵 (Entropy)</code>、<code>概率质心 (Centroid)</code>、<code>跨层能量差 (Residual Delta)</code>。</li>
+      <li><strong>页头常驻 (In-Place Memory Paging)</strong>: 所有的探视信息伴随原流水线写入 KV Cache 时，直接利用普通内存存储指令（<code>STG</code>）刻入 Token 闲置的物理块头 (Header Padding)，让宿主机使用无感后台低频轮询机制进行拾取。</li>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>§10 Chunked Prefill 无限上下文支撑架构 (ARCH-CHUNKED-PREFILL)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: 本文档 §12.6 (MicroArch-to-IR), <a href="http://hgal-scheduler-algorithm.md">hgal-scheduler-algorithm.md</a> §8.1</p>
+      <p>&gt; <strong>核心使命</strong>: 让系统能够处理几乎无限大的上下文（10M+ Context），同时保持 Decode 请求的零等待延迟。</p>
+    </section>
+    <section id="s10.1" data-section="10.1">
+      <h4>10.1 基于请求形态的交织调度 (Interleaved SEQ-Aware Scheduling)</h4>
+      <p>传统 Continuous Batching 将 Prefill（<code>SEQ &gt; 1</code> 的长序列填充）与 Decode（<code>SEQ = 1</code> 的逐字生成）进行阶段隔离，导致：</p>
+      <li>GPU 利用率方差达 35%（Memory Bound vs Compute Bound 交替）</li>
+      <li>Decode 请求必须等待长文本 Prefill 完成（Tail Latency 恶化至 ~200ms P99）</li>
+      <strong>Gllm 的破局法则</strong>：将无限大的 Prefill 长文强制切成固定大小的物理切片（Chunk），与 Decode Token 交织塞进同一个 Batch，<strong>解码请求永远零等待</strong>。
+      <li><strong>精度的物理隔离壁 (Attention Phase Isolation)</strong>：Prefill Chunk 的 Softmax 分布相对平坦，而 Decode Token 的 Softmax 高度尖锐。在极低精度下，这两种注意力分布模式在同一 Shared Memory 中计算会发生严重的精度交叉污染。因此，<strong>在 Attention 阶段，Prefill Chunk 和 Decode Token 必须被物理分轨调度到不同的 Thread Block 组和 SMEM 分区执行</strong>（复用 §12.7 的 Fat-Binary 跳表实现零开销切换）。FFN 阶段因无分布敏感性允许合流。</li>
+      <p>```</p>
+      <p>Chunked 调度（交织）:</p>
+      <p>┌─────────────────────────────────────────────────────────────┐</p>
+      <p>│ Batch 1:                                                    │</p>
+      <p>│   [Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1,      │</p>
+      <p>│    Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1]      │</p>
+      <p>│    ↑ Chunk 1       ↑ Decode 插槽 (优先)    ↑ Chunk 2        │</p>
+      <p>└─────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s10.2" data-section="10.2">
+      <h4>10.2 切分策略</h4>
+      <table>
+        <tr>
+          <th>策略</th>
+        </tr>
+        <tr>
+          <td>Chunk Size</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>固定切分</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>64/128 tokens</td>
+        </tr>
+        <tr>
+          <td>通用场景</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>自适应切分</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>根据内存压力动态调整</td>
+        </tr>
+        <tr>
+          <td>显存受限</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>优先级切分</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>高优先级请求更大 Chunk</td>
+        </tr>
+        <tr>
+          <td>SLA 保障</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10.3" data-section="10.3">
+      <h4>10.3 调度流程</h4>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>操作</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>收集 Decode 请求</td>
+        </tr>
+        <tr>
+          <td>填充 decode_slots 直到达到配置上限</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>计算剩余预算</td>
+        </tr>
+        <tr>
+          <td>remaining_budget = max_tokens - decode_tokens</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>填入 Prefill Chunk</td>
+        </tr>
+        <tr>
+          <td>从 prefill_queue 取出请求，按 chunk_size 切分</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>更新请求进度</td>
+        </tr>
+        <tr>
+          <td>完成的 Chunk 从 pending 减少</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>请求状态转换</td>
+        </tr>
+        <tr>
+          <td>Prefill 完成后转为 Decode 请求</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10.4" data-section="10.4">
+      <h4>10.4 SplitFuse 废弃声明</h4>
+      <p>&gt; <strong>⛔ REQ-SCHED-007</strong>: SplitFuse 混批路径已被永久移除。不再支持拆分 QKV 与 Attention 融合的畸形计算流。<code>enable_splitfuse</code> 配置字段已弃用并锁定为 <code>false</code>。</p>
+    </section>
+    <section id="s10.5" data-section="10.5">
+      <h4>10.5 验收指标</h4>
+      <table>
+        <tr>
+          <th>指标</th>
+        </tr>
+        <tr>
+          <td>目标值</td>
+        </tr>
+        <tr>
+          <td>测量方法</td>
+        </tr>
+        <tr>
+          <td>Tail Latency (P99)</td>
+        </tr>
+        <tr>
+          <td>&lt; 50ms</td>
+        </tr>
+        <tr>
+          <td>混合负载测试</td>
+        </tr>
+        <tr>
+          <td>GPU 利用率方差</td>
+        </tr>
+        <tr>
+          <td>&lt; 15%</td>
+        </tr>
+        <tr>
+          <td>性能监控</td>
+        </tr>
+        <tr>
+          <td>吞吐提升</td>
+        </tr>
+        <tr>
+          <td>+30-50%</td>
+        </tr>
+        <tr>
+          <td>对比纯 Decode Batch</td>
+        </tr>
+        <tr>
+          <td>内存开销</td>
+        </tr>
+        <tr>
+          <td>&lt; 5% 额外</td>
+        </tr>
+        <tr>
+          <td>显存监控</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>§11 TurboQuant 2.0 运行时数学精度优化体系 (ARCH-TURBOQUANT)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: 本文档 §11 TurboQuant, <a href="http://ai-development-guideline.md">ai-development-guideline.md</a> §1, <a href="http://hgal-scheduler-algorithm.md">hgal-scheduler-algorithm.md</a> §3.3</p>
+      <p>&gt; <strong>学术依据</strong>: SpinQuant (ICLR 2025), KurTail (2025), QuIP# (ICML 2024), RaBitQ (SIGMOD 2024), KIVI</p>
+      <p>&gt; <strong>核心哲学</strong>: "无损"不是"权重逼近原值"，而是"推理过程中内积/输出的期望与全精度一致"。TurboQuant 是 gllm 在前向传播中执行的一组运行时数学优化，通过在线旋转、非对称 KV 量化、无偏修正等手段，使推理精度在任意量化权重格式上逼近数学无损。</p>
+      <p>&gt; <strong>定位</strong>: gllm 加载 SafeTensors/GGUF/ONNX 全格式权重，TurboQuant 优化推理过程本身——不管权重来自哪里，不管权重用什么工具量化的。</p>
+    </section>
+    <section id="s11.1" data-section="11.1">
+      <h4>11.1 在线旋转插入点 (Online FWHT Insertion Points)</h4>
+      <p>前向传播中存在 3 个非线性边界（Softmax、SwiGLU 门控乘法、RoPE），旋转变换无法穿越这些非线性层，必须在运行时执行 Fast Walsh-Hadamard Transform (FWHT)。与 Mega-Kernel 铁律完全兼容: 不增加新的 Kernel Launch（内联在 Mega-Kernel 指令流中），不引入 if-else 分支（FWHT 是固定指令序列），复杂度 $O(d \log d)$ 远低于 GEMM 的 $O(d^2)$。</p>
+      <table>
+        <tr>
+          <th>位置</th>
+        </tr>
+        <tr>
+          <td>Mega-Kernel 阶段</td>
+        </tr>
+        <tr>
+          <td>白嫖路径</td>
+        </tr>
+        <tr>
+          <td>Softmax(QK^T) V 输出之后</td>
+        </tr>
+        <tr>
+          <td>Attention Epilogue 尾段内联</td>
+        </tr>
+        <tr>
+          <td>数据在寄存器/SMEM，无额外全局内存读写。$R^T$ 已离线吸收进 $W_o$</td>
+        </tr>
+        <tr>
+          <td>SwiGLU(Gate) Up 输出之后</td>
+        </tr>
+        <tr>
+          <td>FFN 中间态 Epilogue 内联</td>
+        </tr>
+        <tr>
+          <td>数据在寄存器。$R^T$ 已离线吸收进 $W_{down}$</td>
+        </tr>
+        <tr>
+          <td>RoPE(K) 存入 KV Cache 之前</td>
+        </tr>
+        <tr>
+          <td>KV Write 阶段内联</td>
+        </tr>
+        <tr>
+          <td>与 Epilogue Zero-Copy Paged Header Write 共享同一条 STG 指令流</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.2" data-section="11.2">
+      <h4>11.2 KV Cache 非对称量化 (Asymmetric KV Quantization)</h4>
+      <p>基于 KIVI/KVQuant 研究: Key 和 Value 的离群点分布特性截然不同。</p>
+      <strong>Attention Sink 保护</strong>: 前 $N$ 个 Token（默认 $N=4$）保留 FP16 全精度。Sink 判定从 Epilogue Telemetry 的 Entropy/Centroid 数据推导，无需新增探测代码。
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>离群点特征</td>
+        </tr>
+        <tr>
+          <td>量化粒度</td>
+        </tr>
+        <tr>
+          <td>Scale 来源</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Key Cache</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>集中在特定通道（跨 Token 稳定）</td>
+        </tr>
+        <tr>
+          <td>Per-Channel</td>
+        </tr>
+        <tr>
+          <td>离线校准常数（零运行时开销）</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Value Cache</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>集中在特定 Token（跨通道稳定）</td>
+        </tr>
+        <tr>
+          <td>Per-Token</td>
+        </tr>
+        <tr>
+          <td>KV 写入时寄存器内 reduce_max</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.3" data-section="11.3">
+      <h4>11.3 无偏性保证 (Unbiased Inner Product Estimation)</h4>
+      <p>受 RaBitQ (SIGMOD 2024) 启发，在 Attention $QK^T$ 计算中引入修正因子: $\widehat{QK^T} = QK^T_{quant} \cdot C_1 + C_0$。</p>
+      <li>$|v|$（修正因子输入）: 从 RMSNorm 免费白嫖，$|v| = \text{RMS} \cdot \sqrt{d}$</li>
+      <li>量化前后内积: 在量化循环中追加 1 条 FMA 指令</li>
+      <li>理论误差界: $O(1/\sqrt{D})$。$D=4096$ 时约 $1.5%$，$D=8192$ 时约 $1.1%$</li>
+    </section>
+    <section id="s11.4" data-section="11.4">
+      <h4>11.4 白嫖全景与运行时净开销 (Freeloading Summary)</h4>
+      <p>gllm 在推理过程中执行的全部 TurboQuant 运算及其净开销：</p>
+      <strong>结论</strong>: TurboQuant 的全部运行时开销 = 3 个在线 FWHT（每个 $O(d\log d)$）+ 每层若干条 max/FMA 指令。其余全部被 Mega-Kernel 的 Epilogue 白嫖基础设施吃掉。
+      <table>
+        <tr>
+          <th>运算</th>
+        </tr>
+        <tr>
+          <td>白嫖来源</td>
+        </tr>
+        <tr>
+          <td>净开销</td>
+        </tr>
+        <tr>
+          <td>Group Scale 计算</td>
+        </tr>
+        <tr>
+          <td>RMSNorm 规约尾段追加 max</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>2-4 条指令/层</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Attention 后 FWHT</td>
+        </tr>
+        <tr>
+          <td>Attention Epilogue 内联</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>$O(d\log d)$ 算术</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU 后 FWHT</td>
+        </tr>
+        <tr>
+          <td>FFN Epilogue 内联</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>$O(d\log d)$ 算术</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>KV Cache 写入 K 旋转</td>
+        </tr>
+        <tr>
+          <td>KV Write 阶段内联</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>$O(d\log d)$ 算术</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>KV Cache V per-token scale</td>
+        </tr>
+        <tr>
+          <td>KV 写入时寄存器内 reduce_max</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>极低</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RaBitQ 修正因子</td>
+        </tr>
+        <tr>
+          <td>RMSNorm 范数 + FMA</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>1 条 FMA</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Sink Token 检测</td>
+        </tr>
+        <tr>
+          <td>Epilogue Entropy/Centroid</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>零</td>
+          <td></td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11.5" data-section="11.5">
+      <h4>11.5 双轨显存池 (The Dual-Track Memory Pool)</h4>
+      <p>重构 <code>KvCacheConfig</code>，全面淘汰 <code>dtype_size</code>。由 <code>GlobalMemoryManager</code> 申请物理隔离的两轨架构:</p>
+      <strong>多卡同步红利</strong>: PCIe Swap 和跨卡 RDMA 同步 KV 时，仅需传输原 FP16 内存量纲的 25%（4x 压缩），突破总线墙。
+      <table>
+        <tr>
+          <th>轨道</th>
+        </tr>
+        <tr>
+          <td>物理精度</td>
+        </tr>
+        <tr>
+          <td>职能</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>主池</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>极低精度 (3-4bit)</td>
+        </tr>
+        <tr>
+          <td>组级缩放由 Epilogue 快递，KV 按 11.2 非对称量化</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>校验池 (QJL)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>1-bit</td>
+        </tr>
+        <tr>
+          <td>XNOR 残差掩码阵列</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12" data-section="12">
+      <h3>§12 空间异构流派与动态块式计算图 (ARCH-SPATIAL-DISAGGREGATION)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: 会话 6e743114 §14</p>
+      <p>&gt; <strong>核心使命</strong>: 解决大吞吐量下，个体动态分歧与 Batch 同步执行的木桶效应。</p>
+    </section>
+    <section id="s12.1" data-section="12.1">
+      <h4>12.1 核心维度的空间异构流片 (Sub-Batching by Graph Shape)</h4>
+      <p>不同的 CPU/GPU 核心（Cores / SMs）物理分区，同时运行着<strong>不同拓扑结构的 JIT 图</strong>：</p>
+      <p>1. <strong>零散归类 (Sub-Batching)</strong>: 调度器发现本批 128 个请求中：60 个可跳过注意力（Shape A），30 个死神经元走 INT8 窄网（Shape B），38 个需完整 FP16 密集网络（Shape C）</p>
+      <p>2. <strong>多流分发 (Multi-Stream Spatial Dispatch)</strong>: 不再取最坏形状统一掩码，而是切割为三个子批次，并行发射到不同硬件分片</p>
+      <p>3. <strong>硬件资源软分区 (Software-Defined Core Partitions)</strong>:</p>
+      <li><strong>GPU 端</strong>: JIT 代码生成时锁死 <code>gridDim</code> 与 <code>Block Size</code>，强制 Shape A 的 Kernel 只占用 SM[0-15]，Shape B 占用 SM[16-40]，Shape C 占用 SM[41-80]。共享 L2 和显存带宽，互不卡脖</li>
+      <li><strong>CPU 端</strong>: 利用 <code>NUMA Node / Core Affinity</code> 绑核。AMX 核心处理密集计算，AVX 核心处理低精度稀疏映射</li>
+    </section>
+    <section id="s12.2" data-section="12.2">
+      <h4>12.2 兜底回收 (Residual Compaction &amp; Predication)</h4>
+      <p>当零碎请求不足以构成独立 Sub-Batch（如某形状仅 2 个单孤 Token），回退到：</p>
+      <li><strong>动态张量紧凑重排 (Ragged Compaction)</strong>: <code>vcompress</code> / Warp Prefix Sum</li>
+      <li><strong>硬件谓词掩码 (Predicate K-mask)</strong>: 保持完整控制流用掩码位强行断电</li>
+      <strong>"小差异合流兜底、大分层异构分治、长尾期修补坍缩"</strong> —— 这种三位一体的体系彻底补齐了 Gllm 面对百万级动态上下文（10M Context）+ 数百路并发时，算力无法充分释放的理论死角。
+    </section>
+    <section id="s12.4" data-section="12.4">
+      <h4>12.4 硬件感知型黄金装筒规则 (Hardware-Aware Shape Bucketing)</h4>
+      <p>这是动态图形状隔离的“第一起因（First Cause）”，定义了系统如何根据不同的 <strong>SEQ（上下文长度）</strong> 或者 <strong>异构请求状态</strong> 生成<strong>最佳集中性能状态图</strong>：</p>
+      <li><strong>底层时滞与拓扑探测 (Hardware Telemetry Probing)</strong>：</li>
+      <p>    在 Load-Time（模型加载阶段）与 Autotuning 期间，<strong>严禁</strong>预设死板的数组（如 <code>[128, 512, 1024, 2048]</code>）作为 JIT 的静态 Bucket。</p>
+      <p>    系统必须依靠真实的“底层时滞探测器（Latency Probes）”测定在当前微架构（如 Ada Lovelace 或 Zen4）上：</p>
+      <li>寄存器堆何时开始溢出 (Spilling out points)</li>
+      <li>共享内存 (SMEM) 的满载率与占用悬崖 (Occupancy Cliffs)</li>
+      <li>L2 缓存 Thrashing 阈值</li>
+      <li><strong>物理资源的离散塌缩 (State Graph Concentrating)</strong>：</li>
+      <p>    由探测器探出的物理拐点圈定出仅有的几档“黄金尺寸”（Golden Sizes，例如针对某模型/显卡，探测出的最佳分桶刚好是 112、463 和 1011）。对于推理期任意连续离散的 SEQ 长度，系统不再在运行期进行软路由判断或全尺寸 JIT 编译，而是将这些差异化请求<strong>全部强行映射/塌缩</strong>到这几张 <strong>只针对该硬件表现为“满血最佳集中性能”的静态 JIT 状态图</strong> 上。</p>
+      <li><strong>零退化原则 (Zero-Padding Degradation)</strong>：</li>
+      <p>    当实际请求长度与“黄金尺寸”产生部分空隙时，<strong>坚决禁止</strong>使用低效的 Padding 补零机制（如为了对齐 128 强行补零，废算无效 FLOPs）。</p>
+      <p>    必须依靠 §12.2 定义的张量物理挤压（Ragged Compaction，如 <code>vcompress</code> 或 Warp Prefix Sum）以及硬件控制流谓词（Predicate K-mask），实现完全 0 周期浪费的“真填满”，确保生成的 Kernel 永远呈现 100% 寄存器命中率与管线吞吐率。</p>
+      <li><strong>运行时装筒热演化 (Runtime Bucket Evolution)</strong>：</li>
+      <p>    黄金装筒绝非 Load-Time 的静态死水。JIT Director Daemon 必须持续观测流量的 SEQ 分布直方图。如果负载发生时段性偏移，大量请求密集落在现有 Bucket 的缝隙中（导致挤压也无法挽回物理层面的微观浪费），JIT Director 允许在后台沙盒中<strong>即时编译新的中间态 Bucket 变体（如 Bucket-96）</strong>。编译完成后利用 §9.2 的原子覆写机制热插入跳表，并在 L1i 缓存重排中淘汰命中率 &lt; 0.1% 的僵尸 Bucket。实现运行时无停机演化。</p>
+    </section>
+    <section id="s12.5" data-section="12.5">
+      <h4>12.5 JIT 硅晶指令深层映射原则 (Silicon-Level Instruction Mapping)</h4>
+      <p>全世代硬件能力（REQ-HARDWARE-SENSORS）不仅仅是调度约束，更必须下沉入 JIT Mega-Kernel 的汇编强映射：</p>
+      <li><strong>x86/ARM 脉络 (Vectors &amp; Converged Cores)</strong></li>
+      <li><strong>AVX10 P/E 收敛映射</strong>: 面对 AVX10.1/10.2 混合大小核架构，JIT 必须探明 <code>256-bit Converged Vector</code> 屏障。在调度 E-Core 时，物理寄存器切片图自动塌缩至 256 宽，同时利用 <code>vp2intersect</code> 指令无缝下发稀疏张量的交叉表。</li>
+      <li><strong>AVX512 极限物理挤压</strong>: 上述文的张量挤压（Ragged Compaction）在 x86 必须翻译为 <code>vcompress</code> 系列指令；利用全量的 31 个通用寄存器 (APX) 彻底消灭内循环的 Spilling 行为。</li>
+      <li><strong>NVIDIA GPU 脉络 (Hopper/Blackwell Evolution)</strong></li>
+      <li><strong>Hopper (SM90) 内存墙突围</strong>: 绝对禁止使用传统 <code>LDG</code> 执行 KV Cache 离散读取！JIT 代码必须生成 <code>TMA (Tensor Memory Accelerator)</code> 配置包，并结合 <code>WGMMA</code> 与 <code>cuda::barrier</code> 实现生产者-消费者（Thread Block Cluster）内存直接多播传输（L2 mcast）。</li>
+      <li><strong>Blackwell (SM100) 精度原生力</strong>: 针对 W4A4 / W4A8 TurboQuant 适配，编译器直写针对 <code>FP4 / FP6 Native Tension</code> 优化的 MMA 汇编指令，抛弃任何高精度的模拟或溢出防范开销，发挥 Block Scale 底层机制的最大吞吐。</li>
+      <li><strong>AMD GPU 脉络 (CDNA)</strong></li>
+      <li>利用 CDNA3 管线的 XCD/GCD 拓扑屏障，确立本地物理隔离。配合内置的 <code>WMMA</code> 指令进行张量吞吐提速。</li>
+    </section>
+    <section id="s12.6" data-section="12.6">
+      <h4>12.6 硬件探测→IR 强约束变量体系 (MicroArch-to-IR Constraints)</h4>
+      <p>&gt; <strong>关联</strong>: 本文档 §12 硬件探测, resolved.10 §2.2</p>
+      <p>&gt; <strong>核心法则</strong>: 废弃散乱的指令集条件判断。所有加载期的硬件探测结果必须严格坍缩为对底层 JIT 编译器的 <strong>强数学约束变量组（Compiler Constraints）</strong>，确保 JIT 逻辑与物理实体芯片解耦。</p>
+    </section>
+    <section id="s-物理传感器指标" data-section="null">
+      <h5>物理传感器指标</h5>
+      <table>
+        <tr>
+          <th>传感器类目</th>
+        </tr>
+        <tr>
+          <td>探测项</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>缓存与拓扑</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>L1i</td>
+          <td> (指令缓存大小)</td>
+        </tr>
+        <tr>
+          <td>防止大 Bucket (如 </td>
+          <td>seq=1024</td>
+          <td>) 的指令平铺导致 L1i 缓存颠簸。触达 </td>
+          <td>l1i_size * 0.8</td>
+          <td> 时 JIT 退化为 </td>
+          <td>jmp</td>
+        </tr>
+        <tr>
+          <td>L2_Cache</td>
+        </tr>
+        <tr>
+          <td>GPU 分级驻留锚点</td>
+        </tr>
+        <tr>
+          <td>CCX/NUMA</td>
+          <td> 边界</td>
+        </tr>
+        <tr>
+          <td>AMD CCD 的 L3 分区嗅探，规避跨片通信</td>
+        </tr>
+        <tr>
+          <td>TLB Entries</td>
+        </tr>
+        <tr>
+          <td>防止大显存映射的 TLB Thrashing</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>x86 极化阵列</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>AMX</td>
+          <td>, </td>
+          <td>APX</td>
+          <td> (31 GPR), </td>
+          <td>VNNI/AVX_VNNI_INT8</td>
+        </tr>
+        <tr>
+          <td>见 §12.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARM 极化阵列</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SVE2</td>
+          <td>, </td>
+          <td>SME/SME2</td>
+          <td> (</td>
+          <td>ZA_Array_Size</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>及 Streaming SVE 模式阈值</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>总线协议</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>GPU </td>
+          <td>TMA</td>
+          <td> (Hopper 异步内存张量加速)</td>
+        </tr>
+        <tr>
+          <td>见 §12.5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>RDMA/Scale-Out</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>nic_bandwidth_gbs</td>
+          <td>, </td>
+          <td>rdma_latency_us</td>
+        </tr>
+        <tr>
+          <td>跨机 NUMA 拓扑必须包含网卡带宽和 RDMA 延迟</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-ir-约束变量输出-target-execution-topology" data-section="null">
+      <h5>IR 约束变量输出 (Target Execution Topology)</h5>
+      <p>传感器数据转化为 CompilerGraph 直接可消费的环境变量：</p>
+      <table>
+        <tr>
+          <th>约束变量</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>典型值</td>
+        </tr>
+        <tr>
+          <td>max_gpr_count</td>
+        </tr>
+        <tr>
+          <td>控制寄存器溢写（Spill）阈值</td>
+        </tr>
+        <tr>
+          <td>普通 CPU=15, APX=31</td>
+        </tr>
+        <tr>
+          <td>optimal_tile_bits</td>
+        </tr>
+        <tr>
+          <td>决定 JIT 平铺展开的二维尺寸</td>
+        </tr>
+        <tr>
+          <td>启用 AMX/SME 阵列时极速扩大</td>
+        </tr>
+        <tr>
+          <td>native_int4_dot</td>
+        </tr>
+        <tr>
+          <td>标定是否可通过 VNNI/SVE2 直接下发硬件解包</td>
+        </tr>
+        <tr>
+          <td>true/false</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-rdma-pipelining-融合约束" data-section="null">
+      <h5>RDMA Pipelining 融合约束</h5>
+      <p>当引擎跨越单机时，Chunk 的切分块大小必须满足：</p>
+      <p>$$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma_transfer}}(\text{chunk})$$</p>
+      <p>即单卡对该 Chunk 的计算时间 ≥ 跨节点 RDMA 参数投递时间，从而实现 Pipelining 掩盖网络延迟。此约束由 <code>rdma_latency_us</code> 和 <code>nic_bandwidth_gbs</code> 共同确定。</p>
+    </section>
+    <section id="s12.7" data-section="12.7">
+      <h4>12.7 终极静态化极境 (The Ultimate Staticization Limits)</h4>
+      <p>在现有 JIT Mega-Kernel 和 TurboQuant 的架构底盘之上，为了彻底榨干硅晶的最后一滴血，Gllm 将残留于内循环（Inner Loops）中极少量的“动态计算开销”进行终极抹杀。我们将把<strong>运行期的最后一点弹性和分支判断，全部提权并折叠到内核启动前（Load-Time &amp; Dispatch-Time）！</strong> </p>
+      <p>我们称之为 <strong>“运行期状态 0 化，编译期变体无限爆发 (State Minimization vs. Variant Explosion)”</strong> 架构原则。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h5>1. 立即数硬编码步长 (Constexpr Memory Strides)</h5>
+      <p>禁止 JIT 核内存在计算连续物理步长的动态计算（如 <code>seq_len * head_dim</code>）。</p>
+      <p>基于 §12.4 黄金装筒（Golden Sizes），因形状已是编译期定理，编译器直接将被截断好的张量偏移量化作<strong>立即数常量 (Immediate values)</strong>，原生内嵌至 PTX/ASM 访存底码中。内循环中彻底消杀针对内存地址重算的整数数学（<code>IMUL</code> 等）。</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h5>2. 无分支极限循环展开 (Zero-Branch Full Unrolling)</h5>
+      <p>依据探测约束变量 <code>optimal_tile_bits</code> 以及硬件宽度（如 AMX 的 1024-bit 算盘），编译器暴力解开并<strong>全量抹平循环体 (Fully Unrolled FMA)</strong>。</p>
+      <p>生成的该类型装筒变体中，不再存留任何属于控制流检查的对比器（<code>cmp</code>）和跳转界限分支（<code>br/jmp</code>），达成流水线（Pipeline）指令乱序执行（OOO）的无阻塞轰炸极限。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h5>3. 完美哈希跳表分轨 (Perfect Hashed Jump Tables)</h5>
+      <p>针对诸如 MoE 路由分发或多意图抽离（Semantic Anchors），废除内循环中所有的“字典映射查询”。</p>
+      <p>编译器通过为分发任务生成 $O(1)$ 的无冲突完美哈希表，将其异变为<strong>汇编级别基于步进指令的表层跳转（Static Switch ASM）</strong>。在 <code>Mega-Kernel</code> 启动进入 Thread Block 的第一纳秒，瞬间物理踹走进入属于该任务/专家的独立纯净汇编层。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h5>4. 跨机 RDMA 的显存绝对硬绑定 (Static Memory Topologies)</h5>
+      <p>在极化并行（Pipeline/Tensor Parallelism）部署体系中，特定的网卡通信队列对（QP）与特定 GPU (SM) 物理锁死绑定（Pinning）。</p>
+      <p>不需要再查地址树，JIT 解析图时直接将向远端投射地址和网络目标编码成恒定的双轨显存池物理只读指针，将通信网络操作像本地总线定址一样直呼。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h5>5. 量化隔离与模型只读图折叠 (Lazy JIT Variant &amp; Graph Folding)</h5>
+      <li><strong>按需生成的量化泛型</strong>：摒弃传统静态算子中的 <code>if (dtype == INT4)</code> 判断。在 Load 模型时权重 DType 精度与计算路径已定。JIT 编译器只精确生成<strong>与该层目前物理类型一致的单特化汇编代码</strong>（例如只生成带 SM100 FP4 的微指令汇编），运行时不需要推断，物理底层结构便保障了精度的零开销匹配。</li>
+      <li><strong>系统静态前缀折叠 (Static KV Prefill Folding)</strong>：面对数十万 token 仍雷打不动的安全审核机制和 Prompt，由编译器（AOT 层面）运算后，化作只读状态流。不用再去查询 KV，此部分的树直接作为“固化的计算缓存”，彻底剥夺访问带宽需求。</li>
+    </section>
+    <section id="s13" data-section="13">
+      <h3>§13 Epilogue 白嫖网络 — 全链路物理融合 (ARCH-EPILOGUE-FUSIONS)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED — 11 fusion points codegen 完成 (x86_64 AVX2/AVX-512)</p>
+      <p>&gt; <strong>关联</strong>: 会话 6e743114 §4, 会话 全链路审计</p>
+      <p>&gt; <strong>核心原则</strong>: 所有的特征检测必须"寄生"在上游核函数的数学尾段（Epilogue），严禁单独发起采集循环。</p>
+      <p>&gt; <strong>审计基准</strong>: 从 Embedding → Layer Loop → lm_head 全管线，识别 11 个白嫖点（4 已规划 + 7 新发现）。</p>
+    </section>
+    <section id="s13.1" data-section="13.1">
+      <h4>13.1 融合 1：Gate-First 掩码层跳过 (Masked CondGEMM)</h4>
+      <p>取代"完整计算后剪裁"的做法：</p>
+      <li>在 JIT Mega-Graph 的 FFN 阶段：经过 Gate GEMM 后，Epilogue 立刻评估 $\text{SiLU}(g)$</li>
+      <li>探测到死神经元（如 $&gt; 50%$ 列失效）时，立即通过硬件掩码跳过后续的 Up GEMM 和 Down GEMM 通道</li>
+      <li><strong>FLOPs 当场砍掉 40%</strong></li>
+    </section>
+    <section id="s13.2" data-section="13.2">
+      <h4>13.2 融合 2：Softmax 质心引导预取 (Centroid-Guided Prefetch)</h4>
+      <p>在 Chunked Prefill 阶段面临超大 Context，KV Cache 不可避免发生 L2 未命中：</p>
+      <li><strong>白嫖触发器</strong>: 利用第 N 层 Softmax 的 Epilogue 提取概率高地（质心 / Centroid）</li>
+      <li><strong>JIT 联动</strong>: 将质心坐标压入异步内存队列，触发 <code>cuMemPrefetchAsync</code>（或 CPU/AMX 的软件预取指令），让第 N+1 层将要关注的 KV Chunk 越过系统总线<strong>提前驻留</strong></li>
+    </section>
+    <section id="s13.3" data-section="13.3">
+      <h4>13.3 融合 3：残差旁路 (Residual Bypass)</h4>
+      <li><strong>白嫖触发器</strong>: Residual Add 循环的 Epilogue 免费测算跨层能量方差 $\Delta \rho$</li>
+      <li><strong>JIT 联动</strong>: 如果 $\Delta \rho &lt; 0.001$，直接触发底层的汇编跳转 <code>jmp END_OF_LAYER</code></li>
+      <li>不管是 Chunk 还是单步 Decode，整个 Layer Q/K/V 和 FFN 的核函数被暴力切掉，<strong>省下 ~15% 全局算力</strong></li>
+    </section>
+    <section id="s13.4" data-section="13.4">
+      <h4>13.4 融合 4：KV Write FWHT 旋转 (Runtime FWHT Injection)</h4>
+      <li><strong>白嫖触发器</strong>: KV Cache 写入阶段数据已在寄存器，追加 $O(d \log d)$ FWHT 在线旋转</li>
+      <li><strong>JIT 联动</strong>: 旋转后 KV 值的离群点被均匀分散，后续层的 Attention 计算数值稳定性提升</li>
+      <li><strong>净开销</strong>: $O(d \log d)$ 算术（远低于 GEMM 的 $O(d^2)$），内联在 KV Write 指令流中</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h4>全链路审计：7 个新发现白嫖点 (ARCH-EPILOGUE-EXTENDED)</h4>
+      <p>&gt; <strong>审计时间</strong>: 2026-03-29</p>
+      <p>&gt; <strong>审计方法</strong>: 逐阶段分析推理管线中"数据在寄存器/共享内存停留但被直接丢弃"的位置</p>
+    </section>
+    <section id="s13.5" data-section="13.5">
+      <h4>13.5 [P0] 融合 5：SiLU 死神经元掩码 (Dead Neuron Masking)</h4>
+      <p>&gt; <strong>前置条件</strong>: §13.1 Gate-First Skip 的信号来源</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（Silu lowering → epilogue ConditionalSkip + telemetry store）</p>
+      <p>在计算 $\text{SiLU}(x) = x \cdot \sigma(x)$ 时，sigmoid 值已在寄存器中：</p>
+      <li><strong>白嫖触发器</strong>: 追加 1 条 <code>vcmpps</code> + 1 条 <code>vphaddd</code>，统计 $\sigma(x) &lt; \varepsilon$ 的元素数量</li>
+      <li><strong>免费产物</strong>: 死神经元计数（该列对 FFN 输出无贡献）</li>
+      <li><strong>下游消费</strong>: 如果死神经元 &gt; 50%，触发 §13.1 Gate-First Skip，跳过 Up/Down GEMM</li>
+      <li><strong>额外指令</strong>: ~3 条 SIMD</li>
+      <li><strong>关联</strong>: §13.1 的前置信号源，替代已删除的 Amax 运行时检测（§14.1）</li>
+    </section>
+    <section id="s13.6" data-section="13.6">
+      <h4>13.6 [P0] 融合 6：MoE Gate 命中计数 (Expert Hit Counter)</h4>
+      <p>&gt; <strong>前置条件</strong>: §15.4 冷板凳 Deopt 的信号源</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（TopK lowering → per-expert atomic hit counter）</p>
+      <p>Gate 概率经 softmax 后，TopK 线性扫描已在遍历所有概率值：</p>
+      <li><strong>白嫖触发器</strong>: 在 TopK 扫描循环中追加 1 条原子 <code>add</code>，将选中的 expert ID 写入共享计数器</li>
+      <li><strong>免费产物</strong>: 每个 expert 的命中率统计</li>
+      <li><strong>下游消费</strong>: JIT Director Daemon 轮询计数器，持续零命中的冷板凳专家触发 §15.4 Uncommon Trap 物理封杀</li>
+      <li><strong>额外指令</strong>: ~2 条（1 条 atomic add + 1 条条件判断）</li>
+      <li><strong>优势</strong>: 替代 SPEC 原设计中"JIT Director 扫描 KV Page Header"的方案，精度更高、延迟更低</li>
+    </section>
+    <section id="s13.7" data-section="13.7">
+      <h4>13.7 [P1] 融合 7：GEMM 行级激活统计 (Row-wise Activation Stats)</h4>
+      <p>&gt; <strong>前置条件</strong>: §13.5 死神经元检测的扩展</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（GEMM epilogue → row-wise L1/max/min 统计 store）</p>
+      <p>K-loop 结束后累加器寄存器（ymm/zmm）包含完整 GEMM 输出：</p>
+      <li><strong>白嫖触发器</strong>: 在 <code>emit_trace_on_accumulator</code> 写回前追加统计规约</li>
+      <li><strong>免费产物</strong>: 行级 $|row|_1$（1 条 <code>vphaddd</code> + 1 条 <code>vpaddd</code>）、行级 max（1 条 <code>vpmaxsd</code>）、行级 min（1 条 <code>vpminsd</code>）</li>
+      <li><strong>下游消费</strong>: 为 §13.5 Gate-First Skip 提供"是否死神经元"的前置判断；为后续层融合决策提供前驱张量分布特征</li>
+      <li><strong>额外指令</strong>: ~10 条 SIMD</li>
+      <li><strong>关联</strong>: 替代 §14.1 已删除的 Amax 检测，提供更丰富的分布信号</li>
+    </section>
+    <section id="s13.8" data-section="13.8">
+      <h4>13.8 [P1] 融合 8：RmsNorm per-channel Scale (KIVI 量化信号)</h4>
+      <p>&gt; <strong>前置条件</strong>: §11 TurboQuant KV 非对称量化的 per-channel scale 来源</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（RmsNorm 规约 → per-channel |x| max 追踪）</p>
+      <p>RmsNorm 的规约循环已在做 $\sum x^2$：</p>
+      <li><strong>白嫖触发器</strong>: 追加 1 条 <code>vmaxps</code> 记录逐通道绝对值最大值</li>
+      <li><strong>免费产物</strong>: per-channel scale = $\max(|x|)$，用于 KIVI 的 K per-channel 量化（§11.2）</li>
+      <li><strong>下游消费</strong>: 直接传入 KV Cache 写入阶段，替代独立的 scale 计算 kernel</li>
+      <li><strong>额外指令</strong>: 1 条 SIMD</li>
+      <li><strong>关联</strong>: 与 §11.2 KIVI 非对称量化联动，消除独立的 scale 计算开销</li>
+    </section>
+    <section id="s13.9" data-section="13.9">
+      <h4>13.9 [P1] 融合 9：Softmax 锐度与 Attention Sink 检测 (Sharpness + Sink Detection)</h4>
+      <p>&gt; <strong>前置条件</strong>: §13.2 质心预取的扩展</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（Softmax lowering → sharpness + sink store）</p>
+      <p>Softmax 的 max（<code>ymm4</code>）和 sum（<code>ymm5</code>）已在寄存器中：</p>
+      <li><strong>白嫖触发器</strong>: max 值本身免费可取；追加 1 条除法得到 max/sum 比值</li>
+      <li><strong>免费产物</strong>:</li>
+      <li><strong>max 值</strong>: Attention Sink 检测（max 极高 → 当前 token 是 sink，保留全精度）</li>
+      <li><strong>max/sum 比值（锐度）</strong>: 接近 1 → 尖锐关注某个 token；接近 $1/n$ → 均匀分散</li>
+      <li><strong>有效上下文长度</strong>: <code>count(softmax &gt; ε)</code>（追加 1 条 <code>vcmpps</code> + <code>vphaddd</code>）</li>
+      <li><strong>下游消费</strong>: Sink 检测 → §11.2 前 N 个 token FP16 保护；锐度 → 动态 chunk 大小调整</li>
+      <li><strong>额外指令</strong>: ~2 条</li>
+      <li><strong>关联</strong>: 扩展 §13.2 的质心预取，丰富 Softmax Epilogue 的产出</li>
+    </section>
+    <section id="s13.10" data-section="13.10">
+      <h4>13.10 [P2] 融合 10：Embedding 范数初始化 (RaBitQ Bootstrap)</h4>
+      <p>&gt; <strong>前置条件</strong>: §11.3 RaBitQ 修正因子的初始值</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（Gather lowering → L2 norm reduce + store）</p>
+      <p>Token embedding 查表后数据在 copy 路径上经过寄存器：</p>
+      <li><strong>白嫖触发器</strong>: 在 copy 循环中追加 reduce + sqrt</li>
+      <li><strong>免费产物</strong>: $|embed|_2$，作为第一层 RaBitQ 修正因子的初始值 $C_0$</li>
+      <li><strong>下游消费</strong>: 直接传入第一层 RmsNorm Epilogue，避免冷启动</li>
+      <li><strong>额外指令</strong>: ~5 条</li>
+      <li><strong>关联</strong>: 与 §11.3 RaBitQ 无偏修正联动</li>
+    </section>
+    <section id="s13.11" data-section="13.11">
+      <h4>13.11 [P2] 融合 11：残差方向余弦 (Residual Cosine Similarity)</h4>
+      <p>&gt; <strong>前置条件</strong>: §13.3 残差旁路的精化指标</p>
+      <p>&gt; <strong>实现位置</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>（Residual lowering → cosine sim + Δρ store）</p>
+      <p>Residual Add 的两个输入 $x_{in}$ 和 $x_{out}$ 都在寄存器中：</p>
+      <li><strong>白嫖触发器</strong>: 在现有 $\Delta\rho = |x_{out}| / |x_{in}|$ 基础上追加内积累加</li>
+      <li><strong>免费产物</strong>: 方向余弦 $\cos\theta = x_{in} \cdot x_{out} / (|x_{in}| |x_{out}|)$</li>
+      <li><strong>下游消费</strong>: 更精确的 Early Exit 指标——不仅仅看能量衰减，还看方向偏移。$\cos\theta &gt; 0.99$ 且 $\Delta\rho &lt; 0.01$ 时高置信度跳过</li>
+      <li><strong>额外指令</strong>: ~5 条（FMA + 除法）</li>
+      <li><strong>关联</strong>: 精化 §13.3 的旁路决策，减少误跳</li>
+    </section>
+    <section id="s-全链路白嫖全景图" data-section="null">
+      <h4>全链路白嫖全景图</h4>
+      <p>```</p>
+      <p>推理管线数据流（白嫖全景）</p>
+      <p>Token IDs</p>
+      <p>  │</p>
+      <p>  ▼</p>
+      <p>Embedding Lookup ──── §13.10: ‖embed‖₂ → RaBitQ 初始修正</p>
+      <p>  │</p>
+      <p>  ▼</p>
+      <p>═══ Layer Loop (×N) ═══</p>
+      <p>  │</p>
+      <p>  ├─ RmsNorm ─────── §11 ‖v‖ + §13.8 per-channel scale → KIVI 量化</p>
+      <p>  │</p>
+      <p>  ├─ Q/K/V GEMM ──── §13.7 行级 ‖row‖₁ + max → 死神经元检测</p>
+      <p>  │</p>
+      <p>  ├─ RoPE ────────── §13.4 FWHT 在线旋转</p>
+      <p>  │</p>
+      <p>  ├─ Softmax ─────── §13.2 Entropy + Centroid + §13.9 max + 锐度 → 预取 + Sink 检测</p>
+      <p>  │</p>
+      <p>  ├─ Residual Add ── §13.3 Δρ + §13.11 方向余弦 → Early Exit</p>
+      <p>  │</p>
+      <p>  ├─ RmsNorm2 ────── 同 RmsNorm</p>
+      <p>  │</p>
+      <p>  ├─ MoE Gate ────── §13.6 路由熵 + 命中计数 → Deopt 信号</p>
+      <p>  │</p>
+      <p>  ├─ FFN Gate SiLU ─ §13.5 死神经元掩码 → Gate-First Skip (40% FLOPs)</p>
+      <p>  │</p>
+      <p>  ├─ FFN Up × Down</p>
+      <p>  │</p>
+      <p>  └─ Residual Add ── 同上</p>
+      <p>  │</p>
+      <p>  ▼</p>
+      <p>═══ End Layer Loop ═══</p>
+      <p>  │</p>
+      <p>  ▼</p>
+      <p>lm_head GEMM ────── §13.7 logits 范数 → 采样策略调整</p>
+      <p>  │</p>
+      <p>  ▼</p>
+      <p>Output Token</p>
+      <p>```</p>
+    </section>
+    <section id="s13.12" data-section="13.12">
+      <h4>13.12 硬件感知融合拓扑变换 (Hardware-Topology-Aware Fusion)</h4>
+      <p>&gt; <strong>核心原则</strong>: FusionRule 的 <code>plan()</code> 阶段根据 <code>DeviceProfile</code> 产生<strong>不同的图拓扑</strong>——不仅是同一算子的不同 codegen，而是节点数量、边连接、数据流方向根本不同。</p>
+      <p>&gt; <strong>关联</strong>: §8 AttentionStrategy, §9 Mega-Kernel, §11 TurboQuant, §12 空间异构, gllm-kernels FusionEngine</p>
+      <p>&gt; <strong>硬件 SSOT</strong>: REQ-HARDWARE-SENSORS 定义探测能力，本节定义探测结果如何驱动图拓扑</p>
+    </section>
+    <section id="s13.12.0" data-section="13.12.0">
+      <h5>13.12.0 硬件 Profile 分层定义</h5>
+      <p>FusionRule 基于以下 Profile 层级产生拓扑决策：</p>
+      <strong>GPU 层级</strong>:
+      <strong>CPU 层级 (x86)</strong>:
+      <strong>CPU 层级 (ARM)</strong>:
+      <table>
+        <tr>
+          <th>Profile</th>
+        </tr>
+        <tr>
+          <td>SM 范围</td>
+        </tr>
+        <tr>
+          <td>核心硬件能力</td>
+        </tr>
+        <tr>
+          <td>拓扑影响</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_100+ (Blackwell)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>FP4/FP6 原生 Tensor Core; Block-scaled GEMM (per-block 缩放因子内置); TMEM 256KB/SM; tcgen05.mma; 2-CTA 协同 MMA; Thread Block Cluster</td>
+        </tr>
+        <tr>
+          <td>权重全程 FP4 无反量化节点; Block-scaled 消除独立 Scale 节点; TMEM 替代 shared memory 做 attention tiling; 2-CTA 协同产生跨 CTA 边</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_90 (Hopper)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>sm_90</td>
+        </tr>
+        <tr>
+          <td>TMA 2D/5D prefetch; WGMMA 16×16×64; Warp Specialization (producer/consumer); FP8 native; cuda::barrier; L2 multicast</td>
+        </tr>
+        <tr>
+          <td>TMA 替代 cp.async; WGMMA 替代 mma.sync; Warp spec 产生双线程组子图</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_80-89 (Ampere/Ada)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>sm_80-89</td>
+        </tr>
+        <tr>
+          <td>mma.sync 16×8×16; cp.async 128B; BF16/TF32 Tensor Core; 32 寄存器/warp</td>
+        </tr>
+        <tr>
+          <td>mma.sync 主力; cp.async 异步预取; BF16 原生计算</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_70-79 (Volta/Turing)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>sm_70-79</td>
+        </tr>
+        <tr>
+          <td>wmma 16×16×16; 16 寄存器/warp; 无异步内存; FP16 Tensor Core</td>
+        </tr>
+        <tr>
+          <td>wmma 精度受限; 寄存器压力限制融合深度; 无异步预取</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>Profile</th>
+        </tr>
+        <tr>
+          <td>核心硬件能力</td>
+        </tr>
+        <tr>
+          <td>拓扑影响</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX10.2 + APX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>256-bit 统一 SIMD; P/E 核混合感知; VP2INTERSECT; 31 GPR; BF16 256-bit 原生; VNNI-INT8 256-bit</td>
+        </tr>
+        <tr>
+          <td>31 GPR 支持最深 epilogue 链 (≥8 ops 融合); P-core 走 256-bit SIMD 全量路径，E-core 走标量降级; VP2INTERSECT 硬件化 sparse mask 节点</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX10.1 + APX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>256-bit 统一 SIMD; 31 GPR; 基础 BF16/VNNI</td>
+        </tr>
+        <tr>
+          <td>31 GPR 支持 6-8 ops epilogue; 缺 VP2INTERSECT，sparse mask 走软件</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512 + AMX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>512-bit SIMD (32 zmm); VNNI; VP2INTERSECT; BF16; AMX tile 8×8 BF16</td>
+        </tr>
+        <tr>
+          <td>AMX tile GEMM 替代 BLIS 微内核; AVX-512 做 epilogue; 32 zmm 无溢出支持 8-op epilogue</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512 only</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>512-bit SIMD (32 zmm); VNNI; BF16; 无 AMX</td>
+        </tr>
+        <tr>
+          <td>BLIS 微内核做 GEMM; epilogue 用 AVX-512; 无 AMX tile 加速</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>256-bit SIMD (16 ymm); FMA; F16C</td>
+        </tr>
+        <tr>
+          <td>最保守拓扑: BLIS pack/unpack + 16 ymm epilogue 溢出到栈</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>Profile</th>
+        </tr>
+        <tr>
+          <td>核心硬件能力</td>
+        </tr>
+        <tr>
+          <td>拓扑影响</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SME2 + SVE2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ZA Array 2D 存储; streaming SVE 模式; outer product 矩阵乘; SVE2 可变长向量</td>
+        </tr>
+        <tr>
+          <td>ZA array 消除显式 tile 管理节点; outer product 直接做 attention; streaming 模式切换开销影响跨层融合决策</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SVE2 only</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>可变长 SIMD (128-2048 bit); SVE2 整数/浮点; 无 ZA array</td>
+        </tr>
+        <tr>
+          <td>无 ZA 时回退 BLIS 风格 GEMM; epilogue 用 SVE2 predicated 向量</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>NEON</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>128-bit 固定 SIMD; ASIMD</td>
+        </tr>
+        <tr>
+          <td>最保守: BLIS 微内核 + NEON epilogue; 类似 AVX2 体验</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.12.1" data-section="13.12.1">
+      <h5>13.12.1 Attention 子图拓扑</h5>
+      <strong>节点级差异矩阵</strong>:
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>子图拓扑</td>
+        </tr>
+        <tr>
+          <td>节点列表</td>
+        </tr>
+        <tr>
+          <td>关键差异</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_100+</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FlashV4 Block-Scaled</td>
+        </tr>
+        <tr>
+          <td>TMEMLoad_QKV → tcgen05.mma_QK(block_scaled) → Online_Softmax → tcgen05.mma_AV → Epilogue_FWHT → TMEMScatter_KV</td>
+        </tr>
+        <tr>
+          <td>FP4 权重</td>
+          <td>全程无反量化</td>
+          <td>；block-scaled 内置 per-block scale 消除 Scale 节点；TMEMLoad 替代 TMA；2-CTA 协同拆分 Q 维度；TMEMScatter 一次写 KV</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_90</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FlashV3 Pipeline</td>
+        </tr>
+        <tr>
+          <td>TMA_prefetch_QKV → WGMMA_QK → Online_Softmax → WGMMA_AV → Epilogue_FWHT → Scatter_KV</td>
+        </tr>
+        <tr>
+          <td>TMA 2D prefetch; WGMMA warp 特化 (producer/consumer); FP8 辅助路径可选; Scatter 单 kernel 写 KV</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_80-89</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>FlashV2 Tiled</td>
+        </tr>
+        <tr>
+          <td>cp_async_pack_QKV → mma.sync_QK → Online_Softmax → mma.sync_AV → Epilogue_FWHT → DtoD_KV</td>
+        </tr>
+        <tr>
+          <td>mma.sync 替代 WGMMA; cp.async 替代 TMA; DtoD 逐页写 KV</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_70-79</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>wmma Tiled</td>
+        </tr>
+        <tr>
+          <td>global_load_QKV → wmma_QK → Online_Softmax → wmma_AV → Epilogue_FWHT(可选) → DtoD_KV</td>
+        </tr>
+        <tr>
+          <td>wmma 16×16×16 精度受限; 无异步预取; FWHT 收益小可跳过</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SME2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>ZA Outer Product</td>
+        </tr>
+        <tr>
+          <td>SVE2_RmsNorm → SME2_tile_load_QKV → RoPE(SVE2) → SME2_outer_product_QK → Softmax → SME2_outer_product_AV → Epilogue_FWHT → Direct_KV_Write</td>
+        </tr>
+        <tr>
+          <td>ZA array 2D 存储消除 tile 管理节点; outer product 直接算 attention; streaming 模式切换在层边界</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX10.2 + APX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Tiled Naive + Deep Epilogue</td>
+        </tr>
+        <tr>
+          <td>BLIS_QKV_GEMM(VNNI-256) → RoPE(AVX10) → Naive_Attn → Epilogue_FWHT(31GPR 深链) → Direct_KV_Write</td>
+        </tr>
+        <tr>
+          <td>31 GPR 允许 attention→FWHT→量化→写入 全融合; P-core 全速, E-core 降级为标量; VP2INTERSECT 硬件化 sparse mask</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512 + AMX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Tiled + AMX GEMM</td>
+        </tr>
+        <tr>
+          <td>AMX_QKV_GEMM → RoPE → AMX_Attn_GEMM → Epilogue_FWHT → Direct_KV_Write</td>
+        </tr>
+        <tr>
+          <td>AMX tile 8×8 BF16 GEMM; 无 Flash tiling (CPU 无 SMEM); 32 zmm epilogue</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Naive + BLIS</td>
+        </tr>
+        <tr>
+          <td>BLIS_QKV_GEMM → RoPE → Naive_Attn(O(n²)) → Epilogue_FWHT → Direct_KV_Write</td>
+        </tr>
+        <tr>
+          <td>BLIS 微内核; 朴素 attention; 最保守 CPU 路径</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>节点</th>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>sm_90</td>
+        </tr>
+        <tr>
+          <td>sm_80</td>
+        </tr>
+        <tr>
+          <td>sm_70</td>
+        </tr>
+        <tr>
+          <td>SME2</td>
+        </tr>
+        <tr>
+          <td>AVX10.2+APX</td>
+        </tr>
+        <tr>
+          <td>AMX</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>权重加载</td>
+        </tr>
+        <tr>
+          <td>FP4 直读 (无反量化)</td>
+        </tr>
+        <tr>
+          <td>FP16/BF16 pack</td>
+        </tr>
+        <tr>
+          <td>FP16 pack</td>
+        </tr>
+        <tr>
+          <td>FP16 pack</td>
+        </tr>
+        <tr>
+          <td>FP16 load</td>
+        </tr>
+        <tr>
+          <td>FP16/BF16 pack</td>
+        </tr>
+        <tr>
+          <td>BF16 tile load</td>
+        </tr>
+        <tr>
+          <td>FP32 pack</td>
+        </tr>
+        <tr>
+          <td>QKV GEMM</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma + block_scale</td>
+        </tr>
+        <tr>
+          <td>WGMMA 16×16×64</td>
+        </tr>
+        <tr>
+          <td>mma.sync 16×8×16</td>
+        </tr>
+        <tr>
+          <td>wmma 16×16×16</td>
+        </tr>
+        <tr>
+          <td>SME2 outer product</td>
+        </tr>
+        <tr>
+          <td>BLIS VNNI-256</td>
+        </tr>
+        <tr>
+          <td>AMX tdpbssd</td>
+        </tr>
+        <tr>
+          <td>BLIS FP32</td>
+        </tr>
+        <tr>
+          <td>QK^T Scale</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>无 (block-scaled 内置)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Epilogue max</td>
+        </tr>
+        <tr>
+          <td>Softmax</td>
+        </tr>
+        <tr>
+          <td>Online + 2-CTA spec</td>
+        </tr>
+        <tr>
+          <td>Online + warp spec</td>
+        </tr>
+        <tr>
+          <td>Online tiled</td>
+        </tr>
+        <tr>
+          <td>Online tiled</td>
+        </tr>
+        <tr>
+          <td>Full (ZA 内)</td>
+        </tr>
+        <tr>
+          <td>Full</td>
+        </tr>
+        <tr>
+          <td>Full</td>
+        </tr>
+        <tr>
+          <td>Full</td>
+        </tr>
+        <tr>
+          <td>AV 计算</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma + TMEM prefetch</td>
+        </tr>
+        <tr>
+          <td>WGMMA + TMA V</td>
+        </tr>
+        <tr>
+          <td>mma.sync</td>
+        </tr>
+        <tr>
+          <td>wmma</td>
+        </tr>
+        <tr>
+          <td>SME2 outer product</td>
+        </tr>
+        <tr>
+          <td>BLIS VNNI-256</td>
+        </tr>
+        <tr>
+          <td>AMX tdpbssd</td>
+        </tr>
+        <tr>
+          <td>BLIS FP32</td>
+        </tr>
+        <tr>
+          <td>FWHT 旋转</td>
+        </tr>
+        <tr>
+          <td>Epilogue 内联 (GPU SIMD)</td>
+        </tr>
+        <tr>
+          <td>Epilogue 内联</td>
+        </tr>
+        <tr>
+          <td>Epilogue 内联</td>
+        </tr>
+        <tr>
+          <td>可选跳过</td>
+        </tr>
+        <tr>
+          <td>SVE2 内联</td>
+        </tr>
+        <tr>
+          <td>AVX10 256-bit 内联</td>
+        </tr>
+        <tr>
+          <td>AVX-512 内联</td>
+        </tr>
+        <tr>
+          <td>AVX-512 内联</td>
+        </tr>
+        <tr>
+          <td>KV 写入</td>
+        </tr>
+        <tr>
+          <td>TMEMScatter (2-CTA)</td>
+        </tr>
+        <tr>
+          <td>Scatter 单 kernel</td>
+        </tr>
+        <tr>
+          <td>DtoD 逐页</td>
+        </tr>
+        <tr>
+          <td>DtoD 逐页</td>
+        </tr>
+        <tr>
+          <td>Direct write</td>
+        </tr>
+        <tr>
+          <td>Direct write</td>
+        </tr>
+        <tr>
+          <td>Direct write</td>
+        </tr>
+        <tr>
+          <td>Direct write</td>
+        </tr>
+        <tr>
+          <td>Sparse Mask</td>
+        </tr>
+        <tr>
+          <td>无需 (block-scaled)</td>
+        </tr>
+        <tr>
+          <td>可选</td>
+        </tr>
+        <tr>
+          <td>可选</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>VP2INTERSECT 硬件</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.12.2" data-section="13.12.2">
+      <h5>13.12.2 FFN 子图拓扑</h5>
+      <strong>Gate-First Skip 拓扑条件</strong> (§13.1):
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>子图拓扑</td>
+        </tr>
+        <tr>
+          <td>关键差异</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_100+</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NormIntoGemm → BlockScaled_Gate(tcgen05,FP4直读) → SiLU_Epilogue(dead_neuron) → GateSkip(2-CTA compress) → Up_GEMM(shared_pack,FP4) → FusedMulAdd → Down_GEMM(FP4)+Epilogue(residual)</td>
+        </tr>
+        <tr>
+          <td>FP4 权重全程无反量化; block-scaled 消除 Gate/Up 独立 Scale 节点; 2-CTA compress 支持最高挤压比</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_90</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NormIntoGemm → Gate_GEMM(WGMMA) → SiLU_Epilogue → GateSkip(vcompress) → Up_GEMM(shared_pack_a) → FusedMulAdd → Down_GEMM+Epilogue</td>
+        </tr>
+        <tr>
+          <td>WGMMA + warp spec; NormIntoGemm 融合; GateSkip 条件跳过</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_80-89</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RmsNorm → Gate_GEMM(mma.sync) → SiLU → GateSkip → Up_GEMM(shared_pack_a) → FusedMulAdd → Down_GEMM+Epilogue</td>
+        </tr>
+        <tr>
+          <td>RmsNorm 独立节点 (寄存器约束); mma.sync; GateSkip warp prefix sum</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_70-79</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RmsNorm → Gate_GEMM(wmma) → SiLU → Up_GEMM → Mul → Down_GEMM → Residual_Add</td>
+        </tr>
+        <tr>
+          <td>无 GateSkip (16 寄存器不够); 无 shared_pack_a; 所有节点独立</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX10.2 + APX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RmsNorm → Gate_GEMM(BLIS,VNNI-256) → SiLU → GateSkip(vcompressps,31GPR) → Up_GEMM(shared_pack_a) → FusedMulAdd → Down_GEMM → Residual_Add</td>
+        </tr>
+        <tr>
+          <td>31 GPR 允许 SiLU→GateSkip→Up 全融合 (8-op epilogue 无溢出); vcompressps 硬件压缩; P-core 全力, E-core 标量降级</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512 + AMX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RmsNorm → AMX_Gate_GEMM → SiLU → GateSkip(vcompressps) → AMX_Up_GEMM → Mul → AMX_Down_GEMM → Residual_Add</td>
+        </tr>
+        <tr>
+          <td>AMX tile GEMM 替代 BLIS; GateSkip 可选; 32 zmm epilogue</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SME2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RmsNorm → SME2_Gate_GEMM(outer product) → SiLU → Up_GEMM → Mul → Down_GEMM → Residual_Add</td>
+        </tr>
+        <tr>
+          <td>SME2 outer product 做 GEMM; ZA array 消除 pack/unpack 节点; 无 GateSkip (ZA 无 compress)</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>硬件</th>
+        </tr>
+        <tr>
+          <td>支持</td>
+        </tr>
+        <tr>
+          <td>压缩机制</td>
+        </tr>
+        <tr>
+          <td>拓扑效果</td>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>✅ tcgen05 + TMEM</td>
+        </tr>
+        <tr>
+          <td>2-CTA 协同 compress (跨 SM 协调)</td>
+        </tr>
+        <tr>
+          <td>最高挤压比: 死神经元 &gt; 50% 时 Up/Down GEMM 规模减半</td>
+        </tr>
+        <tr>
+          <td>sm_90</td>
+        </tr>
+        <tr>
+          <td>✅ WGMMA + 32 寄存器</td>
+        </tr>
+        <tr>
+          <td>vcompress GPU intrinsic</td>
+        </tr>
+        <tr>
+          <td>GateSkip 内联: vcompress → 紧凑 Up/Down</td>
+        </tr>
+        <tr>
+          <td>sm_80-89</td>
+        </tr>
+        <tr>
+          <td>✅ mma.sync + 32 寄存器</td>
+        </tr>
+        <tr>
+          <td>warp prefix sum</td>
+        </tr>
+        <tr>
+          <td>GateSkip 内联: prefix sum 挤压</td>
+        </tr>
+        <tr>
+          <td>sm_70-79</td>
+        </tr>
+        <tr>
+          <td>❌ wmma + 16 寄存器</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>无 GateSkip 节点</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>AVX10.2 + APX</td>
+        </tr>
+        <tr>
+          <td>✅ vcompressps + 31 GPR</td>
+        </tr>
+        <tr>
+          <td>vcompressps 硬件指令</td>
+        </tr>
+        <tr>
+          <td>31 GPR 允许 GateSkip + 后续 GEMM 全融合无溢出</td>
+        </tr>
+        <tr>
+          <td>AVX-512 + AMX</td>
+        </tr>
+        <tr>
+          <td>✅ vcompressps</td>
+        </tr>
+        <tr>
+          <td>vcompressps</td>
+        </tr>
+        <tr>
+          <td>可选，32 zmm 支持</td>
+        </tr>
+        <tr>
+          <td>SME2</td>
+        </tr>
+        <tr>
+          <td>❌</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>无 GateSkip 节点</td>
+          <td>: ZA array 无 compress 操作</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.12.3" data-section="13.12.3">
+      <h5>13.12.3 KV Cache 写入子图拓扑</h5>
+      <strong>sm_100+ FP4 颠覆性拓扑变化</strong>:
+      <li>传统路径 (sm_80-90): <code>FP16_K → Quantize_4bit → Write</code> (3 步)</li>
+      <li>sm_100+: <code>FP4_K → Write</code> (1 步，权重已是 FP4，直接写入 KV cache)</li>
+      <li><strong>Quantize 节点被完全消除</strong>: 这是图拓扑的根本性变化，不是 codegen 差异</li>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>子图拓扑</td>
+        </tr>
+        <tr>
+          <td>关键差异</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_100+</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE → FWHT_K → Direct_FP4_K_Write(TMEM) → FWHT_V → Direct_FP4_V_Write(TMEM)</td>
+        </tr>
+        <tr>
+          <td>FP4 权重环境: KV 可直接 4-bit 写入，</td>
+          <td>无独立 Quantize 节点</td>
+          <td>; TMEM 直写消除 scatter launch 开销</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_90</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE → FWHT_K → Quantize_K → KvScatterWrite(per-head) → Quantize_V → KvScatterWrite(per-token)</td>
+        </tr>
+        <tr>
+          <td>Scatter 单 kernel; 需要 Quantize 节点 (FP16→4-bit)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_80-89</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE → FWHT_K → Quantize_K → DtoD_Copy(per_page) → Quantize_V → DtoD_Copy(per_page)</td>
+        </tr>
+        <tr>
+          <td>无 scatter; 逐页 DtoD</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>sm_70-79</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE → FWHT_K → Quantize_K → DtoD_Copy → Quantize_V → DtoD_Copy</td>
+        </tr>
+        <tr>
+          <td>同 sm_80 但带宽更低</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX10.2 + APX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE(AVX10) → FWHT_K(256-bit SIMD) → Quantize_K(VNNI-256) → Direct_memcpy → Quantize_V → Direct_memcpy</td>
+        </tr>
+        <tr>
+          <td>VNNI-256 加速量化; 31 GPR 允许 RoPE→FWHT→Quantize 三合一 epilogue</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512 + AMX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE → FWHT_K → Quantize_K → Direct_memcpy → Quantize_V → Direct_memcpy</td>
+        </tr>
+        <tr>
+          <td>AVX-512 量化; 直写内存</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SME2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RoPE(SVE2) → FWHT_K(SVE2) → Quantize_K → Direct_memcpy → Quantize_V → Direct_memcpy</td>
+        </tr>
+        <tr>
+          <td>SVE2 predicated 向量做量化; 无 scatter 概念</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.12.4" data-section="13.12.4">
+      <h5>13.12.4 融合模式硬件决策树</h5>
+      <p>```</p>
+      <p>DeviceProfile</p>
+      <p>  │</p>
+      <p>  ├─ backend == Gpu?</p>
+      <p>  │   ├─ YES → sm_version?</p>
+      <p>  │   │   ├─ sm_100+ → FP4 直读(无反量化) + block_scaled(无 Scale 节点)</p>
+      <p>  │   │   │         + TMEM 替代 SMEM 做 attention tiling</p>
+      <p>  │   │   │         + tcgen05.mma(2-CTA 协同)</p>
+      <p>  │   │   │         + TMEMScatter_KV(无 scatter launch)</p>
+      <p>  │   │   │         + NormIntoGemm + GateSkip(2-CTA compress)</p>
+      <p>  │   │   │         + Quantize 节点全部消除(FP4 原生)</p>
+      <p>  │   │   │</p>
+      <p>  │   │   ├─ sm_90 → TMA_prefetch + WGMMA + warp_specialization</p>
+      <p>  │   │   │         + Scatter_KV + NormIntoGemm + GateSkip(vcompress)</p>
+      <p>  │   │   │         + Quantize(FP16→4bit) 节点保留</p>
+      <p>  │   │   │</p>
+      <p>  │   │   ├─ sm_80-89 → cp_async + mma.sync + DtoD_KV</p>
+      <p>  │   │   │             + NormIntoGemm(可选) + GateSkip(prefix sum)</p>
+      <p>  │   │   │             + Quantize 节点保留</p>
+      <p>  │   │   │</p>
+      <p>  │   │   └─ sm_70-79 → global_load + wmma + DtoD_KV</p>
+      <p>  │   │                 + Standalone + 无 GateSkip + FWHT 可跳过</p>
+      <p>  │   │                 + ComputeRoot(SMEM &lt; 48KB)</p>
+      <p>  │   │</p>
+      <p>  │   └─ NO → CPU</p>
+      <p>  │       ├─ arch == AArch64?</p>
+      <p>  │       │   ├─ has_sme2? → SME2_tile_load + outer_product + Direct_KV</p>
+      <p>  │       │   │             + ZA_array 消除 pack/unpack</p>
+      <p>  │       │   │             + streaming mode 切换在层边界</p>
+      <p>  │       │   │             + 无 GateSkip (ZA 无 compress)</p>
+      <p>  │       │   │</p>
+      <p>  │       │   ├─ has_sve2? → SVE2_predicated_GEMM + Direct_KV</p>
+      <p>  │       │   │             + SVE2 epilogue (可变长)</p>
+      <p>  │       │   │</p>
+      <p>  │       │   └─ NEON → BLIS + NEON epilogue (最保守)</p>
+      <p>  │       │</p>
+      <p>  │       └─ arch == x86_64?</p>
+      <p>  │           ├─ avx10_version?</p>
+      <p>  │           │   ├─ AVX10.2 → 31 GPR + 256-bit unified</p>
+      <p>  │           │   │          + VP2INTERSECT 硬件 sparse mask</p>
+      <p>  │           │   │          + P/E hybrid: P-core 全 SIMD, E-core 标量降级</p>
+      <p>  │           │   │          + GateSkip(vcompressps, 31GPR 全融合无溢出)</p>
+      <p>  │           │   │          + VNNI-256 加速量化</p>
+      <p>  │           │   │</p>
+      <p>  │           │   └─ AVX10.1 → 31 GPR + 256-bit unified</p>
+      <p>  │           │              + 无 VP2INTERSECT (软件 sparse mask)</p>
+      <p>  │           │              + GateSkip(vcompressps)</p>
+      <p>  │           │</p>
+      <p>  │           ├─ has_amx? → AMX_tile + tdpbssd + Direct_KV</p>
+      <p>  │           │           + 32 zmm epilogue (8-op 无溢出)</p>
+      <p>  │           │           + GateSkip(vcompressps 可选)</p>
+      <p>  │           │</p>
+      <p>  │           ├─ has_avx512? → BLIS + 32 zmm epilogue</p>
+      <p>  │           │               + 无 AMX, 回退 BLIS 微内核</p>
+      <p>  │           │</p>
+      <p>  │           └─ AVX2 only → BLIS + 16 ymm epilogue</p>
+      <p>  │                       + 最保守: 溢出到栈, 限制 4-op epilogue</p>
+      <p>  │</p>
+      <p>  └─ turboquant_enabled?</p>
+      <p>      ├─ YES → FWHT 旋转节点:</p>
+      <p>      │        GPU: Epilogue 内联 (3 条 GPU SIMD)</p>
+      <p>      │        CPU x86: Epilogue 内联 (AVX-512 / AVX10 / AVX2)</p>
+      <p>      │        CPU ARM: Epilogue 内联 (SVE2 / NEON)</p>
+      <p>      │        sm_100+: FWHT 收益最大 (FP4 域内旋转, 无精度损失)</p>
+      <p>      └─ NO → 标准前向传播拓扑</p>
+      <p>```</p>
+      <strong>FusionRule 接口扩展</strong>:
+      <p>```rust</p>
+      <p>trait FusionRule {</p>
+      <p>    /// 匹配阶段: 检查子图模式是否适用 (不变)</p>
+      <p>    fn matches(&amp;self, subgraph: &amp;[OpNode]) -&gt; Option<matchresult>;</matchresult></p>
+      <p>    /// 规划阶段: 根据 DeviceProfile 产生不同的图拓扑 (增强)</p>
+      <p>    fn plan(&amp;self, match_result: MatchResult, profile: &amp;DeviceProfile) -&gt; FusionPlan {</p>
+      <p>        // 基于 profile 决定:</p>
+      <p>        // 1. 插入/消除节点 (sm_100+ 消除 Quantize; AVX10.2 消除软件 sparse mask)</p>
+      <p>        // 2. 选择计算核心 (tcgen05.mma / WGMMA / mma.sync / AMX / SME2 outer product)</p>
+      <p>        // 3. 连接边 (block_scaled 内置 scale / shared_pack_a / NormIntoGemm 直通)</p>
+      <p>        // 4. 融合深度 (31 GPR 8-op epilogue / 16 ymm 4-op / wmma standalone)</p>
+      <p>        // 5. 内存层级 (TMEM / SMEM / L1 / ZA array)</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>与 §12 空间异构的协同</strong>:
+      <p>§12 定义了"不同请求走不同子图"。本节定义了"同一请求，不同硬件走不同子图"。两者正交组合：</p>
+      <li>§12 按请求形态 (Dense/Sparse/MoE) 分区 → 产生不同子批次</li>
+      <li>§13.12 按硬件能力 (sm_100/sm_90/sm_80/AVX10.2/SME2/AMX/...) → 产生不同子图拓扑</li>
+      <li>最终: (请求形态 × 硬件能力) 的笛卡尔积由 §12.4 Shape Bucketing 统一调度</li>
+    </section>
+    <section id="s14" data-section="14">
+      <h3>§14 旧世代优化理念的全面突变升级 (ARCH-LEGACY-METAMORPHOSIS)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: 本文档 §9 Mega-Kernel, §13 Epilogue 白嫖</p>
+      <p>&gt; <strong>核心宣言</strong>: 在"物理级隔离、指令级热修与 TurboQuant 降维"架构下，过去的优化思路发生了根本性突变。我们抛弃了所有 if-else 幼稚做法，将它们转为底层硬件法则。</p>
+    </section>
+    <section id="s14.1" data-section="14.1">
+      <h4>14.1 动态混合精度检测 → 数学级静态湮灭 (Mathematical Annihilation)</h4>
+      <li><strong>旧思路</strong>: RmsNorm 尾端计算 <code>Amax</code>，发现 Outlier 就回退 FP16，否则降级 FP8/INT8。反复横跳引发严重流水线不确定性。</li>
+      <li><strong>新架构蜕变</strong>: 详见 §11 TurboQuant 2.0 无损量化体系。</li>
+      <li><strong>执行定论</strong>: 所有 <code>Amax</code> 运行时检测代码<strong>全盘删除</strong>！QuantType 驱动 JIT 静态锁定执行路径。</li>
+    </section>
+    <section id="s14.2" data-section="14.2">
+      <h4>14.2 门控网络失效截断 → 寄存器级动态挤压 (Register-Level Compaction)</h4>
+      <li><strong>旧思路</strong>: 算完 <code>Gate = SiLU(xW)</code> 后发现死列，在调度层切片或 <code>jmp</code> 绕开。</li>
+      <li><strong>新架构蜕变</strong>: 在 Mega-Kernel 中，<strong>不跳远，只挤压</strong>。</li>
+      <li><strong>执行定论</strong>: 调用硬件谓词掩码（Predicated Execution）或张量挤压（AVX512 <code>vcompress</code>、GPU <code>Prefix Sum</code>）。死掉的神经元在 SMEM 里挤成最小密实体，<code>Up/Down GEMM</code> 全负荷不停机算平。</li>
+    </section>
+    <section id="s14.3" data-section="14.3">
+      <h4>14.3 跨层残差旁路 → 块级内嵌路由自毁弃算 (In-Kernel Router Veto)</h4>
+      <li><strong>旧思路</strong>: Residual Add 算方差 $\Delta \rho &lt; 0.001$ 后走控制流分支短路。</li>
+      <li><strong>架构校正（大并发禁区）</strong>: 绝对不能用宏观热修补！因为 Continuous Batching 下 Request A 可以跳过，但 Request B 正处于高信息熵刚需期。修改汇编 <code>jmp</code> 会导致 B 产出乱码！</li>
+      <li><strong>执行定论</strong>: 残差跳过归入 <strong>§9.1 Mega-Kernel 块级内嵌路由</strong>：</li>
+      <li>Request A 的 Thread Block 读取到 $\Delta \rho &lt; 0.001$ → 触发 <code>Thread Exit</code>，输入原封不动抛给输出</li>
+      <li>Request B 的 Thread Block 读取到 $\Delta \rho = 0.5$ → 正常展开矩阵乘法循环</li>
+      <li>物理同源、逻辑分块（Block Idx）的掩码路由，不破坏全局机器码</li>
+    </section>
+    <section id="s14.4" data-section="14.4">
+      <h4>14.4 Hot JMP Patching 的正确使用场景</h4>
+      <p>既然个体行为不能导致热修补，那热修补<strong>仅用于绝对的全局物理共识</strong>：</p>
+      <li><strong>场景 A（领域降维）</strong>: MoE 冷板凳专家持续数百万 Token 均 0 命中率 → JIT Director 用 <code>NOP/JMP</code> 物理抹平其访存分支和跳转入口（DCE）</li>
+      <li><strong>场景 B（极致前缀复用）</strong>: 128 个并发请求全部挂载同一个 10K System Prompt 前缀树 → 前置 Prefill 图直接被热修补塌缩为一条共享直读存储指令</li>
+    </section>
+    <section id="artifact-pipeline" data-artifact-type="pipeline" data-section="14.5">
+      <h4>14.5 注意力预瞄 → RDMA/PCIe 流水线预取 (Pipelined Prefetch)</h4>
+      <li><strong>旧思路</strong>: 用 Softmax 质心决定是否算全量 <code>Q*K^T</code>。</li>
+      <li><strong>新架构蜕变</strong>: 将"算力的减法"转为"带宽的乘法"。</li>
+      <li><strong>执行定论</strong>: Softmax 质心坐标通过页表直接馈入底层硬件预取系统。GPU 处理本层 Dense 网络的同时，总线通道上已在并行利用 <code>cuMemPrefetchAsync</code> 甚至跨机 <code>RDMA</code> 加载下一层的 KV 块。<strong>彻底穿透冯诺依曼架构的显存墙诅咒！</strong></li>
+    </section>
+    <section id="s15" data-section="15">
+      <h3>§15 MoE 异构专家极致落地详案 (ARCH-MOE-EXTREME)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: 本文档 §9 Mega-Kernel + §15 MoE</p>
+      <p>&gt; <strong>核心宣言</strong>: 在"大一统 JIT + TurboQuant + Deopt 兜底"的底层生态下，MoE 的异构不再是孤岛功能，而是底层组件相互摩擦后的自然现象。</p>
+    </section>
+    <section id="s15.1" data-section="15.1">
+      <h4>15.1 核内分发与零启动开销 (In-Kernel Expert Dispatch)</h4>
+      <p>传统 MoE 引擎（如 vLLM/TGI）为每个 Expert 调用独立 Kernel，导致严重 Launch Overhead。</p>
+      <li>MoE 层依然只启动 <strong>1 个 Mega-Kernel</strong></li>
+      <li>Thread Block 拿到 <code>Softmax(Gate)</code> 后利用内置字典读出目标 Expert</li>
+      <li>Kernel 内部利用汇编 <code>jmp</code> 直接跃迁到对应专家的权重读取区</li>
+      <li>物理空间上并发解耦，<strong>零 Driver 启动开销</strong></li>
+    </section>
+    <section id="s15.2" data-section="15.2">
+      <h4>15.2 TurboQuant + 预瞄 → Zero-Stall Swapping</h4>
+      <p>温/冷专家权重在 CPU RAM 甚至远端 RDMA 内存中时：</p>
+      <li>TurboQuant 2.0 将专家权重暴压到 4-bit 甚至 2-bit，<strong>PCIe/RDMA 搬运延迟缩减 75%~87.5%</strong></li>
+      <li>Gate 层算出路由表的瞬间，立刻启动 <code>cuMemPrefetchAsync</code> 无阻塞预加载</li>
+      <li>Thread Block 走到该 Expert 汇编入口时，被极度压缩的权重<strong>已躺在 GPU L2 Cache 里</strong></li>
+      <li>冷专家卡顿被计算流水线完美掩盖（Pipelining）</li>
+    </section>
+    <section id="s15.3" data-section="15.3">
+      <h4>15.3 CPU/GPU 真正并行 (Core Disaggregation)</h4>
+      <li>CPU 的 NUMA 探针暴露 <code>AMX</code> 或 <code>AVX512</code> 能力为 IR</li>
+      <li>编译器为温专家顺量生成一段 CPU 特化的 JIT 代码</li>
+      <li>通过独立的并发流将少部分 Token 交给 CPU 算完后统一回写</li>
+      <li>不需要上层写多线程锁</li>
+    </section>
+    <section id="s15.4" data-section="15.4">
+      <h4>15.4 冷板凳专家的全域封杀与"复活陷阱" (Uncommon Traps &amp; OSR Bailout)</h4>
+      <p>这是所有激进 JIT 编译器（如 V8 / Java HotSpot）必须解决的最核心难点：<strong>物理截肢了一个专家后突然又需要它，怎么办？</strong></p>
+      <p>1. <strong>绝对正确性底线</strong>: 门控（Gate Router）计算开销极低（&lt; 1% 总算力），<strong>绝不去热修补 Gate 概率计算本身</strong></p>
+      <p>2. <strong>陷阱替换 (Uncommon Trap)</strong>: JIT Director 抹除冷门专家的 Up/Down GEMM 时，不是无脑 <code>NOP</code> 丢弃，而是覆写为指向 <strong>Deopt Handler</strong> 的跳转指令</p>
+      <p>3. <strong>冷触发复活流程 (OSR Bailout)</strong>:</p>
+      <li>过去几百万次运行，无人需要冷专家，系统高速穿透修补后的平滑防线</li>
+      <li>突然 Request A 的 Gate 指向被封杀的冷专家 7</li>
+      <li>Request A 的 Thread Block 一头撞进 <strong>Uncommon Trap</strong></li>
+      <li>该 Thread Block 立刻向显存写下 <code>DEOPT_REQUEST = 7</code> 并主动挂起（不输出错误数据）</li>
+      <li>同 Batch 的其他常规请求不受影响，继续极速算完</li>
+      <li>这一层结算时，引擎主循环发现 <code>DEOPT_REQUEST</code></li>
+      <li>Host 触发不到 <strong>1ms 的微冷冻</strong>，JIT Director 瞬间回写 <code>.text</code> 复原冷专家 7 的网格</li>
+      <li>异步唤回其在主存的 4-bit 权重</li>
+      <li>引擎为挂起的 Request A 单独走一遍回炉重造（Re-evaluate）</li>
+      <p>&gt; 这种 <strong>"用万分之一的局部挂起代价，换走 99.99% 时间里的物理绝对零开销"</strong> 的设计，就是 De-optimization（去优化回退）机制，构成 Gllm 架构的最强韧防御底盘。</p>
+    </section>
+    <section id="s16" data-section="16">
+      <h3>§16 残差总线的四大物理应用全景 (ARCH-RESIDUAL-BUS-APPLICATIONS)</h3>
+      <p>&gt; <strong>实现状态</strong>: 🟢 IMPLEMENTED</p>
+      <p>&gt; <strong>关联</strong>: 本文档 §16 残差总线</p>
+      <p>&gt; <strong>核心拷问</strong>: 残差连接 $x_{out} = x_{in} + \text{Layer}(x_{in})$ 不仅仅是为了梯度不消失。在 JIT Mega-Kernel 架构中，残差流被物理重构为一条<strong>贯穿始终的开放式数据总线</strong>。</p>
+    </section>
+    <section id="s16.1" data-section="16.1">
+      <h4>16.1 超大知识的外挂注入点 (Late-Fusion RAG Injection)</h4>
+      <li>外部知识（如 10 万字财报）<strong>不需要从第 0 层 Embedding 开始爬</strong></li>
+      <li>用极便宜的小模型（BERT / 2B）预算出高维语义向量</li>
+      <li>JIT 在指定的"知识融合层"（如第 15 层）预留外链读取汇编（<code>LDG.E</code> 外部图显存）</li>
+      <li>系统拉开该层残差入口，用极其极速的 <code>Vector Add</code> 指令直接将知识向量<strong>硬加进残差流</strong></li>
+      <li>外部长上下文物理级跳过前半段网络，直接在深层语义区完成<strong>晚期融合（Late-Fusion）</strong></li>
+    </section>
+    <section id="s16.2" data-section="16.2">
+      <h4>16.2 任意层数据召回与高维截断 (PGSLE Early-Exit)</h4>
+      <li>在 Mega-Kernel 生成时，JIT 在特定层（如 Layer 20, 28, 35）的残差 Add 后顺手附带一个<strong>超小的线性分类器（微型 lm_head）</strong></li>
+      <li>如果在第 20 层，微型分类器"召回"的中间数据算出下一个 Token 概率逼近 <strong>99.9%</strong>（如模型正在复颂成语"大海(捞针)"）</li>
+      <li>该层 Thread Block 直接发射控制信标，触发 §9.1 块级路由或 §9.2 热修补，<strong>当场物理切断后续 20 层计算</strong></li>
+      <li>对于简单问题的运算量被<strong>物理腰斩</strong></li>
+    </section>
+    <section id="s16.3" data-section="16.3">
+      <h4>16.3 纯解码降维：通用多意图识别 (Pure_Decode Intent NLU)</h4>
+      <li>大模型本身就是无可匹敌的语义编码器</li>
+      <li>引擎提供 <code>Pure_Decode</code> API 模式：JIT 编译时仅选取前 15-20 层"理解区"（剥离后续语言生成层）</li>
+      <li>Prompt 跑过这前段图后，JIT 直接把残差总线截留（Recall），送入轻量级多分类探针（Linear Probe）</li>
+      <li>引擎化身为<strong>速度媲美小模型、成本近乎 0 的意图分类与特征提取神塔</strong></li>
+    </section>
+    <section id="s16.4" data-section="16.4">
+      <h4>16.4 零延迟飞行巡航审查 (In-Flight Guardrail Layer)</h4>
+      <li>不再是输入前拦截或输出后审查的二次判断</li>
+      <li>在模型深度的某一层（如倒数几层）<strong>物理强插入极小的安全审查头（Safety Head）</strong></li>
+      <li>自回归生成过程中，每吐出一个新词时，寄生在残差总线上的 Guard 探针不断"嗅探"当前高维语义流中是否存在危险概念特征聚集</li>
+      <li><strong>物理熔断</strong>: 一旦 Guard 探针概率超标，Mega-Kernel 内的 Thread Block 直接抛出 <code>Safety Veto</code> 中断信号</li>
+      <li>模型在吐出危险词的<strong>那一瞬间之前</strong>，就被当场强行切断计算流</li>
+      <li>这是真正的<strong>零延迟、无法越狱的安全物理护城河</strong></li>
+      <p>&gt; <strong>架构结论</strong>: 诸如意图识别、RAG、安全护栏等原先必须架设微服务集群的复杂大生态，被硬生生压成了 Kernel 里的几句附加指令，化为引擎出厂自带的超光速内置兵器！</p>
+    </section>
+    <section id="s17" data-section="17">
+      <h3>§17 分布式通信集成架构 (ARCH-DISTRIBUTED-COMM)</h3>
+      <p>&gt; <strong>关联 SPEC</strong>: gllm-nccl SPEC/02-ARCHITECTURE.md §5 (集成接口), SPEC/26-VMINSTR-RATIONALIZATION.md §1.6 (通信 VmInstr)</p>
+      <p>&gt; <strong>feature gate</strong>: <code>nccl</code> — 编译时门控，未启用时通信指令不存在于 VmInstr 枚举</p>
+      <p>&gt; <strong>依赖方向</strong>: gllm-kernels → depends on → gllm-nccl（通过 <code>nccl</code> feature 门控）</p>
+    </section>
+    <section id="s17.1" data-section="17.1">
+      <h4>17.1 集成定位</h4>
+      <p>gllm-nccl 是独立的跨设备集合通信库，使用 raw pointer API（<code>*mut u8</code>），不依赖 gllm-kernels 的类型系统。gllm-kernels 通过 <code>nccl</code> feature 编译时引入 gllm-nccl，在 JIT codegen 中生成通信指令的调用桩。</p>
+      <strong>权责边界</strong>:
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>所有权</td>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>VmInstr 通信变体定义</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels SPEC/26</td>
+        </tr>
+        <tr>
+          <td>指令集定义 + ISA Lowering 规则</td>
+        </tr>
+        <tr>
+          <td>通信运行时实现</td>
+        </tr>
+        <tr>
+          <td>gllm-nccl</td>
+        </tr>
+        <tr>
+          <td>AllReduce/AllGather/ReduceScatter/Broadcast 实现</td>
+        </tr>
+        <tr>
+          <td>JIT 调用桩生成</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels</td>
+        </tr>
+        <tr>
+          <td>codegen 生成 </td>
+          <td>call</td>
+          <td> 指令链接到 gllm-nccl 运行时</td>
+        </tr>
+        <tr>
+          <td>Compute-Comm 重叠编排</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels</td>
+        </tr>
+        <tr>
+          <td>JIT 生成的 mega-kernel 在 compute/comm stream 上并发</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s17.2" data-section="17.2">
+      <h4>17.2 Feature 传播机制</h4>
+      <p>```toml</p>
+      <p>[features]</p>
+      <p>default = []</p>
+      <p>nccl = ["dep:gllm-nccl"]</p>
+      <p>cuda = ["gllm-nccl?/cuda"]</p>
+      <p>hip = ["gllm-nccl?/hip"]</p>
+      <p>[dependencies]</p>
+      <p>gllm-nccl = { path = "../gllm-nccl", optional = true }</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>Feature 组合</th>
+        </tr>
+        <tr>
+          <td>语义</td>
+        </tr>
+        <tr>
+          <td>--features cuda</td>
+        </tr>
+        <tr>
+          <td>单机 CUDA 计算，无通信</td>
+        </tr>
+        <tr>
+          <td>--features "cuda,nccl"</td>
+        </tr>
+        <tr>
+          <td>CUDA 计算 + 分布式通信（gllm-nccl 以 cuda 后端编译）</td>
+        </tr>
+        <tr>
+          <td>--features "hip,nccl"</td>
+        </tr>
+        <tr>
+          <td>HIP 计算 + 分布式通信（gllm-nccl 以 hip 后端编译）</td>
+        </tr>
+      </table>
+    </section>
+    <section id="artifact-interface" data-artifact-type="interface" data-section="17.3">
+      <h4>17.3 Raw Pointer 接口契约</h4>
+      <p>gllm-kernels 调用 gllm-nccl 时通过 raw pointer 转换，不共享类型：</p>
+      <p>```rust</p>
+      <p>// gllm-kernels 内部调用（gllm-kernels 侧代码）</p>
+      <p>#[cfg(feature = "nccl")]</p>
+      <p>{</p>
+      <p>    use gllm_nccl::CommHandle;</p>
+      <p>    let future = comm_handle.all_reduce(</p>
+      <p>        gpu_buf.as_device_ptr() as *const u8,  // GpuBuffer → raw ptr</p>
+      <p>        recv_buf.as_device_ptr() as *mut u8,</p>
+      <p>        count, DType::Fp16, ReduceOp::Sum,</p>
+      <p>    )?;</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="17.4">
+      <h4>17.4 Compute-Comm Overlap 数据流</h4>
+      <p>JIT 生成的融合 kernel 在 compute stream 和 comm stream 上并发：</p>
+      <p>```</p>
+      <p>Time ─────────────────────────────────────────────►</p>
+      <p>GPU Stream (compute):  [chunk_0 GEMM] [chunk_1 GEMM] [chunk_2 GEMM] ...</p>
+      <p>GPU Stream (comm):                  [chunk_0 AR]   [chunk_1 AR]   [chunk_2 AR] ...</p>
+      <p>                                     ↑ overlap ↑    ↑ overlap ↑</p>
+      <p>gllm-kernels scheduler:</p>
+      <p>  1. 发起 chunk_0 计算 (CUDA stream compute)</p>
+      <p>  2. chunk_0 计算完成 → 发起 chunk_0 AllReduce (CUDA stream comm)</p>
+      <p>  3. 同时发起 chunk_1 计算 (CUDA stream compute)</p>
+      <p>  4. chunk_0 AllReduce 完成 + chunk_1 计算完成 → 发起 chunk_1 AllReduce</p>
+      <p>  5. 重复...</p>
+      <p>```</p>
+      <p>gllm-kernels 负责 stream 编排，gllm-nccl 只负责在指定 stream 上执行通信操作。</p>
+    </section>
+    <section id="s17.5" data-section="17.5">
+      <h4>17.5 VmInstr 通信指令</h4>
+      <p>通信 VmInstr 定义在 SPEC/26 §1.6，共 3 个变体：</p>
+      <p>JIT codegen 遇到通信 VmInstr 时：</p>
+      <p>1. 生成调用桩（call stub），链接到 gllm-nccl 提供的运行时函数</p>
+      <p>2. 不内联通信实现（通信是跨设备操作，不能 JIT 内联）</p>
+      <p>3. 调用桩的参数通过系统 ABI 寄存器传递</p>
+      <table>
+        <tr>
+          <th>VmInstr</th>
+        </tr>
+        <tr>
+          <td>用途</td>
+        </tr>
+        <tr>
+          <td>GPU Lowering</td>
+        </tr>
+        <tr>
+          <td>CPU Lowering</td>
+        </tr>
+        <tr>
+          <td>AllReduceChunk</td>
+        </tr>
+        <tr>
+          <td>chunk 级 AllReduce</td>
+        </tr>
+        <tr>
+          <td>PTX/HIP call stub → gllm-nccl runtime</td>
+        </tr>
+        <tr>
+          <td>FFI call stub</td>
+        </tr>
+        <tr>
+          <td>CommBarrier</td>
+        </tr>
+        <tr>
+          <td>通信/计算同步</td>
+        </tr>
+        <tr>
+          <td>PTX </td>
+          <td>bar.sync</td>
+          <td> / HIP barrier</td>
+        </tr>
+        <tr>
+          <td>pthread_barrier</td>
+        </tr>
+        <tr>
+          <td>NvlinkAsyncCopy</td>
+        </tr>
+        <tr>
+          <td>NVLink 异步块拷贝</td>
+        </tr>
+        <tr>
+          <td>PTX </td>
+          <td>cp.async.bulk</td>
+        </tr>
+        <tr>
+          <td>NOP</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s17.6" data-section="17.6">
+      <h4>17.6 与 gllm-nccl SPEC 的交叉对齐</h4>
+      <table>
+        <tr>
+          <th>本节</th>
+        </tr>
+        <tr>
+          <td>对齐 gllm-nccl SPEC</td>
+        </tr>
+        <tr>
+          <td>§17.1 集成定位</td>
+        </tr>
+        <tr>
+          <td>gllm-nccl SPEC/02 §5.1 集成架构</td>
+        </tr>
+        <tr>
+          <td>§17.2 Feature 传播</td>
+        </tr>
+        <tr>
+          <td>gllm-nccl SPEC/02 §5.4 Feature 传播</td>
+        </tr>
+        <tr>
+          <td>§17.3 Raw Pointer</td>
+        </tr>
+        <tr>
+          <td>gllm-nccl SPEC/02 §5.2 Raw Pointer 接口契约</td>
+        </tr>
+        <tr>
+          <td>§17.4 Overlap</td>
+        </tr>
+        <tr>
+          <td>gllm-nccl SPEC/05 §6.3 Compute-Comm Overlap</td>
+        </tr>
+        <tr>
+          <td>§17.5 VmInstr</td>
+        </tr>
+        <tr>
+          <td>gllm-nccl SPEC/07 §5 优化路径 AllReduce</td>
+        </tr>
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-architecture-features" data-entity="ENT-ARCHITECTURE-FEATURES" data-req-ref="REQ-ARCH-002 REQ-ARCH-001 REQ-ARCH-003 REQ-ARCH-004 REQ-ARCH-AUTO-001" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY ENT-MODEL-CONFIG" data-xref="REQ-ARCH-002 REQ-ARCH-001 REQ-ARCH-003 REQ-ARCH-004 REQ-ARCH-AUTO-001"><h4>ENT-ARCHITECTURE-FEATURES</h4><p>ArchitectureFeatures — 从tensor名称推导的架构特征（无启发式）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="family" data-type="string" data-required="true" <td="">family<td>string</td><td>是</td><td>Decoder/Encoder/Embedding/Reranker</td><td>Family 权重拓扑族(BUILD-stage策略选择器)</td></tr>
+<tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td></td><td>模型层数</td></tr><tr data-field="has_rope" data-type="boolean" data-required="true" <td="">has_rope<td>boolean</td><td>是</td><td></td><td>是否使用RoPE位置编码</td></tr><tr data-field="is_moe" data-type="boolean" data-required="true" <td="">is_moe<td>boolean</td><td>是</td><td></td><td>是否为MoE(混合专家)模型</td></tr><tr data-field="is_mla" data-type="boolean" data-required="true" <td="">
+is_mla<td>boolean</td><td>是</td><td></td><td>是否为MLA(多头潜在注意力)模型</td></tr><tr data-field="is_post_norm" data-type="boolean" data-required="true" <td="">is_post_norm<td>boolean</td><td>是</td><td></td><td>后归一化架构(BERT/XLM-R)</td></tr><tr data-field="is_hetero_layer" data-type="boolean" data-required="true" <td="">is_hetero_layer<td>boolean</td><td>是</td><td></td><td>异构层模型(Gemma4 sliding+global+不同FFN)</td></tr><tr data-field="norm_type" data-type="string" data-required="true" <td="">norm_type
+<td>string</td><td>是</td><td>RmsNorm/LayerNorm</td><td>归一化类型</td></tr></table></section>
+      <section id="ent-compiler-graph" data-entity="ENT-COMPILER-GRAPH" data-req-ref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-BUFFER-LAYOUT ENT-COMPUTE-PATTERN ENT-DEVICE-PROFILE ENT-FUSION-PLAN ENT-GRAPH-RESOURCE-PLAN" data-xref="REQ-AIS-001 REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002">
+        <h4>ENT-COMPILER-GRAPH</h4>
+        <p>CompilerGraph — 统一编译图IR (op集合+拓扑+SymDim+dtype)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_ops" data-type="number" data-required="true" <td="">num_ops<td>number</td><td>是</td><td>usize</td><td>算子数量 (ops.len())</td></tr><tr data-field="num_tensors" data-type="number" data-required="true" <td="">num_tensors<td>number</td><td>是</td><td>usize</td><td>张量数量 (tensors.len())</td></tr>
+<tr data-field="max_seq_len" data-type="number" data-required="true" <td="">max_seq_len<td>number</td><td>是</td><td>usize</td><td>最大序列长度 (SymDim::Symbolic 上界)</td></tr><tr data-field="num_inputs" data-type="number" data-required="true" <td="">num_inputs<td>number</td><td>是</td><td>usize</td><td>输入张量ID数量</td></tr><tr data-field="num_outputs" data-type="number" data-required="true" <td="">num_outputs<td>number</td><td>是</td><td>usize</td><td>输出张量ID数量</td></tr>
+<tr data-field="layer_loop_config" data-type="string" data-required="false" <td="">layer_loop_config<td>string</td><td>否</td><td>Option&lt;LayerLoopConfig&gt;</td><td>层循环配置 (mega-kernel编译时使用)</td></tr><tr data-field="embedding_scale" data-type="number" data-required="false" <td="">embedding_scale<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>Embedding缩放因子</td></tr><tr data-field="kv_load_mode" data-type="string" data-required="false" <td="">kv_load_mode<td>string</td><td>否</td><td>
+Option&lt;KvLoadMode&gt;</td><td>KV cache加载模式 (KIVI/Direct)</td></tr><tr data-field="ops" data-type="number" data-required="true" <td="">ops<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="tensors" data-type="number" data-required="true" <td="">tensors<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="inputs" data-type="number" data-required="true" <td="">inputs<td>number</td><td>是</td><td>(synced)</td></tr>
+<tr data-field="outputs" data-type="number" data-required="true" <td="">outputs<td>number</td><td>是</td><td>(synced)</td></tr><tr data-field="telemetry" data-type="string" data-required="true" <td="">telemetry<td>string</td><td>是</td><td>(synced)</td></tr></table>
+      </section>
+      <section id="ent-model-arch-key" data-entity="ENT-MODEL-ARCH-KEY" data-req-ref="REQ-ARCH-002 REQ-ARCH-001 REQ-ARCH-003 REQ-ARCH-004 REQ-ARCH-AUTO-001" data-entity-model-type="relational" data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-COMPILER-GRAPH ENT-MODEL-CONFIG" data-xref="REQ-ARCH-002 REQ-ARCH-001 REQ-ARCH-003 REQ-ARCH-004 REQ-ARCH-AUTO-001"><h4>ENT-MODEL-ARCH-KEY</h4><p>ModelArchKey — 架构特征键（struct ArchitectureFeatures in gllm/src/arch/auto_graph_fragments/types.inc.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="family" data-type="string" data-required="true" <td="">family<td>string</td><td>是</td><td>Decoder|Encoder</td><td>权重拓扑族（BUILD 阶段策略选择器）</td></tr>
+<tr data-field="num_layers" data-type="number" data-required="true" <td="">num_layers<td>number</td><td>是</td><td>usize</td><td>模型层数</td></tr><tr data-field="norm_type" data-type="string" data-required="true" <td="">norm_type<td>string</td><td>是</td><td>RmsNorm|LayerNorm</td><td>归一化类型</td></tr><tr data-field="ffn_type" data-type="string" data-required="true" <td="">ffn_type<td>string</td><td>是</td><td>SwiGLU|GeGLU|Standard|MoE</td><td>FFN 类型</td></tr>
+<tr data-field="is_moe" data-type="boolean" data-required="true" <td="">is_moe<td>boolean</td><td>是</td><td></td><td>是否为 MoE 架构</td></tr><tr data-field="is_mla" data-type="boolean" data-required="false" <td="">is_mla<td>boolean</td><td>否</td><td></td><td>是否为 MLA（Multi-head Latent Attention）</td></tr><tr data-field="is_vision" data-type="boolean" data-required="false" <td="">is_vision<td>boolean</td><td>否</td><td></td><td>是否含视觉编码器</td></tr>
+<tr data-field="is_audio" data-type="boolean" data-required="false" <td="">is_audio<td>boolean</td><td>否</td><td></td><td>是否含音频编码器</td></tr></table></section>
+      <section id="ent-model-config" data-entity="ENT-MODEL-CONFIG" data-req-ref="REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002 REQ-ARCH-001" data-entity-model-type="relational" data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-BATCH-CONTEXT ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-HEAD-ROUTING ENT-INTENT-TRACKER ENT-KV-CACHE ENT-MODEL-ARCH-KEY" data-xref="REQ-ERR-001 REQ-ERR-002 REQ-ERR-003 REQ-ARCH-002 REQ-ARCH-001">
+        <h4>ENT-MODEL-CONFIG</h4>
+        <p>ModelConfig — 模型配置 (tensor-driven Ω1)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="hidden_size" data-type="number" data-required="true" <td="">hidden_size<td>number</td><td>是</td><td>usize</td><td>隐藏层维度</td></tr><tr data-field="num_attention_heads" data-type="number" data-required="true" <td="">num_attention_heads<td>number</td><td>是</td><td>usize</td><td>注意力头数</td></tr>
+<tr data-field="num_key_value_heads" data-type="number" data-required="true" <td="">num_key_value_heads<td>number</td><td>是</td><td>usize</td><td>KV头数 (GQA)</td></tr><tr data-field="num_hidden_layers" data-type="number" data-required="true" <td="">num_hidden_layers<td>number</td><td>是</td><td>usize</td><td>Transformer层数</td></tr><tr data-field="vocab_size" data-type="number" data-required="true" <td="">vocab_size<td>number</td><td>是</td><td>usize</td><td>词表大小</td></tr>
+<tr data-field="max_position_embeddings" data-type="number" data-required="true" <td="">max_position_embeddings<td>number</td><td>是</td><td>usize</td><td>最大位置编码数</td></tr><tr data-field="head_dim" data-type="number" data-required="true" <td="">head_dim<td>number</td><td>是</td><td>usize</td><td>每个注意力头维度</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>DType</td><td>模型权重dtype (F32/F16/BF16)</td></tr><tr data-field="qk_norm" data-type="boolean" data-required="false"><td>qk_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="value_norm" data-type="boolean" data-required="false"><td>value_norm</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="embedding_scale_factor" data-type="number" data-required="false"><td>embedding_scale_factor</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="rope_partial_ratio_global" data-type="number" data-required="false"><td>rope_partial_ratio_global</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="mla_use_unabsorbed" data-type="boolean" data-required="false"><td>mla_use_unabsorbed</td><td>boolean</td><td>否</td><td>(synced)</td></tr><tr data-field="unabsorbed_threshold" data-type="number" data-required="false"><td>unabsorbed_threshold</td><td>number</td><td>否</td><td>(synced)</td></tr><tr data-field="hidden_act" data-type="string" data-required="false"><td>hidden_act</td><td>string</td><td>否</td><td>(synced)</td></tr></table>
+      </section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+</main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：02-ARCHITECTURE.html</address>
+  </footer>
+</body>
+</html>

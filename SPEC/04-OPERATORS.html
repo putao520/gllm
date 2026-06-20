@@ -1,0 +1,3387 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head><body><section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-op-equiv-001" data-test="TEST-OP-EQUIV-001" data-req-ref="REQ-OP-EQUIV-001" data-test-categories="unit"><h4>TEST-OP-EQUIV-001: REQ-OP-EQUIV-001 单元测试</h4><p>验证 REQ-OP-EQUIV-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-equiv-002" data-test="TEST-OP-EQUIV-002" data-req-ref="REQ-OP-EQUIV-002" data-test-categories="unit"><h4>TEST-OP-EQUIV-002: REQ-OP-EQUIV-002 单元测试</h4><p>验证 REQ-OP-EQUIV-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-equiv-003" data-test="TEST-OP-EQUIV-003" data-req-ref="REQ-OP-EQUIV-003" data-test-categories="unit"><h4>TEST-OP-EQUIV-003: REQ-OP-EQUIV-003 单元测试</h4><p>验证 REQ-OP-EQUIV-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-dispatch-001" data-test="TEST-OP-DISPATCH-001" data-req-ref="REQ-OP-DISPATCH-001" data-test-categories="unit"><h4>TEST-OP-DISPATCH-001: REQ-OP-DISPATCH-001 单元测试</h4><p>验证 REQ-OP-DISPATCH-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-dispatch-002" data-test="TEST-OP-DISPATCH-002" data-req-ref="REQ-OP-DISPATCH-002" data-test-categories="unit"><h4>TEST-OP-DISPATCH-002: REQ-OP-DISPATCH-002 单元测试</h4><p>验证 REQ-OP-DISPATCH-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-dispatch-003" data-test="TEST-OP-DISPATCH-003" data-req-ref="REQ-OP-DISPATCH-003" data-test-categories="unit"><h4>TEST-OP-DISPATCH-003: REQ-OP-DISPATCH-003 单元测试</h4><p>验证 REQ-OP-DISPATCH-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-hwmatrix-001" data-test="TEST-OP-HWMATRIX-001" data-req-ref="REQ-OP-HWMATRIX-001" data-test-categories="unit"><h4>TEST-OP-HWMATRIX-001: REQ-OP-HWMATRIX-001 单元测试</h4><p>验证 REQ-OP-HWMATRIX-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-hwmatrix-002" data-test="TEST-OP-HWMATRIX-002" data-req-ref="REQ-OP-HWMATRIX-002" data-test-categories="unit"><h4>TEST-OP-HWMATRIX-002: REQ-OP-HWMATRIX-002 单元测试</h4><p>验证 REQ-OP-HWMATRIX-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-hwmatrix-003" data-test="TEST-OP-HWMATRIX-003" data-req-ref="REQ-OP-HWMATRIX-003" data-test-categories="unit"><h4>TEST-OP-HWMATRIX-003: REQ-OP-HWMATRIX-003 单元测试</h4><p>验证 REQ-OP-HWMATRIX-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-gemm-001" data-test="TEST-OP-GEMM-001" data-req-ref="REQ-OP-GEMM-001" data-test-categories="unit"><h4>TEST-OP-GEMM-001: REQ-OP-GEMM-001 单元测试</h4><p>验证 REQ-OP-GEMM-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-gemm-002" data-test="TEST-OP-GEMM-002" data-req-ref="REQ-OP-GEMM-002" data-test-categories="unit"><h4>TEST-OP-GEMM-002: REQ-OP-GEMM-002 单元测试</h4><p>验证 REQ-OP-GEMM-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-op-gemm-003" data-test="TEST-OP-GEMM-003" data-req-ref="REQ-OP-GEMM-003" data-test-categories="unit"><h4>TEST-OP-GEMM-003: REQ-OP-GEMM-003 单元测试</h4><p>验证 REQ-OP-GEMM-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-backend-cap-001" data-test="TEST-BACKEND-CAP-001" data-req-ref="REQ-BACKEND-CAP-001" data-test-categories="unit"><h4>TEST-BACKEND-CAP-001: REQ-BACKEND-CAP-001 单元测试</h4><p>验证 REQ-BACKEND-CAP-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-backend-cap-002" data-test="TEST-BACKEND-CAP-002" data-req-ref="REQ-BACKEND-CAP-002" data-test-categories="unit"><h4>TEST-BACKEND-CAP-002: REQ-BACKEND-CAP-002 单元测试</h4><p>验证 REQ-BACKEND-CAP-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-backend-cap-003" data-test="TEST-BACKEND-CAP-003" data-req-ref="REQ-BACKEND-CAP-003" data-test-categories="unit"><h4>TEST-BACKEND-CAP-003: REQ-BACKEND-CAP-003 单元测试</h4><p>验证 REQ-BACKEND-CAP-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="04-OPERATORS">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"04-OPERATORS", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>算子与算子分发</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>04-OPERATORS</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-算子与算子分发" data-section="null">
+      <h2>算子与算子分发</h2>
+      <p>&gt; <strong>SSOT</strong>: 本文档是 gllm + gllm-kernels 统一项目算子库、算子语义定义、三层分发架构、硬件特化路径、融合策略差异矩阵、统一 GEMM 模型、硬件参数→codegen 贯通链的唯一真源。</p>
+      <p>&gt; 交叉引用: <code>01-JIT-PIPELINE.md</code>（JIT 管线）、<code>02-HARDWARE.md</code>（DeviceProfile）、<code>00-PHILOSOPHY.md</code>（铁律）</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 三层零成本分发架构</h3>
+      <p>算子通过三层分发实现零运行时开销:</p>
+      <p>```rust</p>
+      <p>错误: match dtype { F16 =&gt; path_a(), F32 =&gt; path_b() }</p>
+      <p>正确: &lt;E: Element&gt; fn compute(input: &amp;[E]) -&gt; E</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>层次</th>
+        </tr>
+        <tr>
+          <td>分发机制</td>
+        </tr>
+        <tr>
+          <td>开销</td>
+        </tr>
+        <tr>
+          <td>实现位置</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Layer 1: Backend</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>编译时 feature gate 单态化</td>
+        </tr>
+        <tr>
+          <td>零</td>
+        </tr>
+        <tr>
+          <td>#[cfg(feature = "jit-cuda")]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Layer 2: ISA</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>启动时 </td>
+          <td>DeviceProfile::detect()</td>
+          <td> 一次性探测</td>
+        </tr>
+        <tr>
+          <td>零（编译时常量）</td>
+        </tr>
+        <tr>
+          <td>gllm-kernels/src/compiler/</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Layer 3: Precision</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>编译时 </td>
+          <td>&lt;E: Element&gt;</td>
+          <td> 泛型单态化</td>
+        </tr>
+        <tr>
+          <td>零</td>
+        </tr>
+        <tr>
+          <td>Backend trait impl</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 Backend 分发</h4>
+      <p>后端检测优先级: CUDA -&gt; ROCm -&gt; Metal -&gt; CPU (<code>src/backend/detection.rs</code>)</p>
+      <table>
+        <tr>
+          <th>后端</th>
+        </tr>
+        <tr>
+          <td>类型</td>
+        </tr>
+        <tr>
+          <td>Feature Gate</td>
+        </tr>
+        <tr>
+          <td>实现位置</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CpuBackend</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>CPU (JIT 编译内核)</td>
+        </tr>
+        <tr>
+          <td>默认</td>
+        </tr>
+        <tr>
+          <td>src/compat/cpu_backend.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>CudaBackend</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>NVIDIA GPU</td>
+        </tr>
+        <tr>
+          <td>jit-cuda</td>
+        </tr>
+        <tr>
+          <td>src/compat/cuda_backend.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>HipBackend</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>AMD GPU (ROCm)</td>
+        </tr>
+        <tr>
+          <td>jit-hip</td>
+        </tr>
+        <tr>
+          <td>src/compat/hip_backend.rs</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>MetalBackend</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Apple GPU</td>
+        </tr>
+        <tr>
+          <td>jit-metal</td>
+        </tr>
+        <tr>
+          <td>src/compat/metal_backend.rs</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 ISA 分发 (Layer 2)</h4>
+      <p>启动时通过 CPUID / /proc 检测 ISA，结果缓存于 <code>DeviceProfile</code>（完整字段定义见 <code>SPEC/02-HARDWARE.md</code> §2）。运行时通过 <code>DeviceProfile</code> 字段选择代码路径。</p>
+      <p>硬件参数通过 <code>DeviceProfile</code> 字段驱动 codegen: <code>simd_width</code>、<code>use_avx512</code>、<code>has_amx</code>、<code>has_sve</code>、<code>sve_vl_bytes</code>、<code>cache_sizes</code> 等。</p>
+      <table>
+        <tr>
+          <th>ISA</th>
+        </tr>
+        <tr>
+          <td>寄存器宽度</td>
+        </tr>
+        <tr>
+          <td>典型平台</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX2</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>256-bit, 16 ymm</td>
+        </tr>
+        <tr>
+          <td>Haswell+ (2013)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AVX-512</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>512-bit, 32 zmm</td>
+        </tr>
+        <tr>
+          <td>Skylake-X+ (2017)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>NEON</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>128-bit, 32 v-reg</td>
+        </tr>
+        <tr>
+          <td>ARMv8+ 全系</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SVE</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>128~2048-bit, 32 z-reg</td>
+        </tr>
+        <tr>
+          <td>Neoverse V1+</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AMX</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Tile</td>
+        </tr>
+        <tr>
+          <td>Intel Xeon Scalable</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>1.3 Precision 分发 (Layer 3)</h4>
+      <p>精度通过 <code>&lt;E: Element&gt;</code> 编译时单态化。运行时无 <code>match dtype</code> 分支。<code>Element</code> trait 定义算术运算接口，精度差异体现在类型大小和指令选择上，由 codegen 处理。</p>
+      <table>
+        <tr>
+          <th>DType</th>
+        </tr>
+        <tr>
+          <td>Element 实现</td>
+        </tr>
+        <tr>
+          <td>字节</td>
+        </tr>
+        <tr>
+          <td>SIMD 指令集</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>F32</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>f32</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>AVX2 </td>
+          <td>vaddps</td>
+          <td> / AVX-512 </td>
+          <td>vaddps</td>
+          <td> / NEON </td>
+          <td>fadd</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>F16</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>half::f16</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>AVX2 F16C </td>
+          <td>vcvtph2ps</td>
+          <td> / AVX-512 FP16 </td>
+          <td>vaddph</td>
+          <td> / NEON FP16 </td>
+          <td>fadd</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>BF16</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>half::bf16</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>AVX-512 BF16 </td>
+          <td>vdpbf16ps</td>
+          <td> / NEON BF16 </td>
+          <td>bfdot</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. Element trait</h3>
+      <p>Element trait 定义标量算术和类型约束，供 codegen 使用:</p>
+      <p>```rust</p>
+      <p>pub trait Element: Copy + Clone + Default + Sized + Send + Sync + Debug {</p>
+      <p>    const ZERO: Self;</p>
+      <p>    fn to_f32(self) -&gt; f32;</p>
+      <p>    fn from_f32(v: f32) -&gt; Self;</p>
+      <p>    fn pack_i8(v: Self) -&gt; [u8];</p>
+      <p>    fn unpack_i8(data: &amp;[u8]) -&gt; Self;</p>
+      <p>}</p>
+      <p>```</p>
+      <p>实现: <code>f32</code>, <code>half::f16</code>, <code>half::bf16</code>。编译时单态化确保零运行时分支。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Backend trait</h3>
+      <p>Backend trait 定义硬件后端的统一接口。每个方法通过 <code>&lt;E: Element&gt;</code> 单态化。</p>
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>签名概要</td>
+        </tr>
+        <tr>
+          <td>rms_norm</td>
+        </tr>
+        <tr>
+          <td>(x: &amp;[E], out: &amp;mut [E], weight: &amp;[E], eps: f32)</td>
+        </tr>
+        <tr>
+          <td>rope</td>
+        </tr>
+        <tr>
+          <td>(q: &amp;mut [E], k: &amp;mut [E], pos: usize, head_dim: usize, ...)</td>
+        </tr>
+        <tr>
+          <td>gemm</td>
+        </tr>
+        <tr>
+          <td>(a: &amp;[E], b: &amp;[E], c: &amp;mut [E], m: usize, n: usize, k: usize)</td>
+        </tr>
+        <tr>
+          <td>gemv</td>
+        </tr>
+        <tr>
+          <td>(a: &amp;[E], x: &amp;[E], y: &amp;mut [E], m: usize, n: usize)</td>
+        </tr>
+        <tr>
+          <td>softmax</td>
+        </tr>
+        <tr>
+          <td>(x: &amp;mut [E], len: usize)</td>
+        </tr>
+        <tr>
+          <td>silu</td>
+        </tr>
+        <tr>
+          <td>(x: &amp;mut [E], len: usize)</td>
+        </tr>
+        <tr>
+          <td>swiglu</td>
+        </tr>
+        <tr>
+          <td>(gate: &amp;[E], up: &amp;[E], out: &amp;mut [E], len: usize)</td>
+        </tr>
+        <tr>
+          <td>embed</td>
+        </tr>
+        <tr>
+          <td>(input: &amp;[u8], output: &amp;mut [E], ...)</td>
+        </tr>
+        <tr>
+          <td>dequantize_row</td>
+        </tr>
+        <tr>
+          <td>(data: &amp;[u8], scale: f32, zero_point: i32, ...)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 算子清单</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 BLAS 模块</h4>
+      <p>BLIS GEMM 五层级循环: Pack A/B -&gt; K-loop (MC) -&gt; IR 循环 (NC) -&gt; Tile (MR/NR) -&gt; 输出。</p>
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>数学定义</td>
+        </tr>
+        <tr>
+          <td>gemm</td>
+        </tr>
+        <tr>
+          <td>C = A * B + bias</td>
+        </tr>
+        <tr>
+          <td>gemv</td>
+        </tr>
+        <tr>
+          <td>y = A * x</td>
+        </tr>
+        <tr>
+          <td>vec_dot</td>
+        </tr>
+        <tr>
+          <td>内积</td>
+        </tr>
+        <tr>
+          <td>vec_add</td>
+        </tr>
+        <tr>
+          <td>向量加</td>
+        </tr>
+        <tr>
+          <td>vec_mul</td>
+        </tr>
+        <tr>
+          <td>向量乘</td>
+        </tr>
+        <tr>
+          <td>vec_scale</td>
+        </tr>
+        <tr>
+          <td>标量乘</td>
+        </tr>
+        <tr>
+          <td>vec_axpy</td>
+        </tr>
+        <tr>
+          <td>AXPY: y += a * x</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 激活函数</h4>
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>数学定义</td>
+        </tr>
+        <tr>
+          <td>silu</td>
+        </tr>
+        <tr>
+          <td>x * sigmoid(x)</td>
+        </tr>
+        <tr>
+          <td>gelu</td>
+        </tr>
+        <tr>
+          <td>x * Phi(x)</td>
+        </tr>
+        <tr>
+          <td>relu</td>
+        </tr>
+        <tr>
+          <td>max(0, x)</td>
+        </tr>
+        <tr>
+          <td>tanh</td>
+        </tr>
+        <tr>
+          <td>tanh(x)</td>
+        </tr>
+        <tr>
+          <td>softmax</td>
+        </tr>
+        <tr>
+          <td>exp(x_i) / sum(exp(x_j))</td>
+        </tr>
+        <tr>
+          <td>swiglu</td>
+        </tr>
+        <tr>
+          <td>silu(gate) * up</td>
+        </tr>
+        <tr>
+          <td>exp</td>
+        </tr>
+        <tr>
+          <td>e^x</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 归一化</h4>
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>数学定义</td>
+        </tr>
+        <tr>
+          <td>rms_norm</td>
+        </tr>
+        <tr>
+          <td>x / sqrt(mean(x^2) + eps) * weight</td>
+        </tr>
+        <tr>
+          <td>layer_norm</td>
+        </tr>
+        <tr>
+          <td>(x - mean) / std * weight + bias</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 位置编码</h4>
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>数学定义</td>
+        </tr>
+        <tr>
+          <td>rope</td>
+        </tr>
+        <tr>
+          <td>旋转位置编码</td>
+        </tr>
+        <tr>
+          <td>rope_with_pos</td>
+        </tr>
+        <tr>
+          <td>带显式位置的 RoPE</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.5" data-section="4.5">
+      <h4>4.5 注意力</h4>
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>flash_attention</td>
+        </tr>
+        <tr>
+          <td>融合注意力: Softmax + 因果掩码 + 输出投影 + KV cache</td>
+        </tr>
+        <tr>
+          <td>gqa</td>
+        </tr>
+        <tr>
+          <td>分组查询注意力: KV cache 读取 + GQA 分组 + 缩放</td>
+        </tr>
+        <tr>
+          <td>paged_attention</td>
+        </tr>
+        <tr>
+          <td>分页注意力: 虚拟内存管理</td>
+        </tr>
+        <tr>
+          <td>sliding_window</td>
+        </tr>
+        <tr>
+          <td>滑动窗口注意力</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.6" data-section="4.6">
+      <h4>4.6 MoE (Mixture of Experts)</h4>
+      <strong>MoERouter vs MoEGate</strong>:
+      <li><code>MoEGate</code>: DeepSeek-V3 风格，无 bias，softmax 后 top-k。用于 <code>OpKind::MoEGate</code></li>
+      <li><code>MoERouter</code>: GPT-OSS-20B 风格，有 bias，softmax 后 top-k。用于 <code>OpKind::MoERouter</code></li>
+      <li>两者输出相同格式：(router_weights, router_indices)，供下游 <code>MoEDispatchPacked</code> 消费</li>
+      <strong>MoERouter JIT lowering 策略</strong>:
+      <p>```</p>
+      <p>MoERouter 分解为 3 个子操作:</p>
+      <p>  1. GEMM: hidden @ weight.T → router_logits [seq, num_experts]</p>
+      <p>  2. Softmax: softmax(router_logits) → router_probs [seq, num_experts]</p>
+      <p>  3. TopK: top_k(router_probs, k) → (weights, indices) [seq, top_k]</p>
+      <p>JIT 实现: lower_moe_router() 内部依次调用:</p>
+      <li>emit_gemm_inline_with_hook() (GEMM)</li>
+      <li>lower_reduction_softmax() (Softmax)</li>
+      <li>lower_topk() (TopK — 新增 VmInstr::TopK)</li>
+      <p>```</p>
+      <strong>ComputePattern 分类</strong>: <code>OpSemantics::Gemm</code>（内含 GEMM 子操作）
+      <strong>lower 函数</strong>: <code>lower::lower_moe_router()</code> — 专用 lower，内部组合 GEMM + softmax + top-k
+      <table>
+        <tr>
+          <th>算子</th>
+        </tr>
+        <tr>
+          <td>数学定义</td>
+        </tr>
+        <tr>
+          <td>输入</td>
+        </tr>
+        <tr>
+          <td>输出</td>
+        </tr>
+        <tr>
+          <td>MoEGate</td>
+        </tr>
+        <tr>
+          <td>router_logits = hidden @ weight.T; probs = softmax(router_logits); top_k_indices, top_k_weights = topk(probs)</td>
+        </tr>
+        <tr>
+          <td>hidden [seq, hidden_size], weight [hidden_size, num_experts]</td>
+        </tr>
+        <tr>
+          <td>router_weights [seq, top_k], router_indices [seq, top_k]</td>
+        </tr>
+        <tr>
+          <td>MoERouter</td>
+        </tr>
+        <tr>
+          <td>logits = hidden @ weight.T + bias; probs = softmax(logits); weights, indices = top_k(probs, k)</td>
+        </tr>
+        <tr>
+          <td>hidden [seq, hidden_size], weight [hidden_size, num_experts], bias [num_experts]</td>
+        </tr>
+        <tr>
+          <td>router_weights [seq, top_k], router_indices [seq, top_k]</td>
+        </tr>
+        <tr>
+          <td>MoEDispatchPacked</td>
+        </tr>
+        <tr>
+          <td>for each token: selected_experts = indices[token]; for each expert: out += expert_ffn(hidden, expert_weights) * router_weight</td>
+        </tr>
+        <tr>
+          <td>hidden_input, router_weights, router_indices, gate_up_blocks, gate_up_scales, gate_up_bias, down_blocks, down_scales, down_bias (9 个)</td>
+        </tr>
+        <tr>
+          <td>output [seq, hidden_size]</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 量化类型支持</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 GgmlDType 到 QuantType 映射</h4>
+      <p>GGUF 格式 (21 种) 通过 <code>GgmlDType</code> 枚举标识，映射到 <code>QuantType</code> 后分发到对应的解量化内核。</p>
+      <table>
+        <tr>
+          <th>GgmlDType</th>
+        </tr>
+        <tr>
+          <td>QuantType</td>
+        </tr>
+        <tr>
+          <td>分发目标</td>
+        </tr>
+        <tr>
+          <td>Q4_0</td>
+        </tr>
+        <tr>
+          <td>Q4_0</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Q4_1</td>
+        </tr>
+        <tr>
+          <td>Q4_1</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Q5_0</td>
+        </tr>
+        <tr>
+          <td>Q5_0</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Q5_1</td>
+        </tr>
+        <tr>
+          <td>Q5_1</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Q8_0</td>
+        </tr>
+        <tr>
+          <td>Q8_0</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Q8_1</td>
+        </tr>
+        <tr>
+          <td>Q8_1</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Q2_K</td>
+        </tr>
+        <tr>
+          <td>Q2K</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>Q3_K</td>
+        </tr>
+        <tr>
+          <td>Q3K</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>Q4_K</td>
+        </tr>
+        <tr>
+          <td>Q4K</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>Q5_K</td>
+        </tr>
+        <tr>
+          <td>Q5K</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>Q6_K</td>
+        </tr>
+        <tr>
+          <td>Q6K</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>Q8_K</td>
+        </tr>
+        <tr>
+          <td>Q8K</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ1_S</td>
+        </tr>
+        <tr>
+          <td>IQ1S</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ1_M</td>
+        </tr>
+        <tr>
+          <td>IQ1M</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ2_XXS</td>
+        </tr>
+        <tr>
+          <td>IQ2XXS</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ2_XS</td>
+        </tr>
+        <tr>
+          <td>IQ2XS</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ2_S</td>
+        </tr>
+        <tr>
+          <td>IQ2S</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ3_XXS</td>
+        </tr>
+        <tr>
+          <td>IQ3XXS</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ3_S</td>
+        </tr>
+        <tr>
+          <td>IQ3S</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ4_NL</td>
+        </tr>
+        <tr>
+          <td>IQ4NL</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ4_XS</td>
+        </tr>
+        <tr>
+          <td>IQ4XS</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>AWQ4</td>
+        </tr>
+        <tr>
+          <td>AWQ4</td>
+        </tr>
+        <tr>
+          <td>awq_matmul</td>
+        </tr>
+        <tr>
+          <td>GPTQ4</td>
+        </tr>
+        <tr>
+          <td>GPTQ4</td>
+        </tr>
+        <tr>
+          <td>gptq_matmul</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 解量化内核</h4>
+      <table>
+        <tr>
+          <th>内核</th>
+        </tr>
+        <tr>
+          <td>格式类别</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>classic_matmul</td>
+        </tr>
+        <tr>
+          <td>Classic (Q4_0/Q5_0/Q8_0)</td>
+        </tr>
+        <tr>
+          <td>block_size = 32, 最简单的量化格式</td>
+        </tr>
+        <tr>
+          <td>kquant_matmul</td>
+        </tr>
+        <tr>
+          <td>K-Quant (Q2_K~Q8_K)</td>
+        </tr>
+        <tr>
+          <td>block_size = 256, 高精度量化</td>
+        </tr>
+        <tr>
+          <td>iq_matmul</td>
+        </tr>
+        <tr>
+          <td>IQ 系列 (IQ1~IQ4)</td>
+        </tr>
+        <tr>
+          <td>block_size = 256, 不量化矩阵</td>
+        </tr>
+        <tr>
+          <td>awq_matmul</td>
+        </tr>
+        <tr>
+          <td>AWQ4</td>
+        </tr>
+        <tr>
+          <td>block_size = 128, 激活感知量化</td>
+        </tr>
+        <tr>
+          <td>gptq_matmul</td>
+        </tr>
+        <tr>
+          <td>GPTQ4</td>
+        </tr>
+        <tr>
+          <td>block_size = 128, 静态后训练量化</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 TurboQuant 静态极化</h4>
+      <p>TurboQuant 将权重量化到 W4A4 或 W8A8 模式，JIT 编译时锁定执行路径，推理过程中无类型判断分支。</p>
+      <p>TurboQuant 严格受限于 GGUF 格式权重。SafeTensors/ONNX 原生浮点权重直接使用对应的 DType 模式。禁止运行时动态切换 TurboQuant 模式。运行时数学优化（FWHT 在线旋转、KIVI 非对称量化、RaBitQ 无偏修正、Dual-Track 显存池）详见 <code>SPEC/05-OPTIMIZATIONS.md</code> §4。</p>
+      <table>
+        <tr>
+          <th>模式</th>
+        </tr>
+        <tr>
+          <td>权重精度</td>
+        </tr>
+        <tr>
+          <td>量化方式</td>
+        </tr>
+        <tr>
+          <td>适用格式</td>
+        </tr>
+        <tr>
+          <td>W4A4</td>
+        </tr>
+        <tr>
+          <td>4-bit (非对称)</td>
+        </tr>
+        <tr>
+          <td>非对称量化 + FWHT 在线旋转</td>
+        </tr>
+        <tr>
+          <td>GGUF Q4_K/Q5_K</td>
+        </tr>
+        <tr>
+          <td>W8A8</td>
+        </tr>
+        <tr>
+          <td>8-bit (非对称)</td>
+        </tr>
+        <tr>
+          <td>非对称量化 + RaBitQ 无偏修正</td>
+        </tr>
+        <tr>
+          <td>GGUF Q8_K</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. GPU SM 版本分发</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 PtxKernelRegistry</h4>
+      <p>GPU 后端通过 <code>PtxKernelRegistry</code> 按 SM 版本选择最优 PTX 内核。<code>SmRange</code> 定义 SM 版本范围。</p>
+      <p>```rust</p>
+      <p>pub struct SmRange {</p>
+      <p>    pub min_sm: u32,</p>
+      <p>    pub max_sm: u32,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>查找策略: 目标 SM 版本在注册表项的范围内时返回该项，否则返回错误。禁止 SM 版本降级。</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 SM 版本特化</h4>
+      <table>
+        <tr>
+          <th>SM 版本</th>
+        </tr>
+        <tr>
+          <td>矩阵乘指令</td>
+        </tr>
+        <tr>
+          <td>异步预取</td>
+        </tr>
+        <tr>
+          <td>典型平台</td>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma</td>
+          <td> (block-scaled)</td>
+        </tr>
+        <tr>
+          <td>TMA 2D/5D</td>
+        </tr>
+        <tr>
+          <td>Blackwell</td>
+        </tr>
+        <tr>
+          <td>sm_90</td>
+        </tr>
+        <tr>
+          <td>WGMMA</td>
+        </tr>
+        <tr>
+          <td>TMA 2D/5D prefetch</td>
+        </tr>
+        <tr>
+          <td>Hopper</td>
+        </tr>
+        <tr>
+          <td>sm_80~89</td>
+        </tr>
+        <tr>
+          <td>mma.sync</td>
+        </tr>
+        <tr>
+          <td>cp.async</td>
+        </tr>
+        <tr>
+          <td>Ampere/Ada</td>
+        </tr>
+        <tr>
+          <td>sm_70~79</td>
+        </tr>
+        <tr>
+          <td>wmma</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>Volta/Turing</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 HIP AMD GPU</h4>
+      <p>warp_size: RDNA (gfx1000+) = 32, CDNA = 64。</p>
+      <table>
+        <tr>
+          <th>gfx_arch</th>
+        </tr>
+        <tr>
+          <td>GPU 架构</td>
+        </tr>
+        <tr>
+          <td>tensor_core_gen</td>
+        </tr>
+        <tr>
+          <td>典型平台</td>
+        </tr>
+        <tr>
+          <td>gfx940+</td>
+        </tr>
+        <tr>
+          <td>CDNA3</td>
+        </tr>
+        <tr>
+          <td>3 (WMMA)</td>
+        </tr>
+        <tr>
+          <td>MI300</td>
+        </tr>
+        <tr>
+          <td>gfx908+</td>
+        </tr>
+        <tr>
+          <td>CDNA2</td>
+        </tr>
+        <tr>
+          <td>2 (WMMA)</td>
+        </tr>
+        <tr>
+          <td>MI250</td>
+        </tr>
+        <tr>
+          <td>gfx1100+</td>
+        </tr>
+        <tr>
+          <td>RDNA3</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>RX 7900</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6.4" data-section="6.4">
+      <h4>6.4 Metal Apple GPU</h4>
+      <p>Apple GPU 通过 Metal framework 直接编译。所有 Apple GPU 共享 <code>MetalBackend</code> 实现。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 硬件特化路径</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 x86_64 特化</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>特化机制</td>
+        </tr>
+        <tr>
+          <td>BLIS GEMM</td>
+        </tr>
+        <tr>
+          <td>5 层级循环: Pack A/B -&gt; K-loop (MC) -&gt; IR 循环 (NC) -&gt; Tile (MR/NR) -&gt; 输出</td>
+        </tr>
+        <tr>
+          <td>手写汇编微内核</td>
+        </tr>
+        <tr>
+          <td>AVX2: 6×16, AVX-512: 14×32 (</td>
+          <td>global_asm!</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>AVX-512 BF16</td>
+        </tr>
+        <tr>
+          <td>vdpbf16ps</td>
+          <td> 原生 BF16 内积</td>
+        </tr>
+        <tr>
+          <td>AVX-512 VNNI</td>
+        </tr>
+        <tr>
+          <td>vpdpbusd</td>
+          <td> W8A8 INT8 内积</td>
+        </tr>
+        <tr>
+          <td>AMX tile</td>
+        </tr>
+        <tr>
+          <td>Intel AMX </td>
+          <td>tdpbssd</td>
+          <td> 定点规格</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 ARM 特化</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>特化机制</td>
+        </tr>
+        <tr>
+          <td>BLIS GEMM</td>
+        </tr>
+        <tr>
+          <td>5 层级循环: Pack A/B -&gt; K-loop -&gt; Tile -&gt; 输出</td>
+        </tr>
+        <tr>
+          <td>手写汇编微内核</td>
+        </tr>
+        <tr>
+          <td>NEON: 8×12 (</td>
+          <td>global_asm!</td>
+          <td>)</td>
+        </tr>
+        <tr>
+          <td>SVE 向量</td>
+        </tr>
+        <tr>
+          <td>可变长度 128~2048-bit</td>
+        </tr>
+        <tr>
+          <td>NEON BF16</td>
+        </tr>
+        <tr>
+          <td>bfdot</td>
+          <td> BF16 内积</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 GPU 特化</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>SM 版本</td>
+        </tr>
+        <tr>
+          <td>特化机制</td>
+        </tr>
+        <tr>
+          <td>TMA prefetch</td>
+        </tr>
+        <tr>
+          <td>sm_90+</td>
+        </tr>
+        <tr>
+          <td>张量内存加速器异步预取</td>
+        </tr>
+        <tr>
+          <td>WGMMA</td>
+        </tr>
+        <tr>
+          <td>sm_90+</td>
+        </tr>
+        <tr>
+          <td>Warp 级矩阵乘累加</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma</td>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>Block-scaled 矩阵乘累加</td>
+        </tr>
+        <tr>
+          <td>FP4/FP6 native</td>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>原生低精度 MMA</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 融合策略硬件差异矩阵</h3>
+      <p>Phase 2 融合决策由 <code>DeviceProfile</code> 驱动，不同硬件平台的融合能力差异显著。本节定义每种融合模式在各硬件 Profile 上的行为和约束。</p>
+    </section>
+    <section id="s8.1" data-section="8.1">
+      <h4>8.1 EpilogueInjection 融合深度</h4>
+      <p>GEMM 微内核累加完毕后，Epilogue 在累加器寄存器上原地执行 TraceOp 链。融合深度受可用 scratch 寄存器数限制:</p>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>微内核 MR×NR</td>
+        </tr>
+        <tr>
+          <td>累加器寄存器</td>
+        </tr>
+        <tr>
+          <td>Scratch 寄存器</td>
+        </tr>
+        <tr>
+          <td>最大 Epilogue 深度</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>6×16</td>
+        </tr>
+        <tr>
+          <td>12 ymm</td>
+        </tr>
+        <tr>
+          <td>4 ymm</td>
+        </tr>
+        <tr>
+          <td>2-3 ops</td>
+        </tr>
+        <tr>
+          <td>16 ymm 总量，寄存器溢出到栈后性能骤降</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>14×32</td>
+        </tr>
+        <tr>
+          <td>28 zmm</td>
+        </tr>
+        <tr>
+          <td>4 zmm</td>
+        </tr>
+        <tr>
+          <td>6-8 ops</td>
+        </tr>
+        <tr>
+          <td>32 zmm 总量，充裕 scratch 空间</td>
+        </tr>
+        <tr>
+          <td>AMX (AVX-512)</td>
+        </tr>
+        <tr>
+          <td>14×32</td>
+        </tr>
+        <tr>
+          <td>28 zmm</td>
+        </tr>
+        <tr>
+          <td>4 zmm</td>
+        </tr>
+        <tr>
+          <td>8+ ops</td>
+        </tr>
+        <tr>
+          <td>AMX tile 做主 GEMM，zmm 全用于 epilogue</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>8×12</td>
+        </tr>
+        <tr>
+          <td>24 v</td>
+        </tr>
+        <tr>
+          <td>8 v</td>
+        </tr>
+        <tr>
+          <td>4-6 ops</td>
+        </tr>
+        <tr>
+          <td>32 v-reg 总量，适中 scratch</td>
+        </tr>
+        <tr>
+          <td>SVE2</td>
+        </tr>
+        <tr>
+          <td>动态</td>
+        </tr>
+        <tr>
+          <td>动态</td>
+        </tr>
+        <tr>
+          <td>动态</td>
+        </tr>
+        <tr>
+          <td>4-8 ops</td>
+        </tr>
+        <tr>
+          <td>按 </td>
+          <td>sve_vl_bytes</td>
+          <td> 动态计算</td>
+        </tr>
+        <tr>
+          <td>GPU sm_70</td>
+        </tr>
+        <tr>
+          <td>wmma 16×16×16</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>3-4 ops</td>
+        </tr>
+        <tr>
+          <td>寄存器压力限制融合深度</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>mma.sync 16×8×16</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>4-6 ops</td>
+        </tr>
+        <tr>
+          <td>较多寄存器支持更深 epilogue</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>WGMMA 16×16×64</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>6-8 ops</td>
+        </tr>
+        <tr>
+          <td>Warp Specialization 释放寄存器压力</td>
+        </tr>
+        <tr>
+          <td>GPU sm_100+</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>8+ ops</td>
+        </tr>
+        <tr>
+          <td>TMEM 替代 shared memory 做累加</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.2" data-section="8.2">
+      <h4>8.2 TileLevelFusion vs ComputeRoot 决策</h4>
+      <p>由 DeviceProfile 的 cache 层级数据驱动:</p>
+      <p>```</p>
+      <p>if predecessor_output_bytes &gt; profile.l1_cache_bytes * 0.75 {</p>
+      <p>    TileLevelFusion { tile_rows: mc }  // 嵌入 GEMM MC 循环</p>
+      <p>} else {</p>
+      <p>    ComputeRoot  // 先算完驻留 L1</p>
+      <p>}</p>
+      <p>```</p>
+      <p>&gt; <strong>注</strong>: elem 数量阈值 = L1 × 75% / elem_bytes(compute_dtype)。BF16 模型 elem_bytes=2 时阈值翻倍。</p>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>L1 Cache (KB)</td>
+        </tr>
+        <tr>
+          <td>TileLevelFusion 阈值</td>
+        </tr>
+        <tr>
+          <td>ComputeRoot 范围</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>32</td>
+        </tr>
+        <tr>
+          <td>&gt; 24 KB</td>
+        </tr>
+        <tr>
+          <td>hidden ≤ 6K elem (compute_dtype=F32 时)</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>32</td>
+        </tr>
+        <tr>
+          <td>&gt; 24 KB</td>
+        </tr>
+        <tr>
+          <td>hidden ≤ 6K elem (compute_dtype=F32 时)</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>32-64</td>
+        </tr>
+        <tr>
+          <td>&gt; 24-48 KB</td>
+        </tr>
+        <tr>
+          <td>hidden ≤ 6-12K elem (compute_dtype=F32 时)</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>48-164 (SMEM)</td>
+        </tr>
+        <tr>
+          <td>&gt; SMEM × 75%</td>
+        </tr>
+        <tr>
+          <td>tile ≤ 36-123 KB</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>228 (group SMEM)</td>
+        </tr>
+        <tr>
+          <td>&gt; 171 KB</td>
+        </tr>
+        <tr>
+          <td>tile ≤ 171 KB</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.3" data-section="8.3">
+      <h4>8.3 QkvSharedInput 适用性</h4>
+      <p>Q/K/V 三个 GEMM 共享 pack_a，消除重复 pack 开销:</p>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>pack_a 开销</td>
+        </tr>
+        <tr>
+          <td>融合收益</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>高 (6×16 tile pack)</td>
+        </tr>
+        <tr>
+          <td>显著</td>
+        </tr>
+        <tr>
+          <td>3 次 pack → 1 次</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>高 (14×32 tile pack)</td>
+        </tr>
+        <tr>
+          <td>显著</td>
+        </tr>
+        <tr>
+          <td>3 次 pack → 1 次</td>
+        </tr>
+        <tr>
+          <td>AMX</td>
+        </tr>
+        <tr>
+          <td>低 (tile load)</td>
+        </tr>
+        <tr>
+          <td>中等</td>
+        </tr>
+        <tr>
+          <td>AMX tile load 天然高效</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>中 (cp.async)</td>
+        </tr>
+        <tr>
+          <td>显著</td>
+        </tr>
+        <tr>
+          <td>3 次 Global→Shared → 1 次</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>低 (TMA 2D)</td>
+        </tr>
+        <tr>
+          <td>中等</td>
+        </tr>
+        <tr>
+          <td>TMA prefetch 天然高效</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.4" data-section="8.4">
+      <h4>8.4 NormIntoGemm 融合</h4>
+      <p>RmsNorm 输出直接喂入 GEMM（无中间写回），与 TileLevelFusion 协同:</p>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>Norm 计算位置</td>
+        </tr>
+        <tr>
+          <td>数据流</td>
+        </tr>
+        <tr>
+          <td>CPU 全系</td>
+        </tr>
+        <tr>
+          <td>寄存器内 Norm → pack_a 直通</td>
+        </tr>
+        <tr>
+          <td>Norm 结果写入 scratchpad 的 normed 区域，紧接着被 pack_a 消费</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>Block 内 Norm → SMEM 直通</td>
+        </tr>
+        <tr>
+          <td>Thread Block 内完成 Norm，结果写入 SMEM 供 mma.sync 消费</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>Warp 内 Norm → Register 直通</td>
+        </tr>
+        <tr>
+          <td>Warp Specialization producer 完成 Norm，consumer WGMMA 直接消费</td>
+        </tr>
+        <tr>
+          <td>GPU sm_100+</td>
+        </tr>
+        <tr>
+          <td>TMEM 内 Norm → TMEM 直通</td>
+        </tr>
+        <tr>
+          <td>TMEM 完成累加和 Norm，无 SMEM 中间写回</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.5" data-section="8.5">
+      <h4>8.5 FFNBlock 融合</h4>
+      <p>Gate GEMM + Up GEMM 的 Gate/Up 结果融合激活 (SiLU) + 乘法:</p>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>融合方式</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>分离 GEMM + LoopFusion(SiLU×Up)</td>
+        </tr>
+        <tr>
+          <td>Gate/Up 各自独立 GEMM，epilogue 仅处理 SiLU</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>EpilogueInjection(SiLU) + LoopFusion(Mul)</td>
+        </tr>
+        <tr>
+          <td>Gate GEMM epilogue 内联 SiLU，结果与 Up 做 LoopFusion 乘法</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>EpilogueInjection(SiLU) + Elementwise</td>
+        </tr>
+        <tr>
+          <td>Gate epilogue 内联 SiLU，与 Up 做 fused multiply</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>EpilogueInjection(SiLU+Mul)</td>
+        </tr>
+        <tr>
+          <td>Warp Specialization 支持 Gate epilogue 内同时完成 SiLU 和乘法</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s8.6" data-section="8.6">
+      <h4>8.6 CrossLayerResidual 融合</h4>
+      <p>Add → RmsNorm scratchpad 直通:</p>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>融合方式</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>CPU 全系</td>
+        </tr>
+        <tr>
+          <td>Scratchpad 直通</td>
+        </tr>
+        <tr>
+          <td>Add 结果写入 RmsNorm scratchpad，无中间写回</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>SMEM 直通</td>
+        </tr>
+        <tr>
+          <td>Thread Block 内 Add→Norm 无 Global 写回</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>Register 直通</td>
+        </tr>
+        <tr>
+          <td>Warp Specialization consumer 直接消费 Add 结果</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 算子实现硬件差异矩阵</h3>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>9.1 GEMM 微内核规格</h4>
+      <table>
+        <tr>
+          <th>ISA</th>
+        </tr>
+        <tr>
+          <td>MR×NR</td>
+        </tr>
+        <tr>
+          <td>累加器寄存器</td>
+        </tr>
+        <tr>
+          <td>Scratch 寄存器</td>
+        </tr>
+        <tr>
+          <td>数据搬运</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>6×16</td>
+        </tr>
+        <tr>
+          <td>12 ymm</td>
+        </tr>
+        <tr>
+          <td>4 ymm</td>
+        </tr>
+        <tr>
+          <td>pack_a/pack_b (F32)</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>14×32</td>
+        </tr>
+        <tr>
+          <td>28 zmm</td>
+        </tr>
+        <tr>
+          <td>4 zmm</td>
+        </tr>
+        <tr>
+          <td>pack_a/pack_b (F32)</td>
+        </tr>
+        <tr>
+          <td>AVX-512 BF16 原生</td>
+        </tr>
+        <tr>
+          <td>14×32</td>
+        </tr>
+        <tr>
+          <td>28 zmm</td>
+        </tr>
+        <tr>
+          <td>4 zmm</td>
+        </tr>
+        <tr>
+          <td>pack_b K-pair interleaved, pack_a BF16 列主序</td>
+        </tr>
+        <tr>
+          <td>AMX tile</td>
+        </tr>
+        <tr>
+          <td>16×16 (tile)</td>
+        </tr>
+        <tr>
+          <td>8 TMM</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>tile load/store (TDPBF16PS)</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>8×12</td>
+        </tr>
+        <tr>
+          <td>24 v</td>
+        </tr>
+        <tr>
+          <td>8 v</td>
+        </tr>
+        <tr>
+          <td>pack_a/pack_b (F32)</td>
+        </tr>
+        <tr>
+          <td>GPU sm_70 wmma</td>
+        </tr>
+        <tr>
+          <td>16×16×16</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>global_load (无异步)</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80 mma.sync</td>
+        </tr>
+        <tr>
+          <td>16×8×16</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>cp.async 128B</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90 WGMMA</td>
+        </tr>
+        <tr>
+          <td>16×16×64</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>TMA 2D prefetch</td>
+        </tr>
+        <tr>
+          <td>GPU sm_100+ tcgen05</td>
+        </tr>
+        <tr>
+          <td>16×16×64+</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>TMA 2D/5D + TMEM</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2 Attention 实现路径</h4>
+      <p>FlashAttention 按 SM 版本四路特化:</p>
+      <p>CPU Attention 路径:</p>
+      <table>
+        <tr>
+          <th>SM 范围</th>
+        </tr>
+        <tr>
+          <td>名称</td>
+        </tr>
+        <tr>
+          <td>核心指令</td>
+        </tr>
+        <tr>
+          <td>数据搬运</td>
+        </tr>
+        <tr>
+          <td>Softmax</td>
+        </tr>
+        <tr>
+          <td>sm_100+</td>
+        </tr>
+        <tr>
+          <td>FA4 Block-Scaled</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma + block_scale + TMEM</td>
+        </tr>
+        <tr>
+          <td>TMEMLoad/TMEMScatter</td>
+        </tr>
+        <tr>
+          <td>Online softmax + block-scale factor</td>
+        </tr>
+        <tr>
+          <td>sm_90</td>
+        </tr>
+        <tr>
+          <td>FA3 Pipeline</td>
+        </tr>
+        <tr>
+          <td>WGMMA 16×16×64 + TMA</td>
+        </tr>
+        <tr>
+          <td>TMA 2D prefetch + Warp Specialization</td>
+        </tr>
+        <tr>
+          <td>Online softmax in registers</td>
+        </tr>
+        <tr>
+          <td>sm_80-89</td>
+        </tr>
+        <tr>
+          <td>FA2 Tiled</td>
+        </tr>
+        <tr>
+          <td>mma.sync 16×8×16</td>
+        </tr>
+        <tr>
+          <td>cp.async 128B</td>
+        </tr>
+        <tr>
+          <td>Online softmax in shared memory</td>
+        </tr>
+        <tr>
+          <td>sm_70-79</td>
+        </tr>
+        <tr>
+          <td>wmma Tiled</td>
+        </tr>
+        <tr>
+          <td>wmma 16×16×16</td>
+        </tr>
+        <tr>
+          <td>global_load (无异步)</td>
+        </tr>
+        <tr>
+          <td>Online softmax in shared memory</td>
+        </tr>
+      </table>
+      <table>
+        <tr>
+          <th>CPU Profile</th>
+        </tr>
+        <tr>
+          <td>Attention 实现</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>Loop-based + vaddps/vmulps</td>
+        </tr>
+        <tr>
+          <td>逐 head 计算，SIMD 向量化 Softmax</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>Loop-based + zmm 向量</td>
+        </tr>
+        <tr>
+          <td>更宽的 SIMD Softmax，减少循环次数</td>
+        </tr>
+        <tr>
+          <td>AMX</td>
+        </tr>
+        <tr>
+          <td>AMX tile QK^T + V 投影</td>
+        </tr>
+        <tr>
+          <td>Tile 矩阵乘法做 Attention 核心</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>Loop-based + NEON v</td>
+        </tr>
+        <tr>
+          <td>128-bit 向量化</td>
+        </tr>
+        <tr>
+          <td>SVE2</td>
+        </tr>
+        <tr>
+          <td>Predicate-gated 向量化</td>
+        </tr>
+        <tr>
+          <td>可变长向量，无 padding 浪费</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2a1 All-in-GEMM + Softmax 融合</h4>
+      <p>Softmax 融合到 Attention 的 QK^T → V 投影 GEMM epilogue 中:</p>
+      <li><strong>online softmax</strong> 在累加器/共享内存中完成 max + exp + sum + scale</li>
+      <li><strong>softmax_weights</strong> 直接作为 V 投影的乘数因子</li>
+      <li>消除 <code>attn_output → softmax → O_proj</code> 三次独立内存读写</li>
+      <li>融合后: QK^T → [online softmax in regs/smem] → scale → × V → O_proj，单次 GEMM 完成</li>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>Softmax 融合方式</td>
+        </tr>
+        <tr>
+          <td>消除的中间结果</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>ymm 寄存器内 online softmax → scale 嵌入 vmovups 输入</td>
+        </tr>
+        <tr>
+          <td>attn_output + softmax + scale 三次内存读写</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>zmm 寄存器内 online softmax → scale 嵌入 vfmadd 输入</td>
+        </tr>
+        <tr>
+          <td>同上</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>mma.sync epilogue 内 softmax → scale 作为 V 投影乘数</td>
+        </tr>
+        <tr>
+          <td>attn_output + softmax + O_proj 三次 GEMM launch</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>WGMMA epilogue + Warp Specialization</td>
+        </tr>
+        <tr>
+          <td>softmax 在 consumer warp 完成</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.3" data-section="9.3">
+      <h4>9.3 RmsNorm 实现路径</h4>
+    </section>
+    <section id="s9.3" data-section="9.3">
+      <h4>9.3 RmsNorm 实现路径</h4>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>实现方式</td>
+        </tr>
+        <tr>
+          <td>指令</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>两遍扫描 + ymm 向量</td>
+        </tr>
+        <tr>
+          <td>vmulps + vaddps (reduce) + vdivps</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>两遍扫描 + zmm 向量</td>
+        </tr>
+        <tr>
+          <td>vfmadd231ps (平方) + vreduce (求和)</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>两遍扫描 + v 向量</td>
+        </tr>
+        <tr>
+          <td>fmla + fadd (reduce)</td>
+        </tr>
+        <tr>
+          <td>SVE2</td>
+        </tr>
+        <tr>
+          <td>Predicate-gated 单遍</td>
+        </tr>
+        <tr>
+          <td>whilelt + fmla (无尾处理)</td>
+        </tr>
+        <tr>
+          <td>GPU 全系</td>
+        </tr>
+        <tr>
+          <td>Warp reduce + scale</td>
+        </tr>
+        <tr>
+          <td>warp shuffle reduce + FMA scale</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.4" data-section="9.4">
+      <h4>9.4 RoPE 实现路径</h4>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>实现方式</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>查表 + ymm FMA</td>
+        </tr>
+        <tr>
+          <td>预计算 cos/sin 表，vmulps + vfmadd231ps</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>查表 + zmm FMA</td>
+        </tr>
+        <tr>
+          <td>更宽的 SIMD，一次处理更多 head_dim</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>查表 + v FMA</td>
+        </tr>
+        <tr>
+          <td>fmul + fmla</td>
+        </tr>
+        <tr>
+          <td>GPU 全系</td>
+        </tr>
+        <tr>
+          <td>Register 内计算</td>
+        </tr>
+        <tr>
+          <td>SFU ex2.approx + fma.rn</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.5" data-section="9.5">
+      <h4>9.5 Softmax 实现路径</h4>
+      <table>
+        <tr>
+          <th>硬件 Profile</th>
+        </tr>
+        <tr>
+          <td>实现方式</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>三遍 (max → exp → sum+scale)</td>
+        </tr>
+        <tr>
+          <td>多项式逼近 exp，ymm reduce</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>三遍 + zmm reduce</td>
+        </tr>
+        <tr>
+          <td>更宽的 reduce，减少迭代</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>三遍 + v reduce</td>
+        </tr>
+        <tr>
+          <td>fmaxv + exp 逼近</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80+</td>
+        </tr>
+        <tr>
+          <td>Online softmax + mma.sync</td>
+        </tr>
+        <tr>
+          <td>单遍 max+exp+sum 在寄存器</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90+</td>
+        </tr>
+        <tr>
+          <td>Online softmax + WGMMA</td>
+        </tr>
+        <tr>
+          <td>Warp Specialization 内联 softmax</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9.6" data-section="9.6">
+      <h4>9.6 量化 GEMV/GEMM 路径</h4>
+      <p>CPU ISV 策略链 (<code>select_gemm_strategy()</code>):</p>
+      <p>```</p>
+      <p>AMX → oneDNN → Accelerate → JIT BLIS</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>ISV 特性</th>
+        </tr>
+        <tr>
+          <td>指令</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+        </tr>
+        <tr>
+          <td>AVX-512 VNNI</td>
+        </tr>
+        <tr>
+          <td>vpdpbusd</td>
+        </tr>
+        <tr>
+          <td>INT8 量化 GEMV (W8A8)</td>
+        </tr>
+        <tr>
+          <td>AVX-512 BF16</td>
+        </tr>
+        <tr>
+          <td>vdpbf16ps</td>
+        </tr>
+        <tr>
+          <td>BF16 原生 GEMM (pack_b K-pair interleaved)</td>
+        </tr>
+        <tr>
+          <td>AMX tile</td>
+        </tr>
+        <tr>
+          <td>tdpbssd</td>
+          <td> / </td>
+          <td>tdpbf16ps</td>
+        </tr>
+        <tr>
+          <td>INT8 / BF16 tile 矩阵乘</td>
+        </tr>
+        <tr>
+          <td>NEON BF16</td>
+        </tr>
+        <tr>
+          <td>bfdot</td>
+        </tr>
+        <tr>
+          <td>BF16 点积</td>
+        </tr>
+        <tr>
+          <td>GPU Tensor Core</td>
+        </tr>
+        <tr>
+          <td>wmma/mma.sync/WGMMA</td>
+        </tr>
+        <tr>
+          <td>全精度范围量化矩阵乘</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>10. 统一分层 GEMM 模型</h3>
+      <p>所有平台的 GEMM 共享同一个分层 tiling 模型，每层映射到不同硬件资源:</p>
+      <p>Phase 2 融合决策（EpilogueInjection、TileLevelFusion 等）对所有平台通用。差异只在 Phase 3 微内核指令选择。</p>
+      <table>
+        <tr>
+          <th>层次</th>
+        </tr>
+        <tr>
+          <td>CPU (AVX2)</td>
+        </tr>
+        <tr>
+          <td>CPU (AVX-512)</td>
+        </tr>
+        <tr>
+          <td>CPU (AMX)</td>
+        </tr>
+        <tr>
+          <td>GPU (CUDA sm_80)</td>
+        </tr>
+        <tr>
+          <td>最外层</td>
+        </tr>
+        <tr>
+          <td>NC×KC (L3)</td>
+        </tr>
+        <tr>
+          <td>NC×KC (L3)</td>
+        </tr>
+        <tr>
+          <td>NC×KC (L3)</td>
+        </tr>
+        <tr>
+          <td>Grid tile</td>
+        </tr>
+        <tr>
+          <td>中间层</td>
+        </tr>
+        <tr>
+          <td>MC×KC (L2)</td>
+        </tr>
+        <tr>
+          <td>MC×KC (L2)</td>
+        </tr>
+        <tr>
+          <td>MC×KC (L2)</td>
+        </tr>
+        <tr>
+          <td>Block tile (shared mem)</td>
+        </tr>
+        <tr>
+          <td>微内核</td>
+        </tr>
+        <tr>
+          <td>6×16 FMA</td>
+        </tr>
+        <tr>
+          <td>14×32 FMA</td>
+        </tr>
+        <tr>
+          <td>16×16 TDPBF16PS</td>
+        </tr>
+        <tr>
+          <td>Warp mma.sync</td>
+        </tr>
+        <tr>
+          <td>数据搬运</td>
+        </tr>
+        <tr>
+          <td>pack_a/pack_b</td>
+        </tr>
+        <tr>
+          <td>pack_a/pack_b</td>
+        </tr>
+        <tr>
+          <td>tile load/store</td>
+        </tr>
+        <tr>
+          <td>Global→Shared (cp.async)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s10.1" data-section="10.1">
+      <h4>10.1 GEMM 分块参数推导</h4>
+      <p>DeviceProfile 的缓存层级直接驱动 GEMM 分块:</p>
+      <p>```</p>
+      <p>DeviceProfile.cache_sizes (L1, L2, L3)</p>
+      <p>  → GemmBlocking { kc, mc, nc }</p>
+      <p>    → Phase 3: NC/MC/KR 三重循环边界</p>
+      <p>```</p>
+      <li><code>kc</code> 适配 L1 Cache（K 维度分块）</li>
+      <li><code>mc</code> 适配 L2 Cache（M 维度分块）</li>
+      <li><code>nc</code> 适配 L3 Cache（N 维度分块）</li>
+      <li><code>mr</code>, <code>nr</code> 由微内核规格决定</li>
+    </section>
+    <section id="s10.2" data-section="10.2">
+      <h4>10.2 GEMM 代码结构</h4>
+      <p>Phase 3 生成的 GEMM + Epilogue 代码结构（CPU 和 GPU 共享同一 tiling 逻辑）:</p>
+      <p>```</p>
+      <p>prologue (save callee-saved)</p>
+      <p>├── NC loop</p>
+      <p>│   ├── pack_b</p>
+      <p>│   ├── MC loop</p>
+      <p>│   │   ├── [可选] tiled_predecessor: 嵌入的前驱算子 tile 计算</p>
+      <p>│   │   ├── pack_a</p>
+      <p>│   │   └── NR loop</p>
+      <p>│   │       └── 微内核:</p>
+      <p>│   │           ├── 累加器清零</p>
+      <p>│   │           ├── K-loop: FMA 序列</p>
+      <p>│   │           ├── [可选] epilogue: TraceOp → SIMD 指令</p>
+      <p>│   │           └── store</p>
+      <p>│   └── edge tile</p>
+      <p>epilogue (restore + ret)</p>
+      <p>```</p>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>11. 硬件参数→codegen 贯通链</h3>
+      <p>DeviceProfile 的每个字段如何驱动 Phase 3 代码生成。</p>
+    </section>
+    <section id="s11.1" data-section="11.1">
+      <h4>11.1 GEMM 分块参数</h4>
+      <p>```</p>
+      <p>DeviceProfile.cache_sizes (L1, L2, L3)</p>
+      <p>  → GemmBlocking { kc, mc, nc }</p>
+      <p>    → Phase 3: NC/MC/KR 三重循环边界</p>
+      <p>```</p>
+    </section>
+    <section id="s11.2" data-section="11.2">
+      <h4>11.2 寄存器分配</h4>
+      <p>```</p>
+      <p>DeviceProfile.num_simd_regs</p>
+      <p>  → 微内核累加器数量 (MR × NR_vecs)</p>
+      <p>  → epilogue 可用 scratch 寄存器</p>
+      <p>  → FusionRule 是否允许 EpilogueInjection</p>
+      <p>```</p>
+    </section>
+    <section id="s11.3" data-section="11.3">
+      <h4>11.3 预取距离</h4>
+      <p>```</p>
+      <p>DeviceProfile (平台相关)</p>
+      <p>  → prefetch_distance: AVX2=256B, AVX-512=512B, NEON=128B</p>
+      <p>  → Phase 3: K-loop 中的 PREFETCHT0 指令偏移</p>
+      <p>```</p>
+    </section>
+    <section id="s11.4" data-section="11.4">
+      <h4>11.4 SIMD 指令宽度</h4>
+      <p>```</p>
+      <p>DeviceProfile.simd_width + use_avx512</p>
+      <p>  → Phase 3: ymm (256-bit) vs zmm (512-bit) 指令选择</p>
+      <p>  → 循环步长: step = simd_width / sizeof(elem)</p>
+      <p>```</p>
+    </section>
+    <section id="s11.5" data-section="11.5">
+      <h4>11.5 GPU Tensor Core 代数</h4>
+      <p>```</p>
+      <p>DeviceProfile.tensor_core_gen</p>
+      <p>  → GemmStrategy: JitGpuTensorCore (gen≥2) / JitGpu (gen&lt;2)</p>
+      <p>  → Phase 3 PTX: wmma (sm70) / mma.sync (sm80) / WGMMA (sm90) / tcgen05.mma (sm100+)</p>
+      <p>```</p>
+    </section>
+    <section id="s11.6" data-section="11.6">
+      <h4>11.6 ISV 特性→代码路径</h4>
+      <p>```</p>
+      <p>DeviceProfile.has_bf16 + use_avx512 + gemm_dtype==BF16</p>
+      <p>  → use_native_bf16() = true</p>
+      <p>  → Phase 3: VDPBF16PS 原生 BF16 GEMM 路径 (pack_b/pack_a/fma_body _bf16_native 后缀)</p>
+      <p>DeviceProfile.has_vnni</p>
+      <p>  → Phase 3: INT8 量化 GEMV 使用 vpdpbusd</p>
+      <p>DeviceProfile.has_amx</p>
+      <p>  → Phase 3: GEMM 微内核使用 TDPBF16PS tile 指令</p>
+      <p>```</p>
+    </section>
+    <section id="s11.7" data-section="11.7">
+      <h4>11.7 GPU 共享内存</h4>
+      <p>```</p>
+      <p>DeviceProfile.shared_mem_per_block</p>
+      <p>  → Phase 2: TileLevelFusion 的 tile 大小上限</p>
+      <p>  → Phase 3 PTX: .shared .f32 声明大小</p>
+      <p>```</p>
+    </section>
+    <section id="s11.8" data-section="11.8">
+      <h4>11.8 GPU SM 版本</h4>
+      <p>```</p>
+      <p>DeviceProfile.sm_version</p>
+      <p>  → PtxKernelRegistry: 选择最优 emitter</p>
+      <p>  → PTX 版本: .version 7.0 (sm70), .version 8.0 (sm80), ...</p>
+      <p>  → 数据搬运: TMA (sm90+) / cp.async (sm80+) / global_load (sm70)</p>
+      <p>  → 同步: bar.sync / cuda::barrier</p>
+      <p>```</p>
+    </section>
+    <section id="s13" data-section="13">
+      <h3>13. GEMM 极致优化基础</h3>
+    </section>
+    <section id="s13.1" data-section="13.1">
+      <h4>13.1 K-loop 软件流水线</h4>
+      <p>GEMM K-loop 内 prefetch 与 compute 重叠，隐藏内存延迟：</p>
+      <p>```</p>
+      <p>K-loop iteration i:</p>
+      <p>  PREFETCHT0 A[k+pf_dist]     ← DRAM → L1, 异步（硬件预取不占执行槽）</p>
+      <p>  PREFETCHT0 B[k+pf_dist]     ← DRAM → L1, 异步</p>
+      <p>  vfmadd231ps acc, A[k], B[k]  ← 计算（数据已在 L1 命中）</p>
+      <p>```</p>
+      <strong>软件流水线深度</strong>（同时飞行的 prefetch 数量）：
+      <strong>预取距离推导公式</strong>:
+      <p>```</p>
+      <p>pf_distance = max(cache_line_bytes × depth, hidden_size × sizeof(elem))</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>硬件</th>
+        </tr>
+        <tr>
+          <td>K-loop depth</td>
+        </tr>
+        <tr>
+          <td>预取距离</td>
+        </tr>
+        <tr>
+          <td>原因</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>256B (4 cache lines)</td>
+        </tr>
+        <tr>
+          <td>16 ymm 溢出压力，只能 prefetch 一行</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>512B (8 cache lines)</td>
+        </tr>
+        <tr>
+          <td>32 zmm 充裕，prefetch 两行</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>128B (2 cache lines)</td>
+        </tr>
+        <tr>
+          <td>寄存器压力类似 AVX2</td>
+        </tr>
+        <tr>
+          <td>SVE2</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>按 sve_vl_bytes 动态</td>
+        </tr>
+        <tr>
+          <td>可变长向量，按实际宽度计算</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80</td>
+        </tr>
+        <tr>
+          <td>2-3</td>
+        </tr>
+        <tr>
+          <td>cp.async 128B 多条</td>
+        </tr>
+        <tr>
+          <td>异步拷贝不占计算单元</td>
+        </tr>
+        <tr>
+          <td>GPU sm_90</td>
+        </tr>
+        <tr>
+          <td>∞</td>
+        </tr>
+        <tr>
+          <td>TMA 单条指令</td>
+        </tr>
+        <tr>
+          <td>TMA 硬件自动管理 prefetch，无需手动</td>
+        </tr>
+        <tr>
+          <td>GPU sm_100+</td>
+        </tr>
+        <tr>
+          <td>∞</td>
+        </tr>
+        <tr>
+          <td>TMEM 替代 SMEM</td>
+        </tr>
+        <tr>
+          <td>TMEM 直接做累加，无需 SMEM staging</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.2" data-section="13.2">
+      <h4>13.2 FMA/Load 比率与微内核选择</h4>
+      <p>微内核的 MR×NR 选择由寄存器预算和 FMA/Load 比率共同决定：</p>
+      <p>```</p>
+      <p>FMA_to_Load_Ratio = (MR × NR_vecs) / (1 + NR_vecs)</p>
+      <p>                   = MR × NR_vecs / (1 + NR_vecs)</p>
+      <p>NR_vecs = ceil(NR / simd_width)</p>
+      <p>accumulator_regs = MR × NR_vecs</p>
+      <p>scratch_regs = num_simd_regs - accumulator_regs</p>
+      <p>```</p>
+      <strong>选择约束</strong>: <code>accumulator_regs + min_scratch(2) + pointer_regs(2) ≤ num_simd_regs</code>
+      <p>当 <code>scratch_regs &lt; min_epilogue_regs</code> 时，epilogue 溢出到栈 → 性能断崖。这就是为什么 AVX2 只能 2-3 ops epilogue。</p>
+      <table>
+        <tr>
+          <th>微内核</th>
+        </tr>
+        <tr>
+          <td>FMA ops/iter</td>
+        </tr>
+        <tr>
+          <td>Load ops/iter</td>
+        </tr>
+        <tr>
+          <td>比率</td>
+        </tr>
+        <tr>
+          <td>寄存器分配</td>
+        </tr>
+        <tr>
+          <td>AVX2 6×16</td>
+        </tr>
+        <tr>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>3:1</td>
+        </tr>
+        <tr>
+          <td>12 累加器 + 1 A ptr + 1 B ptr + 2 scratch = 16 ymm</td>
+        </tr>
+        <tr>
+          <td>AVX-512 14×32</td>
+        </tr>
+        <tr>
+          <td>14</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>7:1</td>
+        </tr>
+        <tr>
+          <td>28 累加器 + 2 ptr + 2 scratch = 32 zmm</td>
+        </tr>
+        <tr>
+          <td>AMX 16×16</td>
+        </tr>
+        <tr>
+          <td>1 TDP</td>
+        </tr>
+        <tr>
+          <td>2 TLOAD</td>
+        </tr>
+        <tr>
+          <td>0.5:1</td>
+        </tr>
+        <tr>
+          <td>8 TMM tile，但单指令处理 16×16×16 = 4096 MAC</td>
+        </tr>
+        <tr>
+          <td>NEON 8×12</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>4:1</td>
+        </tr>
+        <tr>
+          <td>24 累加器 + 4 ptr + 4 scratch = 32 v</td>
+        </tr>
+        <tr>
+          <td>GPU sm_80 warp</td>
+        </tr>
+        <tr>
+          <td>16×8×16</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>寄存器由 warp 分配，32 regs/thread</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.3" data-section="13.3">
+      <h4>13.3 Epilogue 寄存器预算公式</h4>
+      <p>```rust</p>
+      <p>/// 计算给定微内核规格下的最大 epilogue 操作数</p>
+      <p>fn max_epilogue_depth(num_simd_regs: usize, mr: usize, nr_vecs: usize) -&gt; usize {</p>
+      <p>    let accumulator = mr * nr_vecs;</p>
+      <p>    let pointer_regs = 2;  // A ptr + B ptr</p>
+      <p>    let available = num_simd_regs - accumulator - pointer_regs;</p>
+      <p>    // 每个 TraceOp 需要 1-2 scratch 寄存器</p>
+      <p>    // Binary op (Add/Mul) = 2 regs, Unary op (Exp/Sqrt) = 1 reg</p>
+      <p>    let avg_regs_per_op = 1.5;</p>
+      <p>    (available as f32 / avg_regs_per_op).floor() as usize</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>NR 缩减策略</strong>: 当 epilogue 深度需求高时，Phase 2 可选择 <code>NR_variant &lt; NR_nominal</code>，牺牲微内核吞吐换取更深 epilogue。trade-off 由 <code>FusionEngine</code> 根据 fusion plan 自动计算。
+      <table>
+        <tr>
+          <th>硬件</th>
+        </tr>
+        <tr>
+          <td>总寄存器</td>
+        </tr>
+        <tr>
+          <td>累加器</td>
+        </tr>
+        <tr>
+          <td>指针</td>
+        </tr>
+        <tr>
+          <td>可用 scratch</td>
+        </tr>
+        <tr>
+          <td>最大 epilogue</td>
+        </tr>
+        <tr>
+          <td>AVX2</td>
+        </tr>
+        <tr>
+          <td>16 ymm</td>
+        </tr>
+        <tr>
+          <td>12</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>1-2 ops</td>
+        </tr>
+        <tr>
+          <td>AVX-512</td>
+        </tr>
+        <tr>
+          <td>32 zmm</td>
+        </tr>
+        <tr>
+          <td>28</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>1-2 ops（保守）</td>
+        </tr>
+        <tr>
+          <td>AVX-512 + NR 缩减</td>
+        </tr>
+        <tr>
+          <td>32 zmm</td>
+        </tr>
+        <tr>
+          <td>14</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>16</td>
+        </tr>
+        <tr>
+          <td>6-8 ops</td>
+        </tr>
+        <tr>
+          <td>NEON</td>
+        </tr>
+        <tr>
+          <td>32 v</td>
+        </tr>
+        <tr>
+          <td>24</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>3-4 ops</td>
+        </tr>
+        <tr>
+          <td>NEON + NR 缩减</td>
+        </tr>
+        <tr>
+          <td>32 v</td>
+        </tr>
+        <tr>
+          <td>16</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>14</td>
+        </tr>
+        <tr>
+          <td>6-8 ops</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s13.4" data-section="13.4">
+      <h4>13.4 缓存层级资源分配算法</h4>
+      <p>三级缓存资源分配模型：</p>
+      <p>```</p>
+      <p>L1 Cache (最快, 最小):</p>
+      <p>  ┌─────────────────────────────────┐</p>
+      <p>  │  GEMM A tile (MC × KC)          │  ← pack_a 输出</p>
+      <p>  │  GEMM B tile (KC × NC)          │  ← pack_b 输出</p>
+      <p>  │  [可选] Normed tile (MC × hidden)│  ← TileLevelFusion scratch</p>
+      <p>  └─────────────────────────────────┘</p>
+      <p>  约束: MC × KC × elem_bytes + KC × NC × elem_bytes ≤ L1 × 75%</p>
+      <p>L2 Cache:</p>
+      <p>  ┌─────────────────────────────────┐</p>
+      <p>  │  权重预取窗口 (KC × NC tiles)    │  ← software pipelining</p>
+      <p>  │  KV Cache 热页 (当前层)          │  ← Attention 访问</p>
+      <p>  │  激活值缓存 (hidden × MC)        │  ← 前驱输出</p>
+      <p>  └─────────────────────────────────┘</p>
+      <p>  分配策略:</p>
+      <p>    kv_budget   = L2 × 0.40  (Attention-bound 场景)</p>
+      <p>    weight_budget = L2 × 0.35 (GEMM-bound 场景)</p>
+      <p>    activation   = L2 × 0.25 (Epilogue scratch)</p>
+      <p>L3 Cache / HBM:</p>
+      <p>  ┌─────────────────────────────────┐</p>
+      <p>  │  全部模型权重                    │  ← 常驻</p>
+      <p>  │  全量 KV Cache (所有层)          │  ← PagedAttention 管理</p>
+      <p>  │  临时 buffer (Epilogue 输出)     │  ← 区间图着色复用</p>
+      <p>  └─────────────────────────────────┘</p>
+      <p>  分配策略:</p>
+      <p>    model_weights = model.param_count × dtype_size</p>
+      <p>    kv_cache      = total_pages × page_size × 2 × num_layers × kv_dim × dtype_size</p>
+      <p>    workspace     = min(activation_bytes, L3 × 30%)</p>
+      <p>```</p>
+      <strong>GPU 显存预算分配</strong>:
+      <p>```</p>
+      <p>total_hbm = DeviceProfile.total_memory</p>
+      <p>model_weights = sum(all_tensors) × quant_type_size_ratio  // 4-bit = 0.25, FP16 = 0.5</p>
+      <p>kv_pool       = total_hbm × 0.60 - model_weights</p>
+      <p>workspace     = total_hbm × 0.10  // 临时 buffer</p>
+      <p>reserved      = total_hbm × 0.05  // CUDA/驱动保留</p>
+      <p>max_pages = kv_pool / (page_size × 2 × num_layers × kv_dim × dtype_size)</p>
+      <p>```</p>
+    </section>
+    <section id="s13.5" data-section="13.5">
+      <h4>13.5 新硬件特性积极使用策略</h4>
+      <p>硬件特性不止是"支持"，而是<strong>主动利用</strong>——在检测到新特性时，JIT 编译器自动切换到更优路径：</p>
+    </section>
+    <section id="s100" data-section="100">
+      <h5>GPU Blackwell (sm_100+)</h5>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>传统路径</td>
+        </tr>
+        <tr>
+          <td>积极利用路径</td>
+        </tr>
+        <tr>
+          <td>收益</td>
+        </tr>
+        <tr>
+          <td>FP4 原生</td>
+        </tr>
+        <tr>
+          <td>W4A8 量化 → 解量化 → F16 GEMM</td>
+        </tr>
+        <tr>
+          <td>权重全程 FP4，GEMM 直接消费 FP4</td>
+        </tr>
+        <tr>
+          <td>显存 -50%，带宽 -50%</td>
+        </tr>
+        <tr>
+          <td>TMEM (256KB/SM)</td>
+        </tr>
+        <tr>
+          <td>SMEM 做 attention tiling</td>
+        </tr>
+        <tr>
+          <td>TMEM 替代 SMEM 做 attention + 累加</td>
+        </tr>
+        <tr>
+          <td>shared memory 解放给 routing/compact</td>
+        </tr>
+        <tr>
+          <td>tcgen05.mma</td>
+        </tr>
+        <tr>
+          <td>mma.sync 16×8×16</td>
+        </tr>
+        <tr>
+          <td>block-scaled GEMM with per-block scale</td>
+        </tr>
+        <tr>
+          <td>消除独立 Scale 节点</td>
+        </tr>
+        <tr>
+          <td>Thread Block Cluster</td>
+        </tr>
+        <tr>
+          <td>单 CTA GEMM</td>
+        </tr>
+        <tr>
+          <td>跨 CTA 协同 MMA</td>
+        </tr>
+        <tr>
+          <td>2-CTA 协同扩展 tile 尺寸</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s90" data-section="90">
+      <h5>GPU Hopper (sm_90)</h5>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>传统路径</td>
+        </tr>
+        <tr>
+          <td>积极利用路径</td>
+        </tr>
+        <tr>
+          <td>收益</td>
+        </tr>
+        <tr>
+          <td>TMA 2D/5D</td>
+        </tr>
+        <tr>
+          <td>cp.async 手动预取</td>
+        </tr>
+        <tr>
+          <td>TMA 单条指令异步预取</td>
+        </tr>
+        <tr>
+          <td>释放寄存器，减少指令数</td>
+        </tr>
+        <tr>
+          <td>WGMMA</td>
+        </tr>
+        <tr>
+          <td>mma.sync warp 级</td>
+        </tr>
+        <tr>
+          <td>warp-group 矩阵乘累加</td>
+        </tr>
+        <tr>
+          <td>4× 矩阵吞吐</td>
+        </tr>
+        <tr>
+          <td>Warp Specialization</td>
+        </tr>
+        <tr>
+          <td>同步 kernel</td>
+        </tr>
+        <tr>
+          <td>producer/consumer 分离</td>
+        </tr>
+        <tr>
+          <td>预取与计算完全重叠</td>
+        </tr>
+        <tr>
+          <td>cuda::barrier</td>
+        </tr>
+        <tr>
+          <td>bar.sync 全局</td>
+        </tr>
+        <tr>
+          <td>per-warp barrier</td>
+        </tr>
+        <tr>
+          <td>细粒度同步减少等待</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-cpu-amx" data-section="null">
+      <h5>CPU AMX</h5>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>传统路径</td>
+        </tr>
+        <tr>
+          <td>积极利用路径</td>
+        </tr>
+        <tr>
+          <td>收益</td>
+        </tr>
+        <tr>
+          <td>TDPBF16PS</td>
+        </tr>
+        <tr>
+          <td>BLIS FMA 微内核</td>
+        </tr>
+        <tr>
+          <td>tile 8×8 BF16 矩阵乘</td>
+        </tr>
+        <tr>
+          <td>GEMM 吞吐 2-4×</td>
+        </tr>
+        <tr>
+          <td>tile_config</td>
+        </tr>
+        <tr>
+          <td>运行时固定</td>
+        </tr>
+        <tr>
+          <td>per-layer 动态配置 tile 尺寸</td>
+        </tr>
+        <tr>
+          <td>Attention 用小 tile，FFN 用大 tile</td>
+        </tr>
+        <tr>
+          <td>tile_release</td>
+        </tr>
+        <tr>
+          <td>编译时持有</td>
+        </tr>
+        <tr>
+          <td>FFN 完成后释放 tile 资源</td>
+        </tr>
+        <tr>
+          <td>释放后 zmm 全给 epilogue</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h5>ARM SME2</h5>
+      <strong>检测→切换流程</strong>:
+      <p>```</p>
+      <p>DeviceProfile::detect()</p>
+      <p>  → has_amx=true → GemmStrategy::AmxTile (替代 BLIS)</p>
+      <p>  → sm_version=90 → FlashAttention::FA3Pipeline (替代 FA2Tiled)</p>
+      <p>  → sm_version=100 → FlashAttention::FA4BlockScaled (替代 FA3)</p>
+      <p>  → has_sme2 → GemmStrategy::SmeOuterProduct (替代 NEON BLIS)</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>传统路径</td>
+        </tr>
+        <tr>
+          <td>积极利用路径</td>
+        </tr>
+        <tr>
+          <td>收益</td>
+        </tr>
+        <tr>
+          <td>ZA Array</td>
+        </tr>
+        <tr>
+          <td>NEON 向量化</td>
+        </tr>
+        <tr>
+          <td>2D 矩阵存储 + outer product</td>
+        </tr>
+        <tr>
+          <td>消除显式 tile 管理</td>
+        </tr>
+        <tr>
+          <td>streaming SVE</td>
+        </tr>
+        <tr>
+          <td>NEON 固定 128-bit</td>
+        </tr>
+        <tr>
+          <td>可变长 streaming mode</td>
+        </tr>
+        <tr>
+          <td>矩阵专用向量单元</td>
+        </tr>
+        <tr>
+          <td>SMOP (outer product)</td>
+        </tr>
+        <tr>
+          <td>NEON FMLA 累加</td>
+        </tr>
+        <tr>
+          <td>单指令 outer product</td>
+        </tr>
+        <tr>
+          <td>矩阵乘效率大幅提升</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s12" data-section="12">
+      <h3>12. 交叉引用</h3>
+      <table>
+        <tr>
+          <th>主题</th>
+        </tr>
+        <tr>
+          <td>位置</td>
+        </tr>
+        <tr>
+          <td>JIT 四阶段管线</td>
+        </tr>
+        <tr>
+          <td>SPEC/01-JIT-PIPELINE.md</td>
+        </tr>
+        <tr>
+          <td>硬件探测与 DeviceProfile</td>
+        </tr>
+        <tr>
+          <td>SPEC/02-HARDWARE.md</td>
+        </tr>
+        <tr>
+          <td>计算图 IR</td>
+        </tr>
+        <tr>
+          <td>SPEC/03-GRAPH-IR.md</td>
+        </tr>
+        <tr>
+          <td>核心铁律</td>
+        </tr>
+        <tr>
+          <td>SPEC/00-PHILOSOPHY.md</td>
+        </tr>
+        <tr>
+          <td>运行时优化</td>
+        </tr>
+        <tr>
+          <td>SPEC/05-OPTIMIZATIONS.md</td>
+        </tr>
+        <tr>
+          <td>支持模型清单</td>
+        </tr>
+        <tr>
+          <td>SPEC/11-MODELS.md</td>
+        </tr>
+      </table>
+    </section>
+  <section id="opsemantics" data-entity="OpSemantics" data-req-ref="REQ-ORPHAN-568" data-entity-model-type="relational" data-xref="REQ-ORPHAN-568"><h3>OpSemantics </h3><table data-entity-table="OpSemantics"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="MetadataNop" data-type="enum" data-required="false"><td>MetadataNop</td><td>enum</td><td>否</td><td></td><td></td></tr><tr data-field="Structural" data-type="enum" data-required="false"><td>Structural</td><td>enum</td><td>否</td><td></td><td></td></tr><tr data-field="ComputePattern" data-type="enum" data-required="false"><td>ComputePattern</td><td>enum</td><td>否</td><td></td><td></td></tr><tr data-field="Unregistered" data-type="enum" data-required="false"><td>Unregistered</td><td>enum</td><td>否</td><td></td><td></td></tr></table></section><section id="req-op-equiv-001" data-req="REQ-OP-EQUIV-001" data-req-status="approved" data-req-domain="op-equiv" data-req-category="architecture" data-req-entity="ENT-COMPUTE-PATTERN" data-req-api="POST /compile"><h3>REQ-OP-EQUIV-001 Op 等价性 — 跨硬件数值一致性</h3><p>Op 等价性契约：同一个 OpKind 在不同硬件上必须产生数值等价的输出：
+1. 不同 DeviceProfile 下相同 OpKind 的 JIT 输出必须在容差范围内与 scalar 参考一致
+2. 数值等价 = 相同输入 → 输出差异在 DType 容差内（F32: 1e-6, BF16: 1e-2）
+3. 禁止不同硬件产出不同数量级的结果
+
+前置条件：每个 OpKind 有 scalar 参考实现作为 ground truth
+后置条件：per-DeviceProfile diff test 验证数值等价
+违规检测：diff test 失败 = 编译管线 BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>不同 DeviceProfile 下相同 OpKind 的 JIT 输出必须在容差范围内与 scalar 参考一致</li><li>数值等价 = 相同输入 → 输出差异在 DType 容差内（F32: 1e-6, BF16: 1e-2）</li><li>禁止不同硬件产出不同数量级的结果
+
+前置条件：每个 OpKind 有 scalar 参考实现作为 ground truth
+后置条件：per-DeviceProfile diff test 验证数值等价
+违规检测：diff test 失败 = 编译管线 BUG</li><li>前置条件满足: 每个 OpKind 有 scalar 参考实现作为 ground truth</li><li>后置条件验证: per-DeviceProfile diff test 验证数值等价</li><li>违规可检测: diff test 失败 = 编译管线 BUG</li></ol></div></section><section id="req-op-equiv-002" data-req="REQ-OP-EQUIV-002" data-req-status="approved" data-req-domain="op-equiv" data-req-category="architecture" data-req-entity="ENT-COMPUTE-PATTERN" data-req-api="POST /compile"><h3>REQ-OP-EQUIV-002 Op 等价性 — 融合前后语义等价</h3><p>Op 等价性契约：融合前后语义等价：
+1. 融合算子的输出必须与原子算子序列串行执行的输出数值一致
+2. 融合仅改变执行顺序和内存访问模式，不改变计算语义
+3. EpilogueInjection 必须保证注入后与分离执行结果一致
+
+前置条件：融合 pass 必须声明保持不变量
+后置条件：融合前后 diff test 验证语义等价
+违规检测：融合前后输出差异超出容差 = 融合 pass BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>融合算子的输出必须与原子算子序列串行执行的输出数值一致</li><li>融合仅改变执行顺序和内存访问模式，不改变计算语义</li><li>EpilogueInjection 必须保证注入后与分离执行结果一致
+
+前置条件：融合 pass 必须声明保持不变量
+后置条件：融合前后 diff test 验证语义等价
+违规检测：融合前后输出差异超出容差 = 融合 pass BUG</li><li>前置条件满足: 融合 pass 必须声明保持不变量</li><li>后置条件验证: 融合前后 diff test 验证语义等价</li><li>违规可检测: 融合前后输出差异超出容差 = 融合 pass BUG</li></ol></div></section><section id="req-op-equiv-003" data-req="REQ-OP-EQUIV-003" data-req-status="approved" data-req-domain="op-equiv" data-req-category="architecture" data-req-entity="ENT-COMPUTE-PATTERN" data-req-api="POST /compile"><h3>REQ-OP-EQUIV-003 Op 等价性 — 量化前后语义等价</h3><p>Op 等价性契约：量化前后语义等价：
+1. 量化算子（dequant + compute）的输出必须与 F32 直接计算的输出在量化容差内
+2. TurboQuant 静态极化后输出必须在声明精度范围内
+3. 禁止量化路径产出 NaN/Inf（除非 F32 路径也产出）
+
+前置条件：量化格式有明确的精度声明
+后置条件：量化路径 diff test 验证在声明精度内
+违规检测：量化 diff test 超出声明精度 = 量化管线 BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>量化算子（dequant + compute）的输出必须与 F32 直接计算的输出在量化容差内</li><li>TurboQuant 静态极化后输出必须在声明精度范围内</li><li>禁止量化路径产出 NaN/Inf（除非 F32 路径也产出）
+
+前置条件：量化格式有明确的精度声明
+后置条件：量化路径 diff test 验证在声明精度内
+违规检测：量化 diff test 超出声明精度 = 量化管线 BUG</li><li>前置条件满足: 量化格式有明确的精度声明</li><li>后置条件验证: 量化路径 diff test 验证在声明精度内</li><li>违规可检测: 量化 diff test 超出声明精度 = 量化管线 BUG</li></ol></div></section><section id="req-op-dispatch-001" data-req="REQ-OP-DISPATCH-001" data-req-status="approved" data-req-domain="op-dispatch" data-req-category="architecture" data-req-entity="ENT-VM-INSTR" data-req-api="POST /internal/vminstr/dispatch"><h3>REQ-OP-DISPATCH-001 三层分发契约 — 编译时确定性分发</h3><p>三层零成本分发架构契约：
+1. Layer 1 (Backend): CPU/GPU 分发由 DeviceProfile 驱动，编译时确定，零运行时分支
+2. Layer 2 (ISA): x86_64/AArch64/GPU ISA 分发由 DeviceProfile.ISV 驱动，编译时确定
+3. Layer 3 (Precision): dtype 分发由 TensorMeta.dtype 驱动，编译时 bake 进 VmInstr
+
+前置条件：DeviceProfile 完整填充，TensorMeta.dtype 正确
+后置条件：编译产出无运行时 match dtype/match backend 分支
+违规检测：grep 运行时 dtype/backend match 分支</p><div data-criteria=""><strong>验收标准：</strong><ol><li>Layer 1 (Backend): CPU/GPU 分发由 DeviceProfile 驱动，编译时确定，零运行时分支</li><li>Layer 2 (ISA): x86_64/AArch64/GPU ISA 分发由 DeviceProfile.ISV 驱动，编译时确定</li><li>Layer 3 (Precision): dtype 分发由 TensorMeta.dtype 驱动，编译时 bake 进 VmInstr
+
+前置条件：DeviceProfile 完整填充，TensorMeta.dtype 正确
+后置条件：编译产出无运行时 match dtype/match backend 分支
+违规检测：grep 运行时 dtype/backend match 分支</li><li>前置条件满足: DeviceProfile 完整填充，TensorMeta.dtype 正确</li><li>后置条件验证: 编译产出无运行时 match dtype/match backend 分支</li><li>违规可检测: grep 运行时 dtype/backend match 分支</li></ol></div></section><section id="req-op-dispatch-002" data-req="REQ-OP-DISPATCH-002" data-req-status="approved" data-req-domain="op-dispatch" data-req-category="architecture" data-req-entity="ENT-VM-INSTR" data-req-api="POST /internal/vminstr/dispatch"><h3>REQ-OP-DISPATCH-002 三层分发契约 — 自动指令选择器驱动</h3><p>三层分发契约：自动指令选择器驱动：
+1. 禁止手写 OpKind → VmInstr match arm，必须用 auto_lower_trace() 查表法
+2. ComputePattern 7 种通用处理器自动路由，每种只有一个通用处理器
+3. 新增 OpKind 只需注册 scalar impl → SymExec 提取 ComputePattern → 自动路由
+
+前置条件：OpKind 在 ScalarOpRegistry 注册
+后置条件：auto_select 100% 覆盖已注册 OpKind
+违规检测：构建时 audit_auto_select_coverage()</p><div data-criteria=""><strong>验收标准：</strong><ol><li>禁止手写 OpKind → VmInstr match arm，必须用 auto_lower_trace() 查表法</li><li>ComputePattern 7 种通用处理器自动路由，每种只有一个通用处理器</li><li>新增 OpKind 只需注册 scalar impl → SymExec 提取 ComputePattern → 自动路由
+
+前置条件：OpKind 在 ScalarOpRegistry 注册
+后置条件：auto_select 100% 覆盖已注册 OpKind
+违规检测：构建时 audit_auto_select_coverage()</li><li>前置条件满足: OpKind 在 ScalarOpRegistry 注册</li><li>后置条件验证: auto_select 100% 覆盖已注册 OpKind</li><li>违规可检测: 构建时 audit_auto_select_coverage()</li></ol></div></section><section id="req-op-dispatch-003" data-req="REQ-OP-DISPATCH-003" data-req-status="approved" data-req-domain="op-dispatch" data-req-category="architecture" data-req-entity="ENT-VM-INSTR" data-req-api="POST /internal/vminstr/dispatch"><h3>REQ-OP-DISPATCH-003 三层分发契约 — GPU SM 版本多支持</h3><p>三层分发契约：GPU SM 版本多支持：
+1. PtxKernelRegistry 按 SM 版本选择最优内核，禁止 fallback 到低版本
+2. 每个支持的 SM 版本必须有对应 PTX 生成路径
+3. SM 版本不匹配 = Err，不是静默降级
+
+前置条件：DeviceProfile.gpu_sm_version 正确探测
+后置条件：编译产出匹配当前 SM 版本的最优 PTX
+违规检测：SM 版本 fallback 测试</p><div data-criteria=""><strong>验收标准：</strong><ol><li>PtxKernelRegistry 按 SM 版本选择最优内核，禁止 fallback 到低版本</li><li>每个支持的 SM 版本必须有对应 PTX 生成路径</li><li>SM 版本不匹配 = Err，不是静默降级
+
+前置条件：DeviceProfile.gpu_sm_version 正确探测
+后置条件：编译产出匹配当前 SM 版本的最优 PTX
+违规检测：SM 版本 fallback 测试</li><li>前置条件满足: DeviceProfile.gpu_sm_version 正确探测</li><li>后置条件验证: 编译产出匹配当前 SM 版本的最优 PTX</li><li>违规可检测: SM 版本 fallback 测试</li></ol></div></section><section id="req-op-hwmatrix-001" data-req="REQ-OP-HWMATRIX-001" data-req-status="approved" data-req-domain="op-hwmatrix" data-req-category="architecture" data-req-entity="ENT-DEVICE-PROFILE" data-req-api="POST /internal/hw/accel"><h3>REQ-OP-HWMATRIX-001 硬件差异矩阵 — 融合策略硬件约束形式化</h3><p>硬件差异矩阵契约：融合策略硬件差异必须形式化：
+1. EpilogueInjection 融合深度由 DeviceProfile 缓存层级约束决定
+2. TileLevelFusion vs ComputeRoot 决策由 DeviceProfile 寄存器预算和缓存拓扑决定
+3. 禁止硬件不支持时降级拆分融合算子（NO-HW-DEGRADATION）
+
+前置条件：HwOptEngine.FusionSolver 正确配置硬件参数
+后置条件：融合决策仅取决于硬件参数，无硬编码 if/else
+违规检测：融合路径 grep 硬编码硬件判断</p><div data-criteria=""><strong>验收标准：</strong><ol><li>EpilogueInjection 融合深度由 DeviceProfile 缓存层级约束决定</li><li>TileLevelFusion vs ComputeRoot 决策由 DeviceProfile 寄存器预算和缓存拓扑决定</li><li>禁止硬件不支持时降级拆分融合算子（NO-HW-DEGRADATION）
+
+前置条件：HwOptEngine.FusionSolver 正确配置硬件参数
+后置条件：融合决策仅取决于硬件参数，无硬编码 if/else
+违规检测：融合路径 grep 硬编码硬件判断</li><li>前置条件满足: HwOptEngine.FusionSolver 正确配置硬件参数</li><li>后置条件验证: 融合决策仅取决于硬件参数，无硬编码 if/else</li><li>违规可检测: 融合路径 grep 硬编码硬件判断</li></ol></div></section><section id="req-op-hwmatrix-002" data-req="REQ-OP-HWMATRIX-002" data-req-status="approved" data-req-domain="op-hwmatrix" data-req-category="architecture" data-req-entity="ENT-DEVICE-PROFILE" data-req-api="POST /internal/hw/accel"><h3>REQ-OP-HWMATRIX-002 硬件差异矩阵 — 算子实现路径硬件约束形式化</h3><p>硬件差异矩阵契约：算子实现路径硬件差异必须形式化：
+1. Attention 实现路径（FlashAttention/tiled attention/gqa attention）由 DeviceProfile 驱动
+2. RmsNorm/RoPE/Softmax 实现路径由 DeviceProfile.ISV 驱动
+3. 量化 GEMV/GEMM 路径由 QuantPrecision + DeviceProfile 联合驱动
+
+前置条件：Backend Capability Matrix 条目完整
+后置条件：每个 OpKind+DeviceProfile 组合有确定的实现路径
+违规检测：Backend Capability Matrix 查表缺失 = Err</p><div data-criteria=""><strong>验收标准：</strong><ol><li>Attention 实现路径（FlashAttention/tiled attention/gqa attention）由 DeviceProfile 驱动</li><li>RmsNorm/RoPE/Softmax 实现路径由 DeviceProfile.ISV 驱动</li><li>量化 GEMV/GEMM 路径由 QuantPrecision + DeviceProfile 联合驱动
+
+前置条件：Backend Capability Matrix 条目完整
+后置条件：每个 OpKind+DeviceProfile 组合有确定的实现路径
+违规检测：Backend Capability Matrix 查表缺失 = Err</li><li>前置条件满足: Backend Capability Matrix 条目完整</li><li>后置条件验证: 每个 OpKind+DeviceProfile 组合有确定的实现路径</li><li>违规可检测: Backend Capability Matrix 查表缺失 = Err</li></ol></div></section><section id="req-op-hwmatrix-003" data-req="REQ-OP-HWMATRIX-003" data-req-status="approved" data-req-domain="op-hwmatrix" data-req-category="architecture" data-req-entity="ENT-DEVICE-PROFILE" data-req-api="POST /internal/hw/accel"><h3>REQ-OP-HWMATRIX-003 硬件差异矩阵 — 硬件参数→codegen 贯通链完整性</h3><p>硬件差异矩阵契约：硬件参数→codegen 贯通链必须完整：
+1. GEMM 分块参数由 DeviceProfile 缓存层级推导
+2. 寄存器分配由 DeviceProfile 寄存器数量推导
+3. SIMD 指令宽度由 DeviceProfile.ISV 推导
+4. GPU Tensor Core 代数由 DeviceProfile.gpu_sm_version 推导
+5. 禁止硬编码参数值，所有参数从 DeviceProfile 推导
+
+前置条件：DeviceProfile 完整填充
+后置条件：codegen 参数 100% 从 DeviceProfile 推导，零硬编码
+违规检测：grep 硬编码 elem_bytes/simd_width/tile_size 等参数</p><div data-criteria=""><strong>验收标准：</strong><ol><li>GEMM 分块参数由 DeviceProfile 缓存层级推导</li><li>寄存器分配由 DeviceProfile 寄存器数量推导</li><li>SIMD 指令宽度由 DeviceProfile.ISV 推导</li><li>GPU Tensor Core 代数由 DeviceProfile.gpu_sm_version 推导</li><li>禁止硬编码参数值，所有参数从 DeviceProfile 推导
+
+前置条件：DeviceProfile 完整填充
+后置条件：codegen 参数 100% 从 DeviceProfile 推导，零硬编码
+违规检测：grep 硬编码 elem_bytes/simd_width/tile_size 等参数</li><li>前置条件满足: DeviceProfile 完整填充</li><li>后置条件验证: codegen 参数 100% 从 DeviceProfile 推导，零硬编码</li><li>违规可检测: grep 硬编码 elem_bytes/simd_width/tile_size 等参数</li></ol></div></section><section id="req-op-gemm-001" data-req="REQ-OP-GEMM-001" data-req-status="approved" data-req-domain="op-gemm" data-req-category="architecture" data-req-entity="ENT-COMPUTE-PATTERN" data-req-api="POST /compile"><h3>REQ-OP-GEMM-001 GEMM 模型 — 统一分层 GEMM 参数推导</h3><p>GEMM 模型契约：统一分层 GEMM 模型必须覆盖所有 GEMM 使用场景：
+1. GEMM 分块参数由 DeviceProfile 推导，禁止硬编码
+2. CPU GEMM 和 GPU GEMM 共享相同的高层模型，分块参数由各自 DeviceProfile 推导
+3. K-loop 软件流水线参数由 FMA/Load 比率推导
+
+前置条件：DeviceProfile 包含缓存层级/寄存器数量/SIMD 宽度信息
+后置条件：GEMM 参数 100% 从 DeviceProfile 推导
+违规检测：grep 硬编码 GEMM 分块参数</p><div data-criteria=""><strong>验收标准：</strong><ol><li>GEMM 分块参数由 DeviceProfile 推导，禁止硬编码</li><li>CPU GEMM 和 GPU GEMM 共享相同的高层模型，分块参数由各自 DeviceProfile 推导</li><li>K-loop 软件流水线参数由 FMA/Load 比率推导
+
+前置条件：DeviceProfile 包含缓存层级/寄存器数量/SIMD 宽度信息
+后置条件：GEMM 参数 100% 从 DeviceProfile 推导
+违规检测：grep 硬编码 GEMM 分块参数</li><li>前置条件满足: DeviceProfile 包含缓存层级/寄存器数量/SIMD 宽度信息</li><li>后置条件验证: GEMM 参数 100% 从 DeviceProfile 推导</li><li>违规可检测: grep 硬编码 GEMM 分块参数</li></ol></div></section><section id="req-op-gemm-002" data-req="REQ-OP-GEMM-002" data-req-status="approved" data-req-domain="op-gemm" data-req-category="architecture" data-req-entity="ENT-COMPUTE-PATTERN" data-req-api="POST /compile"><h3>REQ-OP-GEMM-002 GEMM 模型 — Epilogue 寄存器预算契约</h3><p>GEMM 模型契约：Epilogue 寄存器预算必须与 GEMM 主循环共享预算：
+1. EpilogueInjection 不增加额外寄存器压力超出预算
+2. Epilogue 寄存器预算公式必须在编译时可计算
+3. 禁止 Epilogue 导致 register spill
+
+前置条件：DeviceProfile 寄存器数量已知
+后置条件：GEMM + Epilogue 的寄存器使用不超过预算
+违规检测：编译时寄存器预算检查溢出 = Err</p><div data-criteria=""><strong>验收标准：</strong><ol><li>EpilogueInjection 不增加额外寄存器压力超出预算</li><li>Epilogue 寄存器预算公式必须在编译时可计算</li><li>禁止 Epilogue 导致 register spill
+
+前置条件：DeviceProfile 寄存器数量已知
+后置条件：GEMM + Epilogue 的寄存器使用不超过预算
+违规检测：编译时寄存器预算检查溢出 = Err</li><li>前置条件满足: DeviceProfile 寄存器数量已知</li><li>后置条件验证: GEMM + Epilogue 的寄存器使用不超过预算</li><li>违规可检测: 编译时寄存器预算检查溢出 = Err</li></ol></div></section><section id="req-op-gemm-003" data-req="REQ-OP-GEMM-003" data-req-status="approved" data-req-domain="op-gemm" data-req-category="architecture" data-req-entity="ENT-COMPUTE-PATTERN" data-req-api="POST /compile"><h3>REQ-OP-GEMM-003 GEMM 模型 — 缓存层级资源分配契约</h3><p>GEMM 模型契约：缓存层级资源分配必须由硬件拓扑推导：
+1. L1/L2/L3 缓存分配策略由 DeviceProfile 缓存大小推导
+2. GPU 共享内存分配由 DeviceProfile.smem_size 推导
+3. 预取距离由缓存行大小和带宽推导
+
+前置条件：DeviceProfile 包含完整缓存层级信息
+后置条件：缓存分配策略 100% 从硬件拓扑推导
+违规检测：grep 硬编码缓存大小/预取距离</p><div data-criteria=""><strong>验收标准：</strong><ol><li>L1/L2/L3 缓存分配策略由 DeviceProfile 缓存大小推导</li><li>GPU 共享内存分配由 DeviceProfile.smem_size 推导</li><li>预取距离由缓存行大小和带宽推导
+
+前置条件：DeviceProfile 包含完整缓存层级信息
+后置条件：缓存分配策略 100% 从硬件拓扑推导
+违规检测：grep 硬编码缓存大小/预取距离</li><li>前置条件满足: DeviceProfile 包含完整缓存层级信息</li><li>后置条件验证: 缓存分配策略 100% 从硬件拓扑推导</li><li>违规可检测: grep 硬编码缓存大小/预取距离</li></ol></div></section><section id="req-backend-cap-001" data-req="REQ-BACKEND-CAP-001" data-req-status="approved" data-req-domain="backend-cap" data-req-category="architecture" data-req-entity="ENT-DEVICE-PROFILE" data-req-api="POST /internal/hw/accel"><h3>REQ-BACKEND-CAP-001 Backend Capability Model — 能力矩阵定义与推导规则</h3><p>Backend Capability Model 契约：ENT-BACKEND-CAP-MATRIX 定义 per-OpKind × DeviceProfile 的能力矩阵：
+1. 每个条目包含 {OpKind, DeviceProfile, ComputePattern, supported: bool, strategy: enum}
+2. 编译时查表：OpKind+DeviceProfile 条目 supported=false → Err（不是 fallback）
+3. 矩阵不是手写维护，而是从 ScalarOpRegistry + auto_select match arms 自动推导生成
+
+前置条件：ScalarOpRegistry 和 auto_select 完整覆盖
+后置条件：编译时 capability 查表确定 OpKind 在当前 DeviceProfile 上是否可执行
+违规检测：矩阵条目缺失 = 编译失败</p><div data-criteria=""><strong>验收标准：</strong><ol><li>每个条目包含 {OpKind, DeviceProfile, ComputePattern, supported: bool, strategy: enum}</li><li>编译时查表：OpKind+DeviceProfile 条目 supported=false → Err（不是 fallback）</li><li>矩阵不是手写维护，而是从 ScalarOpRegistry + auto_select match arms 自动推导生成
+
+前置条件：ScalarOpRegistry 和 auto_select 完整覆盖
+后置条件：编译时 capability 查表确定 OpKind 在当前 DeviceProfile 上是否可执行
+违规检测：矩阵条目缺失 = 编译失败</li><li>前置条件满足: ScalarOpRegistry 和 auto_select 完整覆盖</li><li>后置条件验证: 编译时 capability 查表确定 OpKind 在当前 DeviceProfile 上是否可执行</li><li>违规可检测: 矩阵条目缺失 = 编译失败</li></ol></div></section><section id="req-backend-cap-002" data-req="REQ-BACKEND-CAP-002" data-req-status="approved" data-req-domain="backend-cap" data-req-category="architecture" data-req-entity="ENT-DEVICE-PROFILE" data-req-api="POST /internal/hw/accel"><h3>REQ-BACKEND-CAP-002 Backend Capability Model — 矩阵推导源与规则</h3><p>Backend Capability Model 契约：能力矩阵推导规则：
+1. 推导源：ScalarOpRegistry（注册与否）+ auto_select match arms（lowering 路径）+ DeviceProfile ISV（指令支持）
+2. 推导结果：每个 OpKind+DeviceProfile 条目 supported=true/false + strategy=JitNative/JitSimd/JitGpu/JitGpuTensorCore/Unsupported
+3. SPEC 只定义矩阵 schema 和推导规则，具体条目由代码生成
+
+前置条件：OpKind 注册和 auto_select 实现完成
+后置条件：构建时自动生成完整的能力矩阵
+违规检测：矩阵条目与实际代码不一致 = 推导规则 BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>推导源：ScalarOpRegistry（注册与否）+ auto_select match arms（lowering 路径）+ DeviceProfile ISV（指令支持）</li><li>推导结果：每个 OpKind+DeviceProfile 条目 supported=true/false + strategy=JitNative/JitSimd/JitGpu/JitGpuTensorCore/Unsupported</li><li>SPEC 只定义矩阵 schema 和推导规则，具体条目由代码生成
+
+前置条件：OpKind 注册和 auto_select 实现完成
+后置条件：构建时自动生成完整的能力矩阵
+违规检测：矩阵条目与实际代码不一致 = 推导规则 BUG</li><li>前置条件满足: OpKind 注册和 auto_select 实现完成</li><li>后置条件验证: 构建时自动生成完整的能力矩阵</li><li>违规可检测: 矩阵条目与实际代码不一致 = 推导规则 BUG</li></ol></div></section><section id="req-backend-cap-003" data-req="REQ-BACKEND-CAP-003" data-req-status="approved" data-req-domain="backend-cap" data-req-category="architecture" data-req-entity="ENT-DEVICE-PROFILE" data-req-api="POST /internal/hw/accel"><h3>REQ-BACKEND-CAP-003 Backend Capability Model — 编译时门控与错误报告</h3><p>Backend Capability Model 契约：能力矩阵编译时门控：
+1. compile() 入口查表：如果 OpKind+DeviceProfile 条目 supported=false → 返回 Err
+2. 错误信息包含：OpKind 名称 + DeviceProfile 名称 + 缺失的 lowering 路径
+3. 禁止 supported=false 时静默 NOP 或 fallback 到通用路径
+
+前置条件：能力矩阵构建完成
+后置条件：编译时门控阻止不支持 OpKind+DeviceProfile 组合进入 codegen
+违规检测：尝试编译不支持的组合 → Err（不是 panic 或静默）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>compile() 入口查表：如果 OpKind+DeviceProfile 条目 supported=false → 返回 Err</li><li>错误信息包含：OpKind 名称 + DeviceProfile 名称 + 缺失的 lowering 路径</li><li>禁止 supported=false 时静默 NOP 或 fallback 到通用路径
+
+前置条件：能力矩阵构建完成
+后置条件：编译时门控阻止不支持 OpKind+DeviceProfile 组合进入 codegen
+违规检测：尝试编译不支持的组合 → Err（不是 panic 或静默）</li><li>前置条件满足: 能力矩阵构建完成</li><li>后置条件验证: 编译时门控阻止不支持 OpKind+DeviceProfile 组合进入 codegen</li><li>违规可检测: 尝试编译不支持的组合 → Err（不是 panic 或静默）</li></ol></div></section><section id="data-" data-entity="" data-entity-model-type="relational"><h3>undefined Backend Capability Matrix</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="opkind" data-type="string" data-required="true"><td>opkind</td><td>string</td><td>是</td><td></td><td>算子类型枚举变体</td></tr><tr data-field="device_profile" data-type="string" data-required="true"><td>device_profile</td><td>string</td><td>是</td><td></td><td>硬件 Profile 标识</td></tr><tr data-field="compute_pattern" data-type="string" data-required="true"><td>compute_pattern</td><td>string</td><td>是</td><td></td><td>7 种通用计算模式之一</td></tr><tr data-field="supported" data-type="boolean" data-required="true"><td>supported</td><td>boolean</td><td>是</td><td></td><td>该组合是否被编译管线支持</td></tr><tr data-field="strategy" data-type="string" data-required="true"><td>strategy</td><td>string</td><td>是</td><td></td><td>支持时的具体策略枚举</td></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：04-OPERATORS.html</address>
+  </footer>
+</body>
+</html>

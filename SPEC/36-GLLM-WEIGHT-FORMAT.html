@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="36-GLLM-WEIGHT-FORMAT">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"36-GLLM-WEIGHT-FORMAT", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>gllm 原生模型权重分发格式 (GLLM-WEIGHT-FORMAT)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>36-GLLM-WEIGHT-FORMAT</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-gllm-原生模型权重分发格式-gllm-weight-format" data-section="null">
+      <h2>gllm 原生模型权重分发格式 (GLLM-WEIGHT-FORMAT)</h2>
+      <p>&gt; <strong>实现状态</strong>: ✅ REQ-GLF-001~007 全部完成; RTN 量化 baseline 已实现 (AWQ4/GPTQ4/NVFP4)，AWQ/GPTQ activation-aware 校准为未来增强</p>
+      <p>&gt; <strong>SSOT</strong>: 本文件定义 gllm 原生模型权重分发格式 <code>.gllm</code>。权重在文件中即以量化格式存储（AWQ4/GPTQ4/NVFP4/FP8 等），推理时通过分页机制按需加载到 GPU，由 GEMM prologue（QuantGather）on-the-fly 解量化后送入 Tensor Core。</p>
+      <p>&gt; 交叉引用: <code>35-QUANTIZED-WEIGHT-PAGE-COMPRESSION.md</code>（量化权重页架构）、<code>23-QUANT-CODEGEN-ALGO.md</code>（QuantFormatDescriptor 22 种量化格式）、<code>21-WEIGHT-PAGING.md</code>（权重分页 §8 量化权重页）、<code>07-LOADER.md</code>（模型加载规范）</p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 设计原则</h3>
+      <p>1. <strong>量化原生存储</strong>: 权重在文件中即以量化格式存储，加载时零解压，GEMM prologue 负责解量化</p>
+      <p>2. <strong>分页友好</strong>: 文件布局与 GPU 分页对齐，支持 mmap + 按需加载</p>
+      <p>3. <strong>自描述格式</strong>: 内嵌模型架构元数据，无需外部 config.json</p>
+      <p>4. <strong>量化格式覆盖</strong>: 支持 SPEC 23 定义的 22 种 QuantType</p>
+      <p>5. <strong>向后兼容</strong>: 提供从 GGUF/safetensors 到 <code>.gllm</code> 的离线转换工具</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 文件格式</h3>
+      <p>```</p>
+      <p>GLLM Weight File (.gllm):</p>
+      <p>┌──────────────────────────────────────┐</p>
+      <p>│ Header (64 bytes):                    │</p>
+      <p>│   magic:          "GLLM" (4B)         │</p>
+      <p>│   version:        u32 = 1             │</p>
+      <p>│   flags:          u32 (bit 0: 量化)   │</p>
+      <p>│   meta_offset:    u64                 │</p>
+      <p>│   tensor_count:   u32                 │</p>
+      <p>│   tensor_dir_offset: u64              │</p>
+      <p>│   data_offset:    u64                 │</p>
+      <p>│   page_size:      u32 (分页对齐)       │</p>
+      <p>│   reserved:       [u8; 28]            │</p>
+      <p>├──────────────────────────────────────┤</p>
+      <p>│ Tensor Directory:                     │</p>
+      <p>│   per tensor (64 bytes):              │</p>
+      <p>│     name_offset:      u32             │</p>
+      <p>│     name_len:         u16             │</p>
+      <p>│     ndim:             u8              │</p>
+      <p>│     dtype:            u8 (DType)      │</p>
+      <p>│     shape:            [u64; 4]        │</p>
+      <p>│     quant_format:     u8 (QuantType)  │</p>
+      <p>│     quant_block_size: u16             │</p>
+      <p>│     scale_dtype:      u8 (DType)      │</p>
+      <p>│     zp_type:          u8 (0=无/1=u8)  │</p>
+      <p>│     data_offset:      u64             │</p>
+      <p>│     compressed_size:  u64             │</p>
+      <p>│     original_size:    u64             │</p>
+      <p>├──────────────────────────────────────┤</p>
+      <p>│ String Table:                         │</p>
+      <p>│   tensor names (null-terminated)      │</p>
+      <p>├──────────────────────────────────────┤</p>
+      <p>│ Metadata (MessagePack):               │</p>
+      <p>│   model_type, arch_key, vocab_size,   │</p>
+      <p>│   hidden_size, num_layers, num_heads, │</p>
+      <p>│   head_dim, intermediate_size, ...    │</p>
+      <p>├──────────────────────────────────────┤</p>
+      <p>│ Quantized Tensor Data:                │</p>
+      <p>│   For each tensor (page-aligned):     │</p>
+      <p>│     packed_quant_data: [u8; ...]      │</p>
+      <p>│     scales: [scale_dtype; n_blocks]   │</p>
+      <p>│     zero_points: [u8; ...] (可选)     │</p>
+      <p>│     (padding to page_size boundary)   │</p>
+      <p>└──────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 Header 字段说明</h4>
+      <table>
+        <tr>
+          <th>字段</th>
+        </tr>
+        <tr>
+          <td>偏移</td>
+        </tr>
+        <tr>
+          <td>大小</td>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td>magic</td>
+        </tr>
+        <tr>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>"GLLM" ASCII</td>
+        </tr>
+        <tr>
+          <td>version</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>格式版本 (当前 1)</td>
+        </tr>
+        <tr>
+          <td>flags</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>bit 0: 全局量化标志</td>
+        </tr>
+        <tr>
+          <td>meta_offset</td>
+        </tr>
+        <tr>
+          <td>12</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>MessagePack 元数据偏移</td>
+        </tr>
+        <tr>
+          <td>tensor_count</td>
+        </tr>
+        <tr>
+          <td>20</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>张量数量</td>
+        </tr>
+        <tr>
+          <td>tensor_dir_offset</td>
+        </tr>
+        <tr>
+          <td>24</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>Tensor Directory 偏移</td>
+        </tr>
+        <tr>
+          <td>data_offset</td>
+        </tr>
+        <tr>
+          <td>32</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>数据区偏移</td>
+        </tr>
+        <tr>
+          <td>page_size</td>
+        </tr>
+        <tr>
+          <td>40</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>分页对齐大小 (通常 4096)</td>
+        </tr>
+        <tr>
+          <td>reserved</td>
+        </tr>
+        <tr>
+          <td>44</td>
+        </tr>
+        <tr>
+          <td>20</td>
+        </tr>
+        <tr>
+          <td>保留</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 Tensor Directory 条目</h4>
+      <p>每个张量 64 字节。<code>quant_format</code> 字段对应 SPEC 23 <code>QuantType</code> 枚举（AWQ4/GPTQ4/NVFP4/FP8 等）。</p>
+      <p>当 <code>quant_format = 0</code>（QuantType::None）时，数据为原始精度（FP32/BF16/FP16），<code>compressed_size = original_size</code>。</p>
+      <p>当 <code>quant_format != 0</code> 时：</p>
+      <li><code>compressed_size</code> = 量化后字节数（packed data + scales + zero_points）</li>
+      <li><code>quant_block_size</code> = 量化块大小（如 128 for AWQ4, 32 for NVFP4）</li>
+      <li><code>scale_dtype</code> = 缩放因子精度</li>
+      <li><code>zp_type</code> = 零点类型（0 = 无零点，如 NVFP4；1 = u8 零点，如 GPTQ4）</li>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 量化数据块布局</h4>
+      <p>每个张量的量化数据按 <code>quant_block_size</code> 分块存储，与 <code>QuantBlockLoad</code> VmInstr (SPEC 26 §1.2.1) 对齐：</p>
+      <p>```</p>
+      <p>AWQ4 布局 (行优先, block_size=128):</p>
+      <p>  per block:</p>
+      <p>    packed_weights: [u4; 128] = 64 bytes (行优先打包)</p>
+      <p>    scale: f16 = 2 bytes</p>
+      <p>    zero_point: f16 = 2 bytes (可选)</p>
+      <p>  total per block: 68 bytes (128 元素, 压缩比 7.5:1 vs FP32)</p>
+      <p>GPTQ4 布局 (列交织, block_size=128):</p>
+      <p>  per block:</p>
+      <p>    packed_weights: [u4; 128] = 64 bytes (列交织打包)</p>
+      <p>    scale: f16 = 2 bytes</p>
+      <p>    zero_point: i32 packed = 4 bytes (INT4 packed + 1 偏移)</p>
+      <p>  total per block: 70 bytes</p>
+      <p>NVFP4 布局 (两级缩放, block_size=16, sub_block=16):</p>
+      <p>  per 128 elements (8 blocks × 16 sub_blocks):</p>
+      <p>    packed_weights: [E2M1; 128] = 64 bytes</p>
+      <p>    sub_block_scales: [UE4M3; 8] = 8 bytes</p>
+      <p>    global_scale: f16 = 2 bytes (per 128-element tile)</p>
+      <p>  total per 128 elements: 74 bytes</p>
+      <p>FP8 布局 (无块结构):</p>
+      <p>  per element: 1 byte (E4M3 或 E5M2)</p>
+      <p>  无 scales, 无 zero_points</p>
+      <p>  total: n_elements bytes (4:1 vs FP32)</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 与分页系统的集成</h3>
+      <p>```</p>
+      <p>.gllm 文件加载流程:</p>
+      <p>  1. mmap 整个文件到虚拟地址空间</p>
+      <p>  2. 解析 Header + Tensor Directory + Metadata</p>
+      <p>  3. 构建 ModelArchKey + TensorMap</p>
+      <p>  4. 从 Metadata 推导模型架构 (auto_graph 所需参数)</p>
+      <p>  5. 对于每个权重 tensor:</p>
+      <p>     a. 从 quant_format 和 block_size 计算页内块数</p>
+      <p>     b. 创建 QuantizedWeightPage 映射 (file_offset → page_id)</p>
+      <p>     c. 注册到 UnifiedVirtualPage 系统 (SPEC 21 §8)</p>
+      <p>  6. 推理时按需加载:</p>
+      <p>     a. 缺页 → 从 mmap 读取量化数据块</p>
+      <p>     b. DMA 到 GPU HBM</p>
+      <p>     c. QuantBlockLoad + QuantGather 解量化 → GEMM</p>
+      <p>```</p>
+      <strong>零解压加载</strong>: 文件中的数据就是量化格式，不需要任何 CPU 端解压或解量化。GPU 端由 GEMM prologue（QuantGather）on-the-fly 处理。
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 转换工具</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 GGUF → .gllm</h4>
+      <p>```bash</p>
+      <p>gllm-convert --input model.gguf --output model.gllm \</p>
+      <p>    --quant-format awq4 --block-size 128 --calibration-data wiki.jsonl</p>
+      <p>```</p>
+      <p>转换流程:</p>
+      <p>1. 解析 GGUF header + tensor metadata</p>
+      <p>2. 如果 GGUF 已包含量化权重 (Q4_0/Q5_1 等):</p>
+      <p>   a. 读取量化参数 (block_size, n_blocks)</p>
+      <p>   b. 转换为 .gllm 原生量化布局（repack 如果布局不同）</p>
+      <p>   c. 直接写入 packed data + scales</p>
+      <p>3. 如果 GGUF 包含 FP16/BF32 权重:</p>
+      <p>   a. 读取原始权重</p>
+      <p>   b. 使用 calibration data 执行量化校准</p>
+      <p>   c. 按 quant_format 编码 (AWQ4/GPTQ4/NVFP4)</p>
+      <p>   d. 写入 packed data + scales + zero_points</p>
+      <p>4. 构建 Tensor Directory + Metadata</p>
+      <p>5. 写入 .gllm 文件</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 safetensors → .gllm</h4>
+      <p>```bash</p>
+      <p>gllm-convert --input model.safetensors --output model.gllm \</p>
+      <p>    --quant-format nvfp4 --calibration-data wiki.jsonl</p>
+      <p>```</p>
+      <p>safetensors 中权重为原始精度（BF16/FP16/F32），必须执行量化校准：</p>
+      <p>1. 加载原始权重</p>
+      <p>2. 运行 calibration data 收集激活统计</p>
+      <p>3. 计算最优 per-block scale/zp（AWQ: activation-aware; GPTQ: Hessian-based）</p>
+      <p>4. 量化编码 + 写入 .gllm</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 GGUF 已量化 → .gllm（直通模式）</h4>
+      <p>对于已经是量化格式的 GGUF（如 Q4_0、Q8_0），可以跳过重新量化：</p>
+      <p>```bash</p>
+      <p>gllm-convert --input model-Q4_0.gguf --output model.gllm --passthrough</p>
+      <p>```</p>
+      <p>此模式仅 repack GGUF 的量化布局到 .gllm 格式，不改变精度。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 模型架构自动识别</h3>
+      <p>从 Tensor Directory + Metadata 自动推导 <code>ModelArchKey</code>，无需外部配置文件：</p>
+      <p>```</p>
+      <p>识别流程:</p>
+      <p>  1. 读取 Metadata 中的 arch_key (如 "llama", "qwen3", "gemma4")</p>
+      <p>  2. 读取 Metadata 中的关键参数 (hidden_size, num_layers, num_heads, ...)</p>
+      <p>  3. 从 Tensor Directory 的张量名模式确认架构特征</p>
+      <p>     (如 "model.layers.*.self_attn.q_proj" → GQA 架构)</p>
+      <p>  4. 构建 ModelArchKey → auto_graph 直接构建 CompilerGraph</p>
+      <p>  5. 从 Tensor Directory 的 quant_format 为每个权重张量配置 QuantType</p>
+      <p>```</p>
+      <strong>与现有 auto_graph 的兼容</strong>: <code>.gllm</code> 的 Metadata 包含 GGUF equivalent 的所有架构参数。<code>auto_graph</code> 无需修改，只需在 Loader 层增加 <code>.gllm</code> 格式解析 + QuantType 透传。
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 压缩比预估</h3>
+      <strong>说明</strong>: INT4 量化包含 per-block scale/zp 开销（约 6-10%），因此实际压缩比略低于理论的 4:1。
+      <table>
+        <tr>
+          <th>模型</th>
+        </tr>
+        <tr>
+          <td>原始 (FP16)</td>
+        </tr>
+        <tr>
+          <td>INT4 量化</td>
+        </tr>
+        <tr>
+          <td>NVFP4 量化</td>
+        </tr>
+        <tr>
+          <td>FP8 量化</td>
+        </tr>
+        <tr>
+          <td>Qwen3-8B</td>
+        </tr>
+        <tr>
+          <td>~16 GB</td>
+        </tr>
+        <tr>
+          <td>~4.5 GB (3.6x)</td>
+        </tr>
+        <tr>
+          <td>~4 GB (4x)</td>
+        </tr>
+        <tr>
+          <td>~8 GB (2x)</td>
+        </tr>
+        <tr>
+          <td>Llama-4-17B</td>
+        </tr>
+        <tr>
+          <td>~34 GB</td>
+        </tr>
+        <tr>
+          <td>~9.5 GB (3.6x)</td>
+        </tr>
+        <tr>
+          <td>~8.5 GB (4x)</td>
+        </tr>
+        <tr>
+          <td>~17 GB (2x)</td>
+        </tr>
+        <tr>
+          <td>Gemma-4-31B</td>
+        </tr>
+        <tr>
+          <td>~62 GB</td>
+        </tr>
+        <tr>
+          <td>~17 GB (3.6x)</td>
+        </tr>
+        <tr>
+          <td>~15.5 GB (4x)</td>
+        </tr>
+        <tr>
+          <td>~31 GB (2x)</td>
+        </tr>
+        <tr>
+          <td>DeepSeek-V3-671B</td>
+        </tr>
+        <tr>
+          <td>~1.3 TB</td>
+        </tr>
+        <tr>
+          <td>~365 GB (3.6x)</td>
+        </tr>
+        <tr>
+          <td>~325 GB (4x)</td>
+        </tr>
+        <tr>
+          <td>~650 GB (2x)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 禁止规则</h3>
+      <li>❌ 禁止在加载时执行 CPU 侧解量化 — 量化数据直接映射到 GPU</li>
+      <li>❌ 禁止将 FP32/FP16 权重写入 <code>.gllm</code>（除非 quant_format=None 的 embed 层）</li>
+      <li>❌ 禁止硬编码量化格式 — 由 Tensor Directory 的 quant_format 字段驱动</li>
+      <li>❌ 禁止依赖外部 config.json — 所有元数据内嵌</li>
+      <li>❌ 禁止使用函数逼近压缩（FWT/SIREN/INR/F-INR）— 实测不可行</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 REQ 清单</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ ID</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验收标准</td>
+        </tr>
+        <tr>
+          <td>依赖</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+    
+<section id="req-glf-002" data-req="REQ-GLF-002" data-req-status="implemented" data-req-domain="glf" data-req-category="business" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-002</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-glf-004" data-req="REQ-GLF-004" data-req-status="implemented" data-req-domain="glf" data-req-category="business" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-004</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-glf-006" data-req="REQ-GLF-006" data-req-status="implemented" data-req-domain="glf" data-req-category="business" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-006</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-glf-007" data-req="REQ-GLF-007" data-req-status="implemented" data-req-domain="glf" data-req-category="business" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-007</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-glf-008" data-req="REQ-GLF-008" data-req-status="implemented" data-req-domain="glf" data-req-category="business" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-008</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-glf-013" data-req="REQ-GLF-013" data-req-status="implemented" data-req-domain="glf" data-req-category="business" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-013</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+
+
+
+        <tr>
+          <td>.gllm 文件格式定义</td>
+        </tr>
+        <tr>
+          <td>Header + TensorDirectory + StringTable + Metadata + QuantizedData 布局完整</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GLF-002" data-test="TEST-GLF-002" id="test-glf-002">TEST-GLF-002: gllm原生权重格式测试<p>验证REQ-GLF-002相关功能正确性</p>
+      <div id="gllm-格式解析实现完整" data-criterion=".gllm 格式解析实现完整">.gllm 格式解析实现完整</div>
+      <div id="量化原生存储-page-aligned" data-criterion="量化原生存储 page-aligned">量化原生存储 page-aligned</div>
+      <div id="自描述格式-header-tensordir-正确" data-criterion="自描述格式 Header + TensorDir 正确">自描述格式 Header + TensorDir 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>量化数据块布局</td>
+        </tr>
+        <tr>
+          <td>packed_weights + scales + zero_points 按 QuantType 规范存储，page-aligned</td>
+        </tr>
+        <tr>
+          <td>SPEC 23</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GLF-008" data-test="TEST-GLF-9" id="test-glf-9">TEST-GLF-9: gllm原生权重格式测试<p>验证REQ-GLF-003相关功能正确性</p>
+      <div id="gllm-格式解析实现完整" data-criterion=".gllm 格式解析实现完整">.gllm 格式解析实现完整</div>
+      <div id="量化原生存储-page-aligned" data-criterion="量化原生存储 page-aligned">量化原生存储 page-aligned</div>
+      <div id="自描述格式-header-tensordir-正确" data-criterion="自描述格式 Header + TensorDir 正确">自描述格式 Header + TensorDir 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      </section>
+
+        <tr>
+          <td>分页 mmap 加载器</td>
+        </tr>
+        <tr>
+          <td>mmap .gllm → QuantizedWeightPage 映射 → UnifiedVirtualPage 注册</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GLF-004" data-test="TEST-GLF-004" id="test-glf-004">TEST-GLF-004: gllm原生权重格式测试<p>验证REQ-GLF-004相关功能正确性</p>
+      <div id="gllm-格式解析实现完整" data-criterion=".gllm 格式解析实现完整">.gllm 格式解析实现完整</div>
+      <div id="量化原生存储-page-aligned" data-criterion="量化原生存储 page-aligned">量化原生存储 page-aligned</div>
+      <div id="自描述格式-header-tensordir-正确" data-criterion="自描述格式 Header + TensorDir 正确">自描述格式 Header + TensorDir 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>GGUF → .gllm 离线转换器 (已量化)</td>
+        </tr>
+        <tr>
+          <td>Q4_0/Q5_1 等直通 repack，推理结果与原 GGUF 余弦相似度 &gt; 0.999</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GLF-013" data-test="TEST-GLF-005" id="test-glf-005">TEST-GLF-005: gllm原生权重格式测试<p>验证REQ-GLF-005相关功能正确性</p>
+      <div id="gllm-格式解析实现完整" data-criterion=".gllm 格式解析实现完整">.gllm 格式解析实现完整</div>
+      <div id="量化原生存储-page-aligned" data-criterion="量化原生存储 page-aligned">量化原生存储 page-aligned</div>
+      <div id="自描述格式-header-tensordir-正确" data-criterion="自描述格式 Header + TensorDir 正确">自描述格式 Header + TensorDir 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>safetensors → .gllm 离线转换器</td>
+        </tr>
+        <tr>
+          <td>BF16/FP16 + calibration → AWQ4/GPTQ4/NVFP4，perplexity 损失 &lt; 0.1</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GLF-006" data-test="TEST-GLF-006" id="test-glf-006">TEST-GLF-006: gllm原生权重格式测试<p>验证REQ-GLF-006相关功能正确性</p>
+      <div id="gllm-格式解析实现完整" data-criterion=".gllm 格式解析实现完整">.gllm 格式解析实现完整</div>
+      <div id="量化原生存储-page-aligned" data-criterion="量化原生存储 page-aligned">量化原生存储 page-aligned</div>
+      <div id="自描述格式-header-tensordir-正确" data-criterion="自描述格式 Header + TensorDir 正确">自描述格式 Header + TensorDir 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>模型架构自动识别</td>
+        </tr>
+        <tr>
+          <td>从 TensorDir + Metadata 推导 ModelArchKey，auto_graph 可直接构建图</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GLF-007" data-test="TEST-GLF-007" id="test-glf-007">TEST-GLF-007: gllm原生权重格式测试<p>验证REQ-GLF-007相关功能正确性</p>
+      <div id="gllm-格式解析实现完整" data-criterion=".gllm 格式解析实现完整">.gllm 格式解析实现完整</div>
+      <div id="量化原生存储-page-aligned" data-criterion="量化原生存储 page-aligned">量化原生存储 page-aligned</div>
+      <div id="自描述格式-header-tensordir-正确" data-criterion="自描述格式 Header + TensorDir 正确">自描述格式 Header + TensorDir 正确</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+
+        <tr>
+          <td>GGUF → .gllm 转换器 (原始精度)</td>
+        </tr>
+        <tr>
+          <td>FP16/BF16 权重 + calibration → 量化编码，perplexity 损失 &lt; 0.1</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">.gllm 格式解析实现完整</li><li id="id-2" data-criterion="2">量化原生存储 page-aligned</li><li id="id-3" data-criterion="3">自描述格式 Header + TensorDir 正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
+  <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE  </a></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-quant-type" href="./36-GLLM-WEIGHT-FORMAT#ent-quant-type">ENT-QUANT-TYPE
+      
+      
+      </a></div>
+        
+      </table>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-gllm-header" data-entity="ENT-GLLM-HEADER" data-req-ref="REQ-ORPHAN-439 REQ-ORPHAN-441" data-entity-model-type="relational" data-xref="REQ-ORPHAN-439 REQ-ORPHAN-441"><h4>ENT-GLLM-HEADER</h4><p>GllmHeader — .gllm格式头 (64B)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="version" data-type="number" data-required="true" <td="">version<td>number</td><td>是</td><td>u32, currently 1</td><td>File format version</td></tr><tr data-field="flags" data-type="number" data-required="true" <td="">flags<td>number</td><td>是</td><td>
+u32, bit 0=global quantization flag</td><td>Bit flags</td></tr><tr data-field="meta_offset" data-type="number" data-required="true" <td="">meta_offset<td>number</td><td>是</td><td>u64</td><td>Offset to MessagePack metadata section</td></tr><tr data-field="tensor_count" data-type="number" data-required="true" <td="">tensor_count<td>number</td><td>是</td><td>u32</td><td>Number of tensors in the Tensor Directory</td></tr>
+<tr data-field="tensor_dir_offset" data-type="number" data-required="true" <td="">
+tensor_dir_offset<td>number</td><td>是</td><td>u64</td><td>Offset to Tensor Directory (array of 64-byte entries)</td></tr><tr data-field="page_size" data-type="number" data-required="true" <td="">page_size<td>number</td><td>是</td><td>u32, typically 4096</td><td>Page alignment size</td></tr></table></section>
+      <section id="ent-model-manifest" data-entity="ENT-MODEL-MANIFEST" data-req-ref="REQ-LOADER-001 REQ-LOADER-002 REQ-TOK-GGUF-001 REQ-TOK-GGUF-002 REQ-TOK-GGUF-003" data-entity-model-type="relational" data-entity-ref="ENT-DEVICE-PROFILE ENT-MODEL-CONFIG" data-xref="REQ-LOADER-001 REQ-LOADER-002 REQ-TOK-GGUF-001 REQ-TOK-GGUF-002 REQ-TOK-GGUF-003"><h4>ENT-MODEL-MANIFEST</h4><p>ModelManifest — 模型运行时数据与可选覆盖（struct ModelManifest in gllm/src/manifest/types.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="model_id" data-type="string" data-required="true" <td="">model_id<td>string</td><td>是</td><td>HF Model ID</td><td>模型标识（HuggingFace Model ID）</td></tr>
+<tr data-field="arch" data-type="string" data-required="true" <td="">arch<td>string</td><td>是</td><td>ARCH_TABLE 规范名</td><td>架构规范名（运行时由注册表校验）</td></tr><tr data-field="kind" data-type="string" data-required="true" <td="">kind<td>string</td><td>是</td><td>Chat|Embedding|Reranker|Classifier</td><td>模型类型</td></tr><tr data-field="rope_base_override" data-type="number" data-required="false" <td="">rope_base_override<td>number</td><td>否</td><td>Option&lt;f32&gt;</td><td>
+RoPE theta 覆盖（None=用 config.json）</td></tr><tr data-field="max_context_override" data-type="number" data-required="false" <td="">max_context_override<td>number</td><td>否</td><td>Option&lt;usize&gt;</td><td>最大上下文覆盖（None=用 config.json）</td></tr><tr data-field="is_moe" data-type="boolean" data-required="false" <td="">is_moe<td>boolean</td><td>否</td><td>moe_config.is_some()</td><td>是否为 MoE 模型</td></tr><tr data-field="num_tensor_roles" data-type="number" data-required="false" <td="">
+num_tensor_roles<td>number</td><td>否</td><td>HashMap 大小</td><td>张量角色映射数量</td></tr><tr data-field="family" data-type="string" data-required="false" <td="">family<td>string</td><td>否</td><td>Decoder|Encoder</td><td>架构族（从别名表查询）</td></tr></table></section>
+      <section id="ent-quant-type" data-entity="ENT-QUANT-TYPE" data-req-ref="REQ-QCG-001 REQ-QCG-002 REQ-QCG-003 REQ-QCG-004 REQ-QCG-005" data-entity-model-type="relational" data-entity-ref="ENT-DEVICE-PROFILE ENT-QUANT-FORMAT-DESC ENT-QUANT-PRECISION ENT-VM-INSTR" data-xref="REQ-QCG-001 REQ-QCG-002 REQ-QCG-003 REQ-QCG-004 REQ-QCG-005"><h4>ENT-QUANT-TYPE</h4><p>QuantType — 量化格式枚举（enum QuantType in gllm-kernels/src/quant.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+Bf16|F16|F32|Q2K|Q3K|Q4K|Q5K|Q6K|Q8K|IQ1S|IQ1M|IQ2XXS|IQ2XS|IQ2S|IQ3XXS|IQ3S|IQ4NL|IQ4XS|Q4_0|Q4_1|Q5_0|Q5_1|Q8_0|Q8_1|AWQ4|GPTQ4|Squeeze|Fp8E4M3|Fp8E5M2|TQ1_0|TQ2_0|Mxfp4|Nvfp4</td><td>枚举变体名</td></tr><tr data-field="bits_per_element" data-type="number" data-required="true" <td="">bits_per_element<td>number</td><td>是</td><td>2~32</td><td>每个元素占用比特数</td></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>32|256|可配置</td><td>
+量化块大小（元素数）</td></tr><tr data-field="has_scale" data-type="boolean" data-required="true" <td="">has_scale<td>boolean</td><td>是</td><td>原生浮点=Bf16/F16/F32无scale</td><td>是否有缩放因子</td></tr><tr data-field="has_zero_point" data-type="boolean" data-required="true" <td="">has_zero_point<td>boolean</td><td>是</td><td>AWQ4有FP16 zp, GPTQ4有INT4 packed zp</td><td>是否有零点</td></tr><tr data-field="is_native_float" data-type="boolean" data-required="true" <td="">is_native_float<td>boolean</td><td>是</td><td>
+Bf16/F16/F32/Fp8E4M3/Fp8E5M2</td><td>是否为硬件原生浮点格式</td></tr><tr data-field="is_weight_only" data-type="boolean" data-required="true" <td="">is_weight_only<td>boolean</td><td>是</td><td>AWQ4/GPTQ4/Squeeze</td><td>是否仅权重路径</td></tr><tr data-field="block_size_param" data-type="number" data-required="false" <td="">block_size_param<td>number</td><td>否</td><td>仅 Mxfp4 变体</td><td>可配置 block_size 参数</td></tr></table></section>
+      <section id="ent-tensor-dir" data-entity="ENT-TENSOR-DIR" data-req-ref="REQ-ORPHAN-440 REQ-ORPHAN-442" data-entity-model-type="relational" data-xref="REQ-ORPHAN-440 REQ-ORPHAN-442"><h4>ENT-TENSOR-DIR</h4><p>TensorDir — .gllm 张量目录条目 (GllmTensorEntry, 64字节/条目, 自描述格式)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="name_offset" data-type="number" data-required="true" <td="">name_offset<td>number</td><td>是</td><td>u32</td><td>字符串表中张量名偏移</td></tr><tr data-field="ndim" data-type="number" data-required="true" <td="">ndim<td>number</td><td>是</td><td>
+1-4</td><td>维度数</td></tr><tr data-field="dtype" data-type="number" data-required="true" <td="">dtype<td>number</td><td>是</td><td>DType enum</td><td>元素数据类型</td></tr><tr data-field="quant_format" data-type="number" data-required="true" <td="">quant_format<td>number</td><td>是</td><td>QuantType enum</td><td>量化格式 (0=无量化)</td></tr><tr data-field="data_offset" data-type="number" data-required="true" <td="">data_offset<td>number</td><td>是</td><td>u64</td><td>数据区域字节偏移</td></tr>
+<tr data-field="compressed_size" data-type="number" data-required="true" <td="">compressed_size<td>number</td><td>是</td><td>u64</td><td>压缩(量化)后字节数</td></tr></table></section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section id="req-glf-001" data-req="REQ-GLF-001" data-req-status="implemented" data-req-domain="glf" data-req-category="architecture" data-req-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-api="POST /internal/weight/paging"><h3>REQ-GLF-001 REQ-GLF-001: .gllm 格式写入器</h3><p>.gllm 格式写入器：writer 模块将模型权重、配置、tokenizer 打包为 .gllm 格式文件。支持从 safetensors/GGUF 输入创建 .gllm 分发文件。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 .gllm 格式写入器：writer 模块将模型权重、配置、tokenizer 打包为 .gllm 格式文件。支持从 safetensors/GGUF 输入创建 的约束定义</li></ol></div></section><section id="ent-gllm-weight-format" data-entity="ENT-GLLM-WEIGHT-FORMAT" data-req-ref="REQ-GLF-002 REQ-GLF-004 REQ-GLF-006 REQ-GLF-007 REQ-GLF-008" data-entity-model-type="relational" data-xref="REQ-GLF-002 REQ-GLF-004 REQ-GLF-006 REQ-GLF-007 REQ-GLF-008"><h3>ENT-GLLM-WEIGHT-FORMAT GLLM Weight Format</h3><table data-entity-table="ENT-GLLM-WEIGHT-FORMAT"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="format_version" data-type="number" data-required="true"><td>format_version</td><td>number</td><td>是</td><td></td><td>权重文件版本号</td></tr><tr data-field="num_shards" data-type="number" data-required="true"><td>num_shards</td><td>number</td><td>是</td><td></td><td>权重分片数</td></tr><tr data-field="default_quant_type" data-type="string" data-required="true"><td>default_quant_type</td><td>string</td><td>是</td><td></td><td>默认量化类型</td></tr><tr data-field="metadata_size" data-type="number" data-required="true"><td>metadata_size</td><td>number</td><td>是</td><td></td><td>元数据段大小（字节）</td></tr><tr data-field="incremental_load" data-type="boolean" data-required="false"><td>incremental_load</td><td>boolean</td><td>否</td><td></td><td>是否支持增量加载</td></tr><tr data-field="checksum_algorithm" data-type="string" data-required="false"><td>checksum_algorithm</td><td>string</td><td>否</td><td></td><td>权重校验算法</td></tr><tr data-field="page_size" data-type="number" data-required="false"><td>page_size</td><td>number</td><td>否</td><td></td><td>页大小（字节）</td></tr><tr data-field="includes_tokenizer" data-type="boolean" data-required="false"><td>includes_tokenizer</td><td>boolean</td><td>否</td><td></td><td>是否包含 tokenizer 数据</td></tr></table></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：36-GLLM-WEIGHT-FORMAT.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-glf-001" data-test="TEST-GLF-001" data-req-ref="REQ-GLF-001" data-test-categories="unit"><h4>TEST-GLF-001: REQ-GLF-001 单元测试</h4><p>验证 REQ-GLF-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

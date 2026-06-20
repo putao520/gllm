@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="symdim-threading-protocol">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"symdim-threading-protocol", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>SymDim 穿透协议 (ARCH-SYMDIM-THREADING)</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>symdim-threading-protocol</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-symdim-穿透协议-arch-symdim-threading" data-section="null">
+      <h2>SymDim 穿透协议 (ARCH-SYMDIM-THREADING)</h2>
+      <p>&gt; <strong>SSOT 声明</strong>: 本文档定义 SymDim 从 CompilerGraph 到 JIT 机器码的完整穿透机制。</p>
+      <p>&gt; 所有动态维度（seq_len、batch_size、total_seq）的运行时绑定必须遵循本协议。</p>
+      <p>&gt; <strong>交叉引用</strong>: <code>03-GRAPH-IR.md</code> §3（SymDim 定义）、<code>01-JIT-PIPELINE.md</code> §6.2（编译时机）、<code>08-EXECUTOR.md</code> §4（全 JIT 执行模型）</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 问题陈述</h3>
+      <p>SymDim::Symbolic 在管线中途被 <code>as_concrete().unwrap_or(默认值)</code> 丢弃，导致：</p>
+      <li>JIT 内核按编译时上界（2048）生成循环 → 实际只有 6 个 token → 写越界 → 堆损坏</li>
+      <li>buffer 按上界分配 → 每节点 3MB × 40 节点 = 120MB 浪费</li>
+      <strong>设计目标</strong>: SymDim 信息<strong>完整穿透</strong>四阶段管线，到 VmInstr 层面自然转换为 <code>BoundExpr::Runtime</code>，JIT 内核在运行时只迭代实际 seq_len 次。
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 穿透路径</h3>
+      <p>```</p>
+      <p>gllm: build_node_graph()</p>
+      <p>  └─ CompilerGraph 中 OpKind 的 m/seq_len 维度 = SymDim::Symbolic("seq_len", max=2048)</p>
+      <p>      │</p>
+      <p>      ▼</p>
+      <p>gllm-kernels: compile() → plan_lower::lower_fusion_plan()</p>
+      <p>  ├─ Phase 1-2: SemanticDAG + FusionPlan</p>
+      <p>  │   └─ SymDim 原样保留（不 concretize）</p>
+      <p>  │</p>
+      <p>  └─ Phase 3: plan_lower → <a href="http://lower.rs">lower.rs</a> → VmInstr</p>
+      <p>      │</p>
+      <p>      ├─ 编译时路径 (Concrete):</p>
+      <p>      │   SymDim::Concrete(384) → usize → BoundExpr::Const(384) → 硬编码到机器码</p>
+      <p>      │</p>
+      <p>      └─ 运行时路径 (Symbolic):</p>
+      <p>          SymDim::Symbolic("seq_len", max=2048)</p>
+      <p>            → SymBound { name: "seq_len", max_alloc: 2048 }  ← 新类型</p>
+      <p>            → BoundExpr::Symbolic(SymBound)                    ← BoundExpr 新变体</p>
+      <p>            → x86_lower: cmp counter, [rbp + sym_offset_map["seq_len"]]</p>
+      <p>            → 运行时只迭代实际 seq_len 次</p>
+      <p>      │</p>
+      <p>      ▼</p>
+      <p>gllm: Mega-Kernel CALL (executor 传入 ShapeBinding)</p>
+      <p>  └─ MegaKernelFn ABI [rsp+0] (prompt_len) = seq_len (运行时值)</p>
+      <p>     executor 传入 effective_seq = 实际 token 数</p>
+      <p>```</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 核心数据结构</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 SymBound（新类型）</h4>
+      <p>替代在 lower 函数中直接使用 <code>usize</code>，保留符号维度的<strong>名称</strong>和<strong>分配上界</strong>。</p>
+      <p>```rust</p>
+      <p>/// 符号化的循环上界。</p>
+      <p>/// 携带符号名称（用于运行时绑定查找）和编译时分配上界。</p>
+      <p>pub struct SymBound {</p>
+      <p>    /// 符号维度名称，与 SymDim::Symbolic.name 一致</p>
+      <p>    pub name: String,</p>
+      <p>    /// 编译时分配上界（buffer 按此值分配，确保不越界）</p>
+      <p>    pub max_alloc: usize,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 BoundExpr 扩展</h4>
+      <p>```rust</p>
+      <p>pub enum BoundExpr {</p>
+      <p>    /// 编译时常量 — 硬编码到机器码（展开/优化目标）</p>
+      <p>    Const(usize),</p>
+      <p>    /// 运行时值 — 从栈参数/ABI 寄存器读取（现有，低级）</p>
+      <p>    Runtime(PtrExpr),</p>
+      <p>    /// 符号化运行时上界 — 通过 SymDimSlotMap 在 prologue 绑定到物理位置</p>
+      <p>    /// 编译时用 max_alloc 分配 buffer，运行时用 SymDimSlotMap 查找实际值</p>
+      <p>    Symbolic(SymBound),</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>3.3 SymDimSlotMap（新结构）</h4>
+      <p>在 <code>plan_lower::compile_layer()</code> 的 prologue 阶段构建，将符号维度名称映射到 ABI 物理位置。</p>
+      <p>```rust</p>
+      <p>/// 符号维度 → ABI 物理位置的映射。</p>
+      <p>/// plan_lower prologue 阶段构建，传递给所有 lower 函数。</p>
+      <p>pub struct SymDimSlotMap {</p>
+      <p>    slots: HashMap&lt;String, PtrExpr&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>预定义映射</strong>（与 MegaKernelFn ABI 对齐）：
+      <strong>构建时机</strong>: <code>compile_layer()</code> 开头，一次构建，传递给所有 lower 调用。
+      <table>
+        <tr>
+          <th>符号名称</th>
+        </tr>
+        <tr>
+          <td>ABI 位置</td>
+        </tr>
+        <tr>
+          <td>物理寄存器/栈位</td>
+        </tr>
+        <tr>
+          <td>MegaKernelFn 参数</td>
+        </tr>
+        <tr>
+          <td>"seq_len"</td>
+        </tr>
+        <tr>
+          <td>PtrExpr::StackArg(16)</td>
+        </tr>
+        <tr>
+          <td>[rbp+16]</td>
+        </tr>
+        <tr>
+          <td>第 7 个参数</td>
+        </tr>
+        <tr>
+          <td>"batch_size"</td>
+        </tr>
+        <tr>
+          <td>PtrExpr::AbiArg(5)</td>
+        </tr>
+        <tr>
+          <td>r9</td>
+        </tr>
+        <tr>
+          <td>第 6 个参数</td>
+        </tr>
+        <tr>
+          <td>"total_seq"</td>
+        </tr>
+        <tr>
+          <td>PtrExpr::StackArg(16)</td>
+        </tr>
+        <tr>
+          <td>[rbp+16]</td>
+          <td>（同 seq_len）</td>
+        </tr>
+        <tr>
+          <td>Decoder 模式复用</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>3.4 SymDim → BoundExpr 转换函数</h4>
+      <p>```rust</p>
+      <p>impl SymDimSlotMap {</p>
+      <p>    /// SymDim → BoundExpr，保留完整信息。</p>
+      <p>    /// Concrete → BoundExpr::Const（编译时优化）</p>
+      <p>    /// Symbolic → BoundExpr::Symbolic（运行时绑定）</p>
+      <p>    pub fn to_bound(&amp;self, dim: &amp;SymDim) -&gt; BoundExpr {</p>
+      <p>        match dim {</p>
+      <p>            SymDim::Concrete(v) =&gt; BoundExpr::Const(*v),</p>
+      <p>            SymDim::Symbolic { name, max_value } =&gt; {</p>
+      <p>                BoundExpr::Symbolic(SymBound {</p>
+      <p>                    name: name.clone(),</p>
+      <p>                    max_alloc: max_value.unwrap_or(2048),</p>
+      <p>                })</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>    /// SymDim → usize（仅用于编译时 buffer 分配，使用 max_alloc 上界）</p>
+      <p>    pub fn alloc_size(&amp;self, dim: &amp;SymDim) -&gt; usize {</p>
+      <p>        match dim {</p>
+      <p>            SymDim::Concrete(v) =&gt; *v,</p>
+      <p>            SymDim::Symbolic { max_value, .. } =&gt; max_value.unwrap_or(2048),</p>
+      <p>        }</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. lower 函数接口变更</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 当前接口（断裂的）</h4>
+      <p>```rust</p>
+      <p>// plan_lower 调用:</p>
+      <p>let (m, n, k) = extract_gemm_dims(anchor_op)?;  // m: usize ← Symbolic 信息丢失</p>
+      <p>emit_gemm_inline(&amp;mut prog, m, n, k, width, ...);</p>
+      <p>// <a href="http://lower.rs">lower.rs</a>:</p>
+      <p>pub fn lower_elementwise(elem_count: usize, ...) {</p>
+      <p>    prog.emit_loop(BoundExpr::Const(vec_count), ...);  // 硬编码</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 新接口（完整穿透）</h4>
+      <p>```rust</p>
+      <p>// plan_lower 调用:</p>
+      <p>let (m_sym, n, k) = extract_gemm_dims_sym(anchor_op)?;  // m_sym: SymDim ← 保留</p>
+      <p>let m_bound = slot_map.to_bound(&amp;m_sym);                  // → BoundExpr::Symbolic 或 Const</p>
+      <p>emit_gemm_inline(&amp;mut prog, m_bound, n, k, width, ...);</p>
+      <p>// <a href="http://lower.rs">lower.rs</a>:</p>
+      <p>pub fn lower_elementwise(elem_bound: BoundExpr, feature_dim: usize, ...) {</p>
+      <p>    // 外层循环（seq_len 维度）用 elem_bound（可能是 Runtime）</p>
+      <p>    // 内层循环（feature_dim 维度）总是 BoundExpr::Const（编译时已知）</p>
+      <p>    let vec_count = feature_dim / lanes;</p>
+      <p>    prog.emit_loop(elem_bound, row_bytes, |prog, _, row_off| {</p>
+      <p>        prog.emit_loop(BoundExpr::Const(vec_count), vec_step, |prog, _, col_off| {</p>
+      <p>            // 内层 vectorized 循环</p>
+      <p>        });</p>
+      <p>    });</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 受影响的 lower 函数</h4>
+      <strong>内层维度</strong>（hidden_size、head_dim、embed_dim 等）始终是 <code>Concrete</code> → <code>BoundExpr::Const</code>，不受影响。
+      <table>
+        <tr>
+          <th>函数</th>
+        </tr>
+        <tr>
+          <td>外层维度</td>
+        </tr>
+        <tr>
+          <td>当前</td>
+        </tr>
+        <tr>
+          <td>目标</td>
+        </tr>
+        <tr>
+          <td>lower_elementwise</td>
+        </tr>
+        <tr>
+          <td>elem_count</td>
+        </tr>
+        <tr>
+          <td>Const(n)</td>
+        </tr>
+        <tr>
+          <td>elem_bound: BoundExpr</td>
+        </tr>
+        <tr>
+          <td>lower_gemm</td>
+          <td> / </td>
+          <td>emit_gemm_inline</td>
+        </tr>
+        <tr>
+          <td>M 维度</td>
+        </tr>
+        <tr>
+          <td>Const(m)</td>
+        </tr>
+        <tr>
+          <td>m_bound: BoundExpr</td>
+        </tr>
+        <tr>
+          <td>lower_norm</td>
+        </tr>
+        <tr>
+          <td>seq_len</td>
+        </tr>
+        <tr>
+          <td>✅ 已用 </td>
+          <td>Runtime(StackArg(16))</td>
+        </tr>
+        <tr>
+          <td>改用 </td>
+          <td>slot_map.to_bound(seq_dim)</td>
+        </tr>
+        <tr>
+          <td>lower_mha</td>
+        </tr>
+        <tr>
+          <td>seq_len</td>
+        </tr>
+        <tr>
+          <td>Const(seq_len)</td>
+        </tr>
+        <tr>
+          <td>seq_bound: BoundExpr</td>
+        </tr>
+        <tr>
+          <td>lower_gather</td>
+        </tr>
+        <tr>
+          <td>seq_len</td>
+        </tr>
+        <tr>
+          <td>Const(total_vecs)</td>
+        </tr>
+        <tr>
+          <td>seq_bound: BoundExpr</td>
+        </tr>
+        <tr>
+          <td>lower_moe_gate</td>
+        </tr>
+        <tr>
+          <td>seq_len</td>
+        </tr>
+        <tr>
+          <td>Const(seq_len)</td>
+        </tr>
+        <tr>
+          <td>seq_bound: BoundExpr</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. x86_lower BoundExpr::Symbolic 处理</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 ISA Lower 阶段的转换</h4>
+      <code>BoundExpr::Symbolic</code> 在 ISA Lower 阶段通过 <code>SymDimSlotMap</code> 解析为 <code>PtrExpr</code>：
+      <p>```rust</p>
+      <p>// x86_lower.rs LoopBegin 处理:</p>
+      <p>match bound {</p>
+      <p>    BoundExpr::Const(n) =&gt; {</p>
+      <p>        self.asm.cmp(counter, *n as i32)?;  // cmp rax, <imm></imm></p>
+      <p>    }</p>
+      <p>    BoundExpr::Runtime(ptr_expr) =&gt; {</p>
+      <p>        // 现有路径</p>
+      <p>        let addr = self.resolve_ptr_expr(ptr_expr)?;</p>
+      <p>        self.asm.cmp(counter, addr)?;  // cmp rax, [rbp+16]</p>
+      <p>    }</p>
+      <p>    BoundExpr::Symbolic(sym) =&gt; {</p>
+      <p>        // 新路径: 通过 SymDimSlotMap 查找物理位置</p>
+      <p>        let ptr_expr = self.sym_slot_map.resolve(&amp;<a href="http://sym.name">sym.name</a>)</p>
+      <p>            .ok_or(CompilerError::SymDimNotBound(sym.name.clone()))?;</p>
+      <p>        let addr = self.resolve_ptr_expr(&amp;ptr_expr)?;</p>
+      <p>        self.asm.cmp(counter, addr)?;  // cmp rax, [rbp+16]</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 SymDimSlotMap 传递</h4>
+      <code>SymDimSlotMap</code> 在 <code>compile_layer()</code> 中构建，通过 <code>X86Lower::new()</code> 传入：
+      <p>```rust</p>
+      <p>// plan_lower.rs compile_layer():</p>
+      <p>let sym_slot_map = SymDimSlotMap::mega_kernel_abi();  // 预定义 seq_len→StackArg(16) 等</p>
+      <p>let mut lowerer = X86Lower::with_sym_map(use_avx512, sym_slot_map);</p>
+      <p>```</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. Buffer 分配协议</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>6.1 编译时分配（executor.rs）</h4>
+      <p>使用 <code>SymDim::max_for_allocation()</code> 或 <code>SymBound::max_alloc</code> 分配 buffer。</p>
+      <p>保证 buffer 足够容纳最大可能的写入量。</p>
+      <p>```rust</p>
+      <p>let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();</p>
+      <p>// output_numel 用 max_alloc 计算：2048 × hidden_size</p>
+      <p>let mut output_buf = vec![0u8; output_bytes];  // 3MB for seq=2048, hidden=384</p>
+      <p>```</p>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>6.2 运行时迭代（JIT 内核）</h4>
+      <p>JIT 内核的循环只迭代 <code>min(runtime_seq_len, max_alloc)</code> 次。</p>
+      <p>通过 <code>BoundExpr::Symbolic</code> → <code>cmp counter, [rbp+16]</code> 实现。</p>
+      <p>```</p>
+      <p>实际执行: seq_len=6 → 循环 6 次 → 写入 6×384×4 = 9216 bytes</p>
+      <p>buffer 大小: 2048×384×4 = 3145728 bytes</p>
+      <p>安全裕度: 3145728 - 9216 = 3136512 bytes 未使用（但不越界）</p>
+      <p>```</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>6.3 Scratchpad 分配</h4>
+      <p>同理，scratchpad 按 <code>max_alloc</code> 上界分配。</p>
+      <p>JIT 内核的中间结果只写 <code>runtime_seq_len</code> 范围。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. plan_lower 改造清单</h3>
+    </section>
+    <section id="s7.1" data-section="7.1">
+      <h4>7.1 extract_gemm_dims → extract_gemm_dims_sym</h4>
+      <p>```rust</p>
+      <p>// 当前（断裂）:</p>
+      <p>fn extract_gemm_dims(op: &amp;CompilerOp) -&gt; Result&lt;(usize, usize, usize)&gt; {</p>
+      <p>    match &amp;op.kind {</p>
+      <p>        OpKind::Gemm { m, n, k, .. } =&gt; Ok((m.as_concrete().unwrap_or(1), *n, *k)),</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>// 新（完整穿透）:</p>
+      <p>fn extract_gemm_dims_sym(op: &amp;CompilerOp) -&gt; Result&lt;(SymDim, usize, usize)&gt; {</p>
+      <p>    match &amp;op.kind {</p>
+      <p>        OpKind::Gemm { m, n, k, .. } =&gt; Ok((m.clone(), *n, *k)),</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.2" data-section="7.2">
+      <h4>7.2 infer_elem_count → infer_elem_count_sym</h4>
+      <p>```rust</p>
+      <p>// 当前（断裂）:</p>
+      <p>fn infer_elem_count(op: &amp;CompilerOp, graph: &amp;CompilerGraph) -&gt; usize {</p>
+      <p>    tensor.shape.iter().map(|d| d.as_concrete().unwrap_or(1)).product()</p>
+      <p>}</p>
+      <p>// 新（完整穿透）:</p>
+      <p>fn infer_output_sym(op: &amp;CompilerOp, graph: &amp;CompilerGraph, slot_map: &amp;SymDimSlotMap) </p>
+      <p>    -&gt; (BoundExpr, usize)  // (外层 bound, 内层 feature_dim)</p>
+      <p>{</p>
+      <p>    // 从输出张量形状提取：</p>
+      <p>    // 第一个 Symbolic dim → BoundExpr::Symbolic（外层循环）</p>
+      <p>    // 剩余 Concrete dims 乘积 → usize（内层维度）</p>
+      <p>    let shape = &amp;tensor.shape;</p>
+      <p>    let outer = shape.iter().find(|d| d.is_symbolic())</p>
+      <p>        .map(|d| slot_map.to_bound(d))</p>
+      <p>        .unwrap_or(BoundExpr::Const(1));</p>
+      <p>    let inner: usize = shape.iter()</p>
+      <p>        .filter(|d| d.is_concrete())</p>
+      <p>        .map(|d| d.as_concrete().unwrap())</p>
+      <p>        .product();</p>
+      <p>    (outer, inner)</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s7.3" data-section="7.3">
+      <h4>7.3 emit_gemm_inline 签名变更</h4>
+      <p>```rust</p>
+      <p>// 当前:</p>
+      <p>fn emit_gemm_inline(prog, m: usize, n: usize, k: usize, width, ...)</p>
+      <p>// 新:</p>
+      <p>fn emit_gemm_inline(prog, m_bound: BoundExpr, n: usize, k: usize, width, ...)</p>
+      <p>```</p>
+      <p>M 维度循环用 <code>m_bound</code>，N/K 维度循环用 <code>Const</code>（始终编译时已知）。</p>
+    </section>
+    <section id="s8" data-section="8">
+      <h3>8. 铁律</h3>
+      <table>
+        <tr>
+          <th>铁律</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-SYMDIM-NO-UNWRAP</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>禁止 </td>
+          <td>as_concrete().unwrap_or(默认值)</td>
+          <td> 丢弃 Symbolic 信息。必须通过 </td>
+          <td>SymDimSlotMap::to_bound()</td>
+          <td> 转换。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-SYMDIM-OUTER-ONLY</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>只有外层维度（seq_len, batch_size）可以是 Symbolic。内层维度（hidden, head_dim, embed_dim, K, N）始终 Concrete。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-SYMDIM-MAX-ALLOC</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Buffer 分配用 </td>
+          <td>max_alloc</td>
+          <td> 上界。JIT 运行时迭代用实际值。两者解耦。</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>ARCH-SYMDIM-SLOT-MAP</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>符号名 → ABI 位置的映射集中定义在 </td>
+          <td>SymDimSlotMap</td>
+          <td>。lower 函数禁止硬编码栈偏移。</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s9" data-section="9">
+      <h3>9. 废弃项</h3>
+      <table>
+        <tr>
+          <th>废弃</th>
+        </tr>
+        <tr>
+          <td>替代</td>
+        </tr>
+        <tr>
+          <td>as_concrete().unwrap_or(1)</td>
+        </tr>
+        <tr>
+          <td>slot_map.to_bound(&amp;sym_dim)</td>
+        </tr>
+        <tr>
+          <td>as_concrete().unwrap_or(2048)</td>
+        </tr>
+        <tr>
+          <td>slot_map.alloc_size(&amp;sym_dim)</td>
+        </tr>
+        <tr>
+          <td>BoundExpr::Runtime(PtrExpr::StackArg(16))</td>
+          <td> 硬编码</td>
+        </tr>
+        <tr>
+          <td>BoundExpr::Symbolic(SymBound { name: "seq_len", .. })</td>
+        </tr>
+        <tr>
+          <td>extract_gemm_dims</td>
+          <td> 返回 usize</td>
+        </tr>
+        <tr>
+          <td>extract_gemm_dims_sym</td>
+          <td> 返回 SymDim</td>
+        </tr>
+        <tr>
+          <td>infer_elem_count</td>
+          <td> 返回 usize</td>
+        </tr>
+        <tr>
+          <td>infer_output_sym</td>
+          <td> 返回 (BoundExpr, usize)</td>
+        </tr>
+      </table>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：symdim-threading-protocol.html</address>
+  </footer>
+</body>
+</html>

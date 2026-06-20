@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="31-EXECUTOR-DECOMPOSITION">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"31-EXECUTOR-DECOMPOSITION", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>31-EXECUTOR-DECOMPOSITION — Executor 分解架构</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>31-EXECUTOR-DECOMPOSITION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s31" data-section="31">
+      <h2>31-EXECUTOR-DECOMPOSITION — Executor 分解架构</h2>
+      <strong>REQ 覆盖</strong>: REQ-DECOMP-001~008
+    </section>
+    <section id="s0" data-section="0">
+      <h3>§0 动机与约束</h3>
+    </section>
+    <section id="s0.1" data-section="0.1">
+      <h4>§0.1 问题</h4>
+      <p>Executor 累积 53 字段横跨 8 个概念子系统（调度、KV Cache、JIT/遥测、MoE、SG/Callback、推测解码/RAG/路由、权重/内存、模型/IO）。<code>step()</code> 交织 20 个阶段，每阶段访问 3-8 个子系统。存在裸指针绕过 Rust 所有权（<code>unsafe impl Send/Sync</code>），<code>Option&lt;T&gt;</code> 字段产生指数级潜在状态组合。</p>
+    </section>
+    <section id="s0.2" data-section="0.2">
+      <h4>§0.2 根因</h4>
+      <p>Executor 累积 53 字段横跨 8 个概念子系统（调度、KV Cache、JIT/遥测、MoE、SG/Callback、推测解码/RAG/路由、权重/内存、模型/IO）。每次 <code>step()</code> 调用交织 20 个阶段，每阶段访问 3-8 个子系统，形成极其复杂的数据流图。</p>
+    </section>
+    <section id="s0.3" data-section="0.3">
+      <h4>§0.3 为什么先拆分再做 SPEC/20/21</h4>
+      <p>1. SPEC/20 §0.1 明文："batch_size=1 是 batch_size=N 的特例"——意味着 step() 应被 generate_batch 统一，不是再膨胀</p>
+      <p>2. 当前 generate_batch 和 step() 并存 = 两条永不合并的执行路径，违反 SPEC/20 统一前提</p>
+      <p>3. SPEC/21 (权重分页) 必然落入内存域——先拆分能让 WP-001~010 单点改动在 KvCoordinator 内，否则又往 step() 塞 §21 代码</p>
+      <p>4. 不拆分：每个新 SPEC 往 step() 塞大量逻辑 → 线性恶化；先拆分：新 SPEC 落在子系统内 → 边际成本归零</p>
+    </section>
+    <section id="s0.4" data-section="0.4">
+      <h4>§0.4 约束</h4>
+      <li><strong>REQ-DECOMP-001</strong>: 零行为变更。纯结构重构。</li>
+      <li><strong>REQ-DECOMP-002</strong>: 拆分后满足 <a href="http://CLAUDE.md">CLAUDE.md</a> 红线：文件 ≤2000 行，函数 ≤50 行，嵌套 ≤3，圈复杂度 ≤10。</li>
+      <li><strong>REQ-DECOMP-003</strong>: 所有现有测试不经修改即通过。</li>
+      <li><strong>REQ-DECOMP-004</strong>: <code>generate_batch()</code> 是架构目标——每个 coordinator 方法应是自包含单元。</li>
+      <li><strong>REQ-DECOMP-005</strong>: SPEC/20 BCI 自然统一在 <code>DispatchCoordinator.build_batch()</code> 中。</li>
+      <li><strong>REQ-DECOMP-006</strong>: 消除 <code>unsafe impl Send/Sync</code>，用 <code>Arc</code> 替换裸指针。</li>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 目标架构</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 Executor 瘦编排器 (7 字段)</h4>
+      <p>```rust</p>
+      <p>pub struct Executor&lt;B: Backend<e> + 'static, E: Element = f32&gt; {</e></p>
+      <p>    backend: B,</p>
+      <p>    dispatch: DispatchCoordinator,</p>
+      <p>    kv: KvCoordinator,</p>
+      <p>    compute: ComputeCoordinator,</p>
+      <p>    inference: InferenceCoordinator,</p>
+      <p>    model: ModelContextHolder,</p>
+      <p>    observer: ObservabilityCoordinator,</p>
+      <p>}</p>
+      <p>```</p>
+      <p>从 53 字段缩减到 7（backend + 6 coordinator）。每个 coordinator 拥有其子系统字段并暴露方法。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 step() 目标</h4>
+      <p>```rust</p>
+      <p>pub fn step(&amp;mut self) -&gt; ExecutorResult&lt;()&gt; {</p>
+      <p>    self.kv.drain_swap_completions();</p>
+      <p>    self.kv.check_memory_pressure()?;</p>
+      <p>    let system_state = self.observer.capture_system_state(</p>
+      <p>        &amp;self.backend, &amp;self.dispatch)?;</p>
+      <p>    let decision = self.dispatch.decide_strategy(&amp;system_state);</p>
+      <p>    let batch = self.dispatch.build_batch(&amp;decision);</p>
+      <p>    if batch.is_empty() { return Ok(()); }</p>
+      <p>    let spec_advice = self.inference.should_speculate(batch.decode_count());</p>
+      <p>    let (batch_input, request_indices) =</p>
+      <p>        self.dispatch.prepare_inputs(&amp;batch, &amp;self.compute, &amp;self.inference, &amp;self.model)?;</p>
+      <p>    let moe_plan = self.inference.dispatch_moe(</p>
+      <p>        &amp;self.model.geometry, &amp;self.backend, self.compute.mega_kernel())?;</p>
+      <p>    self.inference.prefetch_experts(&amp;moe_plan, &amp;mut self.dispatch)?;</p>
+      <p>    self.compute.record_and_evolve(&amp;batch_input);</p>
+      <p>    let callbacks = self.build_callback_chain()?;</p>
+      <p>    let (logits_list, sparsity, telemetry) =</p>
+      <p>        self.compute.run_forward(&amp;batch_input, &amp;mut self.backend, &amp;self.model, callbacks)?;</p>
+      <p>    self.compute.advance_turboquant(&amp;self.model.geometry, &amp;self.kv.config());</p>
+      <p>    self.observer.update_forward_metrics(...)?;</p>
+      <p>    self.compute.push_telemetry(&amp;telemetry, self.inference.moe_thermal(), &amp;self.model.geometry);</p>
+      <p>    let epilogue = self.compute.epilogue_decide(&amp;telemetry);</p>
+      <p>    self.inference.process_gate_skip(&amp;epilogue, &amp;request_indices);</p>
+      <p>    self.kv.optimize_tiers(&amp;self.compute.layer_headers(&amp;telemetry), ...);</p>
+      <p>    let (results, spec_extra) = self.process_results(</p>
+      <p>        &amp;logits_list, &amp;telemetry, &amp;request_indices, &amp;epilogue, spec_advice)?;</p>
+      <p>    self.kv.advance_cache(total_tokens, spec_extra);</p>
+      <p>    self.dispatch.finalize_batch(&amp;results);</p>
+      <p>    self.kv.optimize_kv_cache(...);</p>
+      <p>    Ok(())</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 六个 Coordinator 定义</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 DispatchCoordinator (调度 + 分发)</h4>
+      <strong>字段</strong> (6):
+      <p>```rust</p>
+      <p>pub struct DispatchCoordinator {</p>
+      <p>    scheduler: PagedScheduler,</p>
+      <p>    batcher: ContinuousBatcher,</p>
+      <p>    chunked_prefill_scheduler: ChunkedPrefillScheduler,</p>
+      <p>    requests: HashMap&lt;RequestId, RequestData&gt;,</p>
+      <p>    memory_manager: GlobalMemoryManager,</p>
+      <p>    policy: PolicyVariant,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>方法</strong>:
+      <strong>SPEC/20 BCI 统一</strong>: <code>build_batch()</code> 已处理任意 decode + prefill token 计数的 <code>InterleavedBatch</code>。SPEC/20 完整实现后，<code>step()</code> 退化为 <code>generate_batch(N=1)</code> 的薄壳。
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>decide_strategy(&amp;self, state: &amp;SystemState) -&gt; Decision</td>
+        </tr>
+        <tr>
+          <td>策略仲裁</td>
+        </tr>
+        <tr>
+          <td>build_batch(&amp;mut self, decision: &amp;Decision) -&gt; InterleavedBatch</td>
+        </tr>
+        <tr>
+          <td>交织调度</td>
+        </tr>
+        <tr>
+          <td>plan_prefill(&amp;mut self, batch: &amp;InterleavedBatch, geometry: &amp;ModelGeometry) -&gt; Result&lt;()&gt;</td>
+        </tr>
+        <tr>
+          <td>自适应 chunk + 页分配</td>
+        </tr>
+        <tr>
+          <td>prepare_inputs(&amp;mut self, batch: &amp;InterleavedBatch, compute: &amp;ComputeCoordinator, inference: &amp;InferenceCoordinator, model: &amp;ModelContextHolder) -&gt; Result&lt;(BatchInput, Vec&lt;RequestId&gt;)&gt;</td>
+        </tr>
+        <tr>
+          <td>序列输入构建</td>
+        </tr>
+        <tr>
+          <td>finalize_batch(&amp;mut self, results: &amp;[BatchResult])</td>
+        </tr>
+        <tr>
+          <td>batcher 更新</td>
+        </tr>
+        <tr>
+          <td>has_pending_work(&amp;self) -&gt; bool</td>
+        </tr>
+        <tr>
+          <td>查询</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 KvCoordinator (KV Cache + 内存层级)</h4>
+      <strong>字段</strong> (6):
+      <p>```rust</p>
+      <p>pub struct KvCoordinator {</p>
+      <p>    kv_cache: Option<kvcachedoublebuffer>,</kvcachedoublebuffer></p>
+      <p>    kv_cache_slot: KvCacheSlot,</p>
+      <p>    kv_cache_config: KvCacheConfig,</p>
+      <p>    paged_kv_pool: Option<pagedkvpool>,</pagedkvpool></p>
+      <p>    kv_optimizer: KvOptimizer,</p>
+      <p>    majority_kv_tier: Option<string>,</string></p>
+      <p>}</p>
+      <p>```</p>
+      <strong>方法</strong>:
+      <strong>SPEC/21 落位</strong>: 权重分页 (WP-001~010) 全部在 KvCoordinator 内完成，零侵入 step()。
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>check_memory_pressure(&amp;mut self) -&gt; Result&lt;()&gt;</td>
+        </tr>
+        <tr>
+          <td>SwiftKV 蒸馏 + 三级换入换出</td>
+        </tr>
+        <tr>
+          <td>drain_swap_completions(&amp;mut self)</td>
+        </tr>
+        <tr>
+          <td>HGAL state sync</td>
+        </tr>
+        <tr>
+          <td>optimize_tiers(&amp;mut self, headers: &amp;[Vec&lt;KvPageHeader&gt;], telemetry: &amp;TelemetryAggregator, geometry: &amp;ModelGeometry)</td>
+        </tr>
+        <tr>
+          <td>跨层 KV 优化</td>
+        </tr>
+        <tr>
+          <td>advance_cache(&amp;mut self, total_tokens: usize, spec_extra: usize)</td>
+        </tr>
+        <tr>
+          <td>KV cache slot 推进</td>
+        </tr>
+        <tr>
+          <td>optimize_kv_cache(&amp;mut self, decode_pages: &amp;[u32], geometry: &amp;ModelGeometry, telemetry: &amp;TelemetryAggregator) -&gt; usize</td>
+        </tr>
+        <tr>
+          <td>重量化 decode pages</td>
+        </tr>
+        <tr>
+          <td>active_handle(&amp;self) -&gt; Result&lt;KvCacheHandle&gt;</td>
+        </tr>
+        <tr>
+          <td>当前 KV handle</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 ComputeCoordinator (JIT + 遥测 + Mega-Kernel)</h4>
+      <strong>字段</strong> (9):
+      <p>```rust</p>
+      <p>pub struct ComputeCoordinator {</p>
+      <p>    mega_kernel: Option<megakernelexecutor>,</megakernelexecutor></p>
+      <p>    jit_director: Option<jitdirector>,</jitdirector></p>
+      <p>    telemetry_aggregator: TelemetryAggregator,</p>
+      <p>    epilogue_subsystem: EpilogueSubsystem,</p>
+      <p>    sub_batch_dispatcher: SubBatchDispatcher,</p>
+      <p>    golden_buckets: GoldenBucketRegistry,</p>
+      <p>    seq_histogram: SeqHistogram,</p>
+      <p>    ragged_compaction: RaggedCompaction,</p>
+      <p>    turboquant: TurboQuantRuntime,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>方法</strong>:
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>classify_shapes(&amp;self, requests: &amp;HashMap&lt;RequestId, RequestData&gt;, ...) -&gt; HashMap&lt;RequestId, SubBatchShape&gt;</td>
+        </tr>
+        <tr>
+          <td>Dead ratio, delta_rho, 形状分类</td>
+        </tr>
+        <tr>
+          <td>dispatch_sub_batches(&amp;self, manifest: &amp;mut BatchManifest, shape_map: &amp;...) -&gt; Option&lt;DispatchPlan&gt;</td>
+        </tr>
+        <tr>
+          <td>Sub-batch 分发</td>
+        </tr>
+        <tr>
+          <td>record_and_evolve(&amp;mut self, sequences: &amp;[SequenceInput])</td>
+        </tr>
+        <tr>
+          <td>直方图 + golden bucket 演化</td>
+        </tr>
+        <tr>
+          <td>evaluate_compact(&amp;self, manifest: &amp;BatchManifest, config: &amp;ChunkedPrefillConfig) -&gt; CompactDecision</td>
+        </tr>
+        <tr>
+          <td>Compact 决策</td>
+        </tr>
+        <tr>
+          <td>run_forward(&amp;mut self, batch_input: &amp;BatchInput, backend: &amp;mut B, model: &amp;ModelContextHolder, callbacks: Vec&lt;Box&lt;dyn LayerCallback + Send&gt;&gt;) -&gt; Result&lt;(Vec&lt;LogitsHandle&gt;, f32, Vec&lt;SequenceTelemetry&gt;)&gt;</td>
+        </tr>
+        <tr>
+          <td>构建回调链 + 调用后端前向</td>
+        </tr>
+        <tr>
+          <td>advance_turboquant(&amp;mut self, geometry: &amp;ModelGeometry, kv_config: &amp;KvCacheConfig)</td>
+        </tr>
+        <tr>
+          <td>Per-channel scales, correction factors</td>
+        </tr>
+        <tr>
+          <td>push_telemetry(&amp;mut self, batch_tel: &amp;[SequenceTelemetry], moe_thermal: Option&lt;&amp;ExpertThermalManager&gt;, geometry: &amp;ModelGeometry)</td>
+        </tr>
+        <tr>
+          <td>JIT Director 遥测注入 + consensus 事件</td>
+        </tr>
+        <tr>
+          <td>epilogue_decide(&amp;mut self, batch_tel: &amp;[SequenceTelemetry]) -&gt; EpilogueBatchSummary</td>
+        </tr>
+        <tr>
+          <td>Epilogue 决策</td>
+        </tr>
+        <tr>
+          <td>layer_headers(&amp;self, batch_tel: &amp;[SequenceTelemetry], geometry: &amp;ModelGeometry) -&gt; Vec&lt;Vec&lt;KvPageHeader&gt;&gt;</td>
+        </tr>
+        <tr>
+          <td>遥测→页头映射</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>§2.4 InferenceCoordinator (MoE + 推测解码 + RAG + 路由)</h4>
+      <strong>字段</strong> (12):
+      <p>```rust</p>
+      <p>pub struct InferenceCoordinator {</p>
+      <p>    // MoE</p>
+      <p>    moe_thermal: Option<expertthermalmanager>,</expertthermalmanager></p>
+      <p>    moe_fault_handler: Option<expertfaulthandler>,</expertfaulthandler></p>
+      <p>    moe_dispatcher: Option<moehardwaredispatcher>,</moehardwaredispatcher></p>
+      <p>    moe_prefetcher: Option<expertweightprefetcher>,</expertweightprefetcher></p>
+      <p>    prefetch_pipeline: Option<prefetchpipeline>,</prefetchpipeline></p>
+      <p>    hot_patch_manager: Option<hotpatchmanager>,</hotpatchmanager></p>
+      <p>    expert_code_regions: HashMap&lt;(usize, usize), (usize, usize)&gt;,</p>
+      <p>    expert_saved_bytes: HashMap&lt;(usize, usize), Vec&lt;u8&gt;&gt;,</p>
+      <p>    // 推测/RAG/路由</p>
+      <p>    spec_decoding: SpecDecodingState,</p>
+      <p>    rag_system: Option<latefusionrag>,</latefusionrag></p>
+      <p>    residual_bus: ResidualBus,</p>
+      <p>    gate_skip_flags: HashMap&lt;u64, bool&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>方法</strong>:
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>should_speculate(&amp;self, decode_count: usize) -&gt; SpecScheduleAdvice</td>
+        </tr>
+        <tr>
+          <td>推测解码决策</td>
+        </tr>
+        <tr>
+          <td>dispatch_moe(&amp;mut self, geometry: &amp;ModelGeometry, backend: &amp;B, mega: Option&lt;&amp;MegaKernelExecutor&gt;) -&gt; Option&lt;MoeDispatchPlan&gt;</td>
+        </tr>
+        <tr>
+          <td>硬件分发 + 热度评估 + NOP patching</td>
+        </tr>
+        <tr>
+          <td>prefetch_experts(&amp;mut self, plan: &amp;MoeDispatchPlan, dispatch: &amp;mut DispatchCoordinator) -&gt; Result&lt;()&gt;</td>
+        </tr>
+        <tr>
+          <td>专家权重预取 + tier 迁移</td>
+        </tr>
+        <tr>
+          <td>advance_prefetch_pipeline(&amp;mut self, plan: Option&lt;&amp;MoeDispatchPlan&gt;, kv_block_size: usize)</td>
+        </tr>
+        <tr>
+          <td>Pipeline 推进</td>
+        </tr>
+        <tr>
+          <td>process_gate_skip(&amp;mut self, summary: &amp;EpilogueBatchSummary, request_indices: &amp;[RequestId])</td>
+        </tr>
+        <tr>
+          <td>Gate skip + bypass + prefetch advice</td>
+        </tr>
+        <tr>
+          <td>process_spec_verification(&amp;mut self, ...) -&gt; usize</td>
+        </tr>
+        <tr>
+          <td>Draft→verify 管线</td>
+        </tr>
+        <tr>
+          <td>moe_thermal(&amp;self) -&gt; Option&lt;&amp;ExpertThermalManager&gt;</td>
+        </tr>
+        <tr>
+          <td>访问器</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.5" data-section="2.5">
+      <h4>§2.5 ModelContextHolder (模型数据 + SG Callbacks + 权重分页)</h4>
+      <strong>字段</strong> (16):
+      <p>```rust</p>
+      <p>pub struct ModelContextHolder&lt;B: Backend<e> + 'static, E: Element&gt; {</e></p>
+      <p>    // 模型数据</p>
+      <p>    manifest: Arc<modelmanifest>,</modelmanifest></p>
+      <p>    weights: WeightsHandle&lt;B, E&gt;,</p>
+      <p>    geometry: Arc<modelgeometry>,</modelgeometry></p>
+      <p>    model_config: ModelConfig,</p>
+      <p>    forward_config: GeneratorForwardConfig,</p>
+      <p>    tokenizer: TokenizerHandle,</p>
+      <p>    topology: AttentionTopology,</p>
+      <p>    add_special_tokens: bool,</p>
+      <p>    // 系统</p>
+      <p>    system_topology: SystemTopology,</p>
+      <p>    profile_accumulator: ProfileAccumulator,</p>
+      <p>    hooks: Arc&lt;RwLock&lt;Vec&lt;Box&lt;dyn GenerationHook=""&gt;&gt;&gt;&gt;,</p>
+      <p>    // SG/Callback (Arc 化, 消除 unsafe)</p>
+      <p>    sg_callback_shim: Option&lt;Arc<semanticgatekeepercallbackshim>&gt;,</semanticgatekeepercallbackshim></p>
+      <p>    sg_ring_buffer: Option&lt;Arc<gatekeeperringbuffer>&gt;,</gatekeeperringbuffer></p>
+      <p>    sg_shared_memory: Option&lt;Arc&lt;Mutex<sgsharedmemory>&gt;&gt;,</sgsharedmemory></p>
+      <p>    callback_table: Arc&lt;Mutex<megakernelcallbacktable>&gt;,</megakernelcallbacktable></p>
+      <p>    // 权重分页 + 三级换入换出</p>
+      <p>    weight_page_table: HashMap&lt;usize, Vec<physicalid>&gt;,</physicalid></p>
+      <p>    weight_pages_registered: bool,</p>
+      <p>    three_tier_swap: Option&lt;Arc&lt;Mutex<threetierswapcoordinator>&gt;&gt;,</threetierswapcoordinator></p>
+      <p>}</p>
+      <p>```</p>
+      <strong>关键变更</strong>: <code>sg_callback_ctx_ptr: *const u8</code> 被消除。<code>Box::leak</code> 的 SgCallbackCtx 改为 <code>Arc&lt;SgCallbackCtx&gt;</code>。<code>callback_chain_ptr: *mut CallbackChain</code> 在 GeneratorForwardConfig 中改为 <code>Arc&lt;Mutex&lt;CallbackChain&gt;&gt;</code>。
+      <strong>方法</strong>:
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>register_sg_callback(&amp;mut self, shim: SemanticGatekeeperCallbackShim)</td>
+        </tr>
+        <tr>
+          <td>SG 注册 + Arc ctx</td>
+        </tr>
+        <tr>
+          <td>register_weight_pages(&amp;mut self, geometry: &amp;ModelGeometry, scheduler: &amp;mut PagedScheduler)</td>
+        </tr>
+        <tr>
+          <td>WP-002/007</td>
+        </tr>
+        <tr>
+          <td>set_rag_system(&amp;mut self, rag: LateFusionRag)</td>
+        </tr>
+        <tr>
+          <td>RAG 设置</td>
+        </tr>
+        <tr>
+          <td>sample_from_logits(&amp;self, logits: &amp;LogitsHandle, config: &amp;SamplingConfig) -&gt; Result&lt;u32&gt;</td>
+        </tr>
+        <tr>
+          <td>Token 采样</td>
+        </tr>
+      </table>
+    </section>
+    <section id="artifact-observability" data-artifact-type="observability" data-section="2.6">
+      <h4>§2.6 ObservabilityCoordinator (观测)</h4>
+      <strong>字段</strong> (1):
+      <p>```rust</p>
+      <p>pub struct ObservabilityCoordinator {</p>
+      <p>    observer: BasicObserver,</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>方法</strong>:
+      <table>
+        <tr>
+          <th>方法</th>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>capture_system_state(&amp;mut self, backend: &amp;B, dispatch: &amp;DispatchCoordinator) -&gt; SystemState</td>
+        </tr>
+        <tr>
+          <td>内存压力 + 碎片 + 调度指标</td>
+        </tr>
+        <tr>
+          <td>update_forward_metrics(&amp;mut self, ...) -&gt; Result&lt;()&gt;</td>
+        </tr>
+        <tr>
+          <td>Logits 熵 + swap IO + MoE fault + 权重指标</td>
+        </tr>
+        <tr>
+          <td>last_state(&amp;self) -&gt; SystemState</td>
+        </tr>
+        <tr>
+          <td>访问器</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 ExecutorBuilder 模式</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 四阶段构造</h4>
+      <p>当前 <code>from_loader()</code> 拆分为:</p>
+      <p>每个阶段独立可测试。阶段 3 (最昂贵) 可缓存。</p>
+      <table>
+        <tr>
+          <th>阶段</th>
+        </tr>
+        <tr>
+          <td>方法</td>
+        </tr>
+        <tr>
+          <td>职责</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>load_model()</td>
+        </tr>
+        <tr>
+          <td>解析模型配置, 创建 geometry/weights/tokenizer</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>detect_system()</td>
+        </tr>
+        <tr>
+          <td>SystemTopology 检测, LatencyProfiler probe</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>compile_kernel()</td>
+        </tr>
+        <tr>
+          <td>构建 CompilerGraph, 编译 mega-kernel, 上传 GPU 产物</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>build_coordinators()</td>
+        </tr>
+        <tr>
+          <td>从模型 + 系统状态初始化 6 个 coordinator</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>build()</td>
+        </tr>
+        <tr>
+          <td>组装 Executor</td>
+        </tr>
+      </table>
+    </section>
+    <section data-entity-ref="ENT-EXECUTOR ENT-COORDINATOR ENT-CALLBACK-CHAIN ENT-BATCH-CONTEXT" <h3="" data-section="4" data-req-api="POST /internal/executor/decompose" data-req-entity="ENT-EXECUTOR,ENT-COORDINATOR,ENT-CALLBACK-CHAIN,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="decomp" data-req-status="implemented" data-req="REQ-DECOMP-001" id="req-decomp-001">§4 unsafe 消除 (REQ-DECOMP-001)
+      <p>消除 Executor 中的 unsafe 代码块，将裸指针（<code>*mut CallbackChain</code>、<code>*const u8</code>）替换为 safe wrapper 类型（Arc/Mutex）。核心约束：零行为变更纯结构重构、六个 Coordinator 职责划分清晰、ExecutorBuilder 四阶段构造模式。FFI 边界仍使用裸指针，但主结构体不持有裸指针，仅在 FFI 调用瞬间取裸指针。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Executor 分解架构实现完整</li>
+        <li id="id-2" data-criterion="2">Coordinator 职责划分清晰</li>
+        <li id="id-3" data-criterion="3">零行为变更纯结构重构</li>
+        <li id="id-4" data-criterion="4">编译通过: cargo check</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+    </section>
+    
+<section id="req-decomp-002" data-req="REQ-DECOMP-002" data-req-status="implemented" data-req-domain="decomp" data-req-category="business" data-req-entity="ENT-EXECUTOR" data-req-api="POST /internal/executor/decompose"><h3>REQ-DECOMP-002</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-decomp-003" data-req="REQ-DECOMP-003" data-req-status="implemented" data-req-domain="decomp" data-req-category="business" data-req-entity="ENT-EXECUTOR" data-req-api="POST /internal/executor/decompose"><h3>REQ-DECOMP-003</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-decomp-004" data-req="REQ-DECOMP-004" data-req-status="implemented" data-req-domain="decomp" data-req-category="business" data-req-entity="ENT-EXECUTOR" data-req-api="POST /internal/executor/decompose"><h3>REQ-DECOMP-004</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+<section id="req-decomp-006" data-req="REQ-DECOMP-006" data-req-status="implemented" data-req-domain="decomp" data-req-category="business" data-req-entity="ENT-EXECUTOR" data-req-api="POST /internal/executor/decompose"><h3>REQ-DECOMP-006</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><strong>验收标准：</strong><ol><li>符合 （需求定义见 SPEC 上文描述） 的约束定义</li></ol></div></section>
+
+
+
+
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 当前问题</h4>
+      <p>```rust</p>
+      <p>// GeneratorForwardConfig (<a href="http://executor.rs">executor.rs</a>)</p>
+      <p>pub callback_chain_ptr: *mut crate::graph::layer_callback::CallbackChain,</p>
+      <p>unsafe impl Send for GeneratorForwardConfig {}</p>
+      <p>unsafe impl Sync for GeneratorForwardConfig {}</p>
+      <p>// ModelContextHolder (coordinator/model_context.rs)</p>
+      <p>pub sg_callback_ctx_ptr: *const u8,</p>
+      <p>// Executor (<a href="http://executor.rs">executor.rs</a>)</p>
+      <p>unsafe impl&lt;B: Backend<e> + Send + 'static, E: Element + Send&gt; Send for Executor&lt;B, E&gt; {}</e></p>
+      <p>unsafe impl&lt;B: Backend<e> + Sync + 'static, E: Element + Sync&gt; Sync for Executor&lt;B, E&gt; {}</e></p>
+      <p>```</p>
+      <p>存在原因: JIT FFI 回调需要 C ABI 裸指针（fn_ptr + ctx_ptr），无法接受 Rust Arc/Mutex。</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 解决方案: Safe Wrapper 类型</h4>
+      <p>核心思路: FFI 边界必须有裸指针，但<strong>主结构体不持有裸指针</strong>。改用 safe wrapper 类型管理生命周期，只在 FFI 调用瞬间取裸指针。</p>
+    </section>
+    <section id="s4.2.1" data-section="4.2.1">
+      <h5>§4.2.1 CallbackChainHandle — 替代 callback_chain_ptr</h5>
+      <p>```rust</p>
+      <p>// coordinator/callback_slot.rs (新文件)</p>
+      <p>use std::sync::atomic::{AtomicPtr, Ordering};</p>
+      <p>/// Safe wrapper for CallbackChain FFI pointer.</p>
+      <p>/// Replaces <code>*mut CallbackChain</code> in GeneratorForwardConfig.</p>
+      <p>/// Thread-safe via AtomicPtr with Acquire/Release ordering.</p>
+      <p>pub struct CallbackChainHandle {</p>
+      <p>    inner: AtomicPtrcrate::graph::layer_callback::CallbackChain,</p>
+      <p>}</p>
+      <p>impl CallbackChainHandle {</p>
+      <p>    pub fn new() -&gt; Self {</p>
+      <p>        Self { inner: AtomicPtr::new(std::ptr::null_mut()) }</p>
+      <p>    }</p>
+      <p>    /// Temporarily borrow the chain as raw pointer for FFI call.</p>
+      <p>    /// Returns None if no chain is set.</p>
+      <p>    pub fn as_ffi_ptr(&amp;self) -&gt; *mut crate::graph::layer_callback::CallbackChain {</p>
+      <p>        self.inner.load(Ordering::Acquire)</p>
+      <p>    }</p>
+      <p>    /// Set the chain pointer. Only call when Executor mutex is held.</p>
+      <p>    pub fn set(&amp;self, ptr: *mut crate::graph::layer_callback::CallbackChain) {</p>
+      <p>        self.inner.store(ptr, Ordering::Release);</p>
+      <p>    }</p>
+      <p>    /// Clear the pointer after FFI call returns.</p>
+      <p>    pub fn clear(&amp;self) {</p>
+      <p>        self.inner.store(std::ptr::null_mut(), Ordering::Release);</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>// Auto-derived: AtomicPtr is Send + Sync, no unsafe impl needed.</p>
+      <p>unsafe impl Send for CallbackChainHandle {}</p>
+      <p>unsafe impl Sync for CallbackChainHandle {}</p>
+      <p>```</p>
+      <strong>替换</strong>: <code>GeneratorForwardConfig.callback_chain_ptr: *mut CallbackChain</code> → <code>callback_chain: CallbackChainHandle</code>
+      <strong>FFI 调用模式变化</strong>:
+      <p>```rust</p>
+      <p>// 旧 (unsafe):</p>
+      <p>self.model_ctx.forward_config.callback_chain_ptr = &amp;mut chain as *mut _;</p>
+      <p>result = ffi_call(..., self.model_ctx.forward_config.callback_chain_ptr);</p>
+      <p>self.model_ctx.forward_config.callback_chain_ptr = std::ptr::null_mut();</p>
+      <p>// 新 (safe wrapper):</p>
+      <p>self.model_ctx.forward_config.callback_chain.set(&amp;mut chain as *mut _);</p>
+      <p>result = ffi_call(..., self.model_ctx.forward_config.callback_chain.as_ffi_ptr());</p>
+      <p>self.model_ctx.forward_config.callback_chain.clear();</p>
+      <p>```</p>
+      <strong>注意</strong>: <code>unsafe impl Send/Sync</code> 仍保留在 CallbackChainHandle 上（AtomicPtr 本身需要），但 GeneratorForwardConfig <strong>不再需要</strong> unsafe impl——因为 CallbackChainHandle 的 unsafe impl 已封装在内部。
+    </section>
+    <section id="s4.2.2" data-section="4.2.2">
+      <h5>§4.2.2 SgCallbackHandle — 替代 sg_callback_ctx_ptr</h5>
+      <p>```rust</p>
+      <p>// coordinator/sg_callback_handle.rs (新文件)</p>
+      <p>use std::pin::Pin;</p>
+      <p>use std::sync::Arc;</p>
+      <p>/// Safe wrapper for leaked SgCallbackCtx FFI pointer.</p>
+      <p>/// Replaces <code>*const u8</code> in ModelContextHolder.</p>
+      <p>/// Uses Pin&lt;Box&lt;&gt;&gt; for stable heap address guaranteed across moves.</p>
+      <p>pub struct SgCallbackHandle {</p>
+      <p>    inner: Option&lt;Pin&lt;Box<sgcallbackctx>&gt;&gt;,</sgcallbackctx></p>
+      <p>}</p>
+      <p>impl SgCallbackHandle {</p>
+      <p>    pub fn new() -&gt; Self {</p>
+      <p>        Self { inner: None }</p>
+      <p>    }</p>
+      <p>    /// Register a new callback context. Returns the raw pointer for FFI callback table.</p>
+      <p>    pub fn register(&amp;mut self, ctx: SgCallbackCtx) -&gt; *const u8 {</p>
+      <p>        let pinned = Box::pin(ctx);</p>
+      <p>        let ptr = (&amp;*pinned) as *const SgCallbackCtx as *const u8;</p>
+      <p>        self.inner = Some(pinned);</p>
+      <p>        ptr</p>
+      <p>    }</p>
+      <p>    /// Reclaim and drop the callback context. Returns the provider_state for Arc cleanup.</p>
+      <p>    pub fn reclaim(&amp;mut self) -&gt; Option&lt;*const u8&gt; {</p>
+      <p>        let pinned = self.inner.take()?;</p>
+      <p>        let ctx = Pin::into_inner(pinned);</p>
+      <p>        let provider_ptr = ctx.provider_state;</p>
+      <p>        // precomputed_knowledge is a leaked Box&lt;[f32]&gt;, reclaim it</p>
+      <p>        if !ctx.precomputed_knowledge.is_null() {</p>
+      <p>            let len = ctx.hidden_size as usize;</p>
+      <p>            unsafe {</p>
+      <p>                let slice = std::slice::from_raw_parts_mut(</p>
+      <p>                    ctx.precomputed_knowledge as *mut f32, len</p>
+      <p>                );</p>
+      <p>                let _ = Box::from_raw(slice as *mut [f32]);</p>
+      <p>            }</p>
+      <p>        }</p>
+      <p>        // ctx dropped here, provider_state returned for Arc::from_raw</p>
+      <p>        Some(provider_ptr)</p>
+      <p>    }</p>
+      <p>    /// Check if a callback is registered.</p>
+      <p>    pub fn is_registered(&amp;self) -&gt; bool {</p>
+      <p>        self.inner.is_some()</p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>替换</strong>: <code>ModelContextHolder.sg_callback_ctx_ptr: *const u8</code> → <code>sg_callback_handle: SgCallbackHandle</code>
+      <strong>注册模式变化</strong>:
+      <p>```rust</p>
+      <p>// 旧 (unsafe leak):</p>
+      <p>let cb_ctx = Box::new(SgCallbackCtx { ... });</p>
+      <p>let cb_ctx_ptr = Box::into_raw(cb_ctx) as *const u8;</p>
+      <p>unsafe { self.model_ctx.callback_table.register(slot, fn_ptr, cb_ctx_ptr); }</p>
+      <p>self.model_ctx.sg_callback_ctx_ptr = cb_ctx_ptr;</p>
+      <p>// 新 (safe Pin):</p>
+      <p>let cb_ctx = SgCallbackCtx { ... };</p>
+      <p>let cb_ctx_ptr = self.model_ctx.sg_callback_handle.register(cb_ctx);</p>
+      <p>unsafe { self.model_ctx.callback_table.register(slot, fn_ptr, cb_ctx_ptr); }</p>
+      <p>// sg_callback_handle owns the memory, no separate tracking needed</p>
+      <p>```</p>
+      <strong>清理模式变化</strong>:
+      <p>```rust</p>
+      <p>// 旧 (unsafe reclaim):</p>
+      <p>self.model_ctx.callback_table.clear(slot);</p>
+      <p>if !self.model_ctx.sg_callback_ctx_ptr.is_null() {</p>
+      <p>    unsafe { let ctx = Box::from_raw(self.model_ctx.sg_callback_ctx_ptr as *mut SgCallbackCtx); }</p>
+      <p>    self.model_ctx.sg_callback_ctx_ptr = std::ptr::null();</p>
+      <p>}</p>
+      <p>// 新 (safe reclaim):</p>
+      <p>self.model_ctx.callback_table.clear(slot);</p>
+      <p>if let Some(provider_ptr) = self.model_ctx.sg_callback_handle.reclaim() {</p>
+      <p>    if !provider_ptr.is_null() {</p>
+      <p>        let _ = Arc::from_raw(provider_ptr as *const Mutex<semanticgatekeepercallback>);</semanticgatekeepercallback></p>
+      <p>    }</p>
+      <p>}</p>
+      <p>```</p>
+      <strong>unsafe 边界</strong>: <code>SgCallbackHandle::reclaim()</code> 内部仍有 unsafe（<code>Box::from_raw</code> 回收 precomputed_knowledge），但这是封装好的单一 unsafe 点，而非散布在 <a href="http://executor.rs">executor.rs</a> 各处。
+    </section>
+    <section id="s4.2.3" data-section="4.2.3">
+      <h5>§4.2.3 GeneratorForwardConfig unsafe impl 消除</h5>
+      <p>```rust</p>
+      <p>// 旧:</p>
+      <p>pub struct GeneratorForwardConfig {</p>
+      <p>    pub callback_chain_ptr: *mut CallbackChain,  // 需要 unsafe impl Send/Sync</p>
+      <p>}</p>
+      <p>unsafe impl Send for GeneratorForwardConfig {}</p>
+      <p>unsafe impl Sync for GeneratorForwardConfig {}</p>
+      <p>// 新:</p>
+      <p>pub struct GeneratorForwardConfig {</p>
+      <p>    pub callback_chain: CallbackChainHandle,  // 内部封装 AtomicPtr，自动 Send+Sync</p>
+      <p>}</p>
+      <p>// 无需 unsafe impl — CallbackChainHandle 已声明 Send+Sync</p>
+      <p>```</p>
+    </section>
+    <section id="s4.2.4" data-section="4.2.4">
+      <h5>§4.2.4 Executor unsafe impl 消除</h5>
+      <p>```rust</p>
+      <p>// 旧:</p>
+      <p>unsafe impl&lt;B: Backend<e> + Send + 'static, E: Element + Send&gt; Send for Executor&lt;B, E&gt; {}</e></p>
+      <p>unsafe impl&lt;B: Backend<e> + Sync + 'static, E: Element + Sync&gt; Sync for Executor&lt;B, E&gt; {}</e></p>
+      <p>// 新: 所有字段自动 Send+Sync:</p>
+      <p>pub struct Executor&lt;B, E&gt; {</p>
+      <p>    pub(crate) backend: B,                    // B: Send + Sync (bound)</p>
+      <p>    pub(crate) dispatch: DispatchCoordinator, // 所有字段 Send+Sync</p>
+      <p>    pub(crate) kv: KvCoordinator,             // 所有字段 Send+Sync</p>
+      <p>    pub(crate) compute: ComputeCoordinator,   // MegaKernelExecutor 内 fn ptr — 需要审查</p>
+      <p>    pub(crate) inference: InferenceCoordinator, // 所有字段 Send+Sync</p>
+      <p>    pub(crate) model_ctx: ModelContextHolder,  // CallbackChainHandle(Send+Sync) + SgCallbackHandle</p>
+      <p>    pub(crate) observability: ObservabilityCoordinator, // Send+Sync</p>
+      <p>}</p>
+      <p>// 删除两个 unsafe impl 块</p>
+      <p>```</p>
+      <strong>ComputeCoordinator.mega_kernel</strong>: <code>MegaKernelExecutor</code> 内含 JIT 编译的函数指针（<code>fn(*const u8) -&gt; i32</code> 等）。这些是 <code>extern "C"</code> 函数指针，Rust 认为它们不自动实现 Send/Sync。需要为 <code>MegaKernelExecutor</code> 添加 <code>unsafe impl Send/Sync</code>（这是合理的：JIT 编译产物在编译后不可变，线程安全）。
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>§4.3 实施步骤</h4>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>文件</td>
+        </tr>
+        <tr>
+          <td>变更</td>
+        </tr>
+        <tr>
+          <td>验证</td>
+        </tr>
+        <tr>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>coordinator/callback_slot.rs</td>
+          <td> (新)</td>
+        </tr>
+        <tr>
+          <td>CallbackChainHandle 定义</td>
+        </tr>
+        <tr>
+          <td>cargo test callback_slot</td>
+        </tr>
+        <tr>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>coordinator/sg_callback_handle.rs</td>
+          <td> (新)</td>
+        </tr>
+        <tr>
+          <td>SgCallbackHandle 定义</td>
+        </tr>
+        <tr>
+          <td>cargo test sg_callback_handle</td>
+        </tr>
+        <tr>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td>coordinator/model_context.rs</td>
+        </tr>
+        <tr>
+          <td>sg_callback_ctx_ptr</td>
+          <td> → </td>
+          <td>sg_callback_handle: SgCallbackHandle</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+        </tr>
+        <tr>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>executor.rs</td>
+        </tr>
+        <tr>
+          <td>callback_chain_ptr</td>
+          <td> → </td>
+          <td>callback_chain: CallbackChainHandle</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+        </tr>
+        <tr>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>executor.rs</td>
+        </tr>
+        <tr>
+          <td>删除 GeneratorForwardConfig 的 unsafe impl Send/Sync</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+        </tr>
+        <tr>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>executor_builder.rs</td>
+        </tr>
+        <tr>
+          <td>初始化新字段</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+        </tr>
+        <tr>
+          <td>7</td>
+        </tr>
+        <tr>
+          <td>executor.rs</td>
+          <td> + </td>
+          <td>executor_api.rs</td>
+        </tr>
+        <tr>
+          <td>更新所有 set/get 点</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+        </tr>
+        <tr>
+          <td>8</td>
+        </tr>
+        <tr>
+          <td>executor.rs</td>
+        </tr>
+        <tr>
+          <td>删除 Executor 的 unsafe impl Send/Sync</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+          <td> 通过即证明</td>
+        </tr>
+        <tr>
+          <td>9</td>
+        </tr>
+        <tr>
+          <td>mega_kernel.rs</td>
+        </tr>
+        <tr>
+          <td>MegaKernelExecutor 添加 unsafe impl Send/Sync（合理的 JIT 产物）</td>
+        </tr>
+        <tr>
+          <td>cargo check</td>
+        </tr>
+        <tr>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>全量测试</td>
+        </tr>
+        <tr>
+          <td>cargo test --lib</td>
+          <td> + E2E SG</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>§4.4 风险</h4>
+      <p>1. <strong>AtomicPtr Acquire/Release</strong>: JIT 在另一线程读取时需要 Release 写、Acquire 读（已采纳）。若后续 JIT 改为非原子 load，需 <code>compiler_fence</code> 配合</p>
+      <p>2. <strong>Pin&lt;Box<sgcallbackctx>&gt;</sgcallbackctx></strong>: 必须用 Pin 保证 <code>as_ptr()</code> 返回的地址在 owner move 时不变。Box 本身的 heap 地址不会随 owner move 变化，但 Pin 是显式契约</p>
+      <p>3. <strong>FFI 读点定位</strong>: Step 4 改字段名后 <code>compat/</code> 中的读取点会有编译错误，正好定位所有需要更新的位置</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 文件布局</h3>
+      <p>```</p>
+      <p>src/engine/</p>
+          <a href="http://mod.rs">mod.rs</a>                    — Re-exports
+          <a href="http://executor.rs">executor.rs</a>               — 瘦编排器
+      <p>    executor_builder.rs       — ExecutorBuilder</p>
+      <p>    coordinator/</p>
+              <a href="http://mod.rs">mod.rs</a>                — 模块根
+              <a href="http://dispatch.rs">dispatch.rs</a>           — DispatchCoordinator
+              <a href="http://kv.rs">kv.rs</a>                 — KvCoordinator
+              <a href="http://compute.rs">compute.rs</a>            — ComputeCoordinator
+              <a href="http://inference.rs">inference.rs</a>          — InferenceCoordinator
+      <p>        model_context.rs      — ModelContextHolder</p>
+              <a href="http://observability.rs">observability.rs</a>      — ObservabilityCoordinator
+      <p>    batch_executor.rs         — (不变)</p>
+      <p>    mega_kernel.rs            — (不变)</p>
+      <p>    callbacks/                — (不变)</p>
+      <p>```</p>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-006" data-test="TEST-DECOMP-6" id="test-decomp-6">TEST-DECOMP-6: Executor分解架构测试<p>验证REQ-DECOMP-001相关功能正确性</p>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰-li-li-data-criterion-3-零行为变更纯结构重构" data-criterion="Coordinator 职责划分清晰<
+    /li><li data-criterion=&quot;3&quot;>零行为变更纯结构重构">Coordinator 职责划分清晰&lt;
+    /li&gt;&lt;li data-criterion="3"&gt;零行为变更纯结构重构</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+6"&gt;
+      <h3>§6 REQ 定义</h3>
+      <table data-req-index="">
+        <tr>
+          <th>REQ</th>
+        </tr>
+        <tr>
+          <td>描述</td>
+        </tr>
+        <tr>
+          <td>验证方法</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 职责划分清晰&lt;
+    /li&gt;
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-002" data-test="TEST-DECOMP-002" id="test-decomp-002">TEST-DECOMP-002: Executor分解架构测试<p>验证REQ-DECOMP-002相关功能正确性</p>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
+      <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+</li><li id="id-3" data-criterion="3">零行为变更纯结构重构</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td>
+        <tr>
+          <td>零行为变更</td>
+        </tr>
+        <tr>
+          <td>所有现有测试不经修改即通过</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 职责划分清晰</li><li id="id-3" data-criterion="3">
+    零行为变
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-003" data-test="TEST-DECOMP-003" id="test-decomp-003">TEST-DECOMP-003: Executor分解架构测试<p>验证REQ-DECOMP-003相关功能正确性</p>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰" data-criterion="Coordinator 
+    职责划分清晰">Coordinator 
+    职责划分清晰</div>
+      <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+更纯结构重构</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>CLAUDE.md</td>
+          <td> 合规</td>
+        </tr>
+        <tr>
+          <td>文件行数 + 函数行数审计</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 
+   
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-004" data-test="TEST-DECOMP-004" id="test-decomp-004">TEST-DECOMP-004: Executor分解架构测试<p>验证REQ-DECOMP-004相关功能正确性</p>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
+      <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    </section>
+ 职责划分清晰</li><li id="id-3" data-criterion="3">零行为变更纯结构重构</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>测试保留</td>
+        </tr>
+        <tr>
+          <td>现有测试无修改</td>
+        </tr>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
+      <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    
+i data-criterion="3"&gt;零行为变更纯结构重构<li id="id-4" data-criterion="4">编译通过: cargo check</li>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>架构目标</td>
+        </tr>
+        <tr>
+          <td>generate_batch() 模式复制</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 职责划分清晰</li><li id="id-3" data-criterion="3">零行为变更纯结构重构</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>BCI 统一</td>
+        </tr>
+        <tr>
+          <td>DispatchCoordinator.build_batch()</td>
+        </tr>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    
+a-criterion="4"&gt;编译通过: cargo check
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>unsafe 消除</td>
+        </tr>
+        <tr>
+          <td>grep "unsafe impl" src/engine/</td>
+          <td> = 0</td>
+        </tr>
+      <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
+      <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
+      <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
+      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      
+    
+ rion="3"&gt;零行为变更纯结构重构<li id="id-4" data-criterion="4">编译通过: cargo check</li>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>Coordinator 独立</td>
+        </tr>
+        <tr>
+          <td>每个 coordinator 可独立单元测试</td>
+        </tr>
+        <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 职责划分清晰</li><li id="id-3" data-criterion="3">零行为变更纯结构重构</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td>
+      <div data-entity-api-xrefs="">
+      
+      
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      
+      
+      </a></div>
+        
+        <tr>
+          <td>Executor 瘦编排器</td>
+        </tr>
+        <tr>
+          <td>Executor ≤7 字段</td>
+        </tr>
+      </table>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-batch-context" data-entity="ENT-BATCH-CONTEXT" data-req-ref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002" data-entity-model-type="relational" data-entity-ref="ENT-CALLBACK-CHAIN ENT-COMPILER-GRAPH ENT-COORDINATOR ENT-DEVICE-PROFILE ENT-EXECUTOR ENT-ISA-PROFILE ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-xref="REQ-GPU-010 REQ-GPU-011 REQ-GPU-012 REQ-GPU-001 REQ-GPU-002"><h4>ENT-BATCH-CONTEXT</h4><p>BatchContext — 批量并发推理上下文（struct BatchContext in gllm/src/engine/batch_context.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="num_seqs" data-type="number" data-required="true" <td="">num_seqs<td>number</td><td>是</td><td>usize, 当前序列数</td><td>当前批次中的活跃序列数</td></tr>
+<tr data-field="max_batch_size" data-type="number" data-required="true" <td="">max_batch_size<td>number</td><td>是</td><td>usize, &gt;= num_seqs</td><td>最大批次容量（SPEC 32 扩展区大小依据）</td></tr><tr data-field="has_v2_extension" data-type="boolean" data-required="true" <td="">has_v2_extension<td>boolean</td><td>是</td><td>SPEC 32 扩展区是否存在</td><td>是否包含 SPEC 32 扩展区</td></tr><tr data-field="data_size" data-type="number" data-required="true" <td="">data_size<td>number</td><td>是</td><td>字节</td><td>
+flat memory buffer 总大小</td></tr><tr data-field="seq_mapping_len" data-type="number" data-required="false" <td="">seq_mapping_len<td>number</td><td>否</td><td>Vec&lt;u32&gt; 长度</td><td>per-token seq_mapping 长度</td></tr><tr data-field="header_size" data-type="number" data-required="false" <td="">header_size<td>number</td><td>否</td><td>96 字节</td><td>固定头大小</td></tr><tr data-field="seq_meta_stride" data-type="number" data-required="false" <td="">seq_meta_stride<td>number</td><td>否</td><td>
+64 字节</td><td>per-seq 元数据步长</td></tr><tr data-field="extension_size" data-type="number" data-required="false" <td="">extension_size<td>number</td><td>否</td><td>96 字节</td><td>SPEC 32 扩展区大小</td></tr></table></section>
+      <section id="ent-callback-chain" data-entity="ENT-CALLBACK-CHAIN" data-req-ref="REQ-CALLBACK-001 REQ-CALLBACK-002 REQ-CALLBACK-003 REQ-DECOMP-001 REQ-COT-007" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COORDINATOR ENT-COT-REASONER ENT-EXECUTOR ENT-GUARDRAIL-PROBE ENT-MEGA-KERNEL-FN ENT-SAFETY-POLICY" data-xref="REQ-CALLBACK-001 REQ-CALLBACK-002 REQ-CALLBACK-003 REQ-DECOMP-001 REQ-COT-007"><h4>ENT-CALLBACK-CHAIN</h4><p>CallbackChain — 回调链</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="callbacks" data-type="string" data-required="false" <td="">callbacks<td>string</td><td>否</td><td></td><td>Vec&lt;LayerCallback&gt; 优先级排序回调列表</td></tr><tr data-field="sorted_indices" data-type="number" data-required="false" <td="">sorted_indices<td>number</td><td>
+否</td><td></td><td>Vec&lt;usize&gt; 按优先级降序的索引缓存</td></tr></table></section>
+      <section id="ent-coordinator" data-entity="ENT-COORDINATOR" data-req-ref="REQ-DECOMP-001" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-CALLBACK-CHAIN ENT-EXECUTOR" data-xref="REQ-DECOMP-001"><h4>ENT-COORDINATOR</h4><p>Coordinator — 协调器 (6种)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="scheduler" data-type="string" data-required="true" <td="">scheduler<td>string</td><td>是</td><td>PagedScheduler</td><td>PagedScheduler instance for KV page management</td></tr><tr data-field="batcher" data-type="string" data-required="true" <td="">batcher<td>string</td>
+<td>是</td><td>ContinuousBatcher</td><td>ContinuousBatcher for request queue management</td></tr><tr data-field="requests" data-type="string" data-required="true" <td="">requests<td>string</td><td>是</td><td>HashMap&lt;RequestId, RequestData&gt;</td><td>Active request map</td></tr><tr data-field="memory_manager" data-type="string" data-required="true" <td="">memory_manager<td>string</td><td>是</td><td>GlobalMemoryManager</td><td>Global memory manager for tier usage tracking</td></tr>
+<tr data-field="policy" data-type="string" data-required="true" <td="">policy<td>string</td><td>是</td><td>PolicyVariant</td><td>Scheduling policy (Absolute/Latency/Throughput)</td></tr></table></section>
+      <section id="ent-executor" data-entity="ENT-EXECUTOR" data-req-ref="REQ-STEP-CONTRACT-001 REQ-STEP-CONTRACT-002 REQ-DECOMP-001 REQ-DECOMP-002 REQ-DECOMP-003" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-CALLBACK-CHAIN ENT-COORDINATOR" data-xref="REQ-STEP-CONTRACT-001 REQ-STEP-CONTRACT-002 REQ-DECOMP-001 REQ-DECOMP-002 REQ-DECOMP-003"><h4>ENT-EXECUTOR</h4><p>Executor — 执行引擎</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="backend" data-type="string" data-required="true" <td="">backend<td>string</td><td>是</td><td>B: Backend</td><td>Backend (CPU/CUDA/HIP/Metal)</td></tr><tr data-field="dispatch" data-type="string" data-required="true" <td="">dispatch<td>string</td><td>是</td><td>DispatchCoordinator</td><td>
+Dispatch coordinator (scheduler+batcher+requests)</td></tr><tr data-field="kv" data-type="string" data-required="true" <td="">kv<td>string</td><td>是</td><td>KvCoordinator</td><td>KV cache coordinator</td></tr><tr data-field="compute" data-type="string" data-required="true" <td="">compute<td>string</td><td>是</td><td>ComputeCoordinator</td><td>Compute coordinator (mega_kernel+jit+telemetry)</td></tr><tr data-field="inference" data-type="string" data-required="true" <td="">inference<td>
+string</td><td>是</td><td>InferenceCoordinator</td><td>Inference coordinator (MoE+spec_decoding+MTP)</td></tr><tr data-field="observability" data-type="string" data-required="true" <td="">observability<td>string</td><td>是</td><td>ObservabilityCoordinator</td><td>Observability coordinator (observer)</td></tr></table></section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section id="api-decomp" data-api="POST /internal/executor/decompose" data-req-ref="REQ-DECOMP-001 REQ-DECOMP-002 REQ-DECOMP-003 REQ-DECOMP-004 REQ-DECOMP-006" data-api-name="API-DECOMP" data-api-type="internal" data-xref="REQ-DECOMP-001 REQ-DECOMP-002 REQ-DECOMP-003 REQ-DECOMP-004 REQ-DECOMP-006"><h4>POST /internal/executor/decompose — Executor decomposition</h4><p>Executor 分解架构接口，6 个 Coordinator 协作管理推理执行。Dispatch/KV/Compute/Inference/CallbackSlot/Observability 各司其职，消除 monolithic executor。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="DecompositionResult"><td>200</td><td>成功</td><td>DecompositionResult</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：31-EXECUTOR-DECOMPOSITION.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-decomp-001" data-test="TEST-DECOMP-001" data-req-ref="REQ-DECOMP-001" data-test-categories="unit"><h4>TEST-DECOMP-001: REQ-DECOMP-001 单元测试</h4><p>验证 REQ-DECOMP-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

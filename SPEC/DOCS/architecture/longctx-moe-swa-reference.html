@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="longctx-moe-swa-reference">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"longctx-moe-swa-reference", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>长上下文 / 稀疏注意力 / MoE 共享专家技术参考</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>longctx-moe-swa-reference</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-长上下文-稀疏注意力-moe-共享专家技术参考" data-section="null">
+      <h2>长上下文 / 稀疏注意力 / MoE 共享专家技术参考</h2>
+      <p>&gt; <strong>用途</strong>: 本文档为 gllm JIT codegen 提供 YaRN RoPE Scaling、Sliding Window Attention、</p>
+      <p>&gt; MoE Shared Experts 三项关键技术的底层实现细节。</p>
+      <p>&gt; 实现规范见 <code>SPEC/23-QUANT-CODEGEN-ALGO.md</code> 和 <code>SPEC/04-OPERATORS.md</code>。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 YaRN RoPE Scaling</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 数学公式</h4>
+      <p>核心思想: 基于波长的分频处理 — 高频外推、低频内插、中间渐变。</p>
+      <strong>频域划分基准</strong>:
+      <li>维度波长: <code>λ_i = 2π × 10000^(2i/d)</code></li>
+      <li>缩放系数: <code>s = L_test / L_train</code></li>
+      <strong>三分频域</strong>:
+      <strong>最终角速度</strong>:
+      <p>```</p>
+      <p>θ_i' = (1 - γ_i) × (θ_i / s) + γ_i × θ_i</p>
+      <p>```</p>
+      <strong>熵稳定因子 (mscale)</strong>:
+      <p>```</p>
+      <p>mscale = 0.1 × ln(s) + 1</p>
+      <p>```</p>
+      <p>在向量旋转时直接作为系数乘在 Query 和 Key 上, 维持 Attention 熵稳定。</p>
+      <table>
+        <tr>
+          <th>区域</th>
+        </tr>
+        <tr>
+          <td>条件</td>
+        </tr>
+        <tr>
+          <td>混合系数 γ_i</td>
+        </tr>
+        <tr>
+          <td>角速度处理</td>
+        </tr>
+        <tr>
+          <td>低频区</td>
+        </tr>
+        <tr>
+          <td>r(i) &lt; α</td>
+        </tr>
+        <tr>
+          <td>γ_i = 0</td>
+        </tr>
+        <tr>
+          <td>PI 线性内插: </td>
+          <td>θ_i / s</td>
+        </tr>
+        <tr>
+          <td>高频区</td>
+        </tr>
+        <tr>
+          <td>r(i) &gt; β</td>
+        </tr>
+        <tr>
+          <td>γ_i = 1</td>
+        </tr>
+        <tr>
+          <td>保持外推: </td>
+          <td>θ_i</td>
+          <td> 不变</td>
+        </tr>
+        <tr>
+          <td>渐变区</td>
+        </tr>
+        <tr>
+          <td>α ≤ r(i) ≤ β</td>
+        </tr>
+        <tr>
+          <td>γ_i = (r(i) - α) / (β - α)</td>
+        </tr>
+        <tr>
+          <td>线性平滑过渡</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 JIT 编译策略</h4>
+      <table>
+        <tr>
+          <th>优化</th>
+        </tr>
+        <tr>
+          <td>实现</td>
+        </tr>
+        <tr>
+          <td>常量折叠</td>
+        </tr>
+        <tr>
+          <td>编译期折叠 </td>
+          <td>s, α, β, mscale</td>
+          <td> 等所有已知超参到立即数</td>
+        </tr>
+        <tr>
+          <td>分支消除</td>
+        </tr>
+        <tr>
+          <td>静态展开每个维度的 θ_i', 移除运行时 if-else</td>
+        </tr>
+        <tr>
+          <td>流水融合</td>
+        </tr>
+        <tr>
+          <td>rotate_half + mscale 缩放在单算子寄存器内完成 (零额外 load/store)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 partial (p-RoPE) 与 YaRN 组合</h4>
+      <p>Gemma 4 使用 partial=0.25 (仅 25% 维度施加 RoPE, 其余 75% 不旋转)。</p>
+      <p>组合公式: 对维度 <code>d_i</code>:</p>
+      <p>```</p>
+      <p>if d_i &lt; partial × head_dim:</p>
+      <p>    θ_i'' = YaRN_scaled(θ_i)    // 应用 YaRN 公式</p>
+      <p>else:</p>
+      <p>    θ_i'' = 1.0                   // 不旋转</p>
+      <p>```</p>
+      <p>编译期已知 <code>partial</code>, 可完全静态化每个维度的处理方式。</p>
+    </section>
+    <section id="s1.4" data-section="1.4">
+      <h4>§1.4 gllm 代码映射</h4>
+      <li><code>OpKind::RoPE { theta, partial, rope_scaling: Some(RopeScaling::Yarn { factor, beta_fast, beta_slow, original_max_position }) }</code></li>
+      <li>JIT codegen: 对每个 <code>dim_idx</code> 计算 <code>θ_i'</code>, 编译期 bake 进 cos/sin 表或立即数</li>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 Sliding Window Attention (SWA)</h3>
+    </section>
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 核心策略: KV Range Limitation (禁止 Tensor Mask)</h4>
+      <table>
+        <tr>
+          <th>策略</th>
+        </tr>
+        <tr>
+          <td>做法</td>
+        </tr>
+        <tr>
+          <td>复杂度</td>
+        </tr>
+        <tr>
+          <td>评估</td>
+        </tr>
+        <tr>
+          <td>Tensor Mask</td>
+        </tr>
+        <tr>
+          <td>全量 Q×K^T 计算, Softmax 前超范围 Score 置 -∞</td>
+        </tr>
+        <tr>
+          <td>O(N²)</td>
+        </tr>
+        <tr>
+          <td>❌ 无效空算, 浪费带宽</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>KV Range Limitation</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>动态裁剪 FlashAttention 块级循环区间</td>
+        </tr>
+        <tr>
+          <td>O(N×W)</td>
+        </tr>
+        <tr>
+          <td>✅ 完全跳过窗口外 KV 加载</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 KV Range Limitation 实现</h4>
+      <p>对给定 Query Tile 区间 <code>[Q_start, Q_end]</code>, Key Block 循环索引限制为:</p>
+      <p>```</p>
+      <p>KV_loop_start = max(0, floor((Q_start - W) / B_kv))</p>
+      <p>KV_loop_end   = ceil(Q_end / B_kv)</p>
+      <p>其中:</p>
+      <p>  W     = sliding_window 窗口大小</p>
+      <p>  B_kv  = KV block size (Tile 大小)</p>
+      <p>```</p>
+      <p>FlashAttention 外层循环边界直接改写, 不加载、不计算窗口外 KV。</p>
+    </section>
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 Decoding 阶段环形缓冲区</h4>
+      <p>解码阶段 KV Cache 物理显存固定为 W:</p>
+      <p>```</p>
+      <p>写入地址: kv_ptr = base + (token_idx % W) × stride</p>
+      <p>```</p>
+      <strong>位置解耦</strong>: 地址循环复用, 必须将绝对位置 <code>token_idx</code> 作为元数据传入内核,
+      <p>用于计算正确的 RoPE 相对距离。</p>
+    </section>
+    <section id="s2.4" data-section="2.4">
+      <h4>§2.4 GPT-OSS Sliding/Full 交替层</h4>
+      <p>GPT-OSS 每 N 层交替使用 sliding (W=4096) 和 full attention:</p>
+      <li>Sliding 层: KV Range Limitation 生效, O(N×W) 复杂度</li>
+      <li>Full 层: 循环边界不限制, 标准 O(N²) FlashAttention</li>
+      <li>JIT 策略: 编译期根据 <code>model_adapter.rs</code> 的 <code>sliding_window: Option&lt;usize&gt;</code> 为每层生成不同的循环边界</li>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 MoE Shared Experts JIT 路径</h3>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="3.1">
+      <h4>§3.1 数据流</h4>
+      <p>```</p>
+      <p>Y = FFN_shared(X) + Σ(i ∈ TopK) g_i × FFN_i(X)</p>
+      <p>```</p>
+      <p>核心冲突:</p>
+      <li>Shared Expert: 接收<strong>全量</strong> Token, Dense GEMM</li>
+      <li>Routed Experts: 接收<strong>部分被分流</strong> Token, Sparse GEMM</li>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 方案 A: Grouped GEMM 融合 (推荐)</h4>
+      <p>```</p>
+      <p>[输入 Token M 个]</p>
+      <p>    ↓ 分流编排</p>
+      <p>    ├── Group 0: 共享专家 (全量 M)     ← 伪装为 Expert 0</p>
+      <p>    ├── Group 1: 路由专家 1 (稀疏)</p>
+      <p>    ├── Group 2: 路由专家 2 (稀疏)</p>
+      <p>    └── ...</p>
+      <p>    ↓ 单内核一次发射</p>
+      <p>Grouped GEMM → 硬件 SM 自动切片并发</p>
+      <p>```</p>
+      <p>实现:</p>
+      <li>编译期将全量 Token 索引无条件硬编码指派给 Group 0</li>
+      <li>路由专家分发至 Group 1..E</li>
+      <li>发射单个 Grouped GEMM 内核, 由硬件调度器自动切片 SM 并发</li>
+      <li>规避多次 Kernel 启动的流阻塞</li>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 方案 B: 双流交错发射</h4>
+      <p>```</p>
+      <p>[输入 Token M 个]</p>
+      <p>    ├── 默认 CUDA 流 ────────→ Shared FFN Kernel (Dense)</p>
+      <p>    └── 异步高优先级流 ───→ MoE Router + Grouped GEMM (Sparse)</p>
+      <p>    ↓ 流级同步</p>
+      <p>    ↓ Fused Epilogue Aggregation</p>
+      <p>```</p>
+      <p>利用硬件 SM 级并发能力 (Concurrent Kernels), 稠密与稀疏矩阵乘法空间重叠。</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 Fused Epilogue Aggregation (两种方案通用)</h4>
+      <p>```</p>
+      <p>Y_final = Y_shared + Y_routed</p>
+      <p>累加操作直接融合进 JIT 算子的 Epilogue 写回阶段:</p>
+      <p>  acc += shared_out × 1.0  (shared expert 恒定权重 1.0)</p>
+      <p>  acc += routed_out × g_i  (routed expert 带 gate 权重)</p>
+      <p>```</p>
+      <p>彻底消除一次 Global Memory 的中间读写 Roundtrip。</p>
+    </section>
+    <section id="s3.5" data-section="3.5">
+      <h4>§3.5 gllm 实现指引</h4>
+      <table>
+        <tr>
+          <th>组件</th>
+        </tr>
+        <tr>
+          <td>当前状态</td>
+        </tr>
+        <tr>
+          <td>需要做的</td>
+        </tr>
+        <tr>
+          <td>MoEDispatchPacked</td>
+        </tr>
+        <tr>
+          <td>支持 routed experts</td>
+        </tr>
+        <tr>
+          <td>扩展支持 shared expert (Group 0 全量 Token)</td>
+        </tr>
+        <tr>
+          <td>model_adapter.rs</td>
+        </tr>
+        <tr>
+          <td>moe_config</td>
+        </tr>
+        <tr>
+          <td>添加 </td>
+          <td>num_shared_experts</td>
+          <td> 字段</td>
+        </tr>
+        <tr>
+          <td>OpKind::MoEGate</td>
+          <td> / </td>
+          <td>MoERouter</td>
+        </tr>
+        <tr>
+          <td>不变</td>
+        </tr>
+        <tr>
+          <td>Shared expert 不经过 Router</td>
+        </tr>
+        <tr>
+          <td>GEMM codegen</td>
+        </tr>
+        <tr>
+          <td>标准 GEMM</td>
+        </tr>
+        <tr>
+          <td>Grouped GEMM 支持 (多 expert 共享一次 kernel launch)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 参考</h3>
+      <li>YaRN 论文: "YaRN: Efficient Context Window Extension of Large Language Models" (Peng et al., 2023)</li>
+      <li>Sliding Window Attention: Mistral paper "A Trick of Attention" (Child et al.)</li>
+      <li>DeepSeek V3: "DeepSeek-V3 Technical Report" — Shared Experts + Multi-head Latent Attention</li>
+      <li>Kimi-K2: MoE with shared experts architecture</li>
+      <li>FlashAttention-2/3: Tiled attention with KV range limitation</li>
+      <li>CUTLASS Grouped GEMM: Multi-expert batched matrix multiplication</li>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：longctx-moe-swa-reference.html</address>
+  </footer>
+</body>
+</html>

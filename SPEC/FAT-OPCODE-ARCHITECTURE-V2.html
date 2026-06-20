@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="gllm-kernels">
+<head>
+  <meta charset="utf-8">
+  <title>FAT-OPCODE-ARCHITECTURE-V2 — 胖 Op 自描述架构</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://spec.gsc.local/v1",
+    "@type": "SpecDocument",
+    "id": "FAT-OPCODE-ARCHITECTURE-V2",
+    "category": "architecture",
+    "title": "胖 Op 自描述架构（v2）— 零 context lowering",
+    "status": "draft",
+    "generated": "2026-06-14",
+    "supersedes": ["03-GRAPH-IR.html §1.2 OpKind"],
+    "summary": "重构 JIT 编译器为胖 opcode + 零 context 架构。每个 Op 自带完整语义（dtype/shape/数据流/副作用），lowering 签名从 9 参数降到 3 参数。对标 LLVM SelectionDAG / Cranelift IR 自描述指令设计。"
+  }
+  </script>
+</head>
+<body><main data-spec-content="">
+<article data-spec-document="FAT-OPCODE-ARCHITECTURE-V2">
+
+<section id="s0" data-section="0">
+  <h2>胖 Op 自描述架构 — Op 唯一 IR + 零 context lowering</h2>
+
+  <p>&gt; <strong>SSOT</strong>：本文档定义 gllm-kernels JIT 编译器的下一代 Op/VmInstr 自描述架构。取代 <code>03-GRAPH-IR.html §1.2 OpKind</code> 的贫血 enum 设计。</p>
+
+  <p>&gt; <strong>动机</strong>：当前 OpKind（77 变体）携带的参数不足以让 lowering 自描述，导致 lowering 函数平均 9 参数（prog+op+graph+ctx+input_ptr+weight_ptr+output_ptr+resolver+abi+override）。最近的 audio SIGSEGV 是这种架构缺陷的典型：<code>VmInstr::MemCopy</code> 不自描述条件，依赖 graph-level <code>topology.kv_cache_source</code> 推导，导致 conformer self-attention 错走 KV cache copy 路径写入 NULL。</p>
+
+  <p>&gt; <strong>目标</strong>：每个 op/instr 自带完整语义，lowering 签名简化为 <code>(prog, op, sess)</code>。</p>
+</section>
+
+<section id="s1" data-section="1">
+  <h3>1. Op — 唯一 IR 扁平 enum + Spec struct</h3>
+
+  <p>所有算子通过 Op 枚举表达（唯一 IR，OpKind 已物理删除）。无参数变体保持 unit，有参数变体携带完整自描述 Spec struct。BUILD 阶段直接构造 Op，不经过 from_op_kind 翻译。</p>
+
+  <pre><code>pub enum Op {
+    // Attention 类
+    MultiHeadAttention(AttentionSpec),
+    CachedGqa(CachedGqaSpec),
+    MlaAttention(MlaSpec),
+    // Norm 类
+    RmsNorm(NormSpec), LayerNorm(NormSpec), ValueNorm(NormSpec), HeadRmsNorm(NormSpec),
+    // Gemm 类
+    Gemm(GemmSpec), GemmBias(GemmSpec), QuantGemm(QuantGemmSpec), FusedRmsNormGemm(FusedNormGemmSpec),
+    // Activation 类（无参数保持 unit）
+    Silu, Gelu, Tanh, SwiGlu, GeGlu,
+    SwiGluClipped { limit: f32 },
+    // Structural / MoE / Vision-Audio / Opaque / Telemetry 类
+    // ...
+}</code></pre>
+
+  <p>关键设计原则：</p>
+  <ul>
+    <li><strong>扁平 enum</strong>：77 变体保持扁平，不嵌套类别 enum（避免两层 match）</li>
+    <li><strong>Spec struct</strong>：横向组合字段（geometry + mask + kv_source + dtype），新增字段不改 match arm</li>
+    <li><strong>无参数保持 unit</strong>：Silu/Gelu 等无配置的 activation 保持 unit 变体</li>
+  </ul>
+</section>
+
+<section id="s1.1" data-section="1.1">
+  <h4>1.1 AttentionSpec — KV cache 来源自描述</h4>
+
+  <p>AttentionSpec 携带完整 attention 语义，消除对 <code>topology.kv_cache_source</code> 的依赖。</p>
+
+  <pre><code>pub struct AttentionSpec {
+    pub geometry: AttentionGeometry,    // num_q_heads, num_kv_heads, head_dim
+    pub mask: AttentionMask,             // Causal | Full | Sliding(W)
+    pub kv_source: KvSource,             // FromTensor | FromCache(layer_idx)
+    pub sinks: SinksSpec,                // None | Learnable(sinks_tid)
+    pub seq_len: SymDim,
+    pub dtype: DType,
+    pub load_mode: Option&lt;KvLoadMode&gt;,
+}
+
+pub enum KvSource {
+    /// K/V 来自当前图的 tensor（self-attention prefill、conformer encoder）。
+    /// 不读写持久化 KV cache，zero cache copy overhead。
+    FromTensor,
+    /// K/V 来自持久化 KV cache（LLM decoder generate loop）。
+    FromCache { layer_idx: usize },
+}</code></pre>
+
+  <p>lowering 时 <code>match op.kv_source</code> 直接决定路径，无需查询 graph topology。</p>
+</section>
+
+<section id="s1.2" data-section="1.2">
+  <h4>1.2 NormSpec / GemmSpec — dtype 自描述</h4>
+
+  <pre><code>pub struct NormSpec {
+    pub feature_dim: usize,
+    pub eps: f32,
+    pub dtype: DType,  // 自描述，消除 ctx.dtype
+}
+
+pub struct GemmSpec {
+    pub m: SymDim, pub n: usize, pub k: usize,
+    pub dtype: DType, pub trans_b: bool,
+    pub exec_pattern: Option&lt;ExecPattern&gt;,      // 从 ctx.bottleneck_map 内化
+    pub parallelism: Option&lt;ParallelismDesc&gt;,    // 从 ctx.parallelism 内化
+}</code></pre>
+</section>
+
+<section id="s2" data-section="2">
+  <h3>2. CompileSession — 编译会话级共享状态</h3>
+
+  <p>替代旧 <code>LoweringContext</code>（18 字段）中的编译会话级常量。AbiPtrs 也搬入此处（不再是 lowering 函数的独立参数）。</p>
+
+  <pre><code>pub struct CompileSession&lt;'a&gt; {
+    pub width: SimdWidth,
+    pub sym_map: &amp;'a SymDimSlotMap,
+    pub registry: Option&lt;&amp;'a ScalarOpRegistry&gt;,
+    pub hook: Option&lt;&amp;'a dyn IsaHook&gt;,
+    pub budget: Option&lt;ResourceBudget&gt;,
+    pub page_size: usize,
+    pub dot_cap: DotProductCap,
+    pub kv_elem_bytes: usize,
+    pub debug_jit: bool,
+    pub abi: AbiPtrs,  // 从 lowering 参数搬入
+    pub virtual_activation: Option&lt;&amp;'a VirtualActivationMap&gt;,
+    pub virtual_tensor_map: Option&lt;&amp;'a VirtualTensorMap&gt;,
+    pub layout: Option&lt;&amp;'a LayoutAssignment&gt;,
+    pub batch_ctx_ptr: Option&lt;VRegId&gt;,
+}
+
+// 目标 lowering 签名
+fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&gt; Result&lt;(), CompilerError&gt;</code></pre>
+
+  <p>LoweringContext 消解：</p>
+  <ul>
+    <li>9 字段搬到 CompileSession（width/sym_map/registry/hook/budget/page_size/dot_cap/kv_elem_bytes/debug_jit）</li>
+    <li>6 字段内化到各 Op spec（dtype/exec_pattern/bottleneck_map/rope_req/ple_req/dwc_req）</li>
+    <li>3 字段搬入 CompileSession（virtual_activation/virtual_tensor_map/layout）</li>
+    <li>batch_ctx_ptr 搬入 CompileSession</li>
+  </ul>
+</section>
+
+<section id="s3" data-section="3">
+  <h3>3. VmInstr — 复合指令自描述</h3>
+
+  <p>仅复合 VmInstr（MemCopy/VecLoad/VecStore/Gather/Scatter）携带 dtype，纯算术读 <code>sess.dtype</code>。</p>
+
+  <pre><code>pub enum VmInstr {
+    MemCopy { dst: VRegId, src: VRegId, bytes: usize,
+              guard: Option&lt;Predicate&gt;,    // 条件谓词内化
+              effect: MemEffect },           // Read/Write/ReadWrite
+    VecLoad { dst: VRegId, src: PtrExpr, dtype: DType,
+              predicate: Option&lt;Predicate&gt; },
+    VecStore { dst: PtrExpr, src: VRegId, dtype: DType },
+    // 纯算术：dtype 为 None 时从 sess.dtype 继承（99% 场景），
+    // Some 时表示 epilogue 覆盖（混合精度融合：BF16 消费者注入 F32 累加器）
+    VecBinOp { dst, a, b, op: VecBinOp, dtype: Option&lt;DType&gt; },
+}</code></pre>
+</section>
+
+<section id="s4" data-section="4"><h3>4. 迁移路线（10 Phase）</h3>
+
+<p>详细执行计划见 §10-15 REQ 规范定义。核心 Phase：</p>
+<ol>
+  <li><strong>Phase 0</strong>（本档）：SPEC 定义</li>
+  <li><strong>Phase 1</strong>：MHA/CachedGqa/MlaAttention 加 kv_source 字段，删 topology.kv_cache_source</li>
+  <li><strong>Phase 2</strong>：CompileSession 提取</li>
+  <li><strong>Phase 3</strong>：Op 新类型 + 共存适配层</li>
+  <li><strong>Phase 4-7</strong>：按类别迁移（Norm/Activation → Gemm/Quant → Attention/MoE/MLA → Structural/Embed/Vision-Audio）</li>
+  <li><strong>Phase 8</strong>：VmInstr 自描述</li>
+  <li><strong>Phase 9</strong>：三仓 SPEC 同步 + JIT cache hash v2</li>
+  <li><strong>Phase 10</strong>：OpKind 物理删除 + KvCacheWrite 删除 + KvSource BUILD 阶段策略 + op.inc.rs 重命名 + cache v3</li>
+</ol></section>
+
+<section id="s5" data-section="5">
+  <h3>5. 验证标准（Phase 10 完成）</h3>
+  <ul>
+    <li>每 Phase 末：<code>cargo test --lib</code> 全绿（gllm-kernels 6847 + gllm ~44000）</li>
+    <li>conformer audio regression test 全程作为 canary</li>
+    <li>Phase 9：<code>LoweringContext</code> / <code>GraphTopologyAnalysis::kv_cache_source</code> / <code>OpKind</code> 零生产代码引用</li>
+  </ul>
+<h4>5.1 Phase 1+2 并行合并策略（architect 建议）</h4>
+<ol>
+  <li><strong>Phase 2 先 merge</strong>：ctx.session.* 重命名是机械替换，diff 大但语义简单</li>
+  <li><strong>Phase 1 rebase 到 Phase 2 之上</strong>：Phase 1 新增的 kv_source 逻辑（~50 行）rebase 时把 ctx.xxx 改为 ctx.session.xxx</li>
+  <li><strong>冲突解决</strong>：dispatch_emit.rs 中以 Phase 2 的 rename 为准，Phase 1 新逻辑用新命名</li>
+</ol>
+
+<h4>5.2 KvSource 扩展预留</h4>
+<p>当前 FromTensor | FromCache(layer_idx) 覆盖 GQA/MHA。未来 MLA 跨层 KV 共享（DeepSeek）可能需要 FromSharedCache { group_id, layer_idx }。当前设计留扩展点，无需立即实现。</p>
+
+<h4>5.3 OPCODE_VERSION — JIT cache hash 版本策略</h4>
+<p>引入 <code>OPCODE_VERSION: u32</code> 常量（Phase 3 引入），每次 Op/VmInstr enum 结构变更 bump 版本号。JIT cache hash 包含此常量，避免手动管理 hash 算法升级。比 Phase 8 整体 hash 策略变更更轻量。</p>
+
+<h4>5.4 VecBinOp dtype 融合盲区（architect 修正）</h4>
+<p>纯算术 VecBinOp 保留 <code>dtype: Option&lt;DType&gt;</code>——None 表示从 sess.dtype 继承（99% 场景），Some 表示 epilogue 覆盖（混合精度融合：BF16 消费者注入 F32 累加器）。避免融合场景下统一读 graph-level dtype 导致宽度错误。</p></section>
+
+
+<section id="reqs" data-section="10">
+<h2>10. REQ 规范定义（Phase 9 §1-§5 形式化）</h2>
+
+<section id="req-fatop-001" data-req="REQ-FATOP-001" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="1">
+<h3>REQ-FATOP-001: Op 枚举扁平结构 — 唯一 IR（OpKind 已删除）</h3>
+<p>Op 枚举是编译器唯一 IR（OpKind enum 已物理删除）。Op 枚举包含 77+ 个变体，扁平 enum 不嵌套类别 enum。无参数变体保持 unit，有参数变体携带完整 Spec struct。Op 由 BUILD 阶段直接构造，不再经过 from_op_kind 翻译。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>Op 枚举变体覆盖所有 OpKind 变体（1:1 映射）</li>
+<li>无参数变体（Silu/Gelu/Tanh/Add 等）保持 unit</li>
+<li>Spec struct 变体（RmsNorm(NormSpec)/Gemm(GemmSpec) 等）携带完整元数据</li>
+<li>100% 编译通过：cargo check --lib</li>
+</ul>
+</div>
+<div data-criteria=""><strong>验收标准：</strong><ol><li>符合 Op 枚举是编译器唯一 IR（OpKind enum 已物理删除）。Op 枚举包含 77+ 个变体，扁平 enum 不嵌套类别 enum。无参数变体保持 uni 的约束定义</li></ol></div></section>
+
+<section id="req-fatop-002" data-req="REQ-FATOP-002" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec,NormSpec,GemmSpec" data-req-api="POST /compile" data-section="1">
+<h3>REQ-FATOP-002: Spec struct 携带完整自描述元数据</h3>
+<p>Spec struct 包含 lowering 所需全部参数，不依赖 LoweringContext 推导。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>AttentionSpec 含 geometry/mask/kv_source/sinks/seq_len/dtype</li>
+<li>NormSpec 含 feature_dim/eps/dtype/has_weight</li>
+<li>GemmSpec 含 m/n/k/dtype/trans_b/has_bias</li>
+<li>所有 Spec struct 是 #[derive(Debug, Clone, PartialEq)]</li>
+</ul>
+</div>
+
+<section id="req-fatop-003" data-req="REQ-FATOP-003" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="1">
+<h3>REQ-FATOP-003: OPCODE_VERSION JIT cache 版本管理 (v3)</h3>
+<p>OPCODE_VERSION u32 常量，Op enum 结构变更时 bump 版本号，旧缓存自动失效。OpKind 物理删除后 bump 到 v3，文件从 op_v2.inc.rs 重命名为 op.inc.rs。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>OPCODE_VERSION 常量定义在 op.inc.rs（已从 op_v2.inc.rs 重命名）</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>OpKind 物理删除后版本号为 v3</li><li>版本变更无需手动清理 cache，自动失效</li></ol></div>
+
+<section id="req-fatop-004" data-req="REQ-FATOP-004" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec" data-req-api="POST /compile" data-section="1.1">
+<h3>REQ-FATOP-004: AttentionSpec kv_source 自描述</h3>
+<p>KvSource enum 内化到 MHA/CachedGQA/MlaAttention，消除 topology.kv_cache_source 全局推导（修复 conformer audio SIGSEGV）。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>KvSource enum: FromTensor / FromCache</li>
+<li>conformer self-attention 使用 FromTensor</li>
+<li>LLM decoder generate loop 使用 FromCache</li>
+<li>zero NULL pointer dereference in audio_forward</li>
+</ul>
+</div>
+
+<section id="req-fatop-005" data-req="REQ-FATOP-005" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec" data-req-api="POST /compile" data-section="1.1">
+<h3>REQ-FATOP-005: AttentionSpec sinks 配置</h3>
+<p>SinksSpec enum: None / Learnable。Learnable 对应 inputs[3] sinks tensor。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>SinksSpec::None 用于标准 attention</li>
+<li>SinksSpec::Learnable 用于 OpenAI gpt-oss-20b 风格 sinks</li>
+<li>Learnable 模式 inputs[3] = sinks tensor of shape [num_heads]</li>
+</ul>
+</div>
+
+<section id="req-fatop-006" data-req="REQ-FATOP-006" data-req-status="implemented" data-req-domain="FATOP" data-req-category="data" data-req-entity="NormSpec" data-req-api="POST /compile" data-section="1.2">
+<h3>REQ-FATOP-006: NormSpec dtype 自描述</h3>
+<p>NormSpec.dtype 从 op.inputs[0].tensor.dtype 推导（from_op_kind 阶段），lowering 时直接用 spec.dtype。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>dtype 传播链：TensorMeta.dtype → NormSpec.dtype → VmInstr.dtype</li>
+<li>无需 op_input_dtype 反查 tensor</li>
+<li>支持 F32/BF16/F16 等所有 DType</li>
+</ul>
+</div>
+
+<section id="req-fatop-007" data-req="REQ-FATOP-007" data-req-status="implemented" data-req-domain="FATOP" data-req-category="data" data-req-entity="GemmSpec" data-req-api="POST /compile" data-section="1.2">
+<h3>REQ-FATOP-007: GemmSpec 完整自描述</h3>
+<p>GemmSpec 含 m/n/k/dtype/trans_b/has_bias，区分 Gemm 与 GemmBias。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>has_bias 区分 Gemm (false) 与 GemmBias (true)</li>
+<li>trans_b 影响 ISA 指令选择（行主序 vs 列主序 B 矩阵）</li>
+<li>dtype 影响 quant 精度选择（F32/BF16/Int8 等）</li>
+</ul>
+</div>
+
+<section id="req-fatop-008" data-req="REQ-FATOP-008" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="CompileSession" data-req-api="POST /compile" data-section="2">
+<h3>REQ-FATOP-008: CompileSession 提取 13 字段</h3>
+<p>从 LoweringContext（18 字段）提取编译会话级常量到 CompileSession（13 字段）。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>CompileSession 包含 width/sym_map/registry/hook</li>
+<li>CompileSession 包含 page_size/dot_cap/kv_elem_bytes/debug_jit</li>
+<li>CompileSession 包含 virtual_activation/virtual_tensor_map/layout</li>
+<li>LoweringContext 持有 &amp;CompileSession 引用</li>
+</ul>
+</div>
+
+<section id="req-fatop-009" data-req="REQ-FATOP-009" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="CompileSession" data-req-api="POST /compile" data-section="2">
+<h3>REQ-FATOP-009: LoweringContext 保留 op-local 字段</h3>
+<p>LoweringContext 持有 session: &amp;CompileSession 引用 + op-local 字段。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>LoweringContext.session: &amp;'a CompileSession</li>
+<li>dtype: QuantPrecision (op-local)</li>
+<li>exec_pattern/bottleneck_map/parallelism (op-local)</li>
+<li>rope_req/ple_req/dwc_req (op-local)</li>
+</ul>
+</div>
+
+<section id="ent-op" data-req="REQ-FATOP-010" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="ENT-VM-INSTR,ENT-PREDICATE" data-req-api="POST /compile" data-entity="ENT-OP" data-req-ref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003" data-section="3" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-QUANT-PRECISION ENT-TRACE-OP ENT-VM-INSTR" data-xref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003">
+<h3>REQ-FATOP-010: VmInstr 复合指令 dtype/guard/effect 自描述</h3>
+<p>Phase 8 完整实现：VecLoad/VecStore 加 predicate；GatherLoad/ScatterStore 加 dtype + predicate；MemCopy 加 dtype + guard + effect。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>VecLoad/VecStore 加 predicate: Option&lt;Predicate&gt;</li>
+<li>GatherLoad/ScatterStore 加 dtype + predicate</li>
+<li>MemCopy 加 dtype + guard + effect 三字段</li>
+<li>OPCODE_VERSION bump 到 v2</li>
+</ul>
+</div>
+
+<section id="ent-op" data-req="REQ-FATOP-011" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="ENT-PREDICATE" data-req-api="POST /compile" data-entity="ENT-OP" data-req-ref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003" data-section="3" data-entity-model-type="relational">
+<h3>REQ-FATOP-011: Predicate 类型（基于 GprCondition）</h3>
+<p>Predicate struct 包装 GprCondition，用于 masked load/store/gather/scatter。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>Predicate::new(cond) 构造函数</li>
+<li>Predicate::inner() 返回 &amp;GprCondition</li>
+<li>Predicate::remap&lt;F&gt; 重映射 VRegId</li>
+<li>Predicate::vregs() 返回引用的 VRegId 列表</li>
+</ul>
+</div>
+
+<section id="ent-op" data-req="REQ-FATOP-012" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="ENT-MEM-EFFECT" data-req-api="POST /compile" data-entity="ENT-OP" data-req-ref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003" data-section="3" data-entity-model-type="relational">
+<h3>REQ-FATOP-012: MemEffect 类型（Read/Write/ReadWrite）</h3>
+<p>MemEffect enum 用于寄存器分配和指令调度的内存依赖分析。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>MemEffect::Read / MemEffect::Write / MemEffect::ReadWrite</li>
+<li>MemEffect::reads() / MemEffect::writes() 属性方法</li>
+<li>MemCopy effect = ReadWrite</li>
+<li>VecLoad effect = Read（隐式）</li>
+<li>VecStore effect = Write（隐式）</li>
+</ul>
+</div>
+
+<section id="req-fatop-013" data-req="REQ-FATOP-013" data-req-status="deprecated" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="4">
+<h3>REQ-FATOP-013: from_op_kind 翻译器（已物理删除）</h3>
+<p>from_op_kind IR Translator 已物理删除。OpKind enum 删除后不再需要 OpKind → Op 翻译。BUILD 阶段直接构造 Op。历史参考：Op::from_op_kind(op, graph) 统一入口，4 个子方法覆盖 77 变体。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>Op::from_op_kind 在 gllm-kernels/src/compiler/ 中零非注释匹配</li><li>from_op_kind_norm_activation / gemm_quant / attention_moe / structural 4 子方法全部物理删除</li><li>BUILD 阶段直接构造 Op，无需翻译</li><li>grep -r from_op_kind kernels/src/compiler/ 零非注释匹配</li></ol></div>
+
+<section id="req-fatop-014" data-req="REQ-FATOP-014" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="4">
+<h3>REQ-FATOP-014: lower_op_v2 零 OpKind 反查（唯一 IR）</h3>
+<p>lower_op_v2 41 类别 100% 通过 Op Spec 获取参数，Op 是唯一 IR，零 OpKind 反查。dispatch_* OpKind match 全部死代码删除。key_from_op(op: &amp;Op) 替代 key_from_op_kind(kind: &amp;OpKind)。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>lower_op_v2 41 类别 100% 通过 Op Spec 获取参数</li>
+<li>NormKind→OpKindKey 直接推导（不查 op.kind）</li>
+<li>dispatch_structural/dispatch_compute_pattern OpKind match 死代码删除（-1179 行）</li>
+<li>OpKind 适配层只在 from_op_kind 调用点存在</li>
+</ul>
+</div>
+
+<section id="req-fatop-015" data-req="REQ-FATOP-015" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="4">
+<h3>REQ-FATOP-015: CompilerOp.op_v2 唯一 IR 字段（.kind 已删除）</h3>
+<p>CompilerOp.op_v2 是唯一 IR 字段（CompilerOp.kind 已物理删除）。add_op(op: Op) / add_op_guarded(op: Op) 内部存储 op_v2。Lowering 路径直接读 op.op_v2，无 clone().or_else(from_op_kind) 缓存模式。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>CompilerOp.op_v2 字段存在</li><li>add_op / add_op_guarded 内部缓存 op_v2</li><li>5 处 lowering 路径直接读 op.op_v2</li><li>测试 fixture 直接构造 Op，不经过 from_op_kind</li></ol></div>
+
+<section id="req-fatop-016" data-req="REQ-FATOP-016" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op,AttentionSpec,NormSpec,GemmSpec,CompileSession" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-016: cargo check + cargo test --lib 全绿</h3>
+<p>编译通过 + 单元测试通过是 Phase 验收最低要求。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>gllm-kernels cargo check --lib 零错误</li>
+<li>gllm-kernels cargo test --lib 6863 passed</li>
+<li>gllm cargo test --lib 44201 passed</li>
+<li>总计 51064 测试全绿</li>
+</ul>
+</div>
+
+<section id="req-fatop-017" data-req="REQ-FATOP-017" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op,AttentionSpec,NormSpec,GemmSpec,CompileSession" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-017: 51064 测试基线维持</h3>
+<p>51064 测试基线（6863 + 44201）维持，0 failures。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>gllm-kernels 6863 passed</li>
+<li>gllm 44201 passed</li>
+<li>0 failures</li>
+<li>audio_forward SIGSEGV 修复后稳定</li>
+</ul>
+</div>
+
+<section id="req-fatop-018" data-req="REQ-FATOP-018" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-018: lowering 路径直接读 op_v2（无缓存 fallback）</h3>
+<p>5 处 lowering 路径直接读 op.op_v2（Op 是唯一 IR）。from_op_kind 已物理删除，lowering 路径无 clone().or_else() 缓存 fallback 模式。文件已从 op_v2.inc.rs 重命名为 op.inc.rs。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>op.inc.rs 中 lowering 路径直接读 op.op_v2（无 or_else fallback）</li><li>context.inc.rs 中参数收集直接读 op.op_v2</li><li>pipeline.inc.rs 中采样/Gemm 识别直接读 op.op_v2</li><li>正常路径零 from_op_kind 调用</li></ol></div>
+
+<section id="req-fatop-019" data-req="REQ-FATOP-019" data-req-status="implemented" data-req-domain="FATOP" data-req-category="deployment" data-req-entity="Op,AttentionSpec,NormSpec,GemmSpec,CompileSession" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-019: JIT cache hash 版本失效 (v3)</h3>
+<p>OPCODE_VERSION 从 v2 bump 到 v3，OpKind 物理删除 + CompilerOp.kind 字段删除 + add_op API 简化后旧缓存自动失效。版本注释说明 OpKind 删除字段变更。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>OPCODE_VERSION 常量值 = 3</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>冷启动一次性重编译成本</li><li>版本注释说明 OpKind 删除 + CompilerOp.kind 字段删除</li></ol></div>
+
+<section id="req-fatop-020" data-req="REQ-FATOP-020" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op,AttentionSpec,NormSpec,GemmSpec,CompileSession" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-020: conformer audio SIGSEGV 修复</h3>
+<p>scratch_block 在 conformer 层间重置，KvSource::FromTensor 用于 self-attention。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>scratch_block 在 conformer 层迭代前重置</li>
+<li>KvSource::FromTensor 用于 conformer/vision self-attention</li>
+<li>不再 NULL pointer dereference</li>
+<li>audio_forward 测试全绿</li>
+</ul>
+</div>
+
+<section id="req-fatop-021" data-req="REQ-FATOP-021" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-021: 5 处 lowering OpKind 反查消除（已完成，OpKind 已删除）</h3>
+<p>5 处 lowering OpKind 反查全部改为直接读 Op（REQ-FATOP-018）。OpKind enum 已物理删除（REQ-FATOP-023），此 REQ 为历史迁移记录。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>context.inc.rs:385 RoPE/DualRoPE 参数收集用 Op</li>
+<li>context.inc.rs:500 DepthwiseConv1D 参数收集用 Op</li>
+<li>context.inc.rs:589 MoEDispatchPacked 参数收集用 Op</li>
+<li>pipeline.inc.rs:290 采样 op 识别用 Op</li>
+<li>pipeline.inc.rs:762 Gemm trans_b 提取用 Op</li>
+</ul>
+</div>
+
+<section id="req-fatop-022" data-req="REQ-FATOP-022" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op" data-req-api="POST /compile" data-section="5">
+<h3>REQ-FATOP-022: @trace 注解完备性</h3>
+<p>Op 枚举与 Spec struct 定义含 @trace 注解，关联 REQ-FATOP-xxx。</p>
+<div data-req-criteria="">
+<h4>验收标准</h4>
+<ul>
+<li>Op 枚举定义含 @trace REQ-FATOP-001 [entity:Op]</li>
+<li>Spec struct 定义含 @trace REQ-FATOP-002 [entity:AttentionSpec]</li>
+<li>CompileSession 含 @trace REQ-FATOP-008 [entity:CompileSession]</li>
+<li>lower_op_v2 含 @trace REQ-FATOP-014</li>
+</ul>
+</div>
+
+<div data-criteria=""><strong>验收标准：</strong><ol><li>符合 Spec struct 包含 lowering 所需全部参数，不依赖 LoweringContext 推导。 的约束定义</li></ol></div></section>
+
+<section id="entities" data-section="11">
+<h2>11. Entity 定义（数据模型）</h2>
+
+<section id="op" data-entity="Op" data-req-ref="REQ-FATOP-001 REQ-FATOP-003 REQ-FATOP-013 REQ-FATOP-014 REQ-FATOP-015" data-entity-model-type="memory-layout" data-entity-ref="AttentionSpec CompileSession GemmSpec NormSpec" data-xref="REQ-FATOP-001 REQ-FATOP-003 REQ-FATOP-013 REQ-FATOP-014 REQ-FATOP-015"><h3>Entity: Op（唯一 IR 枚举）</h3>
+<p>扁平 enum，唯一 IR（OpKind 已物理删除），含 Spec struct 自描述元数据。BUILD 阶段直接构造，不经过翻译。</p>
+<div data-entity-fields="">
+<h4>字段</h4>
+<ul>
+<li>enumeration_kind: enum (77+ variants)</li>
+<li>opcode_version: integer (=3)</li>
+</ul>
+<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="enumeration_kind" data-type="enum" data-required="true"><td>enumeration_kind</td><td>enum</td><td>是</td><td>77+ variants</td><td>唯一 IR 枚举变体（OpKind 已删除）</td></tr><tr data-field="opcode_version" data-type="integer" data-required="true"><td>opcode_version</td><td>integer</td><td>是</td><td>=3</td><td>OPCODE JIT cache 版本号 (OpKind 删除后 v3)</td></tr></table></div></section>
+
+<section id="attentionspec" data-entity="AttentionSpec" data-req-ref="REQ-FATOP-002 REQ-FATOP-004 REQ-FATOP-005 REQ-FATOP-016 REQ-FATOP-017" data-entity-model-type="memory-layout" data-entity-ref="CompileSession GemmSpec NormSpec Op" data-xref="REQ-FATOP-002 REQ-FATOP-004 REQ-FATOP-005 REQ-FATOP-016 REQ-FATOP-017">
+<h3>Entity: AttentionSpec</h3>
+<p>Attention 完整自描述 spec，含 geometry/mask/kv_source/sinks/seq_len/dtype。</p>
+<div data-entity-fields="">
+<h4>字段</h4>
+<ul>
+<li>geometry: AttentionGeometry (num_q_heads, num_kv_heads, head_dim)</li>
+<li>mask: AttentionMask (Causal | Full | Sliding{window})</li>
+<li>kv_source: KvSource (FromTensor | FromCache)</li>
+<li>sinks: SinksSpec (None | Learnable)</li>
+<li>seq_len: SymDim</li>
+<li>dtype: DType</li>
+</ul>
+<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="geometry" data-type="string" data-required="true"><td>geometry</td><td>string</td><td>是</td><td>num_q_heads/num_kv_heads/head_dim</td><td>注意力几何配置</td></tr><tr data-field="mask" data-type="string" data-required="true"><td>mask</td><td>string</td><td>是</td><td>Causal|Full|Sliding{window}</td><td>掩码类型</td></tr><tr data-field="kv_source" data-type="string" data-required="true"><td>kv_source</td><td>string</td><td>是</td><td>FromTensor|FromCache</td><td>KV 来源</td></tr><tr data-field="sinks" data-type="string" data-required="true"><td>sinks</td><td>string</td><td>是</td><td>None|Learnable</td><td>attention sinks 配置</td></tr></table></div>
+</section>
+
+<section id="normspec" data-entity="NormSpec" data-req-ref="REQ-FATOP-002 REQ-FATOP-006 REQ-FATOP-016 REQ-FATOP-017 REQ-FATOP-019" data-entity-model-type="memory-layout" data-entity-ref="AttentionSpec CompileSession GemmSpec Op" data-xref="REQ-FATOP-002 REQ-FATOP-006 REQ-FATOP-016 REQ-FATOP-017 REQ-FATOP-019">
+<h3>Entity: NormSpec</h3>
+<p>Norm 类完整自描述 spec（RmsNorm/LayerNorm/ValueNorm 共用）。</p>
+<div data-entity-fields="">
+<h4>字段</h4>
+<ul>
+<li>feature_dim: usize</li>
+<li>eps: f32</li>
+<li>dtype: DType（从 inputs[0].tensor.dtype 推导）</li>
+<li>has_weight: bool（true=RmsNorm/LayerNorm，false=ValueNorm）</li>
+</ul>
+<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="feature_dim" data-type="integer" data-required="true"><td>feature_dim</td><td>integer</td><td>是</td><td>&gt;0</td><td>特征维度</td></tr><tr data-field="eps" data-type="number" data-required="true"><td>eps</td><td>number</td><td>是</td><td>&gt;0</td><td>归一化 epsilon</td></tr><tr data-field="has_weight" data-type="boolean" data-required="true"><td>has_weight</td><td>bool</td><td>是</td><td>true=RmsNorm/LayerNorm,false=ValueNorm</td><td>是否有学习参数</td></tr></table></div>
+</section>
+
+<section id="gemmspec" data-entity="GemmSpec" data-req-ref="REQ-FATOP-002 REQ-FATOP-007 REQ-FATOP-016 REQ-FATOP-017 REQ-FATOP-019" data-entity-model-type="memory-layout" data-entity-ref="AttentionSpec CompileSession NormSpec Op" data-xref="REQ-FATOP-002 REQ-FATOP-007 REQ-FATOP-016 REQ-FATOP-017 REQ-FATOP-019">
+<h3>Entity: GemmSpec</h3>
+<p>Gemm/GemmBias 共用 spec，区分 has_bias。</p>
+<div data-entity-fields="">
+<h4>字段</h4>
+<ul>
+<li>m: SymDim</li>
+<li>n: usize</li>
+<li>k: usize</li>
+<li>dtype: DType</li>
+<li>trans_b: bool</li>
+<li>has_bias: bool（false=Gemm，true=GemmBias）</li>
+</ul>
+<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="m" data-type="string" data-required="true"><td>m</td><td>string</td><td>是</td><td>symbolic</td><td>M 维度</td></tr><tr data-field="n" data-type="integer" data-required="true"><td>n</td><td>integer</td><td>是</td><td>&gt;0</td><td>N 维度</td></tr><tr data-field="k" data-type="integer" data-required="true"><td>k</td><td>integer</td><td>是</td><td>&gt;0</td><td>K 维度</td></tr><tr data-field="dtype" data-type="string" data-required="true"><td>dtype</td><td>string</td><td>是</td><td>from inputs[0]</td><td>计算 dtype</td></tr><tr data-field="has_bias" data-type="boolean" data-required="true"><td>has_bias</td><td>bool</td><td>是</td><td>false=Gemm,true=GemmBias</td><td>是否含 bias</td></tr></table></div>
+</section>
+
+<section id="compilesession" data-entity="CompileSession" data-req-ref="REQ-FATOP-008 REQ-FATOP-009 REQ-FATOP-016 REQ-FATOP-017 REQ-FATOP-019" data-entity-model-type="memory-layout" data-entity-ref="AttentionSpec GemmSpec NormSpec Op" data-xref="REQ-FATOP-008 REQ-FATOP-009 REQ-FATOP-016 REQ-FATOP-017 REQ-FATOP-019">
+<h3>Entity: CompileSession</h3>
+<p>编译会话级共享状态，从 LoweringContext（18 字段）提取 13 字段。</p>
+<div data-entity-fields="">
+<h4>字段</h4>
+<ul>
+<li>width: SimdWidth</li>
+<li>sym_map: &amp;SymDimSlotMap</li>
+<li>registry: Option&lt;&amp;ScalarOpRegistry&gt;</li>
+<li>hook: Option&lt;&amp;dyn IsaHook&gt;</li>
+<li>budget: Option<resourcebudget></resourcebudget></li>
+<li>page_size: usize</li>
+<li>dot_cap: DotProductCap</li>
+<li>kv_elem_bytes: usize</li>
+<li>debug_jit: bool</li>
+<li>virtual_activation: Option&lt;&amp;VirtualActivationMap&gt;</li>
+<li>virtual_tensor_map: Option&lt;&amp;VirtualTensorMap&gt;</li>
+<li>layout: Option&lt;&amp;LayoutAssignment&gt;</li>
+<li>batch_ctx_ptr: Option<vregid></vregid></li>
+</ul>
+<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="width" data-type="string" data-required="true"><td>width</td><td>string</td><td>是</td><td>SIMD 宽度</td><td>硬件 SIMD 宽度</td></tr><tr data-field="sym_map" data-type="string" data-required="true"><td>sym_map</td><td>string</td><td>是</td><td>ref</td><td>符号维度槽映射</td></tr><tr data-field="page_size" data-type="integer" data-required="true"><td>page_size</td><td>integer</td><td>是</td><td>&gt;0</td><td>KV 页大小</td></tr><tr data-field="dot_cap" data-type="string" data-required="true"><td>dot_cap</td><td>string</td><td>是</td><td>硬件能力</td><td>点积能力上限</td></tr></table></div>
+</section>
+
+</section>
+
+<section id="artifact-decision" data-artifact-type="decision" data-section="12">
+<h2>12. Decision 定义（架构决策）</h2>
+
+<section id="dec-fatop-001" data-decision="DEC-FATOP-001" data-decision-dimension="technical">
+<h3>DEC-FATOP-001: CompileSession 替代 LoweringContext</h3>
+<p>从 LoweringContext（18 字段）提取编译会话级常量到 CompileSession（13 字段）+ op-local 字段保留在 LoweringContext。</p>
+<div data-decision-options="">
+<h4>方案选项</h4>
+<ul>
+<li>Option A: 保留 LoweringContext，不提取（拒绝重构）</li>
+<li>Option B: 完全删除 LoweringContext，所有字段全局化（破坏封装）</li>
+<li>Option C: 提取 CompileSession + 保留 LoweringContext op-local 字段（chosen）</li>
+</ul>
+</div>
+<div data-decision-chosen="">
+<h4>选定方案</h4>
+<p>Option C：CompileSession（13 字段）+ LoweringContext（session 引用 + op-local 字段）</p>
+</div>
+<div data-decision-rationale="">
+<h4>理由</h4>
+<p>编译会话级常量与 op-local 状态分离，符合 SRP（单一职责）。LoweringContext 通过 &amp;session 引用访问全局，零拷贝。</p>
+</div>
+<script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-FATOP-001"
+}</script></section>
+
+</section>
+
+<section id="artifact-dataflow" data-artifact-type="dataflow" data-section="13">
+<h2>13. Dataflow 定义（编译数据流）</h2>
+
+<section id="df-fatop-001" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-FATOP-001" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-001: Op 直接构造 → CompilerOp.op_v2（OpKind 已删除）</h3>
+<p>BUILD 阶段直接构造 Op，add_op(op: Op) 存储 CompilerOp.op_v2。不再经过 OpKind → from_op_kind 翻译。KvSource 由 features.family 策略选择。</p>
+<div data-dataflow-contract="">
+<h4>契约</h4>
+<ul>
+<li>from: graph_builder.add_op(op: Op, ...)</li>
+<li>to: CompilerOp.op_v2 = Op</li>
+<li>transform: Family → KvSource 策略 → Op 直接构造（含完整 Spec struct）</li>
+<li>direction: sync（编译时一次性）</li>
+</ul>
+</div>
+<script type="application/ld+json">{
+  "@context": "https://spec.example.com/dataflow",
+  "@type": "Dataflow",
+  "id": "DF-FATOP-001",
+  "from": "api-weight-loader",
+  "to": "api-umk-compile"
+}</script></section>
+
+<section id="df-fatop-002" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-FATOP-002" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-002: Op → lower_op_v2（lowering 入口，唯一 IR）</h3>
+<p>lowering 路径直接读 op.op_v2，Op 是唯一 IR，零 from_op_kind 调用。</p>
+<div data-dataflow-contract="">
+<h4>契约</h4>
+<ul>
+<li>from: CompilerOp.op_v2 (Op, 不再 Option 缓存)</li>
+<li>to: lower_op_v2(prog, op: &amp;Op, sess)</li>
+<li>transform: Op → VmInstr 序列（通过 Op Spec 直接获取参数）</li>
+<li>direction: sync（编译时一次性）</li>
+</ul>
+</div>
+<script type="application/ld+json">{
+  "@context": "https://spec.example.com/dataflow",
+  "@type": "Dataflow",
+  "id": "DF-FATOP-002",
+  "from": "api-umk-compile",
+  "to": "api-vminstr"
+}</script></section>
+
+<section id="df-fatop-003" data-flow-from="API-VMINSTR" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-FATOP-003" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+<h3>DF-FATOP-003: VmInstr → x86_64/aarch64/gpu_lower（ISA Lowering）</h3>
+<p>VmInstr（含 dtype/guard/effect 自描述）→ ISA 特化机器码。</p>
+<div data-dataflow-contract="">
+<h4>契约</h4>
+<ul>
+<li>from: VmProgram (含 VmInstr 序列)</li>
+<li>to: Machine Code (x86_64 / aarch64 / PTX / HIP / MSL)</li>
+<li>transform: VmInstr + DeviceProfile → ISA 指令序列</li>
+<li>direction: sync（编译时一次性）</li>
+</ul>
+</div>
+<script type="application/ld+json">{
+  "@context": "https://spec.example.com/dataflow",
+  "@type": "Dataflow",
+  "id": "DF-FATOP-003",
+  "from": "api-vminstr",
+  "to": "api-executor-forward"
+}</script><section id="df-tech-004" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-CLIENT-BUILD" data-dataflow="DF-TECH-004" data-dataflow-dimension="technical"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-TECH-004",
+  "title": "Weight Loading → Client Build (Technical)",
+  "dimension": "technical",
+  "from": "api-weight-loader",
+  "to": "api-client-build"
+}</script></section><section id="df-tech-005" data-flow-from="API-CLIENT-GENERATE" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-005" data-dataflow-dimension="technical"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-TECH-005",
+  "title": "Client Generate → Executor Forward (Technical)",
+  "dimension": "technical",
+  "from": "api-client-generate",
+  "to": "api-executor-forward"
+}</script></section><section id="df-tech-006" data-flow-from="API-CLIENT-EMBED" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-006" data-dataflow-dimension="technical"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-TECH-006",
+  "title": "Client Embed → Executor Forward (Technical)",
+  "dimension": "technical",
+  "from": "api-client-embed",
+  "to": "api-executor-forward"
+}</script></section><section id="df-tech-007" data-flow-from="API-CLIENT-RERANK" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-007" data-dataflow-dimension="technical"><script type="application/ld+json">{
+  "@type": "Dataflow",
+  "id": "DF-TECH-007",
+  "title": "Client Rerank → Executor Forward (Technical)",
+  "dimension": "technical",
+  "from": "api-client-rerank",
+  "to": "api-executor-forward"
+}</script></section></section>
+
+</section>
+
+<section id="artifact-interface" data-artifact-type="interface" data-section="14">
+<h2>14. Module / Interface 定义</h2>
+
+<section id="mod-fatop-001" data-module="MOD-FATOP-001" data-module-kind="module"><h3>MOD-FATOP-001: op 模块（唯一 IR）</h3>
+<p>Op 枚举 + Spec struct。OpKind enum 已物理删除，from_op_kind 适配层已删除。文件从 op_v2.inc.rs 重命名为 op.inc.rs。</p>
+<div data-module-contains="">
+<h4>包含</h4>
+<ul>
+<li>Op 枚举定义（77+ 变体，唯一 IR）</li>
+<li>Spec structs: AttentionSpec/NormSpec/GemmSpec/...</li>
+<li>OPCODE_VERSION 常量 (v3)</li>
+<li>key_from_op(op: &amp;Op) → OpKindKey（registry 索引）</li>
+</ul>
+</div>
+<div data-module-exposes="">
+<h4>对外暴露</h4>
+<ul>
+<li>Op 枚举</li>
+<li>Op::category(&amp;self) → &amp;'static str</li>
+<li>add_op(op: Op) / add_op_guarded(op: Op) 单参数 API</li>
+</ul>
+</div>
+<div data-module-depends="">
+<h4>依赖</h4>
+<ul>
+<li>CompilerGraph（查询 tensor metadata）</li>
+<li>CompilerOp（op.inputs/outputs）</li>
+<li>DType / QuantPrecision（dtype 传播）</li>
+<li>Family（BUILD 阶段 KvSource 策略选择）</li>
+</ul>
+</div>
+<script type="application/ld+json">{
+  "@context": "https://spec.example.com/module",
+  "@type": "Module",
+  "name": "MOD-FATOP-001"
+}</script></section>
+
+<section id="if-fatop-001" data-interface="IF-FATOP-001" data-interface-kind="contract">
+<h3>IF-FATOP-001: CompileSession 契约</h3>
+<p>LoweringContext 通过 &amp;CompileSession 引用访问编译会话级常量。</p>
+<div data-interface-input="">
+<h4>输入</h4>
+<ul>
+<li>width: SimdWidth</li>
+<li>sym_map: &amp;SymDimSlotMap</li>
+<li>registry: Option&lt;&amp;ScalarOpRegistry&gt;</li>
+<li>hook: Option&lt;&amp;dyn IsaHook&gt;</li>
+<li>... 13 字段</li>
+</ul>
+</div>
+<div data-interface-output="">
+<h4>输出</h4>
+<p>LoweringContext.session: &amp;'a CompileSession&lt;'a&gt;（共享引用）</p>
+</div>
+<div data-interface-errors="">
+<h4>错误类型</h4>
+<ul>
+<li>CompilerError::CodegenViolation（sym_map slot 缺失等）</li>
+</ul>
+</div>
+<script type="application/ld+json">{
+  "@context": "https://spec.example.com/interface",
+  "@type": "Interface",
+  "name": "IF-FATOP-001"
+}</script></section>
+
+</section>
+
+<section id="tests" data-section="15">
+<h2>15. Test 定义</h2>
+
+
+
+
+
+
+
+
+
+
+
+</section>
+</section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></article>
+<section id="req-fatop-023" data-req="REQ-FATOP-023" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-023 OpKind enum 物理删除 — Op 单 IR 收敛</h3><p>OpKind enum (81 变体) 物理删除。Op enum 是唯一 IR。add_op(kind: OpKind, ...) 替换为 add_op(op: Op)。编译管线零 OpKind 反查。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r OpKind src/ 零非注释匹配（OpKind enum 物理删除）</li><li>Op enum 是唯一 IR，编译管线零 OpKind 反查</li><li>add_op(kind: OpKind, ...) 替换为 add_op(op: Op)</li></ol></div></section><section id="req-fatop-024" data-req="REQ-FATOP-024" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-024 add_op(Op) 统一 API — OpKind 参数删除</h3><p>CompilerGraph API 简化为单参数：add_op(op: Op) / add_op_guarded(op: Op)。删除 add_op_with_op / add_op_guarded_with_op 双参数 API 和 kind_fallback 参数。key_from_op_kind 替换为 key_from_op。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r add_op_with_op src/ 零匹配（双参数 API 已删除）</li><li>add_op(op: Op) / add_op_guarded(op: Op) 单参数 API 存在</li><li>key_from_op 替代 key_from_op_kind</li><li>kind_fallback 参数已删除</li></ol></div></section><section id="req-fatop-025" data-req="REQ-FATOP-025" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-025 KvCacheWrite op 删除 — attention FromCache 内部覆盖 KV 写入</h3><p>Op::KvCacheWrite 是冗余 op — codegen 从未实现其 lowering (git 实证)，而 attention FromCache lowering 内部已通过 MemCopy K/V → kv_cache (dst=k_cache_base) 覆盖 KV 写入。移除冗余 op，消除触发未实现 lowering 的缺陷。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>Op::KvCacheWrite 变体不存在于 Op enum</li><li>attention FromCache lowering 内部覆盖 KV 写入（MemCopy K/V → kv_cache）</li><li>grep -r KvCacheWrite src/ 零 Op 构造匹配</li></ol></div></section><section id="req-fatop-026" data-req="REQ-FATOP-026" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec" data-req-api="POST /compile"><h3>REQ-FATOP-026 KvSource BUILD 阶段 family 驱动 — 符合 BUILD-COMPILE 边界</h3><p>KvSource 由 BUILD 阶段 features.family 决定，不再 hardcode KvSource::FromCache。Decoder → FromCache（generate loop 复用 KV cache）；Encoder → FromTensor（单遍消费当前图 K/V）。符合 ARCH-BUILD-COMPILE-BOUNDARY 铁律：BUILD 阶段做策略选择，COMPILE 阶段只读 AttentionSpec.kv_source。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>KvSource 由 features.family 决定非 hardcode</li><li>Decoder → KvSource::FromCache（generate loop 复用 KV cache）</li><li>Encoder → KvSource::FromTensor（单遍消费当前图 K/V）</li><li>COMPILE 阶段只读 AttentionSpec.kv_source，不传 Family</li></ol></div></section><section id="req-fatop-027" data-req="REQ-FATOP-027" data-req-status="implemented" data-req-domain="FATOP" data-req-category="deployment" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-027 OPCODE_VERSION v3 — OpKind 删除后 JIT cache 失效</h3><p>OpKind 物理删除后 OPCODE_VERSION 从 v2 bump 到 v3，旧缓存自动失效。版本注释说明 OpKind enum 删除 + CompilerOp.kind 字段删除 + add_op API 简化。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>OPCODE_VERSION 常量值 = 3</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>旧 JIT 缓存自动失效，冷启动一次性重编译</li><li>版本注释说明 OpKind enum 删除 + CompilerOp.kind 字段删除</li></ol></div></section><section id="req-fatop-028" data-req="REQ-FATOP-028" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-028 op_v2.inc.rs → op.inc.rs 文件重命名 — 唯一 IR 命名统一</h3><p>gllm-kernels 编译器中 op_v2.inc.rs 重命名为 op.inc.rs，反映 Op 作为唯一 IR 的收敛状态。不再有 v1/v2 双轨，命名统一。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>文件名 op.inc.rs 存在（op_v2.inc.rs 已重命名）</li><li>grep -r op_v2.inc.rs src/ 零匹配</li><li>OPCODE_VERSION 定义在 op.inc.rs</li></ol></div></section><section id="req-fatop-029" data-req="REQ-FATOP-029" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-029 OpKind 删除后测试基线 112037 — 0 failures</h3><p>OpKind 删除后测试基线：gllm-kernels 6838 passed (from_op_kind 死代码测试 -12)，gllm 44199 passed，0 failures。删除的 from_op_kind 测试是预期减少（翻译器本身已删除）。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>cargo test --lib 基线以一次真实实跑输出为准（gllm-kernels + gllm），禁止硬编码数字</li><li>基线满足加法恒等：kernels_passed + gllm_passed = total_passed（注：原文 6838+44199=51037，与曾记录的 112037 不符，须实跑校正，见 REQ-OE-4）</li><li>0 failures，声明须附实跑时间戳与命令</li><li>from_op_kind 死代码测试 -12 是预期减少</li></ol></div></section><section id="req-fatop-030" data-req="REQ-FATOP-030" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-030 from_op_kind translator 物理删除 — 零 OpKind 反查</h3><p>from_op_kind IR Translator 及其 4 个子方法物理删除。所有编译器 consumer 迁移到直接读取 Op。SemanticNode.op_kind → SemanticNode.op_v2。编译管线零 OpKind 反查。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r from_op_kind kernels/src/compiler/ 零非注释匹配</li><li>4 个子方法 from_op_kind_norm_activation/gemm_quant/attention_moe/structural 全部删除</li><li>SemanticNode.op_kind → SemanticNode.op_v2</li><li>编译管线零 OpKind 反查</li></ol></div></section><section id="req-fatop-031" data-req="REQ-FATOP-031" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-031 CompilerOp.kind 删除 — op_v2 成为唯一 IR 字段</h3><p>CompilerOp.kind 字段物理删除，op_v2 成为唯一 IR 字段。Lowering 路径直接读 op.op_v2，无 clone().or_else(from_op_kind) 缓存模式。测试 fixture 直接构造 Op。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>CompilerOp.kind 字段不存在（grep -r 'CompilerOp.*\.kind' 零匹配）</li><li>op.op_v2 是唯一 IR 字段</li><li>Lowering 路径直接读 op.op_v2，无 clone().or_else(from_op_kind)</li><li>测试 fixture 直接构造 Op</li></ol></div></section><section id="req-fatop-032" data-req="REQ-FATOP-032" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-032 gllm 全量 OpKind → Op 迁移（auto_graph/audio/vision/onnx/profiler）</h3><p>gllm 代码库全量 OpKind → Op 迁移：build_graph 153 处、audio/vision 176 处、onnx/graph_convert、profiler、small_graph、intent_tracker。所有 add_op_with_op/OpKind 构造替换为 add_op(Op) 直接构造。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r OpKind src/arch/ src/compat/ 零非注释匹配</li><li>build_graph 153 处已迁移到 add_op(Op)</li><li>audio/vision 176 处已迁移到 add_op(Op)</li><li>onnx/graph_convert、profiler、small_graph、intent_tracker 全部迁移</li></ol></div></section><section id="dec-fatop-002" data-decision="DEC-FATOP-002" data-decision-dimension="technical"><h3>DEC-FATOP-002: OpKind 物理删除 — 零向后兼容</h3>
+<p>决策：OpKind enum 物理删除，零向后兼容。用户决策记录在 commit dae40ad "全量删除兼容层"。</p>
+<p>备选方案：(1) 保留 OpKind 作为兼容层 (2) 逐步弃用 OpKind (deprecated) (3) OpKind 物理删除 + 零向后兼容 [采纳]</p><script type="application/ld+json">{
+  "@type": "Decision",
+  "id": "DEC-FATOP-002",
+  "context": "FAT-OPCODE Phase 1-8 建立了双 IR (OpKind + Op/op_v2)，from_op_kind 作为翻译桥。Phase 9 将 Op 物理删除 OpKind，收敛到单一 IR。",
+  "rationale": "1. from_op_kind 翻译层是临时基础设施，完成使命后应删除\n2. 双 IR 增加维护成本，每次新增 Op 需同步维护 OpKind + from_op_kind\n3. 兼容层违反用户 \"不需要向后兼容\" 的明确决策\n4. add_op_with_op 双参数 API 比单参数更复杂，迁移后简化"
+}</script></section><section id="cf-fatop-001" data-controlflow="CF-FATOP-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-weight-loader" data-controlflow-target="api-umk-compile"><script type="application/ld+json">{
+  "@type": "Controlflow",
+  "id": "CF-FATOP-001",
+  "title": "Load → Op Construction Control",
+  "dimension": "technical",
+  "from": "api-weight-loader",
+  "to": "api-umk-compile"
+}</script></section><section id="cf-fatop-002" data-controlflow="CF-FATOP-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-umk-compile" data-controlflow-target="api-vminstr"><script type="application/ld+json">{
+  "@type": "Controlflow",
+  "id": "CF-FATOP-002",
+  "title": "Compile → VmInstr Lowering Control",
+  "dimension": "technical",
+  "from": "api-umk-compile",
+  "to": "api-vminstr"
+}</script></section><section id="cf-fatop-003" data-controlflow="CF-FATOP-003" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-vminstr" data-controlflow-target="api-executor-forward"><script type="application/ld+json">{
+  "@type": "Controlflow",
+  "id": "CF-FATOP-003",
+  "title": "VmInstr → ISA Lowering → Executor Control",
+  "dimension": "technical",
+  "from": "api-vminstr",
+  "to": "api-executor-forward"
+}</script></section><section id="ent-predicate" data-entity="ENT-PREDICATE" data-req-ref="REQ-FATOP-010 REQ-FATOP-011" data-entity-model-type="relational" data-entity-ref="ENT-VM-INSTR" data-xref="REQ-FATOP-010 REQ-FATOP-011"><h3>undefined Predicate（基于 GprCondition 的掩码谓词）</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="condition" data-type="string" data-required="true"><td>condition</td><td>string</td><td>是</td><td></td><td>底层 GPR 条件码，控制 mask 生效范围</td></tr><tr data-field="num_vregs" data-type="number" data-required="true"><td>num_vregs</td><td>number</td><td>是</td><td></td><td>谓词引用的 VRegId 数量（用于寄存器分配追踪）</td></tr></table></section><section id="ent-mem-effect" data-entity="ENT-MEM-EFFECT" data-req-ref="REQ-FATOP-012" data-entity-model-type="relational" data-xref="REQ-FATOP-012"><h3>undefined MemEffect（内存依赖效果类型）</h3><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="effect_kind" data-type="string" data-required="true"><td>effect_kind</td><td>string</td><td>是</td><td></td><td>内存效果变体：Read=读取、Write=写入、ReadWrite=读写</td></tr><tr data-field="reads" data-type="boolean" data-required="true"><td>reads</td><td>boolean</td><td>是</td><td></td><td>是否包含读操作（Read 和 ReadWrite 为 true）</td></tr><tr data-field="writes" data-type="boolean" data-required="true"><td>writes</td><td>boolean</td><td>是</td><td></td><td>是否包含写操作（Write 和 ReadWrite 为 true）</td></tr></table></section></main><section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-fatop-006" data-test="TEST-FATOP-006" data-req-ref="REQ-FATOP-006" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-006: REQ-FATOP-006 单元测试</h4><p>验证 REQ-FATOP-006 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-007" data-test="TEST-FATOP-007" data-req-ref="REQ-FATOP-007" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-007: REQ-FATOP-007 单元测试</h4><p>验证 REQ-FATOP-007 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-008" data-test="TEST-FATOP-008" data-req-ref="REQ-FATOP-008" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-008: REQ-FATOP-008 单元测试</h4><p>验证 REQ-FATOP-008 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-009" data-test="TEST-FATOP-009" data-req-ref="REQ-FATOP-009" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-009: REQ-FATOP-009 单元测试</h4><p>验证 REQ-FATOP-009 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-010" data-test="TEST-FATOP-010" data-req-ref="REQ-FATOP-010" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-010: REQ-FATOP-010 单元测试</h4><p>验证 REQ-FATOP-010 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-011" data-test="TEST-FATOP-011" data-req-ref="REQ-FATOP-011" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-011: REQ-FATOP-011 单元测试</h4><p>验证 REQ-FATOP-011 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-012" data-test="TEST-FATOP-012" data-req-ref="REQ-FATOP-012" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-012: REQ-FATOP-012 单元测试</h4><p>验证 REQ-FATOP-012 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-013" data-test="TEST-FATOP-013" data-req-ref="REQ-FATOP-013" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-013: from_op_kind 物理删除反向断言</h4><p>反向断言测试（对应 deprecated REQ-FATOP-013）：grep 全仓零 from_op_kind 符号引用；编译期断言 OpKind enum 类型不存在（uncompilable reference test）；CompilerOp 无 .kind 字段。验证 OpKind→Op 翻译器已物理删除、零向后兼容层残留。</p></div><div id="test-fatop-014" data-test="TEST-FATOP-014" data-req-ref="REQ-FATOP-014" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-014: REQ-FATOP-014 单元测试</h4><p>验证 REQ-FATOP-014 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-015" data-test="TEST-FATOP-015" data-req-ref="REQ-FATOP-015" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-015: REQ-FATOP-015 单元测试</h4><p>验证 REQ-FATOP-015 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-016" data-test="TEST-FATOP-016" data-req-ref="REQ-FATOP-016" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-016: REQ-FATOP-016 单元测试</h4><p>验证 REQ-FATOP-016 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-017" data-test="TEST-FATOP-017" data-req-ref="REQ-FATOP-017" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-017: REQ-FATOP-017 单元测试</h4><p>验证 REQ-FATOP-017 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-018" data-test="TEST-FATOP-018" data-req-ref="REQ-FATOP-018" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-018: REQ-FATOP-018 单元测试</h4><p>验证 REQ-FATOP-018 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-019" data-test="TEST-FATOP-019" data-req-ref="REQ-FATOP-019" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-019: REQ-FATOP-019 单元测试</h4><p>验证 REQ-FATOP-019 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-020" data-test="TEST-FATOP-020" data-req-ref="REQ-FATOP-020" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-020: REQ-FATOP-020 单元测试</h4><p>验证 REQ-FATOP-020 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-021" data-test="TEST-FATOP-021" data-req-ref="REQ-FATOP-021" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-021: REQ-FATOP-021 单元测试</h4><p>验证 REQ-FATOP-021 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-022" data-test="TEST-FATOP-022" data-req-ref="REQ-FATOP-022" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-022: REQ-FATOP-022 单元测试</h4><p>验证 REQ-FATOP-022 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-023" data-test="TEST-FATOP-023" data-req-ref="REQ-FATOP-023" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-023: REQ-FATOP-023 单元测试</h4><p>验证 REQ-FATOP-023 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-024" data-test="TEST-FATOP-024" data-req-ref="REQ-FATOP-024" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-024: REQ-FATOP-024 单元测试</h4><p>验证 REQ-FATOP-024 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-025" data-test="TEST-FATOP-025" data-req-ref="REQ-FATOP-025" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-025: REQ-FATOP-025 单元测试</h4><p>验证 REQ-FATOP-025 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-026" data-test="TEST-FATOP-026" data-req-ref="REQ-FATOP-026" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-026: REQ-FATOP-026 单元测试</h4><p>验证 REQ-FATOP-026 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-027" data-test="TEST-FATOP-027" data-req-ref="REQ-FATOP-027" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-027: REQ-FATOP-027 单元测试</h4><p>验证 REQ-FATOP-027 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-028" data-test="TEST-FATOP-028" data-req-ref="REQ-FATOP-028" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-028: REQ-FATOP-028 单元测试</h4><p>验证 REQ-FATOP-028 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-029" data-test="TEST-FATOP-029" data-req-ref="REQ-FATOP-029" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-029: REQ-FATOP-029 单元测试</h4><p>验证 REQ-FATOP-029 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-030" data-test="TEST-FATOP-030" data-req-ref="REQ-FATOP-030" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-030: REQ-FATOP-030 单元测试</h4><p>验证 REQ-FATOP-030 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-031" data-test="TEST-FATOP-031" data-req-ref="REQ-FATOP-031" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-031: REQ-FATOP-031 单元测试</h4><p>验证 REQ-FATOP-031 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-032" data-test="TEST-FATOP-032" data-req-ref="REQ-FATOP-032" data-test-categories="unit" data-level="unit"><h4>TEST-FATOP-032: REQ-FATOP-032 单元测试</h4><p>验证 REQ-FATOP-032 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-001" data-test="TEST-FATOP-001" data-req-ref="REQ-FATOP-001" data-test-categories="unit"><h4>TEST-FATOP-001: REQ-FATOP-001 单元测试</h4><p>验证 REQ-FATOP-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-002" data-test="TEST-FATOP-002" data-req-ref="REQ-FATOP-002" data-test-categories="unit"><h4>TEST-FATOP-002: REQ-FATOP-002 单元测试</h4><p>验证 REQ-FATOP-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-003" data-test="TEST-FATOP-003" data-req-ref="REQ-FATOP-003" data-test-categories="unit"><h4>TEST-FATOP-003: REQ-FATOP-003 单元测试</h4><p>验证 REQ-FATOP-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-004" data-test="TEST-FATOP-004" data-req-ref="REQ-FATOP-004" data-test-categories="unit"><h4>TEST-FATOP-004: REQ-FATOP-004 单元测试</h4><p>验证 REQ-FATOP-004 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fatop-005" data-test="TEST-FATOP-005" data-req-ref="REQ-FATOP-005" data-test-categories="unit"><h4>TEST-FATOP-005: REQ-FATOP-005 单元测试</h4><p>验证 REQ-FATOP-005 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

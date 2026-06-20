@@ -36,6 +36,10 @@ fn get_shape(
 ///
 /// All tensor names are canonical (e.g., `embed`, `L0.q_proj`).
 /// `weight_shapes` must be keyed by canonical names (executor converts).
+// @trace REQ-FATOP-001 [entity:Op] Op 枚举扁平结构 — 唯一 IR（OpKind 已删除）
+// @trace REQ-FATOP-002 [entity:AttentionSpec] [entity:NormSpec] [entity:GemmSpec] Spec struct 携带完整自描述元数据
+// @trace REQ-FATOP-022 @trace 注解完备性
+// @trace REQ-FATOP-032 OpKind → Op 全量迁移（build_graph 153 处）
 pub fn build_compiler_graph(
     features: &ArchitectureFeatures,
     config: &ResolvedConfig,
@@ -46,6 +50,18 @@ pub fn build_compiler_graph(
     max_seq_len: usize,
 ) -> Result<CompilerGraph, GraphBuildError> {
     let mut g = CompilerGraph::new();
+
+    // @trace REQ-FATOP-026 [entity:AttentionSpec] KvSource BUILD 阶段 family 驱动
+    // KvSource 由 family 决定 (ARCH-BUILD-COMPILE-BOUNDARY: BUILD 阶段策略选择):
+    //   Decoder → generate loop → FromCache (持久化 KV cache, decoder 逐 token 复用)
+    //   Encoder → single pass → FromTensor (直接消费当前图 K/V, 无持久化 cache)
+    // Encoder 模型 (embedding/reranker/classifier) 不读写持久化 KV cache;
+    // 只有 Decoder (generator/chat) 才有 KV cache。KvCacheWrite 已物理删除 (REQ-FATOP-025),
+    // KV 持久化写入由 attention FromCache lowering 内部完成。
+    let kv_source = match features.family {
+        crate::arch::auto_graph::Family::Decoder => gllm_kernels::compiler::graph::KvSource::FromCache,
+        crate::arch::auto_graph::Family::Encoder => gllm_kernels::compiler::graph::KvSource::FromTensor,
+    };
 
     let s = SymDim::Symbolic {
         name: "seq_len".to_string(),
@@ -59,6 +75,8 @@ pub fn build_compiler_graph(
     let _ = weight_dtypes;
     let tdt = |_: &str| -> DType { dt };
 
+    // @trace REQ-FATOP-004 [entity:AttentionSpec] AttentionSpec kv_source 自描述
+    // @trace REQ-FATOP-005 [entity:AttentionSpec] AttentionSpec sinks 配置
     // Helper: generate Gemm or QuantGemm based on weight quantization type.
     let add_gemm_or_quant = |g: &mut CompilerGraph,
                               weight_name: &str,
@@ -76,6 +94,8 @@ pub fn build_compiler_graph(
         }
     };
 
+    // @trace REQ-FATOP-006 [entity:NormSpec] NormSpec dtype 自描述
+    // @trace REQ-FATOP-007 [entity:GemmSpec] GemmSpec 完整自描述
     let eps = config.norm_eps;
 
     // ── Derive dimensions from weight shapes (canonical names) ──
@@ -628,21 +648,18 @@ pub fn build_compiler_graph(
                 k_for_attn = rope_k;
             }
 
-            // KvCacheWrite: write K/V projections to KV cache (generate graphs only).
-            // In encode/embedding/rerank graphs, MHA uses K/V directly without persistence.
-            // kv_cache_ptr is resolved at lowering time from ABI, not as a graph tensor.
-            if !features.is_post_norm {
-                g.add_op(Op::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: this_head_dim, seq_len: s.clone() }, 
-                    vec![k_for_attn, v_out],
-                    vec![],
-                    &ptname("kv_write"),
-                );
-            }
+            // @trace REQ-FATOP-025 KvCacheWrite 已物理删除 — attention FromCache lowering 内部覆盖 KV 写入
+    // KV 持久化写入由 attention 的 FromCache lowering 内部完成 (lower_attention_v2:
+            // MemCopy K/V projection → kv_cache, dst=k_cache_base)。历史上独立的
+            // Op::KvCacheWrite 是冗余 op — codegen 从未实现其 lowering (git 实证),
+            // 而 attention FromCache 已覆盖 KV 写入。移除冗余 op, 避免触发未实现的
+            // lowering (缺陷 A: generator 崩在 "KvCacheWrite 未被 lower_op 处理")。
+            // Encoder (FromTensor) 不持久化 KV, 无此路径。
 
             // Attention
             let causal = features.causal;
             let attn = g.add_tensor(&ptname("attn"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
-            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 &ptname("mha"),
@@ -919,11 +936,11 @@ pub fn build_compiler_graph(
 
             // layer_output_scale: per-layer scalar multiply (Gemma 4 E2B/E4B)
             // cur = cur * out_scale  (shape=[1], per-layer scalar)
-            // NOTE: disabled for now — OpKind::Mul doesn't support [S,H] × [1] broadcasting.
-            // Will be enabled once a ScalarMul OpKind is added.
+            // NOTE: disabled for now — Op::Mul doesn't support [S,H] × [1] broadcasting.
+            // Will be enabled once a ScalarMul Op is added.
             // let out_scale_cn = cn_layer(ref_layer, "layer_output_scale");
             // if let Some(scale_shape) = weight_shapes.get(&out_scale_cn) {
-            //     ... TODO ...
+            //     ... future: ScalarMul broadcasting ...
             // }
 
             // Store results for this template type
@@ -1258,7 +1275,7 @@ pub fn build_compiler_graph(
                 // Standard MHA (not MLA attention)
                 let attn = g.add_tensor("layer.attn",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], dt);
-                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
+                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
                     vec![rope_q, rope_k, v_restored],
                     vec![attn],
                     "layer.mha_mla_unabs",
@@ -1268,7 +1285,7 @@ pub fn build_compiler_graph(
                 // ── MLA Absorbed Path (default, bandwidth-optimized) ──
                 let attn = g.add_tensor("layer.attn",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], dt);
-                g.add_op(Op::MlaAttention(MlaSpec { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: mla_d_c, d_rope: mla_d_rope, causal: causal, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache }), 
+                g.add_op(Op::MlaAttention(MlaSpec { seq_len: s.clone(), num_heads: num_heads, head_dim: head_dim, d_c: mla_d_c, d_rope: mla_d_rope, causal: causal, kv_source: kv_source }), 
                     vec![q_absorbed, c_kv, k_pe, uv_w],
                     vec![attn],
                     "layer.mla_attn",
@@ -1460,21 +1477,12 @@ pub fn build_compiler_graph(
                 k_for_attn = rope_k;
             }
 
-            // KvCacheWrite: write K/V projections to KV cache (generate graphs only).
-            // In encode/embedding/rerank graphs, MHA uses K/V directly without persistence.
-            // kv_cache_ptr is resolved at lowering time from ABI, not as a graph tensor.
-            if !features.is_post_norm {
-                g.add_op(Op::KvCacheWrite { num_kv_heads: num_kv_heads, head_dim: head_dim, seq_len: s.clone() }, 
-                    vec![k_for_attn, v_out],
-                    vec![],
-                    "layer.kv_write",
-                );
-            }
+            // KV 写入由 attention FromCache 内部 MemCopy 覆盖 (见上方注释), 不另设冗余 op。
 
             // ── Attention ──
             let causal = features.causal;
             let attn = g.add_tensor("layer.attn", vec![s.clone(), SymDim::Concrete(q_n)], dt);
-            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: gllm_kernels::compiler::graph::KvSource::FromCache, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 "layer.mha",
@@ -1599,7 +1607,11 @@ pub fn build_compiler_graph(
         }
 
         // ── FFN ──
-        // Pre-norm residual: resid + ffn_out. Post-norm residual: post_normed + ffn_out.
+        // Post-norm (BERT): residual = LayerNorm(attn + input) + ffn_output
+        //   The residual skip for FFN connects to the normed output, NOT the pre-norm attn residual.
+        //   In HuggingFace BERT: self.output(ffn_down, attention_output) where attention_output
+        //   is already LayerNorm(attn + input).
+        // Pre-norm (decoder): residual = resid + ffn_output where resid = hidden + attn
         let ffn_resid_src = if features.is_post_norm { post_normed } else { resid };
         let ffn_resid_tid: Option<TensorId>;
         match &features.ffn_type {
@@ -1982,11 +1994,11 @@ pub fn build_compiler_graph(
         }
 
         // layer_output_scale: per-layer scalar multiply (Gemma 4 E2B/E4B)
-        // NOTE: disabled for now — OpKind::Mul doesn't support [S,H] × [1] broadcasting.
-        // Will be enabled once a ScalarMul OpKind is added.
+        // NOTE: disabled for now — Op::Mul doesn't support [S,H] × [1] broadcasting.
+        // Will be enabled once a ScalarMul Op is added.
         // let out_scale_cn = cn_layer(0, "layer_output_scale");
         // if let Some(scale_shape) = weight_shapes.get(&out_scale_cn) {
-        //     ... TODO ...
+        //     ... future: ScalarMul broadcasting ...
         // }
 
         // Save layer config for later layer_loop_config setup
@@ -2055,11 +2067,23 @@ pub fn build_compiler_graph(
         final_hidden = final_hidden_raw;
     }
 
-    // ── Post-norm post-layer: MeanPool → Classifier head ──
+    // ── Post-norm post-layer: pool → output ──
     if features.is_post_norm {
-        // MeanPool: average over seq dimension → [hidden]
-        let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
-        g.add_op(Op::MeanPool { seq_len: 0, hidden: hidden, cls_mode: false },  vec![final_hidden], vec![pooled], "meanpool");
+        // Embedding models use MeanPool (average over seq dimension).
+        // Reranker/classification models use CLS token (position 0) — the classifier
+        // head expects the <s>/[CLS] representation, not the sequence average.
+        // (XLMRobertaClassificationHead: features[:, 0, :])
+        let pooled = if features.has_classifier {
+            // CLS token: extract position 0 from [seq_len, hidden] → [hidden]
+            let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
+            g.add_op(Op::MeanPool { seq_len: 0, hidden: hidden, cls_mode: true },  vec![final_hidden], vec![pooled], "cls_pool");
+            pooled
+        } else {
+            // MeanPool: average over seq dimension → [hidden]
+            let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
+            g.add_op(Op::MeanPool { seq_len: 0, hidden: hidden, cls_mode: false },  vec![final_hidden], vec![pooled], "meanpool");
+            pooled
+        };
 
         // Classifier head (if present): Dense → tanh → OutProj → output
         if features.has_classifier {
@@ -2098,7 +2122,14 @@ pub fn build_compiler_graph(
                 vec![cls_act, cls_out_w], vec![cls_result], "cls_out_proj");
 
             // Check for classifier bias — use GemmBias if present
-            let cls_out_bias_cn = cls_out_cn.clone().replace(".weight", ".bias");
+            // Canonical names may or may not end with ".weight":
+            //   "classifier.out_proj.weight" → bias = "classifier.out_proj.bias" (replace works)
+            //   "classifier" (short form) → bias = "classifier.bias" (append, not replace)
+            let cls_out_bias_cn = if cls_out_cn.ends_with(".weight") {
+                cls_out_cn.clone().replace(".weight", ".bias")
+            } else {
+                format!("{}.bias", cls_out_cn)
+            };
             let has_bias = weight_shapes.contains_key(&cls_out_bias_cn);
             if has_bias {
                 // Rebuild with GemmBias: undo the Gemm, redo as GemmBias
@@ -2117,9 +2148,12 @@ pub fn build_compiler_graph(
         }
     }
 
-    // ── Pre-norm post-layer: final_norm + lm_head + generate loop ──
-    // SPEC/39: Graph always builds the full model structure (lm_head →
-    // LogitSoftcap → Argmax → StoreToken → CheckStopCondition → MTP).
+    // ── Pre-norm post-layer ──
+    // Two mutually exclusive paths driven by weight topology:
+    //   has_classifier → MeanPool → Gemm(classifier) → output (single-pass classification)
+    //   !has_classifier → lm_head → LogitSoftcap → Argmax → StoreToken → CheckStopCondition (generate loop)
+    //
+    // SPEC/39: Graph always builds the full model structure.
     // OutputMode pruning happens at the BUILD strategy layer, not here.
     // Post-norm models (BERT/XLM-R) are architecturally different — they
     // naturally have MeanPool instead of lm_head (driven by weight-driven
@@ -2134,101 +2168,155 @@ pub fn build_compiler_graph(
             g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: dt, has_weight: true }),  vec![final_hidden, final_norm_w, bias_tid], vec![final_normed], "final_norm");
         }
 
-        // ── lm_head → LogitSoftcap → Argmax → StoreToken → CheckStopCondition ──
-        // Always built; OutputMode pruning is a BUILD strategy concern.
-        let lm_head_w = g.add_tensor_concrete("lm_head", &[vocab_size, hidden], tdt("lm_head"));
-        let mut logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-        add_gemm_or_quant(&mut g, "lm_head", s.clone(), vocab_size, hidden,
-            vec![final_normed, lm_head_w],
-            vec![logits],
-            "lm_head",
-        );
+        if features.has_classifier {
+            // ── Classification head path (pre-norm decoder with classifier) ──
+            // ARCH-RERANKER-CLASSIFY: Pre-norm decoder rerankers (e.g. Qwen3-Reranker)
+            // have a classification head instead of a language model head.
+            // The classifier weight has shape [num_labels, hidden] (typically [2, hidden]),
+            // not [vocab_size, hidden]. The graph produces a [num_labels] output
+            // directly, no Argmax/StoreToken/CheckStopCondition.
+            //
+            // Pool: extract CLS token (position 0) for classification.
+            // Decoder rerankers with a separate classifier head use the
+            // first token representation, same as encoder rerankers.
+            let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
+            g.add_op(Op::MeanPool { seq_len: 0, hidden: hidden, cls_mode: true },  vec![final_normed], vec![pooled], "cls_pool");
 
-        // ── Logit softcapping (Gemma 4: cap=30.0, Grok: cap=24.0) ──
-        // cap * tanh(logits / cap) before argmax — prevents extreme logit values.
-        if let Some(cap) = config.final_logit_softcapping {
-            let softcapped = g.add_tensor("logits_softcapped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-            g.add_op(Op::LogitSoftcap { cap: cap },  vec![logits], vec![softcapped], "logit_softcap");
-            logits = softcapped;
-        }
-
-        // ── MTP (Multi-Token Prediction) projection nodes (REQ-MTP-003) ──
-        // Each MTP depth projects the final hidden state through a per-depth
-        // weight matrix to produce candidate token logits:
-        //   mtp_logits_d = final_normed @ W_mtp[d]^T  → [seq_len, vocab_size]
-        //   candidate_d = argmax(mtp_logits_d)
-        //
-        // MTP weights are canonical-named "mtp_proj.{d}" (global) or
-        // "L{N}.mtp_proj.{d}" (per-layer), where d is the depth index.
-        // MTP depth is derived from weight_shapes presence (topology-driven),
-        // not from BusinessConfig (SPEC/39: mtp_config removed).
-        let mtp_global_prefix = "mtp_proj.";
-        let mtp_layered_prefix = format!("L{}.mtp_proj.", features.num_layers);
-
-        // Collect depth indices from weight_shapes
-        let mut mtp_depths: Vec<usize> = weight_shapes.keys()
-            .filter_map(|name| {
-                if let Some(suffix) = name.strip_prefix(mtp_global_prefix) {
-                    suffix.parse::<usize>().ok()
-                } else if let Some(suffix) = name.strip_prefix(&mtp_layered_prefix) {
-                    suffix.parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-            .collect();
-        mtp_depths.sort_unstable();
-        mtp_depths.dedup();
-
-        for d in mtp_depths {
-            let mtp_global = format!("mtp_proj.{}", d);
-            let mtp_layered = format!("L{}.mtp_proj.{}", features.num_layers, d);
-
-            // Resolve canonical name: prefer global variant, fall back to per-layer.
-            let actual_cn = if weight_shapes.contains_key(&mtp_global) {
-                mtp_global
-            } else if weight_shapes.contains_key(&mtp_layered) {
-                mtp_layered
-            } else {
-                // Weight not found for this depth — skip
-                continue;
+            // Classifier OutProj: [hidden] → [num_labels]
+            // Detect classifier weight by canonical name patterns.
+            // For GGUF rerankers: `output.weight` → name_map remaps to `classifier`
+            // For SafeTensors rerankers: `score.weight` → maps to `classifier`
+            let cls_out_cn = weight_shapes.keys()
+                .find(|k| (k.contains("classifier") || k.contains("score")) && !k.contains("dense") && !k.contains("bias"))
+                .cloned().unwrap_or("classifier".to_string());
+            let cls_out_shape = weight_shapes.get(&cls_out_cn);
+            let (num_labels, cls_out_k) = match cls_out_shape {
+                Some(s) if s.len() >= 2 => (s[0], s[1]),
+                Some(s) if s.len() == 1 => (s[0], hidden),
+                _ => (2, hidden), // default: binary classifier
             };
+            let cls_out_w = g.add_tensor_concrete(&cls_out_cn, &[num_labels, cls_out_k], tdt(&cls_out_cn));
+            let cls_result = g.add_tensor("cls_result", vec![SymDim::Concrete(num_labels)], dt);
+            add_gemm_or_quant(&mut g, &cls_out_cn, SymDim::Concrete(1), num_labels, cls_out_k,
+                vec![pooled, cls_out_w], vec![cls_result], "cls_out_proj");
 
-            let mtp_shape = weight_shapes.get(&actual_cn)
-                .expect("MTP weight shape must exist after contains_key check");
-            let mtp_n = if mtp_shape.len() >= 2 { mtp_shape[0] } else { vocab_size };
-            let mtp_k = if mtp_shape.len() >= 2 { mtp_shape[1] } else { hidden };
+            // Check for classifier bias — use GemmBias if present
+            // Canonical names may or may not end with ".weight":
+            //   "classifier.out_proj.weight" → bias = "classifier.out_proj.bias" (replace works)
+            //   "classifier" (short form) → bias = "classifier.bias" (append, not replace)
+            let cls_out_bias_cn = if cls_out_cn.ends_with(".weight") {
+                cls_out_cn.clone().replace(".weight", ".bias")
+            } else {
+                format!("{}.bias", cls_out_cn)
+            };
+            let has_bias = weight_shapes.contains_key(&cls_out_bias_cn);
+            if has_bias {
+                // Rebuild with GemmBias: undo the Gemm, redo as GemmBias
+                let bias_tid = g.add_tensor_concrete(&cls_out_bias_cn, &[num_labels], tdt(&cls_out_bias_cn));
+                let biased = g.add_tensor("cls_result_biased", vec![SymDim::Concrete(num_labels)], dt);
+                g.add_op(Op::GemmBias(GemmSpec { m: SymDim::Concrete(1), n: num_labels, k: cls_out_k, dtype: dt, trans_b: true, has_bias: true }),
+                    vec![pooled, cls_out_w, bias_tid], vec![biased], "cls_out_proj_biased");
+                g.outputs = vec![biased];
+            } else {
+                g.outputs = vec![cls_result];
+            }
+        } else {
+            // ── lm_head → LogitSoftcap → Argmax → StoreToken → CheckStopCondition ──
+            // Always built; OutputMode pruning is a BUILD strategy concern.
+            let lm_head_w = g.add_tensor_concrete("lm_head", &[vocab_size, hidden], tdt("lm_head"));
+            let mut logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+            add_gemm_or_quant(&mut g, "lm_head", s.clone(), vocab_size, hidden,
+                vec![final_normed, lm_head_w],
+                vec![logits],
+                "lm_head",
+            );
 
-            let mtp_w = g.add_tensor_concrete(&actual_cn, &[mtp_n, mtp_k], tdt(&actual_cn));
-            let mtp_logits = g.add_tensor(
-                &format!("mtp_logits_{}", d),
-                vec![s.clone(), SymDim::Concrete(mtp_n)],
-                dt,
-            );
-            add_gemm_or_quant(&mut g, &actual_cn, s.clone(), mtp_n, mtp_k,
-                vec![final_normed, mtp_w],
-                vec![mtp_logits],
-                &format!("mtp_proj_{}", d),
-            );
+            // ── Logit softcapping (Gemma 4: cap=30.0, Grok: cap=24.0) ──
+            // cap * tanh(logits / cap) before argmax — prevents extreme logit values.
+            if let Some(cap) = config.final_logit_softcapping {
+                let softcapped = g.add_tensor("logits_softcapped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+                g.add_op(Op::LogitSoftcap { cap: cap },  vec![logits], vec![softcapped], "logit_softcap");
+                logits = softcapped;
+            }
 
-            let mtp_token = g.add_tensor(
-                &format!("mtp_token_{}", d),
-                vec![SymDim::Concrete(1)],
-                dt,
-            );
-            g.add_op(Op::Argmax { vocab_size: mtp_n }, 
-                vec![mtp_logits], vec![mtp_token], &format!("mtp_argmax_{}", d));
-            g.add_op(Op::StoreToken,
-                vec![mtp_token], vec![], &format!("mtp_store_{}", d));
+            // ── MTP (Multi-Token Prediction) projection nodes (REQ-MTP-003) ──
+            // Each MTP depth projects the final hidden state through a per-depth
+            // weight matrix to produce candidate token logits:
+            //   mtp_logits_d = final_normed @ W_mtp[d]^T  → [seq_len, vocab_size]
+            //   candidate_d = argmax(mtp_logits_d)
+            //
+            // MTP weights are canonical-named "mtp_proj.{d}" (global) or
+            // "L{N}.mtp_proj.{d}" (per-layer), where d is the depth index.
+            // MTP depth is derived from weight_shapes presence (topology-driven),
+            // not from BusinessConfig (SPEC/39: mtp_config removed).
+            let mtp_global_prefix = "mtp_proj.";
+            let mtp_layered_prefix = format!("L{}.mtp_proj.", features.num_layers);
+
+            // Collect depth indices from weight_shapes
+            let mut mtp_depths: Vec<usize> = weight_shapes.keys()
+                .filter_map(|name| {
+                    if let Some(suffix) = name.strip_prefix(mtp_global_prefix) {
+                        suffix.parse::<usize>().ok()
+                    } else if let Some(suffix) = name.strip_prefix(&mtp_layered_prefix) {
+                        suffix.parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            mtp_depths.sort_unstable();
+            mtp_depths.dedup();
+
+            for d in mtp_depths {
+                let mtp_global = format!("mtp_proj.{}", d);
+                let mtp_layered = format!("L{}.mtp_proj.{}", features.num_layers, d);
+
+                // Resolve canonical name: prefer global variant, fall back to per-layer.
+                let actual_cn = if weight_shapes.contains_key(&mtp_global) {
+                    mtp_global
+                } else if weight_shapes.contains_key(&mtp_layered) {
+                    mtp_layered
+                } else {
+                    // Weight not found for this depth — skip
+                    continue
+                };
+
+                let mtp_shape = weight_shapes.get(&actual_cn)
+                    .expect("MTP weight shape must exist after contains_key check");
+                let mtp_n = if mtp_shape.len() >= 2 { mtp_shape[0] } else { vocab_size };
+                let mtp_k = if mtp_shape.len() >= 2 { mtp_shape[1] } else { hidden };
+
+                let mtp_w = g.add_tensor_concrete(&actual_cn, &[mtp_n, mtp_k], tdt(&actual_cn));
+                let mtp_logits = g.add_tensor(
+                    &format!("mtp_logits_{}", d),
+                    vec![s.clone(), SymDim::Concrete(mtp_n)],
+                    dt,
+                );
+                add_gemm_or_quant(&mut g, &actual_cn, s.clone(), mtp_n, mtp_k,
+                    vec![final_normed, mtp_w],
+                    vec![mtp_logits],
+                    &format!("mtp_proj_{}", d),
+                );
+
+                let mtp_token = g.add_tensor(
+                    &format!("mtp_token_{}", d),
+                    vec![SymDim::Concrete(1)],
+                    dt,
+                );
+                g.add_op(Op::Argmax { vocab_size: mtp_n },
+                    vec![mtp_logits], vec![mtp_token], &format!("mtp_argmax_{}", d));
+                g.add_op(Op::StoreToken,
+                    vec![mtp_token], vec![], &format!("mtp_store_{}", d));
+            }
+
+            // ── Argmax → StoreToken → CheckStopCondition (generate loop) ──
+            // Always present in non-post-norm graphs.  BUILD strategy prunes
+            // these when OutputMode is EncodeToLayer/ClassifyBinary.
+            let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
+            g.add_op(Op::Argmax { vocab_size: vocab_size },  vec![logits], vec![token_id], "argmax");
+            g.add_op(Op::StoreToken, vec![token_id], vec![], "store_token");
+            g.add_op(Op::CheckStopCondition, vec![token_id], vec![], "check_stop");
         }
-
-        // ── Argmax → StoreToken → CheckStopCondition (generate loop) ──
-        // Always present in non-post-norm graphs.  BUILD strategy prunes
-        // these when OutputMode is EncodeToLayer/ClassifyBinary.
-        let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
-        g.add_op(Op::Argmax { vocab_size: vocab_size },  vec![logits], vec![token_id], "argmax");
-        g.add_op(Op::StoreToken, vec![token_id], vec![], "store_token");
-        g.add_op(Op::CheckStopCondition, vec![token_id], vec![], "check_stop");
     }
 
     // Set graph inputs: all tensors without a producer (external inputs).
@@ -2244,7 +2332,10 @@ pub fn build_compiler_graph(
             .collect();
         external.sort_by_key(|t| {
             let name = t.name.to_ascii_lowercase();
-            if name.contains("token") || name == "input" || name == "hidden_0" {
+            // BCE-20260619-001: Only `token_ids` is an activation tensor (group 0).
+            // `token_type_embed` is a weight tensor and must be in global weights (group 1).
+            // Previously `name.contains("token")` misclassified token_type_embed as activation.
+            if name == "token_ids" || name == "input" || name == "hidden_0" {
                 (0u8, 0u8)
             } else if name.starts_with("l0.") || name.starts_with("l4.")
                 || name.starts_with("l15.") || name.starts_with("l19.")
@@ -2424,7 +2515,7 @@ pub fn build_compiler_graph(
     // Register physical byte sizes for all quantized weight tensors.
     let quant_sizes: Vec<(gllm_kernels::compiler::graph::TensorId, usize)> = g.ops.iter()
         .filter_map(|op| {
-            match &op.op_v2 {
+            match &op.op {
                 Op::QuantGemm(spec) => {
                     let n = spec.n;
                     let k = spec.k;

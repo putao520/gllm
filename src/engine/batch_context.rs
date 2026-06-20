@@ -16,7 +16,7 @@
 
 // ── Header field offsets ──
 
-use crate::engine::mega_kernel_v2;
+use crate::engine::mega_kernel_gpu;
 
 pub const BATCH_CTX_HEADER_SIZE: usize = 96;
 
@@ -139,7 +139,7 @@ impl BatchContext {
     /// `max_batch_size` must be >= `initial_num_seqs`.
     pub fn with_v2_extension(max_batch_size: usize, initial_num_seqs: usize) -> Self {
         assert!(max_batch_size >= initial_num_seqs);
-        use crate::engine::mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE;
+        use crate::engine::mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE;
         let total_bytes = BATCH_CTX_HEADER_SIZE
             + max_batch_size * SEQ_META_STRIDE
             + BATCH_CTX_EXTENSION_SIZE;
@@ -298,67 +298,67 @@ impl BatchContext {
     }
 
     pub fn set_ext_request_queue_ptr(&mut self, p: *const u8) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_REQUEST_QUEUE_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_REQUEST_QUEUE_PTR), p as usize);
     }
 
     pub fn set_ext_output_ring_ptr(&mut self, p: *const u8) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_OUTPUT_RING_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_OUTPUT_RING_PTR), p as usize);
     }
 
     pub fn set_ext_kv_free_bitmap_ptr(&mut self, p: *mut u32) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_KV_FREE_BITMAP_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_KV_FREE_BITMAP_PTR), p as usize);
     }
 
     pub fn set_ext_kv_pool_total_pages(&mut self, v: u32) {
-        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), v);
+        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), v);
     }
 
     pub fn set_ext_max_batch_size(&mut self, v: u32) {
-        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_MAX_BATCH_SIZE), v);
+        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_MAX_BATCH_SIZE), v);
     }
 
-    pub fn set_ext_dual_batch_meta(&mut self, meta: &mega_kernel_v2::DualBatchMeta) {
-        let base = Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_DUAL_BATCH_META);
+    pub fn set_ext_dual_batch_meta(&mut self, meta: &mega_kernel_gpu::DualBatchMeta) {
+        let base = Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_DUAL_BATCH_META);
         let bytes = unsafe {
-            std::slice::from_raw_parts(meta as *const _ as *const u8, mega_kernel_v2::DualBatchMeta::SIZE)
+            std::slice::from_raw_parts(meta as *const _ as *const u8, mega_kernel_gpu::DualBatchMeta::SIZE)
         };
-        self.data[base..base + mega_kernel_v2::DualBatchMeta::SIZE].copy_from_slice(bytes);
+        self.data[base..base + mega_kernel_gpu::DualBatchMeta::SIZE].copy_from_slice(bytes);
     }
 
     pub fn set_ext_autotune_actual_batch(&mut self, v: u32) {
-        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH), v);
+        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH), v);
     }
 
     pub fn set_ext_pool_cluster_dsmem_ptr(&mut self, p: *mut u8) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_POOL_CLUSTER_DSMEM_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_POOL_CLUSTER_DSMEM_PTR), p as usize);
     }
 
     pub fn set_ext_pending_free_list_ptr(&mut self, p: *mut u32) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_PENDING_FREE_LIST_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_PENDING_FREE_LIST_PTR), p as usize);
     }
 
     pub fn set_ext_pending_free_count_ptr(&mut self, p: *mut u32) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_PENDING_FREE_COUNT_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_PENDING_FREE_COUNT_PTR), p as usize);
     }
 
     pub fn set_ext_output_per_cta_doorbell_ptr(&mut self, p: *mut u64) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_OUTPUT_PER_CTA_DOORBELL_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_OUTPUT_PER_CTA_DOORBELL_PTR), p as usize);
     }
 
     pub fn set_ext_output_epoch_flag_ptr(&mut self, p: *mut u32) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_OUTPUT_EPOCH_FLAG_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_OUTPUT_EPOCH_FLAG_PTR), p as usize);
     }
 
     // ── REQ-KV-EXT-001: V2 extension field writers ──
 
     /// Set KvPageHeader stride in bytes (64 for V2, was 56 for V1).
     pub fn set_ext_kv_page_header_stride(&mut self, v: u32) {
-        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_KV_PAGE_HEADER_STRIDE), v);
+        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_KV_PAGE_HEADER_STRIDE), v);
     }
 
     /// Set base pointer for ext_id indexed KV extension slots.
     pub fn set_ext_kv_ext_id_base_ptr(&mut self, p: *const u8) {
-        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_KV_EXT_ID_BASE_PTR), p as usize);
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_gpu::EXT_KV_EXT_ID_BASE_PTR), p as usize);
     }
 }
 
@@ -530,15 +530,15 @@ mod tests {
 
         // Verify
         assert_eq!(
-            read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES),
+            read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES),
             1024
         );
         assert_eq!(
-            read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_MAX_BATCH_SIZE),
+            read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_MAX_BATCH_SIZE),
             4
         );
         assert_eq!(
-            read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH),
+            read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH),
             3
         );
     }
@@ -546,11 +546,11 @@ mod tests {
     #[test]
     fn test_batch_context_v2_dual_batch_meta() {
         let mut ctx = BatchContext::with_v2_extension(4, 0);
-        let meta = mega_kernel_v2::DualBatchMeta::new(4);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(4);
         ctx.set_ext_dual_batch_meta(&meta);
 
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        let meta_base = ext_start + mega_kernel_v2::EXT_DUAL_BATCH_META;
+        let meta_base = ext_start + mega_kernel_gpu::EXT_DUAL_BATCH_META;
         // Verify ping_seq_offset (first field) = 0
         assert_eq!(read_u32(&ctx.data, meta_base), 0);
         // Verify pong_seq_offset = 4 (max_batch_size)
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn batch_context_v2_extension_byte_size() {
         let ctx = BatchContext::with_v2_extension(8, 2);
-        let expected = BATCH_CTX_HEADER_SIZE + 8 * SEQ_META_STRIDE + mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE;
+        let expected = BATCH_CTX_HEADER_SIZE + 8 * SEQ_META_STRIDE + mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE;
         assert_eq!(ctx.byte_size(), expected);
     }
 
@@ -868,15 +868,15 @@ mod tests {
 
         let dummy_req = 0xAABB_usize as *const u8;
         ctx.set_ext_request_queue_ptr(dummy_req);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_REQUEST_QUEUE_PTR), dummy_req as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_REQUEST_QUEUE_PTR), dummy_req as usize);
 
         let dummy_ring = 0xCCDD_usize as *const u8;
         ctx.set_ext_output_ring_ptr(dummy_ring);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_OUTPUT_RING_PTR), dummy_ring as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_OUTPUT_RING_PTR), dummy_ring as usize);
 
         let dummy_bitmap = 0xEEFF_usize as *mut u32;
         ctx.set_ext_kv_free_bitmap_ptr(dummy_bitmap);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_FREE_BITMAP_PTR), dummy_bitmap as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_FREE_BITMAP_PTR), dummy_bitmap as usize);
     }
 
     #[test]
@@ -886,23 +886,23 @@ mod tests {
 
         let dummy_dsmem = 0x1111_usize as *mut u8;
         ctx.set_ext_pool_cluster_dsmem_ptr(dummy_dsmem);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_POOL_CLUSTER_DSMEM_PTR), dummy_dsmem as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_POOL_CLUSTER_DSMEM_PTR), dummy_dsmem as usize);
 
         let dummy_free_list = 0x2222_usize as *mut u32;
         ctx.set_ext_pending_free_list_ptr(dummy_free_list);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_PENDING_FREE_LIST_PTR), dummy_free_list as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_PENDING_FREE_LIST_PTR), dummy_free_list as usize);
 
         let dummy_free_count = 0x3333_usize as *mut u32;
         ctx.set_ext_pending_free_count_ptr(dummy_free_count);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_PENDING_FREE_COUNT_PTR), dummy_free_count as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_PENDING_FREE_COUNT_PTR), dummy_free_count as usize);
 
         let dummy_doorbell = 0x4444_usize as *mut u64;
         ctx.set_ext_output_per_cta_doorbell_ptr(dummy_doorbell);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_OUTPUT_PER_CTA_DOORBELL_PTR), dummy_doorbell as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_OUTPUT_PER_CTA_DOORBELL_PTR), dummy_doorbell as usize);
 
         let dummy_epoch = 0x5555_usize as *mut u32;
         ctx.set_ext_output_epoch_flag_ptr(dummy_epoch);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_OUTPUT_EPOCH_FLAG_PTR), dummy_epoch as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_OUTPUT_EPOCH_FLAG_PTR), dummy_epoch as usize);
     }
 
     #[test]
@@ -935,7 +935,7 @@ mod tests {
         assert_eq!(ctx.max_batch_size, 32);
         assert_eq!(ctx.num_seqs, 1);
         // Buffer has space for 32 sequences worth of per-seq data
-        assert_eq!(ctx.byte_size(), BATCH_CTX_HEADER_SIZE + 32 * SEQ_META_STRIDE + mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE);
+        assert_eq!(ctx.byte_size(), BATCH_CTX_HEADER_SIZE + 32 * SEQ_META_STRIDE + mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE);
     }
 
     #[test]
@@ -1195,11 +1195,11 @@ mod tests {
     #[test]
     fn batch_context_v2_extension_dual_batch_meta_non_zero_max() {
         let mut ctx = BatchContext::with_v2_extension(32, 0);
-        let meta = mega_kernel_v2::DualBatchMeta::new(32);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(32);
         ctx.set_ext_dual_batch_meta(&meta);
 
         let ext_start = BATCH_CTX_HEADER_SIZE + 32 * SEQ_META_STRIDE;
-        let meta_base = ext_start + mega_kernel_v2::EXT_DUAL_BATCH_META;
+        let meta_base = ext_start + mega_kernel_gpu::EXT_DUAL_BATCH_META;
         // ping_seq_offset = 0
         assert_eq!(read_u32(&ctx.data, meta_base), 0);
         // pong_seq_offset = 32
@@ -1210,51 +1210,51 @@ mod tests {
     fn batch_context_v2_ext_field_with_non_zero_offset() {
         // ext_field(base, offset) should add the offset parameter
         let base_off = BatchContext::ext_field(4, 0);
-        let kv_off = BatchContext::ext_field(4, mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES);
-        assert_eq!(kv_off - base_off, mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES);
+        let kv_off = BatchContext::ext_field(4, mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES);
+        assert_eq!(kv_off - base_off, mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES);
     }
 
     #[test]
     fn batch_context_extension_offsets_within_extension_size() {
         // All extension offsets + their data size must fit in BATCH_CTX_EXTENSION_SIZE
         let ptr_fields: &[(usize, usize)] = &[
-            (mega_kernel_v2::EXT_REQUEST_QUEUE_PTR, 8),
-            (mega_kernel_v2::EXT_OUTPUT_RING_PTR, 8),
-            (mega_kernel_v2::EXT_KV_FREE_BITMAP_PTR, 8),
-            (mega_kernel_v2::EXT_POOL_CLUSTER_DSMEM_PTR, 8),
-            (mega_kernel_v2::EXT_PENDING_FREE_LIST_PTR, 8),
-            (mega_kernel_v2::EXT_PENDING_FREE_COUNT_PTR, 8),
-            (mega_kernel_v2::EXT_OUTPUT_PER_CTA_DOORBELL_PTR, 8),
-            (mega_kernel_v2::EXT_OUTPUT_EPOCH_FLAG_PTR, 8),
+            (mega_kernel_gpu::EXT_REQUEST_QUEUE_PTR, 8),
+            (mega_kernel_gpu::EXT_OUTPUT_RING_PTR, 8),
+            (mega_kernel_gpu::EXT_KV_FREE_BITMAP_PTR, 8),
+            (mega_kernel_gpu::EXT_POOL_CLUSTER_DSMEM_PTR, 8),
+            (mega_kernel_gpu::EXT_PENDING_FREE_LIST_PTR, 8),
+            (mega_kernel_gpu::EXT_PENDING_FREE_COUNT_PTR, 8),
+            (mega_kernel_gpu::EXT_OUTPUT_PER_CTA_DOORBELL_PTR, 8),
+            (mega_kernel_gpu::EXT_OUTPUT_EPOCH_FLAG_PTR, 8),
         ];
         for &(off, size) in ptr_fields {
             assert!(
-                off + size <= mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE,
+                off + size <= mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE,
                 "extension field at offset {} with size {} exceeds extension size {}",
-                off, size, mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE
+                off, size, mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE
             );
         }
         let u32_fields: &[(usize, usize)] = &[
-            (mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES, 4),
-            (mega_kernel_v2::EXT_MAX_BATCH_SIZE, 4),
-            (mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH, 4),
+            (mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES, 4),
+            (mega_kernel_gpu::EXT_MAX_BATCH_SIZE, 4),
+            (mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH, 4),
         ];
         for &(off, size) in u32_fields {
             assert!(
-                off + size <= mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE,
+                off + size <= mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE,
                 "extension u32 field at offset {} with size {} exceeds extension size {}",
-                off, size, mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE
+                off, size, mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE
             );
         }
         // DualBatchMeta: 24 bytes
         assert!(
-            mega_kernel_v2::EXT_DUAL_BATCH_META + mega_kernel_v2::DualBatchMeta::SIZE
-                <= mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE,
+            mega_kernel_gpu::EXT_DUAL_BATCH_META + mega_kernel_gpu::DualBatchMeta::SIZE
+                <= mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE,
             "DualBatchMeta exceeds extension size"
         );
         // Reserved at offset 92
         assert!(
-            mega_kernel_v2::EXT_RESERVED + 4 <= mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE,
+            mega_kernel_gpu::EXT_RESERVED + 4 <= mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE,
             "reserved field exceeds extension size"
         );
     }
@@ -1485,7 +1485,7 @@ mod tests {
         let ctx = BatchContext::with_v2_extension(16, 2);
 
         // Assert: total = header + 16*stride + extension
-        let expected = BATCH_CTX_HEADER_SIZE + 16 * SEQ_META_STRIDE + mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE;
+        let expected = BATCH_CTX_HEADER_SIZE + 16 * SEQ_META_STRIDE + mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE;
         assert_eq!(ctx.byte_size(), expected);
         // Can write to seq index 15 (the 16th slot) without panic
         let mut ctx_mut = ctx;
@@ -1576,28 +1576,28 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_new_sets_ping_offset_zero() {
-        let meta = mega_kernel_v2::DualBatchMeta::new(8);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(8);
         assert_eq!(meta.ping_seq_offset, 0);
         assert_eq!(meta.ping_seq_count, 0);
     }
 
     #[test]
     fn dual_batch_meta_new_sets_pong_offset_to_max_batch() {
-        let meta = mega_kernel_v2::DualBatchMeta::new(16);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(16);
         assert_eq!(meta.pong_seq_offset, 16);
         assert_eq!(meta.pong_seq_count, 0);
     }
 
     #[test]
     fn dual_batch_meta_new_epoch_fields_zero() {
-        let meta = mega_kernel_v2::DualBatchMeta::new(4);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(4);
         assert_eq!(meta.step_epoch, 0);
         assert_eq!(meta.epoch_arrival_count, 0);
     }
 
     #[test]
     fn dual_batch_meta_default_all_zero() {
-        let meta = mega_kernel_v2::DualBatchMeta::default();
+        let meta = mega_kernel_gpu::DualBatchMeta::default();
         assert_eq!(meta.ping_seq_offset, 0);
         assert_eq!(meta.ping_seq_count, 0);
         assert_eq!(meta.pong_seq_offset, 0);
@@ -1608,7 +1608,7 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_swap_exchanges_ping_pong_offsets() {
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(8);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(8);
         meta.ping_seq_count = 3;
         meta.pong_seq_count = 5;
         meta.swap();
@@ -1620,7 +1620,7 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_swap_increments_epoch() {
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(4);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(4);
         assert_eq!(meta.step_epoch, 0);
         meta.swap();
         assert_eq!(meta.step_epoch, 1);
@@ -1630,7 +1630,7 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_swap_resets_arrival_count() {
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(4);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(4);
         meta.epoch_arrival_count = 7;
         meta.swap();
         assert_eq!(meta.epoch_arrival_count, 0);
@@ -1638,7 +1638,7 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_swap_wrapping_epoch() {
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(4);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(4);
         meta.step_epoch = u32::MAX;
         meta.swap();
         assert_eq!(meta.step_epoch, 0);
@@ -1646,12 +1646,12 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_size_is_24() {
-        assert_eq!(mega_kernel_v2::DualBatchMeta::SIZE, 24);
+        assert_eq!(mega_kernel_gpu::DualBatchMeta::SIZE, 24);
     }
 
     #[test]
     fn dual_batch_meta_clone_equals_original() {
-        let meta = mega_kernel_v2::DualBatchMeta::new(16);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(16);
         let cloned = meta.clone();
         assert_eq!(cloned.ping_seq_offset, meta.ping_seq_offset);
         assert_eq!(cloned.ping_seq_count, meta.ping_seq_count);
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_copy_is_independent() {
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(8);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(8);
         let copy = meta;
         meta.ping_seq_count = 99;
         assert_eq!(copy.ping_seq_count, 0);
@@ -1671,7 +1671,7 @@ mod tests {
 
     #[test]
     fn dual_batch_meta_debug_formats_all_fields() {
-        let meta = mega_kernel_v2::DualBatchMeta::new(4);
+        let meta = mega_kernel_gpu::DualBatchMeta::new(4);
         let s = format!("{:?}", meta);
         assert!(s.contains("ping_seq_offset"));
         assert!(s.contains("pong_seq_offset"));
@@ -1783,7 +1783,7 @@ mod tests {
         ctx.set_ext_kv_pool_total_pages(100);
         ctx.set_ext_kv_pool_total_pages(200);
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), 200);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), 200);
     }
 
     #[test]
@@ -1792,7 +1792,7 @@ mod tests {
         ctx.set_ext_max_batch_size(1);
         ctx.set_ext_max_batch_size(4);
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_MAX_BATCH_SIZE), 4);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_MAX_BATCH_SIZE), 4);
     }
 
     #[test]
@@ -1801,7 +1801,7 @@ mod tests {
         ctx.set_ext_autotune_actual_batch(0);
         ctx.set_ext_autotune_actual_batch(3);
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH), 3);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH), 3);
     }
 
     // ── Extension pointer field overwrite isolation ──
@@ -1818,8 +1818,8 @@ mod tests {
         ctx.set_ext_output_ring_ptr(p2);
 
         // Writing p2 should not overwrite p1
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_REQUEST_QUEUE_PTR), p1 as usize);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_OUTPUT_RING_PTR), p2 as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_REQUEST_QUEUE_PTR), p1 as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_OUTPUT_RING_PTR), p2 as usize);
     }
 
     #[test]
@@ -1831,7 +1831,7 @@ mod tests {
         ctx.set_ext_kv_free_bitmap_ptr(p1);
         let p2 = 0x2222_usize as *mut u32;
         ctx.set_ext_kv_free_bitmap_ptr(p2);
-        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_FREE_BITMAP_PTR), p2 as usize);
+        assert_eq!(read_usize(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_FREE_BITMAP_PTR), p2 as usize);
     }
 
     // ── V2 extension data_initially_zeroed ──
@@ -1840,7 +1840,7 @@ mod tests {
     fn batch_context_v2_extension_data_initially_zeroed() {
         let ctx = BatchContext::with_v2_extension(4, 0);
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        for i in 0..mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE {
+        for i in 0..mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE {
             assert_eq!(
                 ctx.data[ext_start + i], 0,
                 "extension byte at offset {} should be zero-initialized",
@@ -2063,8 +2063,8 @@ mod tests {
         let cloned = ctx.clone();
         ctx.set_ext_kv_pool_total_pages(999);
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        assert_eq!(read_u32(&cloned.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), 100);
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), 999);
+        assert_eq!(read_u32(&cloned.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), 100);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), 999);
     }
 
     // ── Constant layout invariants ──
@@ -2081,21 +2081,21 @@ mod tests {
 
     #[test]
     fn constants_extension_size_is_128() {
-        assert_eq!(mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE, 128);
+        assert_eq!(mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE, 128);
     }
 
     #[test]
     fn constants_extension_size_multiple_of_8() {
-        assert_eq!(mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE % 8, 0);
+        assert_eq!(mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE % 8, 0);
     }
 
     #[test]
     fn constants_extension_u32_offsets_4_byte_aligned() {
         let u32_ext_offsets = [
-            mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES,
-            mega_kernel_v2::EXT_MAX_BATCH_SIZE,
-            mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH,
-            mega_kernel_v2::EXT_RESERVED,
+            mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES,
+            mega_kernel_gpu::EXT_MAX_BATCH_SIZE,
+            mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH,
+            mega_kernel_gpu::EXT_RESERVED,
         ];
         for &off in &u32_ext_offsets {
             assert_eq!(off % 4, 0, "extension u32 offset {} is not 4-byte aligned", off);
@@ -2106,11 +2106,11 @@ mod tests {
     fn constants_extension_usize_offsets_8_byte_aligned() {
         // Only offsets that are 8-byte aligned (used for pointer-width fields)
         let eight_byte_aligned_ext_offsets = [
-            mega_kernel_v2::EXT_REQUEST_QUEUE_PTR,
-            mega_kernel_v2::EXT_OUTPUT_RING_PTR,
-            mega_kernel_v2::EXT_KV_FREE_BITMAP_PTR,
-            mega_kernel_v2::EXT_OUTPUT_PER_CTA_DOORBELL_PTR,
-            mega_kernel_v2::EXT_OUTPUT_EPOCH_FLAG_PTR,
+            mega_kernel_gpu::EXT_REQUEST_QUEUE_PTR,
+            mega_kernel_gpu::EXT_OUTPUT_RING_PTR,
+            mega_kernel_gpu::EXT_KV_FREE_BITMAP_PTR,
+            mega_kernel_gpu::EXT_OUTPUT_PER_CTA_DOORBELL_PTR,
+            mega_kernel_gpu::EXT_OUTPUT_EPOCH_FLAG_PTR,
         ];
         for &off in &eight_byte_aligned_ext_offsets {
             assert_eq!(off % 8, 0, "extension usize offset {} is not 8-byte aligned", off);
@@ -2121,9 +2121,9 @@ mod tests {
     fn constants_extension_4_byte_aligned_fields() {
         // Some extension fields are only 4-byte aligned (not 8-byte)
         let four_byte_fields = [
-            mega_kernel_v2::EXT_POOL_CLUSTER_DSMEM_PTR,
-            mega_kernel_v2::EXT_PENDING_FREE_LIST_PTR,
-            mega_kernel_v2::EXT_PENDING_FREE_COUNT_PTR,
+            mega_kernel_gpu::EXT_POOL_CLUSTER_DSMEM_PTR,
+            mega_kernel_gpu::EXT_PENDING_FREE_LIST_PTR,
+            mega_kernel_gpu::EXT_PENDING_FREE_COUNT_PTR,
         ];
         for &off in &four_byte_fields {
             assert_eq!(off % 4, 0, "extension field at offset {} is not 4-byte aligned", off);
@@ -2136,7 +2136,7 @@ mod tests {
     #[test]
     fn batch_context_v2_dual_batch_meta_roundtrip_after_swap() {
         let mut ctx = BatchContext::with_v2_extension(8, 2);
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(8);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(8);
         meta.ping_seq_count = 5;
         meta.pong_seq_count = 3;
         meta.step_epoch = 7;
@@ -2144,7 +2144,7 @@ mod tests {
         ctx.set_ext_dual_batch_meta(&meta);
 
         let ext_start = BATCH_CTX_HEADER_SIZE + 8 * SEQ_META_STRIDE;
-        let meta_base = ext_start + mega_kernel_v2::EXT_DUAL_BATCH_META;
+        let meta_base = ext_start + mega_kernel_gpu::EXT_DUAL_BATCH_META;
         // After swap, ping_offset=8, pong_offset=0
         assert_eq!(read_u32(&ctx.data, meta_base), 8);
         assert_eq!(read_u32(&ctx.data, meta_base + 4), 3);
@@ -2157,13 +2157,13 @@ mod tests {
     #[test]
     fn batch_context_v2_dual_batch_meta_does_not_leak() {
         let mut ctx = BatchContext::with_v2_extension(4, 0);
-        ctx.set_ext_dual_batch_meta(&mega_kernel_v2::DualBatchMeta::new(4));
+        ctx.set_ext_dual_batch_meta(&mega_kernel_gpu::DualBatchMeta::new(4));
         // Extension fields after DualBatchMeta (24 bytes at offset 32) should be zero
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
         // AUTOTUNE_ACTUAL_BATCH is at offset 56, DualBatchMeta ends at 32+24=56
         // So it should be zero (untouched)
         assert_eq!(
-            read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH),
+            read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH),
             0
         );
     }
@@ -2178,7 +2178,7 @@ mod tests {
         assert_eq!(read_u32(&ctx.data, NUM_SEQS), 4);
         assert_eq!(
             ctx.byte_size(),
-            BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE + mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE
+            BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE + mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE
         );
     }
 
@@ -2191,7 +2191,7 @@ mod tests {
         assert_eq!(ctx.num_seqs, 1);
         assert_eq!(
             ctx.byte_size(),
-            BATCH_CTX_HEADER_SIZE + 64 * SEQ_META_STRIDE + mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE
+            BATCH_CTX_HEADER_SIZE + 64 * SEQ_META_STRIDE + mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE
         );
     }
 
@@ -2200,14 +2200,14 @@ mod tests {
     #[test]
     fn batch_context_v2_all_extension_pointers_distinct_offsets() {
         let ptr_offsets: [(usize, &str); 8] = [
-            (mega_kernel_v2::EXT_REQUEST_QUEUE_PTR, "req_queue"),
-            (mega_kernel_v2::EXT_OUTPUT_RING_PTR, "output_ring"),
-            (mega_kernel_v2::EXT_KV_FREE_BITMAP_PTR, "kv_bitmap"),
-            (mega_kernel_v2::EXT_POOL_CLUSTER_DSMEM_PTR, "dsmem"),
-            (mega_kernel_v2::EXT_PENDING_FREE_LIST_PTR, "free_list"),
-            (mega_kernel_v2::EXT_PENDING_FREE_COUNT_PTR, "free_count"),
-            (mega_kernel_v2::EXT_OUTPUT_PER_CTA_DOORBELL_PTR, "doorbell"),
-            (mega_kernel_v2::EXT_OUTPUT_EPOCH_FLAG_PTR, "epoch"),
+            (mega_kernel_gpu::EXT_REQUEST_QUEUE_PTR, "req_queue"),
+            (mega_kernel_gpu::EXT_OUTPUT_RING_PTR, "output_ring"),
+            (mega_kernel_gpu::EXT_KV_FREE_BITMAP_PTR, "kv_bitmap"),
+            (mega_kernel_gpu::EXT_POOL_CLUSTER_DSMEM_PTR, "dsmem"),
+            (mega_kernel_gpu::EXT_PENDING_FREE_LIST_PTR, "free_list"),
+            (mega_kernel_gpu::EXT_PENDING_FREE_COUNT_PTR, "free_count"),
+            (mega_kernel_gpu::EXT_OUTPUT_PER_CTA_DOORBELL_PTR, "doorbell"),
+            (mega_kernel_gpu::EXT_OUTPUT_EPOCH_FLAG_PTR, "epoch"),
         ];
         for i in 0..ptr_offsets.len() {
             for j in (i + 1)..ptr_offsets.len() {
@@ -2307,11 +2307,11 @@ mod tests {
         // Assert: cloned retains original values
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
         assert_eq!(
-            read_u32(&cloned.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES),
+            read_u32(&cloned.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES),
             500
         );
         assert_eq!(
-            read_u32(&cloned.data, ext_start + mega_kernel_v2::EXT_MAX_BATCH_SIZE),
+            read_u32(&cloned.data, ext_start + mega_kernel_gpu::EXT_MAX_BATCH_SIZE),
             4
         );
     }
@@ -2462,9 +2462,9 @@ mod tests {
         ctx.set_ext_autotune_actual_batch(3);
 
         // Assert: all three persist without corrupting each other
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), 4096);
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_MAX_BATCH_SIZE), 4);
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH), 3);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), 4096);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_MAX_BATCH_SIZE), 4);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH), 3);
     }
 
     #[test]
@@ -2484,13 +2484,13 @@ mod tests {
 
         // And extension data is correct
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), 0xCC);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), 0xCC);
     }
 
     #[test]
     fn dual_batch_meta_swap_three_times() {
         // Arrange: verify epoch increments and offsets swap correctly over multiple swaps
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(8);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(8);
         assert_eq!(meta.ping_seq_offset, 0);
         assert_eq!(meta.pong_seq_offset, 8);
 
@@ -2558,7 +2558,7 @@ mod tests {
         assert!(ctx.has_v2_extension);
         assert_eq!(
             ctx.byte_size(),
-            BATCH_CTX_HEADER_SIZE + mega_kernel_v2::BATCH_CTX_EXTENSION_SIZE
+            BATCH_CTX_HEADER_SIZE + mega_kernel_gpu::BATCH_CTX_EXTENSION_SIZE
         );
     }
 
@@ -2699,7 +2699,7 @@ mod tests {
     #[test]
     fn dual_batch_meta_debug_shows_all_six_fields() {
         // Arrange: construct a DualBatchMeta with non-default values
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(12);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(12);
         meta.ping_seq_count = 5;
         meta.pong_seq_count = 7;
         meta.step_epoch = 3;
@@ -2720,7 +2720,7 @@ mod tests {
     #[test]
     fn dual_batch_meta_swap_preserves_counts_after_exchange() {
         // Arrange: set asymmetric counts, verify swap exchanges them correctly
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(8);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(8);
         meta.ping_seq_count = 6;
         meta.pong_seq_count = 2;
 
@@ -2749,7 +2749,7 @@ mod tests {
         assert_eq!(read_u32(&ctx.data, base7 + SEQ_PROMPT_LEN), 7777);
         assert_eq!(read_u32(&ctx.data, base7 + SEQ_GEN_COUNT), 42);
         let ext_start = BATCH_CTX_HEADER_SIZE + 8 * SEQ_META_STRIDE;
-        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_KV_POOL_TOTAL_PAGES), 1234);
+        assert_eq!(read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_KV_POOL_TOTAL_PAGES), 1234);
         let base0 = BATCH_CTX_HEADER_SIZE;
         assert_eq!(read_u32(&ctx.data, base0 + SEQ_PROMPT_LEN), 0);
     }
@@ -2947,15 +2947,15 @@ mod tests {
     fn batch_context_v2_extension_dual_batch_meta_with_default() {
         // Arrange: use DualBatchMeta::default() (all zeros) instead of ::new()
         let mut ctx = BatchContext::with_v2_extension(4, 0);
-        let meta = mega_kernel_v2::DualBatchMeta::default();
+        let meta = mega_kernel_gpu::DualBatchMeta::default();
 
         // Act
         ctx.set_ext_dual_batch_meta(&meta);
 
         // Assert: all 24 bytes at EXT_DUAL_BATCH_META should be zero
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        let meta_base = ext_start + mega_kernel_v2::EXT_DUAL_BATCH_META;
-        for i in 0..mega_kernel_v2::DualBatchMeta::SIZE {
+        let meta_base = ext_start + mega_kernel_gpu::EXT_DUAL_BATCH_META;
+        for i in 0..mega_kernel_gpu::DualBatchMeta::SIZE {
             assert_eq!(
                 ctx.data[meta_base + i], 0,
                 "DualBatchMeta byte {} should be zero after set with default()",
@@ -2967,7 +2967,7 @@ mod tests {
     #[test]
     fn dual_batch_meta_swap_then_swap_back_restores_original_offsets() {
         // Arrange
-        let mut meta = mega_kernel_v2::DualBatchMeta::new(16);
+        let mut meta = mega_kernel_gpu::DualBatchMeta::new(16);
         let original_ping = meta.ping_seq_offset;
         let original_pong = meta.pong_seq_offset;
 
@@ -3017,7 +3017,7 @@ mod tests {
         // should be writable via raw write and readable
         let mut ctx = BatchContext::with_v2_extension(4, 0);
         let ext_start = BATCH_CTX_HEADER_SIZE + 4 * SEQ_META_STRIDE;
-        let reserved_off = ext_start + mega_kernel_v2::EXT_RESERVED;
+        let reserved_off = ext_start + mega_kernel_gpu::EXT_RESERVED;
 
         // Act: write a known value to the reserved field
         write_u32(&mut ctx.data, reserved_off, 0x4242_4242);
@@ -3026,7 +3026,7 @@ mod tests {
         assert_eq!(read_u32(&ctx.data, reserved_off), 0x4242_4242);
         // Verify autotune_actual_batch (at offset 56) is still zero — not corrupted
         assert_eq!(
-            read_u32(&ctx.data, ext_start + mega_kernel_v2::EXT_AUTOTUNE_ACTUAL_BATCH),
+            read_u32(&ctx.data, ext_start + mega_kernel_gpu::EXT_AUTOTUNE_ACTUAL_BATCH),
             0
         );
     }

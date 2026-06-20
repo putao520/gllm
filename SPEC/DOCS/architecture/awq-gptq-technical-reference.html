@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="awq-gptq-technical-reference">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"awq-gptq-technical-reference", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>AWQ/GPTQ 技术参考 (Activation-Aware / Hessian-Based Post-Training Quantization)</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>awq-gptq-technical-reference</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-awq-gptq-技术参考-activation-aware-hessian-based-post-training-quantization" data-section="null">
+      <h2>AWQ/GPTQ 技术参考 (Activation-Aware / Hessian-Based Post-Training Quantization)</h2>
+      <p>&gt; <strong>用途</strong>: 本文档为 gllm 理解 AWQ/GPTQ 量化格式提供底层技术参考。</p>
+      <p>&gt; 涵盖物理存储布局 (交织 vs 行优先)、zero-point 形态差异、反量化公式、与 GGUF 生态的集成方式。</p>
+      <p>&gt; 实现规范见 <code>SPEC/23-QUANT-CODEGEN-ALGO.md</code>。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 概述</h3>
+      <strong>关键共性</strong>: 两者反量化公式数学上完全一致, 差异仅在物理存储打包顺序和 zero-point 处理。
+      <table>
+        <tr>
+          <th>格式</th>
+        </tr>
+        <tr>
+          <td>核心算法</td>
+        </tr>
+        <tr>
+          <td>量化目标</td>
+        </tr>
+        <tr>
+          <td>来源生态</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>AWQ</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Activation-aware: 按 activation magnitude 保护 ~1% salient weights, 仅量化非重要权重</td>
+        </tr>
+        <tr>
+          <td>Weight-only 4-bit</td>
+        </tr>
+        <tr>
+          <td>AutoAWQ / vLLM (CUDA/Triton)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>GPTQ</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Hessian 近似: Oblique dog 逐列量化, 补偿量化误差到未量化列</td>
+        </tr>
+        <tr>
+          <td>Weight-only 4-bit</td>
+        </tr>
+        <tr>
+          <td>AutoGPTQ / ExLlamaV2 (CUDA)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 反量化数学公式</h3>
+      <p>对任意已解包为整数 (0-15) 的 4-bit 权重 <code>qw</code>:</p>
+      <p>```</p>
+      <p>FP16_weight = (qw - zero_point) × scale</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>参数</th>
+        </tr>
+        <tr>
+          <td>AWQ</td>
+        </tr>
+        <tr>
+          <td>GPTQ</td>
+        </tr>
+        <tr>
+          <td>scale</td>
+        </tr>
+        <tr>
+          <td>FP16, 每 group_size=128 权重共享一个</td>
+        </tr>
+        <tr>
+          <td>FP16, 每 group_size=128 权重共享一个</td>
+        </tr>
+        <tr>
+          <td>zero_point</td>
+        </tr>
+        <tr>
+          <td>FP16, 直接从张量读取</td>
+        </tr>
+        <tr>
+          <td>INT4 打包在 u32 中, 需位移解包; 通常需 +1 偏移补偿</td>
+        </tr>
+        <tr>
+          <td>qw</td>
+          <td> 解包</td>
+        </tr>
+        <tr>
+          <td>行优先连续 nibble 解包</td>
+        </tr>
+        <tr>
+          <td>列交织 nibble 解包</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 物理存储布局</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 核心事实: 张量分离存储 (非紧凑 struct)</h4>
+      <p>在实际 CUDA 算子 (AutoAWQ / ExLlamaV2) 中, qweight、scales、zeros 是三个<strong>独立的张量 (Tensor)</strong>, 不是 C struct 紧凑排列:</p>
+      <p>```</p>
+      <p>内存布局:</p>
+      <p>qweight_tensor: [u32; N]  — 打包的 4-bit 权重</p>
+      <p>scales_tensor:  [f16; M]  — 每 group 一个 FP16 scale</p>
+      <p>zeros_tensor:   [f16; M] (AWQ) 或 [u32; P] (GPTQ) — 每 group 一个 zero-point</p>
+      <p>```</p>
+      <p>gllm-kernels 当前定义的 <code>BlockAWQ4 { qweight: [u32; 32], scales: f16, zeros: f16 }</code> 紧凑 struct</p>
+      <p>与实际 AWQ/GPTQ 的张量分离存储不匹配, 需要修正。</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 AWQ — 行优先连续打包</h4>
+      <p>每 8 个连续 4-bit 权重打包进一个 u32:</p>
+      <p>```</p>
+      <p>u32 payload:</p>
+      <p>[W0 W1 W2 W3 W4 W5 W6 W7]</p>
+      <p>Bit 3:0   = W0 (nibble)</p>
+      <p>Bit 7:4   = W1 (nibble)</p>
+      <p>Bit 11:8  = W2 (nibble)</p>
+      <p>Bit 15:12 = W3 (nibble)</p>
+      <p>Bit 19:16 = W4 (nibble)</p>
+      <p>Bit 23:20 = W5 (nibble)</p>
+      <p>Bit 27:24 = W6 (nibble)</p>
+      <p>Bit 31:28 = W7 (nibble)</p>
+      <p>```</p>
+      <p>逻辑大小: group_size=128 × 4-bit = 64 bytes = 16 个 u32。</p>
+      <p>Zero-point: 直接以 FP16 存储在独立张量中, 每 group 一个 FP16 值。</p>
+    </section>
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 GPTQ — 列交织打包</h4>
+      <p>为了 GPU Warp 内线程合并访存 (Coalesced Access), 每 8 个<strong>非连续</strong>权重打包进一个 u32:</p>
+      <p>```</p>
+      <p>u32 payload:</p>
+      <p>[W0 W16 W32 W48 W64 W80 W96 W112]</p>
+      <p> stride = 16 (典型值, 对应 warp 内 32 线程各取一行)</p>
+      <p>```</p>
+      <p>这种交织使得一个 Warp 的 32 个线程可以同时访问同一 u32 的不同 nibble, 避免银行冲突。</p>
+      <p>Zero-point: 8 个 4-bit 整数 zero-point 同样打包进一个 u32:</p>
+      <p>```</p>
+      <p>u32 zeros_payload:</p>
+      <p>[ zp0 | zp1 | zp2 | zp3 | zp4 | zp5 | zp6 | zp7 ]</p>
+      <p>运行时: zp_i = (zeros &gt;&gt; (i * 4)) &amp; 0xF</p>
+      <p>GPTQ 通常需要 +1 偏移: effective_zp = zp_i + 1</p>
+      <p>```</p>
+    </section>
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 存储布局对比</h4>
+      <table>
+        <tr>
+          <th>特性</th>
+        </tr>
+        <tr>
+          <td>AWQ</td>
+        </tr>
+        <tr>
+          <td>GPTQ</td>
+        </tr>
+        <tr>
+          <td>打包顺序</td>
+        </tr>
+        <tr>
+          <td>行优先连续</td>
+        </tr>
+        <tr>
+          <td>列交织 (stride-16)</td>
+        </tr>
+        <tr>
+          <td>每 u32 包含</td>
+        </tr>
+        <tr>
+          <td>8 个连续权重</td>
+        </tr>
+        <tr>
+          <td>8 个间隔权重</td>
+        </tr>
+        <tr>
+          <td>Scale 存储</td>
+        </tr>
+        <tr>
+          <td>独立 FP16 张量</td>
+        </tr>
+        <tr>
+          <td>独立 FP16 张量</td>
+        </tr>
+        <tr>
+          <td>Zero-point 存储</td>
+        </tr>
+        <tr>
+          <td>独立 FP16 张量 (每 group 一个 f16)</td>
+        </tr>
+        <tr>
+          <td>打包 INT4 张量 (8 个 zp 打包进 u32)</td>
+        </tr>
+        <tr>
+          <td>Zero-point 解包</td>
+        </tr>
+        <tr>
+          <td>直接读取 FP16</td>
+        </tr>
+        <tr>
+          <td>位移 + 掩码 → +1 偏移</td>
+        </tr>
+        <tr>
+          <td>访存模式</td>
+        </tr>
+        <tr>
+          <td>标量连续读</td>
+        </tr>
+        <tr>
+          <td>Warp 合并访存</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 GPU 算子执行模型</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 Weight-Only 反量化 GEMM</h4>
+      <p>AWQ/GPTQ 都是 <strong>Weight-Only</strong> 量化: 激活 (Activation) 保持 FP16, 仅权重压缩到 4-bit。</p>
+      <p>GEMM 执行流程:</p>
+      <p>```</p>
+      <p>1. 从 qweight_tensor 加载 u32 到寄存器</p>
+      <p>2. 位移 + AND 解包 4-bit nibble → 整数 (0-15)</p>
+      <p>3. 从 scales_tensor 加载 FP16 scale</p>
+      <p>4. 从 zeros_tensor 加载 zero-point (AWQ: 直接 FP16; GPTQ: 解包 +1)</p>
+      <p>5. 反量化: FP16_weight = (qw - zp) × scale  (在寄存器中完成)</p>
+      <p>6. 发射 mma.sync (FP16 × FP16 → FP32 累加)</p>
+      <p>```</p>
+      <strong>关键</strong>: 反量化在寄存器中完成, 不写回显存。这是 AWQ/GPTQ GEMM kernel 的核心性能优化。
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 与硬件原生 NVFP4 的对比</h4>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>AWQ/GPTQ</td>
+        </tr>
+        <tr>
+          <td>NVFP4 (SM100)</td>
+        </tr>
+        <tr>
+          <td>量化域</td>
+        </tr>
+        <tr>
+          <td>整数 (INT4)</td>
+        </tr>
+        <tr>
+          <td>浮点 (E2M1)</td>
+        </tr>
+        <tr>
+          <td>硬件加速</td>
+        </tr>
+        <tr>
+          <td>无 (软件反量化 → FP16 → HMMA)</td>
+        </tr>
+        <tr>
+          <td>原生 (硬件 Tensor Core 内部解码)</td>
+        </tr>
+        <tr>
+          <td>Scale 类型</td>
+        </tr>
+        <tr>
+          <td>FP16 per-group</td>
+        </tr>
+        <tr>
+          <td>FP8 per-sub-block + F32 global</td>
+        </tr>
+        <tr>
+          <td>Zero-point</td>
+        </tr>
+        <tr>
+          <td>有 (AWQ: FP16; GPTQ: INT4 packed)</td>
+        </tr>
+        <tr>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td>反量化位置</td>
+        </tr>
+        <tr>
+          <td>寄存器 (多条算术指令)</td>
+        </tr>
+        <tr>
+          <td>Tensor Core 内部 (零额外指令)</td>
+        </tr>
+        <tr>
+          <td>打包约束</td>
+        </tr>
+        <tr>
+          <td>AWQ 行优先 / GPTQ 列交织</td>
+        </tr>
+        <tr>
+          <td>小端序连续 nibble</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 与 GGUF/llama.cpp 生态的关系</h3>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 不原生支持</h4>
+      <p>llama.cpp / GGUF <strong>不直接原生运行</strong> AWQ 或 GPTQ 的原始张量格式。</p>
+      <p>生态割裂:</p>
+      <li>AWQ/GPTQ 属于 Python/PyTorch 生态 (依赖 CUDA/Triton 算子: vLLM, AutoGPTQ, AutoAWQ)</li>
+      <li>GGUF 属于 C/C++ 生态 (依赖 llama.cpp)</li>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 转换流程</h4>
+      <p>```</p>
+      <p>AWQ/GPTQ safetensors (HuggingFace)</p>
+      <p>    ↓ convert_hf_to_gguf.py</p>
+      <p>    ↓ 读取 AWQ/GPTQ 权重 → 反量化到 FP16 → 重新量化为 GGUF 格式</p>
+      <p>    ↓</p>
+      <p>GGUF 文件 (Q4_K_M / Q4_0 / Q4_1 / ...)</p>
+      <p>```</p>
+      <p>转换过程中, llama.cpp 会:</p>
+      <p>1. 读取 AWQ/GPTQ 的权重</p>
+      <p>2. 用反量化公式 <code>(qw - zp) × scale</code> 还原为 FP16</p>
+      <p>3. 重新量化为 GGUF 自有格式 (如 Q4_0: 每 32 权重共享一个 FP16 scale, 无 zero-point, 默认 zp=8)</p>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>§5.3 对 gllm 的影响</h4>
+      <table>
+        <tr>
+          <th>加载路径</th>
+        </tr>
+        <tr>
+          <td>AWQ/GPTQ 格式处理</td>
+        </tr>
+        <tr>
+          <td>GGUF 文件</td>
+        </tr>
+        <tr>
+          <td>不需要处理 AWQ/GPTQ 格式 — 已转换为 GGUF 自有格式</td>
+        </tr>
+        <tr>
+          <td>HuggingFace safetensors (AWQ/GPTQ 模型)</td>
+        </tr>
+        <tr>
+          <td>需要理解 AWQ/GPTQ 格式才能正确加载和解量化</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 gllm 实现注意事项</h3>
+    </section>
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 Block 结构体修正</h4>
+      <p>当前 <code>BlockAWQ4</code> / <code>BlockGPTQ4</code> 的紧凑 struct 定义需要修正:</p>
+      <li>实际存储是张量分离的 (qweight/scales/zeros 各自独立)</li>
+      <li>紧凑 struct 会误导 Weight Loader 按 struct 偏移读取</li>
+      <li>GGUF 路径下不会遇到原始 AWQ/GPTQ 格式, 但 safetensors 直加载路径会</li>
+    </section>
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 QuantFormatDescriptor 注册修正</h4>
+      <p>当前注册使用 <code>ScaleLayout::Hierarchical</code> (K-Quant 的 packed scale 布局), 不符合 AWQ/GPTQ 的线性 per-group scale/zero 布局。AWQ/GPTQ 的 scale 和 zero-point 是简单的每 group 一个标量, 不需要分层的 packed scale。</p>
+    </section>
+    <section id="s6.3" data-section="6.3">
+      <h4>§6.3 量化 GEMM 路径</h4>
+      <p>AWQ/GPTQ 在 gllm 中的 GEMM 路径与标准 INT4 不同:</p>
+      <li>标准 INT4 (Q4_0/Q4_1): <code>DK::PackedInt4</code> → nibble 解包 → int8 dot-product → scale</li>
+      <li>AWQ/GPTQ: 需要先反量化到 FP16 → 走 FP16/BF16 GEMM 路径 (Weight-Only 模式)</li>
+      <li>这与 SPEC/23 §1.1 "原生量化计算铁律" 不矛盾 — AWQ/GPTQ 本质是 Weight-Only 反量化到 FP16, 不是 "decode to F32 then FMA"</li>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>§7 参考</h3>
+      <li>AWQ 论文: "AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration" (Lin et al., 2023)</li>
+      <li>GPTQ 论文: "GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers" (Frantar et al., 2022)</li>
+      <li>AutoAWQ: <a href="https://github.com/casper-hansen/AutoAWQ">https://github.com/casper-hansen/AutoAWQ</a></li>
+      <li>AutoGPTQ: <a href="https://github.com/AutoGPTQ/AutoGPTQ">https://github.com/AutoGPTQ/AutoGPTQ</a></li>
+      <li>ExLlamaV2 (GPTQ 变体): <a href="https://github.com/turboderp/exllamav2">https://github.com/turboderp/exllamav2</a></li>
+      <li>llama.cpp convert_hf_to_gguf.py: AWQ/GPTQ → GGUF 转换逻辑</li>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：awq-gptq-technical-reference.html</address>
+  </footer>
+</body>
+</html>

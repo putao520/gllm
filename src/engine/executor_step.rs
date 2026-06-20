@@ -817,7 +817,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 let compact_config = crate::scheduler::compact::CompactConfig::default();
                 let compact_decision = crate::scheduler::compact::evaluate_compact(
                     &compact_manifest,
-                    crate::scheduler::compact::OpKind::Gemm,
+                    crate::scheduler::compact::CompactOpCategory::Gemm,
                     &compact_config,
                 );
                 if compact_decision.should_compact {
@@ -1042,31 +1042,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?
                 .sampling_config;
             let next_token = self.sample_from_logits(logits, &sampling_config)?;
-
-            if std::env::var("GLLM_DEBUG_SAMPLING").is_ok() {
-                let l = &logits.data;
-                let mut top: [(u32, f32); 3] = [(0, f32::NEG_INFINITY); 3];
-                for (i, &v) in l.iter().enumerate() {
-                    if v > top[0].1 {
-                        top[2] = top[1];
-                        top[1] = top[0];
-                        top[0] = (i as u32, v);
-                    } else if v > top[1].1 {
-                        top[2] = top[1];
-                        top[1] = (i as u32, v);
-                    } else if v > top[2].1 {
-                        top[2] = (i as u32, v);
-                    }
-                }
-                let mean: f32 = l.iter().sum::<f32>() / l.len() as f32;
-                let var: f32 = l.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / l.len() as f32;
-                eprintln!(
-                    "[SAMPLE req={req_id} logits.len={} next={next_token} \
-                           top3=[{},{}],[{},{}],[{},{}] mean={:.4} var={:.4}]",
-                    l.len(), top[0].0, top[0].1, top[1].0, top[1].1,
-                    top[2].0, top[2].1, mean, var
-                );
-            }
 
             let hooks_guard = self.model_ctx.hooks.read();
             let hooks_decision = if let Ok(hooks) = &hooks_guard {
@@ -4750,7 +4725,7 @@ mod tests {
     #[test]
     fn executor_error_compilation_long_message_display() {
         // Arrange: construct a Compilation error with detailed failure info.
-        let detail = "failed to lower OpKind::FusedRmsNorm: register pressure exceeded L1 budget";
+        let detail = "failed to lower Op::FusedRmsNormGemm: register pressure exceeded L1 budget";
         let err = ExecutorError::Compilation(detail.into());
         // Act: format via Display.
         let msg = format!("{err}");

@@ -176,7 +176,7 @@ impl<E: Element> CudaBackend<E> {
             total_memory / (1024 * 1024)
         );
 
-        eprintln!("[CudaBackend] Detected: {}", name);
+        log::info!("[CudaBackend] Detected: {}", name);
 
         let device_info = GpuDeviceInfo {
             ordinal: device,

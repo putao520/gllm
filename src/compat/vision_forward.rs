@@ -11,6 +11,8 @@
 //! name (matching the SigLIP tensor naming convention).
 //!
 //! SPEC: 02-ARCHITECTURE ARCH-MULTIMODAL + ARCH-MULTIMODAL-FUSION.
+// @trace REQ-FATOP-004 [entity:AttentionSpec] AttentionSpec kv_source 自描述 (vision: FromTensor)
+// @trace REQ-FATOP-026 [entity:AttentionSpec] KvSource BUILD 阶段 family 驱动 (vision: Encoder → FromTensor)
 
 use std::sync::Arc;
 

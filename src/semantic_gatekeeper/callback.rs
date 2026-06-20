@@ -3,7 +3,7 @@
 //! 协议 SSOT: `SPEC/SEMANTIC-GATEKEEPER.md` §2.1 §5 §7;
 //! 接入点: `SPEC/05-OPTIMIZATIONS.md §2.9`, 优先级 90.
 //!
-//! SG 已迁移到 Mega-Kernel JIT SgDetect/SgInject OpKind;
+//! SG 已迁移到 Mega-Kernel JIT SgDetect/SgInject Op;
 //! callback 检测/注入路径已删除, 由 JIT 共享内存驱动.
 
 use std::sync::{Arc, RwLock};
@@ -50,7 +50,7 @@ pub enum TextEncoderError {
 /// SG 运行时主体.
 ///
 /// 注册到 `CallbackChain` 后由 mega-kernel node loop
-/// 在检测层通过 JIT SgDetect/SgInject OpKind 触发.
+/// 在检测层通过 JIT SgDetect/SgInject Op 触发.
 #[allow(dead_code)]
 pub struct SemanticGatekeeperCallback {
     pub(super) level_keys: Arc<LevelKeysCache>,

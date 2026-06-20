@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>41-COMPILER-DIAGNOSTICS — 编译器诊断协议</title>
+</head>
+<body><main data-spec-content="">
+<h1 id="s-编译器诊断协议">编译器诊断协议 (Compiler Diagnostics Protocol)</h1>
+
+<h2 id="s1">1. 定位</h2>
+<p>编译器诊断协议覆盖编译管线三层失败三角定位模型和 dump 格式规范。</p>
+
+<h2 id="s2">2. 三层失败三角定位模型</h2>
+<p>编译失败时按三层定位：IR 层（pass 输入验证）→ PASS 层（不变量检查）→ CODEGEN 层（ISA 发射）。</p>
+
+<h3 id="s2.1">2.1 IR 层 (IR-ERR)</h3>
+<p>Pass 输入验证：检测图结构、dtype、shape 等前置条件违反。</p>
+
+<h3 id="s2.2">2.2 PASS 层 (PASS-ERR)</h3>
+<p>不变量检查：检测 pass 执行后的不变量违反。</p>
+
+<h3 id="s2.3">2.3 CODEGEN 层 (CG-ERR)</h3>
+<p>ISA 发射：检测 VmInstr 发射失败、寄存器分配溢出等。</p>
+
+<h2 id="s3">3. dump 格式规范</h2>
+<p>编译器 dump 提供四级中间产物：CompilerGraph DOT/JSON + TraceOp SSA + VmInstr 序列 + 寄存器分配。</p>
+
+<h3 id="s3.1">3.1 CompilerGraph DOT/JSON</h3>
+<p>图结构的可视化 dump，包含 op 节点、连接边、dtype/shape 标注。</p>
+
+<h3 id="s3.2">3.2 TraceOp SSA</h3>
+<p>SymExec 提取的 TraceOp SSA 形式，包含 ComputePattern 标注。</p>
+
+<h3 id="s3.3">3.3 VmInstr 序列</h3>
+<p>ISA Lowering 后的 VmInstr 序列 dump，包含寄存器分配和循环边界。</p>
+
+<h2 id="s4">4. 错误码前缀</h2>
+<ul>
+<li>IR-ERR: IR 层错误（图结构/dtype/shape 前置条件违反）</li>
+<li>PASS-ERR: PASS 层错误（不变量违反）</li>
+<li>CG-ERR: CODEGEN 层错误（ISA 发射/寄存器分配失败）</li>
+</ul>
+
+<div id="testing"></div>
+<section id="req-dump-001" data-req="REQ-DUMP-001" data-req-status="approved" data-req-domain="dump" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-DUMP-001 Dump 格式 — CompilerGraph DOT/JSON 完整图结构 dump</h3><p>Dump 格式规范：CompilerGraph dump 必须包含完整图结构信息：
+1. DOT 格式：节点 = op（标注 OpKind/dtype/shape），边 = tensor 连接（标注 slot name）
+2. JSON 格式：完整图序列化，可机器解析
+3. dump 必须包含每个 op 的 ComputePattern 标注
+4. dump 必须包含 GraphTopologyAnalysis 结果
+
+前置条件：CompilerGraph 构建完成
+后置条件：dump 输出可被外部工具解析和可视化
+违规检测：dump 输出缺少必要字段 = dump BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>DOT 格式：节点 = op（标注 OpKind/dtype/shape），边 = tensor 连接（标注 slot name）</li><li>JSON 格式：完整图序列化，可机器解析</li><li>dump 必须包含每个 op 的 ComputePattern 标注</li><li>dump 必须包含 GraphTopologyAnalysis 结果
+
+前置条件：CompilerGraph 构建完成
+后置条件：dump 输出可被外部工具解析和可视化
+违规检测：dump 输出缺少必要字段 = dump BUG</li><li>前置条件满足: CompilerGraph 构建完成</li><li>后置条件验证: dump 输出可被外部工具解析和可视化</li><li>违规可检测: dump 输出缺少必要字段 = dump BUG</li></ol></div></section><section id="req-dump-002" data-req="REQ-DUMP-002" data-req-status="approved" data-req-domain="dump" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-DUMP-002 Dump 格式 — TraceOp SSA 完整符号执行结果 dump</h3><p>Dump 格式规范：TraceOp SSA dump 必须包含完整符号执行结果：
+1. 每个 TraceOp 的输入/输出 SSA 寄存器
+2. ComputePattern 标注
+3. dtype 和 shape 信息
+4. 与源 OpKind 的映射关系
+
+前置条件：SymExec trace 提取完成
+后置条件：TraceOp dump 可回溯到源 OpKind
+违规检测：TraceOp dump 缺少映射关系 = dump BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>每个 TraceOp 的输入/输出 SSA 寄存器</li><li>ComputePattern 标注</li><li>dtype 和 shape 信息</li><li>与源 OpKind 的映射关系
+
+前置条件：SymExec trace 提取完成
+后置条件：TraceOp dump 可回溯到源 OpKind
+违规检测：TraceOp dump 缺少映射关系 = dump BUG</li><li>前置条件满足: SymExec trace 提取完成</li><li>后置条件验证: TraceOp dump 可回溯到源 OpKind</li><li>违规可检测: TraceOp dump 缺少映射关系 = dump BUG</li></ol></div></section><section id="req-dump-003" data-req="REQ-DUMP-003" data-req-status="approved" data-req-domain="dump" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-DUMP-003 Dump 格式 — VmInstr 序列完整 codegen 结果 dump</h3><p>Dump 格式规范：VmInstr 序列 dump 必须包含完整 codegen 结果：
+1. VmInstr 序列（包含 emit_loop 边界）
+2. 寄存器分配结果
+3. ABI 参数绑定信息
+4. 与源 TraceOp 的映射关系
+
+前置条件：ISA Lowering 完成
+后置条件：VmInstr dump 可回溯到源 TraceOp 和 OpKind
+违规检测：VmInstr dump 缺少映射关系 = dump BUG</p><div data-criteria=""><strong>验收标准：</strong><ol><li>VmInstr 序列（包含 emit_loop 边界）</li><li>寄存器分配结果</li><li>ABI 参数绑定信息</li><li>与源 TraceOp 的映射关系
+
+前置条件：ISA Lowering 完成
+后置条件：VmInstr dump 可回溯到源 TraceOp 和 OpKind
+违规检测：VmInstr dump 缺少映射关系 = dump BUG</li><li>前置条件满足: ISA Lowering 完成</li><li>后置条件验证: VmInstr dump 可回溯到源 TraceOp 和 OpKind</li><li>违规可检测: VmInstr dump 缺少映射关系 = dump BUG</li></ol></div></section><section id="req-fail-triang-001" data-req="REQ-FAIL-TRIANG-001" data-req-status="approved" data-req-domain="fail-triang" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FAIL-TRIANG-001 失败三角定位 — IR 层错误码与定位信息</h3><p>失败三角定位模型：IR 层错误必须包含前置条件违反的完整信息：
+1. 错误码前缀 IR-ERR
+2. 错误信息包含：违反的前置条件名称 + 位置（OpKind/slot/边）+ 期望值 vs 实际值
+3. IR 层错误在 compile() 入口 pre_check() 中检测
+4. IR 层错误可回溯到图构建代码（auto_graph）
+
+前置条件：compile() 入口执行 pre_check()
+后置条件：IR 层错误信息可定位到具体前置条件违反
+违规检测：IR 层错误信息缺少位置/期望/实际值 = 诊断不完整</p><div data-criteria=""><strong>验收标准：</strong><ol><li>错误码前缀 IR-ERR</li><li>错误信息包含：违反的前置条件名称 + 位置（OpKind/slot/边）+ 期望值 vs 实际值</li><li>IR 层错误在 compile() 入口 pre_check() 中检测</li><li>IR 层错误可回溯到图构建代码（auto_graph）
+
+前置条件：compile() 入口执行 pre_check()
+后置条件：IR 层错误信息可定位到具体前置条件违反
+违规检测：IR 层错误信息缺少位置/期望/实际值 = 诊断不完整</li><li>前置条件满足: compile() 入口执行 pre_check()</li><li>后置条件验证: IR 层错误信息可定位到具体</li><li>违规可检测: IR 层错误信息缺少位置/期望/实际值 = 诊断不完整</li></ol></div></section><section id="req-fail-triang-002" data-req="REQ-FAIL-TRIANG-002" data-req-status="approved" data-req-domain="fail-triang" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FAIL-TRIANG-002 失败三角定位 — PASS 层错误码与定位信息</h3><p>失败三角定位模型：PASS 层错误必须包含不变量违反的完整信息：
+1. 错误码前缀 PASS-ERR
+2. 错误信息包含：违反的不变量名称 + pass 名称 + 输入图 vs 输出图差异
+3. PASS 层错误在 pass 执行后验证时检测
+4. PASS 层错误可回溯到 pass 实现代码
+
+前置条件：pass 执行后验证函数执行
+后置条件：PASS 层错误信息可定位到具体不变量违反
+违规检测：PASS 层错误信息缺少 pass 名称/不变量名称 = 诊断不完整</p><div data-criteria=""><strong>验收标准：</strong><ol><li>错误码前缀 PASS-ERR</li><li>错误信息包含：违反的不变量名称 + pass 名称 + 输入图 vs 输出图差异</li><li>PASS 层错误在 pass 执行后验证时检测</li><li>PASS 层错误可回溯到 pass 实现代码
+
+前置条件：pass 执行后验证函数执行
+后置条件：PASS 层错误信息可定位到具体不变量违反
+违规检测：PASS 层错误信息缺少 pass 名称/不变量名称 = 诊断不完整</li><li>前置条件满足: pass 执行后验证函数执行</li><li>后置条件验证: PASS 层错误信息可定位到具体不变量违反</li><li>违规可检测: PASS 层错误信息缺少 pass 名称/不变量名称 = 诊断不完整</li></ol></div></section><section id="req-fail-triang-003" data-req="REQ-FAIL-TRIANG-003" data-req-status="approved" data-req-domain="fail-triang" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FAIL-TRIANG-003 失败三角定位 — CODEGEN 层错误码与定位信息</h3><p>失败三角定位模型：CODEGEN 层错误必须包含 ISA 发射失败的完整信息：
+1. 错误码前缀 CG-ERR
+2. 错误信息包含：失败的 VmInstr/ISA 指令 + 源 TraceOp/OpKind + DeviceProfile + 寄存器状态
+3. CODEGEN 层错误在 ISA Lowering emit 时检测
+4. CODEGEN 层错误可回溯到 lowering 代码
+
+前置条件：ISA Lowering 执行
+后置条件：CODEGEN 层错误信息可定位到具体 ISA 发射失败
+违规检测：CODEGEN 层错误信息缺少源 OpKind/DeviceProfile = 诊断不完整</p><div data-criteria=""><strong>验收标准：</strong><ol><li>错误码前缀 CG-ERR</li><li>错误信息包含：失败的 VmInstr/ISA 指令 + 源 TraceOp/OpKind + DeviceProfile + 寄存器状态</li><li>CODEGEN 层错误在 ISA Lowering emit 时检测</li><li>CODEGEN 层错误可回溯到 lowering 代码
+
+前置条件：ISA Lowering 执行
+后置条件：CODEGEN 层错误信息可定位到具体 ISA 发射失败
+违规检测：CODEGEN 层错误信息缺少源 OpKind/DeviceProfile = 诊断不完整</li><li>前置条件满足: ISA Lowering 执行</li><li>后置条件验证: CODEGEN 层错误信息可定位到具体 ISA 发射失败</li><li>违规可检测: CODEGEN 层错误信息缺少源 OpKind/DeviceProfile = 诊断不完整</li></ol></div></section></main><section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-dump-001" data-test="TEST-DUMP-001" data-req-ref="REQ-DUMP-001" data-test-categories="unit"><h4>TEST-DUMP-001: REQ-DUMP-001 单元测试</h4><p>验证 REQ-DUMP-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-dump-002" data-test="TEST-DUMP-002" data-req-ref="REQ-DUMP-002" data-test-categories="unit"><h4>TEST-DUMP-002: REQ-DUMP-002 单元测试</h4><p>验证 REQ-DUMP-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-dump-003" data-test="TEST-DUMP-003" data-req-ref="REQ-DUMP-003" data-test-categories="unit"><h4>TEST-DUMP-003: REQ-DUMP-003 单元测试</h4><p>验证 REQ-DUMP-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fail-triang-001" data-test="TEST-FAIL-TRIANG-001" data-req-ref="REQ-FAIL-TRIANG-001" data-test-categories="unit"><h4>TEST-FAIL-TRIANG-001: REQ-FAIL-TRIANG-001 单元测试</h4><p>验证 REQ-FAIL-TRIANG-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fail-triang-002" data-test="TEST-FAIL-TRIANG-002" data-req-ref="REQ-FAIL-TRIANG-002" data-test-categories="unit"><h4>TEST-FAIL-TRIANG-002: REQ-FAIL-TRIANG-002 单元测试</h4><p>验证 REQ-FAIL-TRIANG-002 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-fail-triang-003" data-test="TEST-FAIL-TRIANG-003" data-req-ref="REQ-FAIL-TRIANG-003" data-test-categories="unit"><h4>TEST-FAIL-TRIANG-003: REQ-FAIL-TRIANG-003 单元测试</h4><p>验证 REQ-FAIL-TRIANG-003 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

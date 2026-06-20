@@ -18,7 +18,7 @@
 //!
 //! - **NO_SILENT_FALLBACK**: 权重加载失败 / 形状不匹配 / dtype 错误 → 显式
 //!   `Err(GuardrailError::...)`, 禁止静默 OK.
-//! - **NO_ISLAND_MODULE**: Guardrail 探针通过 JIT OpKind (GuardrailScore +
+//! - **NO_ISLAND_MODULE**: Guardrail 探针通过 JIT Op (GuardrailScore +
 //!   GuardrailCheck) 注册到前向路径, 由 `Client::classify_binary` /
 //!   `encode_intent` / `generate` 路径真实触发.
 //! - **正交于 SG / HR**: Guardrail callback 使用独立 priority=40, 与 SG(90)

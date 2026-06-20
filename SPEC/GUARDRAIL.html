@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="GUARDRAIL">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"GUARDRAIL", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>Guardrail SDK — In-Flight 安全 Veto 探针协议</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>GUARDRAIL</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-guardrail-sdk-in-flight-安全-veto-探针协议" data-section="null">
+      <h2>Guardrail SDK — In-Flight 安全 Veto 探针协议</h2>
+      <p>&gt; <strong>执行模型</strong>: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 <code>08-EXECUTOR.md</code> §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。</p>
+      <p>&gt; <strong>SSOT</strong>: 本文档定义 gllm Guardrail SDK 的技术协议, 提供推理<strong>前向中途</strong>插入安全分类线性探针 + 多档策略响应(HaltAndVeto / LogOnly / SampleDowngrade)的机制。</p>
+      <p>&gt; <strong>需求 SSOT</strong>: <code>SPEC/01-REQUIREMENTS.md §14</code> REQ-GR-001..005</p>
+      <p>&gt; <strong>API 定义 SSOT</strong>: <code>SPEC/04-API-DESIGN.md §3.9</code></p>
+      <p>&gt; <strong>遵守铁律</strong>: ARCH-FULL-JIT、ARCH-CPU-GPU-UNIFIED、NO_SILENT_FALLBACK、NO_ISLAND_MODULE、CallbackChain 正交性</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>§1 动机与定位</h3>
+    </section>
+    <section id="s1.1" data-section="1.1">
+      <h4>1.1 为什么需要 in-flight 安全探针</h4>
+      <p>主流 LLM 安全方案有三类:</p>
+      <p>1. <strong>Prompt-level filter</strong>: 输入敏感词黑名单 — 粒度粗, 易被改写绕过, 且已损耗用户上下文。</p>
+      <p>2. <strong>Output-level moderation</strong>: 生成后再分类一次 — 延迟最差(完整生成 + 再跑分类模型), 且浪费已生成 tokens 的算力。</p>
+      <p>3. <strong>Fine-tuned 安全头</strong>: RLHF / DPO 把安全策略烘进权重 — 模型升级即失效, 策略不可热切换。</p>
+      <p>Guardrail SDK 采用<strong>第四条路径</strong>: 在<strong>同一前向过程</strong>中, 用一份独立训练的小线性探针对<strong>中间层 hidden state</strong> 做分类, 探针触发立即影响当前推理的策略 (veto / downgrade / log)。</p>
+    </section>
+    <section id="s1.2" data-section="1.2">
+      <h4>1.2 与 Semantic Gatekeeper / Head Routing 的正交关系</h4>
+      <p>三者<strong>可共存</strong>。Guardrail 在 post_node 执行, SG 在 pre_node 执行, HR 读最终结果 —— 互不阻塞。</p>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>Semantic Gatekeeper</td>
+        </tr>
+        <tr>
+          <td>Head Routing</td>
+        </tr>
+        <tr>
+          <td>Guardrail</td>
+        </tr>
+        <tr>
+          <td>作用</td>
+        </tr>
+        <tr>
+          <td>注入知识残差 (InjectHidden)</td>
+        </tr>
+        <tr>
+          <td>读最终 hidden 投 lm_head</td>
+        </tr>
+        <tr>
+          <td>读中间 hidden 做二元分类 + veto</td>
+        </tr>
+        <tr>
+          <td>优先级</td>
+        </tr>
+        <tr>
+          <td>90 (pre_node)</td>
+        </tr>
+        <tr>
+          <td>无 Callback, 直接读 forward 结果</td>
+        </tr>
+        <tr>
+          <td>40 (post_node)</td>
+        </tr>
+        <tr>
+          <td>修改 hidden?</td>
+        </tr>
+        <tr>
+          <td>✅ 是 (InjectHidden)</td>
+        </tr>
+        <tr>
+          <td>❌ 只读</td>
+        </tr>
+        <tr>
+          <td>❌ 只读 + 可 ExitEarly</td>
+        </tr>
+        <tr>
+          <td>粒度</td>
+        </tr>
+        <tr>
+          <td>每次 decode step 每检测层</td>
+        </tr>
+        <tr>
+          <td>每次 API 调用一次</td>
+        </tr>
+        <tr>
+          <td>每次 forward 一次</td>
+        </tr>
+        <tr>
+          <td>生效开销</td>
+        </tr>
+        <tr>
+          <td>检索 + 编码 + 残差加</td>
+        </tr>
+        <tr>
+          <td>零 (最终层读出)</td>
+        </tr>
+        <tr>
+          <td>单次矩阵乘 (hidden · w + b)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>§2 架构总览</h3>
+    </section>
+    <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="2.1">
+      <h4>2.1 数据流</h4>
+      <p>```</p>
+      <p> ┌─ Client::classify_binary / encode_intent / generate ─────────────────────┐</p>
+      <p> │                                                                          │</p>
+      <p> │  1. tokens = tokenizer.encode(prompt)                                     │</p>
+      <p> │                                                                          │</p>
+      <p> │  2. Client::build_guardrail_chain():                                      │</p>
+      <p> │     ├─ 遍历 Client.guardrails (HashMap&lt;id, registration&gt;)                  │</p>
+      <p> │     ├─ 为每个 registration 构造 GuardrailProbeCallback { target_layer,    │</p>
+      <p> │     │    weights, policy, hidden_size, shared (Arc) }                    │</p>
+      <p> │     ├─ 加上用户自定 Extra callbacks (MidLayerEncodeCallback for Intent)    │</p>
+      <p> │     └─ 返回 CallbackChain (按 priority 排序)                              │</p>
+      <p> │                                                                          │</p>
+      <p> │  3. forward_config.callback_chain_ptr = &amp;mut chain                        │</p>
+      <p> │                                                                          │</p>
+      <p> │  4. mega-kernel CALL (callback_table_ptr → GuardrailProbeCallback)          │</p>
+      <p> │     ↓                                                                    │</p>
+      <p> │  5. Mega-Kernel CALL (JIT callback table 内):                            │</p>
+      <p> │     Mega-Kernel 内部执行所有层:                                            │</p>
+      <p> │       ... JIT 机器码执行 ...                                              │</p>
+      <p> │       if layer_idx == target_layer:                                       │</p>
+      <p> │         score = sigmoid(W · h_last + b)                                   │</p>
+      <p> │         shared.record_score(score)                                        │</p>
+      <p> │         match policy:                                                     │</p>
+      <p> │           HaltAndVeto { thr } if score &gt; thr → ExitEarly + veto flag      │</p>
+      <p> │           LogOnly → Continue                                              │</p>
+      <p> │           SampleDowngrade { min_temp } → record + Continue                │</p>
+      <p> │                                                                          │</p>
+      <p> │  6. Client 读 logits: 若为空 → Err("guardrail vetoed")                     │</p>
+      <p> │       否则 softmax 归一化返回分数                                          │</p>
+      <p> │  7. 用户通过 attachment.is_vetoed() / last_score() 查询状态               │</p>
+      <p> └──────────────────────────────────────────────────────────────────────────┘</p>
+      <p>```</p>
+    </section>
+    <section id="s2.2" data-section="2.2">
+      <h4>2.2 核心不变量</h4>
+      <p>1. <strong>零权重重载</strong>: attach_guardrail 仅在 Client 内部 HashMap 新增条目, 不触发 JIT 重编译或权重重装。</p>
+      <p>2. <strong>ARCH-FULL-JIT 合规</strong>: 前向仍走 JIT 管线 (Scalar → SymExec → IR → Lowering), 探针 sigmoid 只是 callback 层的轻量计算, 不绕开 JIT。</p>
+      <p>3. <strong>NO_SILENT_FALLBACK</strong>: 权重加载失败 / 形状不匹配 / anchor 越界 → 显式 <code>GuardrailError::...</code> (包装为 <code>ClientError::RuntimeError</code>)。</p>
+      <p>4. <strong>NO_ISLAND_MODULE</strong>: <code>GuardrailProbeCallback</code> 必须通过 <code>Client::build_guardrail_chain</code> 进入真实前向路径, 且 <code>classify_binary</code> / <code>encode_intent</code> 在构造前向时会消费注册表。</p>
+      <p>5. <strong>状态共享</strong>: 每个 attachment 持有 <code>Arc&lt;GuardrailSharedState&gt;</code>, 回调侧写入 score/veto, API 侧只读 — 双向隔离, 无锁竞争。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>§3 Client API</h3>
+    </section>
+    <section id="s3.1" data-section="3.1">
+      <h4>3.1 API 表面</h4>
+      <p>```rust</p>
+      <p>use gllm::{Client, GuardProbe, GuardProbeWeights, LayerAnchor, SafetyPolicy};</p>
+      <p>let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;</p>
+      <p>// 从 safetensors 加载探针</p>
+      <p>let attachment = client.attach_guardrail(</p>
+      <p>    GuardProbe::from_safetensors("toxicity_probe.safetensors"),</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    SafetyPolicy::HaltAndVeto { threshold: 0.95 },</p>
+      <p>)?;</p>
+      <p>// 或 inline 权重 (测试 / 程序生成的探针)</p>
+      <p>let attachment = client.attach_guardrail_inline(</p>
+      <p>    GuardProbeWeights { weight: vec![0.0; 576], bias: 0.0 },</p>
+      <p>    LayerAnchor::Relative(0.5),</p>
+      <p>    SafetyPolicy::LogOnly,</p>
+      <p>)?;</p>
+      <p>let _score = client.classify_binary("question", ...)?;</p>
+      <p>if attachment.is_vetoed() {</p>
+      <p>    eprintln!("Blocked: {:?}", attachment.last_veto_reason());</p>
+      <p>}</p>
+      <p>println!("score: {:?}", attachment.last_score());</p>
+      <p>client.detach_guardrail(<a href="http://attachment.id">attachment.id</a>)?;</p>
+      <p>```</p>
+    </section>
+    <section id="s3.2" data-section="3.2">
+      <h4>3.2 方法签名</h4>
+      <p>```rust</p>
+      <p>impl Client {</p>
+      <p>    pub fn attach_guardrail(</p>
+      <p>        &amp;self,</p>
+      <p>        probe: GuardProbe,</p>
+      <p>        anchor: LayerAnchor,</p>
+      <p>        policy: SafetyPolicy,</p>
+      <p>    ) -&gt; Result&lt;GuardrailAttachment, ClientError&gt;;</p>
+      <p>    pub fn attach_guardrail_inline(</p>
+      <p>        &amp;self,</p>
+      <p>        weights: GuardProbeWeights,</p>
+      <p>        anchor: LayerAnchor,</p>
+      <p>        policy: SafetyPolicy,</p>
+      <p>    ) -&gt; Result&lt;GuardrailAttachment, ClientError&gt;;</p>
+      <p>    pub fn detach_guardrail(&amp;self, id: u64) -&gt; Result&lt;(), ClientError&gt;;</p>
+      <p>}</p>
+      <p>```</p>
+      <code>attach_guardrail</code> 自动完成权重加载 + 解析 LayerAnchor + 校验 SafetyPolicy。
+    </section>
+    <section id="s4" data-section="4">
+      <h3>§4 GuardProbe 与 GuardProbeWeights</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 GuardProbe 枚举</h4>
+      <p>```rust</p>
+      <p>pub enum GuardProbe {</p>
+      <p>    /// 从本地 safetensors 文件加载探针权重。</p>
+      <p>    FromSafetensors { path: String },</p>
+      <p>}</p>
+      <p>```</p>
+      <p>未来扩展点: HuggingFace Hub 下载、内存字节加载等。<strong>当前仅支持 safetensors 文件</strong>。</p>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 Safetensors 格式约定</h4>
+      <code>H</code> 必须与模型 <code>hidden_size</code> 一致, 或小于 <code>hidden_size</code> (降维探针, 使用部分点积)。
+      <table>
+        <tr>
+          <th>Tensor 名称 (按优先级)</th>
+        </tr>
+        <tr>
+          <td>形状</td>
+        </tr>
+        <tr>
+          <td>含义</td>
+        </tr>
+        <tr>
+          <td>weight</td>
+          <td> / </td>
+          <td>classifier.weight</td>
+          <td> / </td>
+          <td>guard_probe.weight</td>
+        </tr>
+        <tr>
+          <td>[H]</td>
+          <td> / </td>
+          <td>[1, H]</td>
+          <td> / </td>
+          <td>[N, H]</td>
+        </tr>
+        <tr>
+          <td>线性分类器权重 (N≥1 时取第一行)</td>
+        </tr>
+        <tr>
+          <td>bias</td>
+          <td> / </td>
+          <td>classifier.bias</td>
+          <td> / </td>
+          <td>guard_probe.bias</td>
+        </tr>
+        <tr>
+          <td>[1]</td>
+          <td> / </td>
+          <td>[N]</td>
+        </tr>
+        <tr>
+          <td>偏置 (缺失时默认 0.0)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 GuardProbeWeights struct</h4>
+      <p>```rust</p>
+      <p>pub struct GuardProbeWeights {</p>
+      <p>    pub weight: Vec&lt;f32&gt;,</p>
+      <p>    pub bias: f32,</p>
+      <p>}</p>
+      <p>impl GuardProbeWeights {</p>
+      <p>    pub fn input_dim(&amp;self) -&gt; usize;</p>
+      <p>    pub fn score(&amp;self, hidden: &amp;[f32]) -&gt; f32; // sigmoid(w · h + b)</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>§5 SafetyPolicy</h3>
+      <p>```rust</p>
+      <p>pub enum SafetyPolicy {</p>
+      <p>    HaltAndVeto { threshold: f32 },       // score &gt; threshold → veto + ExitEarly</p>
+      <p>    LogOnly,                              // 只 record_score, 不改变前向</p>
+      <p>    SampleDowngrade { min_temperature: f32 }, // 记录 min_temp, 由上层采样器响应</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+    <section id="s5.1" data-section="5.1">
+      <h4>5.1 HaltAndVeto 语义</h4>
+      <li><code>threshold</code> 必须有限且在 <code>[0.0, 1.0]</code> 之间, 否则 <code>GuardrailError::InvalidPolicy</code>。</li>
+      <li><code>score &gt; threshold</code> 时:</li>
+      <p>  1. <code>shared.trigger_veto(reason)</code> 写入 veto 标志 + 原因字符串</p>
+      <p>  2. Callback 返回 <code>CallbackAction::ExitEarly { logits: Vec::new() }</code></p>
+      <p>  3. Mega-Kernel JIT 机器码检测到 veto 标志，立即退出执行，返回空输出</p>
+      <p>  4. JIT GuardrailProbeCallback (post_node) 检测 logits 异常 → ExitEarly 返回空结果</p>
+      <p>  5. Client 层检查 <code>logits.is_empty()</code> → 返回 <code>ClientError::RuntimeError("guardrail vetoed ...")</code></p>
+    </section>
+    <section id="s5.2" data-section="5.2">
+      <h4>5.2 LogOnly 语义</h4>
+      <li><code>shared.record_score(score)</code> 写入最近分数; 回调返回 <code>Continue</code>。</li>
+      <li>前向<strong>不变</strong>, 用户可后续查询 <code>attachment.last_score()</code>。</li>
+    </section>
+    <section id="s5.3" data-section="5.3">
+      <h4>5.3 SampleDowngrade 语义</h4>
+      <li><code>min_temperature</code> 必须有限且 &gt; 0, 否则 <code>InvalidPolicy</code>。</li>
+      <li>回调返回 <code>Continue</code> (不中断前向), 但 <code>shared.record_downgrade(min_temperature)</code> 写入共享状态。</li>
+      <li>采样器 (generation loop) 可通过 <code>attachment.downgraded_temperature()</code> 读取, 对当次采样调低温度。</li>
+      <li><strong>当前实现</strong>: Client-level sampler 钩子尚未完全集成, SampleDowngrade 仅保证"记录"语义; 将来采样器消费路径落地后该字段自动影响生成。</li>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>§6 LayerAnchor 复用</h3>
+      <p>Guardrail 直接复用 <code>crate::head_routing::LayerAnchor</code> 定义:</p>
+      <p>```rust</p>
+      <p>pub enum LayerAnchor {</p>
+      <p>    Relative(f32),   // r ∈ [0.0, 1.0], 映射 round(r × (num_layers - 1))</p>
+      <p>    Absolute(usize), // 绝对层索引, 必须 &lt; num_layers</p>
+      <p>}</p>
+      <p>```</p>
+      <p>解析函数 <code>guardrail::resolve_anchor(anchor, num_layers) -&gt; Result&lt;usize, GuardrailError&gt;</code> 包装底层 <code>LayerAnchor::resolve</code>, 把 <code>HeadRoutingError::InvalidLayerAnchor</code> 转为 <code>GuardrailError::InvalidAnchor</code>。</p>
+      <strong>铁律</strong>: <strong>禁止</strong>在 <a href="http://guardrail.rs">guardrail.rs</a> 中重新定义 <code>LayerAnchor</code> enum, 必须复用 head_routing 定义。
+    </section>
+    <section id="artifact-integration" data-artifact-type="integration" data-section="7">
+      <h3>§7 Integration Trace (NO_ISLAND_MODULE 合规证据)</h3>
+      <p>审计命令:</p>
+      <p>```bash</p>
+      <p>grep -rn "build_guardrail_chain|GuardrailProbeCallback::new" src/ --include="*.rs" | grep -v "#[cfg(test)]" | grep -v "mod tests"</p>
+      <p>```</p>
+      <table>
+        <tr>
+          <th>步骤</th>
+        </tr>
+        <tr>
+          <td>文件:函数:行号(开发后审计)</td>
+        </tr>
+        <tr>
+          <td>用户 API</td>
+        </tr>
+        <tr>
+          <td>src/client.rs::Client::attach_guardrail</td>
+          <td> / </td>
+          <td>attach_guardrail_inline</td>
+          <td> / </td>
+          <td>detach_guardrail</td>
+        </tr>
+        <tr>
+          <td>注册表</td>
+        </tr>
+        <tr>
+          <td>src/client.rs::Client::guardrails: Arc&lt;Mutex&lt;HashMap&lt;u64, GuardrailRegistration&gt;&gt;&gt;</td>
+        </tr>
+        <tr>
+          <td>构造 CallbackChain</td>
+        </tr>
+        <tr>
+          <td>src/client.rs::Client::build_guardrail_chain</td>
+          <td> — 被 </td>
+          <td>classify_binary</td>
+          <td> / 未来 generate 调用</td>
+        </tr>
+        <tr>
+          <td>运行时触发</td>
+        </tr>
+        <tr>
+          <td>src/engine/callbacks/guardrail_probe.rs::GuardrailProbeCallback::post_node</td>
+        </tr>
+        <tr>
+          <td>Executor 接入</td>
+        </tr>
+        <tr>
+          <td>src/engine/executor.rs::Executor::score_tokens_for_prompt_with_callbacks</td>
+          <td> 设置 </td>
+          <td>forward_config.callback_chain_ptr</td>
+        </tr>
+        <tr>
+          <td>Backend 消费</td>
+        </tr>
+        <tr>
+          <td>Mega-Kernel CALL（callback table 通过 </td>
+          <td>hook_ctx_ptr</td>
+          <td> 传入）</td>
+        </tr>
+        <tr>
+          <td>状态返回</td>
+        </tr>
+        <tr>
+          <td>GuardrailSharedState</td>
+          <td> (Arc) + </td>
+          <td>GuardrailAttachment</td>
+          <td> 方法 (</td>
+          <td>is_vetoed</td>
+          <td> / </td>
+          <td>last_score</td>
+          <td> / </td>
+          <td>last_veto_reason</td>
+          <td> / </td>
+          <td>downgraded_temperature</td>
+          <td>)</td>
+        </tr>
+      </table>
+    </section>
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h3="" data-section="8" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-001" id="req-gr-001">§8 E2E 验收 (REQ-GR-001..005)
+      <p>验证 Guardrail SDK 的探针 post_node 回调正确性、三种 SafetyPolicy（HaltAndVeto/LogOnly/SampleDowngrade）行为正确性、与 SG/HR 正交集成、以及 E2E veto 阻止不安全输出的完整链路。Guardrail 通过 <code>attach_guardrail</code> 注册到 CallbackChain，在 anchor 层的 post_node 回调中执行安全检测，与 SG 知识注入和 HR 多头路由完全正交。</p>
+
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Guardrail 探针 post_node 回调正确</li>
+        <li id="id-2" data-criterion="2">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</li>
+        <li id="id-3" data-criterion="3">与 SG/HR 正交集成</li>
+        <li id="id-4" data-criterion="4">E2E: Guardrail veto 阻止不安全输出</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    
+
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="001" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-006" id="req-gr-006">REQ-GR-006: 零探针不触发 veto
+      <p>```</p>
+      <p>输入: SmolLM2-135M-Instruct, GuardProbeWeights { weight=[0...], bias=0 },</p>
+      <p>      HaltAndVeto { threshold: 0.99 }</p>
+      <p>操作: classify_binary(...)</p>
+      <p>验收:</p>
+      <p>  (a) 返回 Ok(f32 ∈ [0, 1]) (无 veto)</p>
+      <p>  (b) attachment.is_vetoed() == false</p>
+      <p>  (c) attachment.last_score() ≈ 0.5 (零探针 sigmoid(0) = 0.5)</p>
+      <p>  (d) actual_layer ∈ [0, num_layers)</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Guardrail 探针 post_node 回调正确</li>
+        <li id="id-2" data-criterion="2">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</li>
+        <li id="id-3" data-criterion="3">与 SG/HR 正交集成</li>
+        <li id="id-4" data-criterion="4">E2E: Guardrail veto 阻止不安全输出</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-006" data-test="TEST-GR-006" id="test-gr-006">TEST-GR-006: Guardrail SDK测试<p>验证REQ-GR-006相关功能正确性</p>
+      <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
+      <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
+      <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
+      <div id="e2e-guardrail-veto-阻止不安全输出" data-criterion="E2E: Guardrail veto 阻止不安全输出">E2E: Guardrail veto 阻止不安全输出</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="002" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-005" id="req-gr-005">REQ-GR-5: HaltAndVeto 触发
+      <p>```</p>
+      <p>输入: weight=[0...], bias=+20 (sigmoid(20) ≈ 1.0),</p>
+      <p>      HaltAndVeto { threshold: 0.5 }</p>
+      <p>验收:</p>
+      <p>  (a) classify_binary 返回 Err(guardrail vetoed)</p>
+      <p>  (b) attachment.is_vetoed() == true</p>
+      <p>  (c) last_veto_reason() 包含 "vetoed" / "score" 子串</p>
+      <p>  (d) last_score() &gt; 0.99</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Guardrail 探针 post_node 回调正确</li>
+        <li id="id-2" data-criterion="2">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</li>
+        <li id="id-3" data-criterion="3">与 SG/HR 正交集成</li>
+        <li id="id-4" data-criterion="4">E2E: Guardrail veto 阻止不安全输出</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-005" data-test="TEST-GR-5" id="test-gr-5">TEST-GR-5: Guardrail SDK测试<p>验证REQ-GR-001相关功能正确性</p>
+      <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
+      <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
+      <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
+      <div id="e2e-guardrail-veto-阻止不安全输出" data-criterion="E2E: Guardrail veto 阻止不安全输出">E2E: Guardrail veto 阻止不安全输出</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="003" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-002" id="req-gr-002">REQ-GR-002: LogOnly 不改变生成
+      <p>```</p>
+      <p>输入: weight=[0...], bias=+100, LogOnly</p>
+      <p>基准: 无 guardrail 时 classify_binary 分数 = baseline</p>
+      <p>验收:</p>
+      <p>  (a) 加 guardrail 后 classify_binary 仍成功返回</p>
+      <p>  (b) 两次分数完全相等 (LogOnly 不影响前向, 浮点误差 &lt; 1e-4)</p>
+      <p>  (c) attachment.is_vetoed() == false</p>
+      <p>  (d) last_score() &gt; 0.99</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Guardrail 探针 post_node 回调正确</li>
+        <li id="id-2" data-criterion="2">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</li>
+        <li id="id-3" data-criterion="3">与 SG/HR 正交集成</li>
+        <li id="id-4" data-criterion="4">E2E: Guardrail veto 阻止不安全输出</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-002" data-test="TEST-GR-002" id="test-gr-002">TEST-GR-002: Guardrail SDK测试<p>验证REQ-GR-002相关功能正确性</p>
+      <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
+      <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
+      <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
+      <div id="e2e-guardrail-veto-阻止不安全输出" data-criterion="E2E: Guardrail veto 阻止不安全输出">E2E: Guardrail veto 阻止不安全输出</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="004" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-003" id="req-gr-003">REQ-GR-003: SampleDowngrade 记录温度
+      <p>```</p>
+      <p>输入: SampleDowngrade { min_temperature: 0.3 }</p>
+      <p>验收:</p>
+      <p>  (a) classify_binary 成功返回</p>
+      <p>  (b) attachment.downgraded_temperature() == Some(0.3)</p>
+      <p>  (c) attachment.is_vetoed() == false</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Guardrail 探针 post_node 回调正确</li>
+        <li id="id-2" data-criterion="2">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</li>
+        <li id="id-3" data-criterion="3">与 SG/HR 正交集成</li>
+        <li id="id-4" data-criterion="4">E2E: Guardrail veto 阻止不安全输出</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-003" data-test="TEST-GR-003" id="test-gr-003">TEST-GR-003: Guardrail SDK测试<p>验证REQ-GR-003相关功能正确性</p>
+      <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
+      <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
+      <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
+      <div id="e2e-guardrail-veto-阻止不安全输出" data-criterion="E2E: Guardrail veto 阻止不安全输出">E2E: Guardrail veto 阻止不安全输出</div>
+      
+    </section>
+
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="005" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-004" id="req-gr-004">REQ-GR-004: attach / detach 生命周期
+      <p>```</p>
+      <p>验收:</p>
+      <p>  (a) 多次 attach 返回单调递增 id</p>
+      <p>  (b) detach 未知 id 返回 Err</p>
+      <p>  (c) detach 后再次 detach 同一 id 返回 Err</p>
+      <p>  (d) detach 另一个 id 独立成功</p>
+      <p>```</p>
+    
+      <div data-criteria="">
+        <h5>验收标准</h5>
+        <ol>
+        <li id="id-1" data-criterion="1">Guardrail 探针 post_node 回调正确</li>
+        <li id="id-2" data-criterion="2">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</li>
+        <li id="id-3" data-criterion="3">与 SG/HR 正交集成</li>
+        <li id="id-4" data-criterion="4">E2E: Guardrail veto 阻止不安全输出</li>
+        </ol>
+      </div>
+    
+      <div data-entity-api-xrefs="">
+      
+      
+      
+      
+      </div>
+    </section>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-004" data-test="TEST-GR-004" id="test-gr-004">TEST-GR-004: Guardrail SDK测试<p>验证REQ-GR-004相关功能正确性</p>
+      <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
+      <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
+      <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
+      <div id="e2e-guardrail-veto-阻止不安全输出" data-criterion="E2E: Guardrail veto 阻止不安全输出">E2E: Guardrail veto 阻止不安全输出</div>
+      
+    </section>
+
+    <section id="s9" data-section="9">
+      <h3>§9 与 SG / HR 的正交性</h3>
+    </section>
+    <section id="s9.1" data-section="9.1">
+      <h4>9.1 共存</h4>
+      <p>同一 Client 可同时挂 SG + HR 召回 + Guardrail:</p>
+      <p>```rust</p>
+      <p>client.register_semantic_gatekeeper(sg_config)?;</p>
+      <p>let ga = client.attach_guardrail(probe, anchor, policy)?;</p>
+      <p>let score = client.classify_binary("prompt", cfg)?;  // 三者全部触发</p>
+      <p>let emb = client.encode_intent("intent", LayerAnchor::Relative(0.5), PoolMode::MeanPool)?;</p>
+      <p>```</p>
+      <li>SG 在 pre_node 注入知识残差 (优先级 90)</li>
+      <li>Guardrail 在 post_node 评估 hidden 做安全检测 (优先级 40)</li>
+      <li>HR 读最终 hidden, 不影响 SG / Guardrail 的 callback 流</li>
+    </section>
+    <section id="s9.2" data-section="9.2">
+      <h4>9.2 失败隔离</h4>
+      <li>Guardrail 的 <code>ExitEarly</code> 只影响<strong>本次前向</strong>; 对下一次 <code>classify_binary</code> 调用无影响 (<code>shared.reset()</code> 在 <code>build_guardrail_chain</code> 时调用)。</li>
+      <li>Guardrail 解绑 (detach) 后, <code>Arc&lt;GuardrailSharedState&gt;</code> 仍由 <code>GuardrailAttachment</code> 持有, 不会泄漏。</li>
+    </section>
+    <section id="s10" data-section="10">
+      <h3>§10 实现映射</h3>
+      <table>
+        <tr>
+          <th>SPEC 条目</th>
+        </tr>
+        <tr>
+          <td>代码位置</td>
+        </tr>
+        <tr>
+          <td>GuardProbe</td>
+          <td> / </td>
+          <td>GuardProbeWeights</td>
+          <td> / </td>
+          <td>SafetyPolicy</td>
+          <td> / </td>
+          <td>GuardrailError</td>
+        </tr>
+        <tr>
+          <td>src/guardrail.rs</td>
+        </tr>
+        <tr>
+          <td>GuardrailSharedState</td>
+          <td> / </td>
+          <td>GuardrailAttachment</td>
+        </tr>
+        <tr>
+          <td>src/guardrail.rs</td>
+        </tr>
+        <tr>
+          <td>load_probe_weights</td>
+          <td> / </td>
+          <td>validate_policy</td>
+          <td> / </td>
+          <td>resolve_anchor</td>
+        </tr>
+        <tr>
+          <td>src/guardrail.rs</td>
+        </tr>
+        <tr>
+          <td>GuardrailProbeCallback</td>
+          <td> (</td>
+          <td>LayerCallback::post_node</td>
+          <td> 实现)</td>
+        </tr>
+        <tr>
+          <td>src/engine/callbacks/guardrail_probe.rs</td>
+        </tr>
+        <tr>
+          <td>Client::attach_guardrail</td>
+          <td> / </td>
+          <td>attach_guardrail_inline</td>
+          <td> / </td>
+          <td>detach_guardrail</td>
+        </tr>
+        <tr>
+          <td>src/client.rs</td>
+        </tr>
+        <tr>
+          <td>Client::guardrails</td>
+          <td> / </td>
+          <td>build_guardrail_chain</td>
+        </tr>
+        <tr>
+          <td>src/client.rs</td>
+        </tr>
+        <tr>
+          <td>Backend::apply_guardrail_probe</td>
+          <td> (Backend trait 方法,Executor 通过 callback_table_ptr 绕过)</td>
+        </tr>
+        <tr>
+          <td>src/compat/cpu_backend.rs</td>
+          <td>, </td>
+          <td>src/compat/gpu_backend_macro.rs</td>
+        </tr>
+        <tr>
+          <td>Executor::score_tokens_for_prompt_with_callbacks</td>
+        </tr>
+        <tr>
+          <td>src/engine/executor.rs</td>
+        </tr>
+        <tr>
+          <td>公共导出</td>
+        </tr>
+        <tr>
+          <td>src/lib.rs</td>
+        </tr>
+        <tr>
+          <td>E2E 测试</td>
+        </tr>
+        <tr>
+          <td>tests/test_e2e_guardrail.rs</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s11" data-section="11">
+      <h3>§11 变更历史</h3>
+      <p>SPEC 文件不维护变更历史 (<a href="http://CLAUDE.md">CLAUDE.md</a> §6 铁律 4: SPEC 防腐化)。版本历史由 git 管理。本 SPEC 当前描述的是<strong>唯一正确设计</strong>, 如需更新设计, 整段重写对应章节。</p>
+    </section>
+  
+    <section data-section="entities">
+      <h3>数据结构</h3>
+      <section id="ent-callback-chain" data-entity="ENT-CALLBACK-CHAIN" data-req-ref="REQ-CALLBACK-001 REQ-CALLBACK-002 REQ-CALLBACK-003 REQ-DECOMP-001 REQ-COT-007" data-entity-model-type="relational" data-entity-ref="ENT-BATCH-CONTEXT ENT-COORDINATOR ENT-COT-REASONER ENT-EXECUTOR ENT-GUARDRAIL-PROBE ENT-MEGA-KERNEL-FN ENT-SAFETY-POLICY" data-xref="REQ-CALLBACK-001 REQ-CALLBACK-002 REQ-CALLBACK-003 REQ-DECOMP-001 REQ-COT-007"><h4>ENT-CALLBACK-CHAIN</h4><p>CallbackChain — 回调链</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="callbacks" data-type="string" data-required="false" <td="">callbacks<td>string</td><td>否</td><td></td><td>Vec&lt;LayerCallback&gt; 优先级排序回调列表</td></tr><tr data-field="sorted_indices" data-type="number" data-required="false" <td="">sorted_indices<td>number</td><td>
+否</td><td></td><td>Vec&lt;usize&gt; 按优先级降序的索引缓存</td></tr></table></section>
+      <section id="ent-guardrail-probe" data-entity="ENT-GUARDRAIL-PROBE" data-req-ref="REQ-GR-001 REQ-GR-006 REQ-GR-005 REQ-GR-002 REQ-GR-003" data-entity-model-type="relational" data-entity-ref="ENT-CALLBACK-CHAIN ENT-SAFETY-POLICY" data-xref="REQ-GR-001 REQ-GR-006 REQ-GR-005 REQ-GR-002 REQ-GR-003"><h4>ENT-GUARDRAIL-PROBE</h4>
+        <p>GuardrailProbe — 安全探针 (Client::attach_guardrail 返回句柄, REQ-GR-001~005)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="id" data-type="number" data-required="true" <td="">id<td>number</td><td>是</td><td>u64</td><td>内部唯一 id (由 Client 分配)</td></tr><tr data-field="actual_layer" data-type="number" data-required="true" <td="">actual_layer<td>number</td><td>是</td><td>usize</td><td>注册的物理层索引</td></tr><tr data-field="probe_name" data-type="string" data-required="true" <td="">probe_name<td>string</td><td>
+是</td><td></td><td>探针名字 / 标识符</td></tr><tr data-field="policy" data-type="string" data-required="true" <td="">policy<td>string</td><td>是</td><td>SafetyPolicy variant</td><td>触发后的动作策略 (HaltAndVeto/LogOnly/SampleDowngrade)</td></tr></table></section>
+      <section id="ent-safety-policy" data-entity="ENT-SAFETY-POLICY" data-req-ref="REQ-GR-001 REQ-GR-006 REQ-GR-005 REQ-GR-002 REQ-GR-003" data-entity-model-type="relational" data-entity-ref="ENT-CALLBACK-CHAIN ENT-GUARDRAIL-PROBE" data-xref="REQ-GR-001 REQ-GR-006 REQ-GR-005 REQ-GR-002 REQ-GR-003"><h4>ENT-SAFETY-POLICY</h4>
+        <p>SafetyPolicy — 安全策略枚举 (Guardrail 触发后的动作, REQ-GR-002~004)</p>
+        <table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>HaltAndVeto|LogOnly|SampleDowngrade</td><td>策略变体</td></tr><tr data-field="threshold" data-type="number" data-required="false" <td="">threshold<td>number</td><td>否</td><td>f32, HaltAndVeto 时必填</td><td>veto 阈值 (分数 &gt; threshold 时设置 veto 标志)</td></tr>
+<tr data-field="min_temperature" data-type="number" data-required="false" <td="">min_temperature<td>number</td><td>否</td><td>f32, SampleDowngrade 时必填</td><td>最低采样温度 (分数超标时写入共享状态)</td></tr></table></section>
+    </section>
+
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
+      <h3>接口契约</h3>
+      
+    </section>
+<section id="api-guardrail-attach" data-api="POST /client/guardrail/attach" data-req-ref="REQ-GR-001 REQ-GR-006 REQ-GR-005 REQ-GR-002 REQ-GR-003" data-api-type="client" data-api-name="API-GUARDRAIL-ATTACH" data-xref="REQ-GR-001 REQ-GR-006 REQ-GR-005 REQ-GR-002 REQ-GR-003"><h4>POST /client/guardrail/attach — Client::attach_guardrail()</h4><p>Guardrail 附件注入 API，为 Client 实例挂载内容安全护栏</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-type="Guardrail" data-required="true" data-param="guardrail"><td>guardrail</td><td>Guardrail</td><td>是</td><td>护栏配置实例</td></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="Client"><td>200</td><td>成功</td><td>Client</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Client"}</script></section></main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：GUARDRAIL.html</address>
+  </footer>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-gr-001" data-test="TEST-GR-001" data-req-ref="REQ-GR-001" data-test-categories="unit"><h4>TEST-GR-001: REQ-GR-001 单元测试</h4><p>验证 REQ-GR-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div></section></body>
+</html>

@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="algorithm-path-coverage">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"algorithm-path-coverage", "dependencies":[], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>算法路径覆盖矩阵 (Algorithm Path Coverage)</h1>
+    <nav data-spec-breadcrumb="">
+      SPEC &gt; <span>algorithm-path-coverage</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="artifact-algorithm" data-artifact-type="algorithm" data-section="null">
+      <h2>算法路径覆盖矩阵 (Algorithm Path Coverage)</h2>
+      <p>&gt; 按算法路径去重的模型测试覆盖分析。同一算法路径只需一个最小代表模型做 E2E 测试。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 算法路径定义</h3>
+      <p>一条"算法路径"由以下 5 个维度唯一确定：</p>
+      <strong>不构成算法差异的因素</strong>（仅权重布局差异）：
+      <li>Fused QKV (glm4) vs Separate QKV (qwen3) → Split 是元数据 op，数学等价</li>
+      <li>Fused gate_up_proj (phi4) vs Separate gate/up (qwen3) → 同上</li>
+      <li>GQA vs MHA → 仅 <code>num_kv_heads</code> 参数不同，代码路径一致</li>
+      <table>
+        <tr>
+          <th>维度</th>
+        </tr>
+        <tr>
+          <td>说明</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>FFN</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU / GeGLU / Standard GELU / MoE</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>注意力</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Standard Causal / Sliding Window / Softcap / Bidirectional</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>位置编码</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Full RoPE / Partial RoPE / Absolute / Absolute+TokenType</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>归一化</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RMSNorm / LayerNorm+Bias</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>特殊算子</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>LogitSoftCap / MoERouter+Dispatch / 无</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. Generator 算法路径</h3>
+    </section>
+    <section id="s8" data-section="8">
+      <h4>8 个模板 → 7 条唯一路径</h4>
+      <table>
+        <tr>
+          <th>路径 ID</th>
+        </tr>
+        <tr>
+          <td>FFN</td>
+        </tr>
+        <tr>
+          <td>注意力</td>
+        </tr>
+        <tr>
+          <td>位置编码</td>
+        </tr>
+        <tr>
+          <td>归一化</td>
+        </tr>
+        <tr>
+          <td>特殊算子</td>
+        </tr>
+        <tr>
+          <td>模板</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-A</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU</td>
+        </tr>
+        <tr>
+          <td>Standard</td>
+        </tr>
+        <tr>
+          <td>Full RoPE</td>
+        </tr>
+        <tr>
+          <td>RMSNorm</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>qwen3, llama, glm4</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-B</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Sliding Window</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Full RoPE</td>
+        </tr>
+        <tr>
+          <td>RMSNorm</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>mistral3</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-C</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU</td>
+        </tr>
+        <tr>
+          <td>Standard</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Partial RoPE</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RMSNorm</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>phi4</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-D</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Std GELU</td>
+          <td> (non-gated)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Sliding+Global 交替</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Dual RoPE (sliding θ=10K / global θ=1M+p-RoPE partial=0.25)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RMSNorm + </td>
+          <td>QkNorm</td>
+          <td> + </td>
+          <td>ValueNorm</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Per-Layer Embeddings (PLE)</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>gemma4</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-E</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU+MoE</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Sliding/Full 交替</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>yarn RoPE</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>RMSNorm</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>MoE 4 experts/token + attention bias + mxfp4 量化</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>gptoss</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-F</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU+</td>
+          <td>MoE</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Standard</td>
+        </tr>
+        <tr>
+          <td>Full RoPE</td>
+        </tr>
+        <tr>
+          <td>RMSNorm</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Router+SharedExperts+Dispatch</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>deepseek</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-G</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>SwiGLU+</td>
+          <td>MoE</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Standard</td>
+        </tr>
+        <tr>
+          <td>Full RoPE</td>
+        </tr>
+        <tr>
+          <td>RMSNorm</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>QwenRouter</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>qwen3 (MoE variant)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-模型-路径映射" data-section="null">
+      <h4>模型→路径映射</h4>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>所有模型</td>
+        </tr>
+        <tr>
+          <td>E2E 代表</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>G-A</td>
+        </tr>
+        <tr>
+          <td>Qwen3, Qwen2.5, Llama4, SmolLM2, SmolLM3, InternLM3, GLM4, GLM5</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>SmolLM2-135M</td>
+          <td> (ST) + </td>
+          <td>Qwen3-0.6B</td>
+          <td> (GGUF)</td>
+        </tr>
+        <tr>
+          <td>✅ 已覆盖</td>
+        </tr>
+        <tr>
+          <td>G-B</td>
+        </tr>
+        <tr>
+          <td>Mistral3, Ministral</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 未覆盖</td>
+        </tr>
+        <tr>
+          <td>G-C</td>
+        </tr>
+        <tr>
+          <td>Phi4, Phi4-mini</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 未覆盖</td>
+        </tr>
+        <tr>
+          <td>G-D</td>
+        </tr>
+        <tr>
+          <td>Gemma4-E2B/E4B/31B/26B-A4B</td>
+        </tr>
+        <tr>
+          <td>google/gemma-4-E2B</td>
+          <td> (模拟加载 + dry-run)</td>
+        </tr>
+        <tr>
+          <td>🟢 atomic 契约 (T36) + pattern_fusion (T41/T42) + JIT compile (T30/T37/T38) 全过,待 E2E 数值对齐 (T47)</td>
+        </tr>
+        <tr>
+          <td>G-E</td>
+        </tr>
+        <tr>
+          <td>GPT-OSS-1.5B, GPT-OSS-12B</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 未覆盖</td>
+        </tr>
+        <tr>
+          <td>G-F</td>
+        </tr>
+        <tr>
+          <td>DeepSeek</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 未覆盖 (模型过大)</td>
+        </tr>
+        <tr>
+          <td>G-G</td>
+        </tr>
+        <tr>
+          <td>Qwen3MoE (235B), Llama4-Scout, Llama4-8B</td>
+        </tr>
+        <tr>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>❌ 未覆盖 (模型过大)</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. Encoder 算法路径</h3>
+    </section>
+    <section id="s1" data-section="1">
+      <h4>1 条唯一路径</h4>
+      <table>
+        <tr>
+          <th>路径 ID</th>
+        </tr>
+        <tr>
+          <td>FFN</td>
+        </tr>
+        <tr>
+          <td>注意力</td>
+        </tr>
+        <tr>
+          <td>位置编码</td>
+        </tr>
+        <tr>
+          <td>归一化</td>
+        </tr>
+        <tr>
+          <td>特殊算子</td>
+        </tr>
+        <tr>
+          <td>模板</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>E-A</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Std GELU</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Bidirectional</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>Absolute+TokenType</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>LayerNorm+Bias</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Bias throughout</td>
+        </tr>
+        <tr>
+          <td>xlmr</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-模型-路径映射" data-section="null">
+      <h4>模型→路径映射</h4>
+      <p>&gt; XlmR 和 XlmRNext 共用 xlmr canonical name，算法路径完全一致。</p>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>所有模型</td>
+        </tr>
+        <tr>
+          <td>E2E 代表</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>E-A</td>
+        </tr>
+        <tr>
+          <td>XlmR: e5-small/base/large, bge-m3, m3e-base, jina-v2/v4; XlmRNext: bge-m4, bge-reranker-v3</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>e5-small-v2</td>
+          <td> (ST) + </td>
+          <td>multilingual-e5-small</td>
+          <td> (ONNX) + </td>
+          <td>bge-reranker-v2-m3</td>
+          <td> (ST/ONNX) + </td>
+          <td>Qwen3-Embedding</td>
+          <td> (GGUF)</td>
+        </tr>
+        <tr>
+          <td>✅ 已覆盖</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 缺口分析</h3>
+    </section>
+    <section id="s4.1" data-section="4.1">
+      <h4>4.1 可填补的缺口 (有公开可用的小模型)</h4>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>最小可用模型</td>
+        </tr>
+        <tr>
+          <td>大小</td>
+        </tr>
+        <tr>
+          <td>可行性</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-D</td>
+          <td> (Gemma4 Dual RoPE + QkNorm)</td>
+        </tr>
+        <tr>
+          <td>google/gemma-4-E2B</td>
+        </tr>
+        <tr>
+          <td>Effective 2B</td>
+        </tr>
+        <tr>
+          <td>✅ 可行，模型公开可用</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-E</td>
+          <td> (Legacy GELU)</td>
+        </tr>
+        <tr>
+          <td>openai/gpt-oss-1.5b</td>
+        </tr>
+        <tr>
+          <td>1.5B</td>
+        </tr>
+        <tr>
+          <td>✅ 已注册，模板通过 </td>
+          <td>build.rs</td>
+          <td> 自动扫描</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.2" data-section="4.2">
+      <h4>4.2 需要 GGUF 量化版的缺口 (原始模型过大)</h4>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>最小原始模型</td>
+        </tr>
+        <tr>
+          <td>大小</td>
+        </tr>
+        <tr>
+          <td>备选 GGUF</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-B</td>
+          <td> (Sliding Window)</td>
+        </tr>
+        <tr>
+          <td>mistralai/Mistral-Small-3.2</td>
+        </tr>
+        <tr>
+          <td>3.2B</td>
+        </tr>
+        <tr>
+          <td>寻找 Q4 量化版</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-C</td>
+          <td> (Partial RoPE)</td>
+        </tr>
+        <tr>
+          <td>microsoft/Phi-4-mini-instruct</td>
+        </tr>
+        <tr>
+          <td>3.8B</td>
+        </tr>
+        <tr>
+          <td>寻找 Q4 量化版</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.3" data-section="4.3">
+      <h4>4.3 无法 E2E 的缺口 (模型太大，仅单元测试覆盖)</h4>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>最小模型</td>
+        </tr>
+        <tr>
+          <td>大小</td>
+        </tr>
+        <tr>
+          <td>覆盖策略</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-F</td>
+          <td> (DeepSeek MoE)</td>
+        </tr>
+        <tr>
+          <td>DeepSeek-V3</td>
+        </tr>
+        <tr>
+          <td>671B</td>
+        </tr>
+        <tr>
+          <td>单元测试覆盖 MoERouter+MoEDispatch</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>G-G</td>
+          <td> (Qwen MoE)</td>
+        </tr>
+        <tr>
+          <td>Qwen3-MoE-A22B</td>
+        </tr>
+        <tr>
+          <td>235B</td>
+        </tr>
+        <tr>
+          <td>单元测试覆盖 MoE 路由</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s4.4" data-section="4.4">
+      <h4>4.4 代码缺口</h4>
+      <table>
+        <tr>
+          <th>问题</th>
+        </tr>
+        <tr>
+          <td>详情</td>
+        </tr>
+        <tr>
+          <td>状态</td>
+        </tr>
+        <tr>
+          <td>GPT-OSS (gpt-oss-20b) auto_graph 特征检测</td>
+        </tr>
+        <tr>
+          <td>真实 gpt-oss 架构 (MoE + sliding/full + yarn RoPE + RMSNorm + SiLU + bias + mxfp4) 需在 auto_graph 中添加特征检测</td>
+        </tr>
+        <tr>
+          <td>✅ MoE + attention_bias 特征检测 + YaRN RoPE scaling 传播已完成</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. E2E 测试最终方案 (每路径一个代表)</h3>
+    </section>
+    <section id="s-generator" data-section="null">
+      <h4>Generator</h4>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>代表模型</td>
+        </tr>
+        <tr>
+          <td>格式</td>
+        </tr>
+        <tr>
+          <td>测试内容</td>
+        </tr>
+        <tr>
+          <td>G-A</td>
+        </tr>
+        <tr>
+          <td>SmolLM2-135M / Qwen3-0.6B</td>
+        </tr>
+        <tr>
+          <td>ST+GGUF+ONNX</td>
+        </tr>
+        <tr>
+          <td>✅ 已有</td>
+        </tr>
+        <tr>
+          <td>G-D</td>
+        </tr>
+        <tr>
+          <td>gemma-4-E2B</td>
+        </tr>
+        <tr>
+          <td>ST (或 GGUF)</td>
+        </tr>
+        <tr>
+          <td>🔴 需新增：QkNorm + ValueNorm + DualRoPE (sliding+global p-RoPE) + PLE + Sliding-window/Global 交替 attention</td>
+        </tr>
+        <tr>
+          <td>G-E</td>
+        </tr>
+        <tr>
+          <td>openai/gpt-oss-1.5b</td>
+        </tr>
+        <tr>
+          <td>ST</td>
+        </tr>
+        <tr>
+          <td>🔴 需新增：LayerNorm+Bias + GELU + AbsolutePos + FusedQKV</td>
+        </tr>
+        <tr>
+          <td>G-B</td>
+        </tr>
+        <tr>
+          <td>mistral-small-3.2 Q4_K_M</td>
+        </tr>
+        <tr>
+          <td>GGUF</td>
+        </tr>
+        <tr>
+          <td>✅ 可选：Sliding Window</td>
+        </tr>
+        <tr>
+          <td>G-C</td>
+        </tr>
+        <tr>
+          <td>phi-4-mini Q4_K_M</td>
+        </tr>
+        <tr>
+          <td>GGUF</td>
+        </tr>
+        <tr>
+          <td>✅ 可选：Partial RoPE</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-encoder-embedding-reranker" data-section="null">
+      <h4>Encoder (Embedding / Reranker)</h4>
+      <table>
+        <tr>
+          <th>路径</th>
+        </tr>
+        <tr>
+          <td>代表模型</td>
+        </tr>
+        <tr>
+          <td>格式</td>
+        </tr>
+        <tr>
+          <td>测试内容</td>
+        </tr>
+        <tr>
+          <td>E-A</td>
+        </tr>
+        <tr>
+          <td>e5-small-v2 / bge-reranker-v2-m3</td>
+        </tr>
+        <tr>
+          <td>ST+GGUF+ONNX</td>
+        </tr>
+        <tr>
+          <td>✅ 已有</td>
+        </tr>
+      </table>
+    </section>
+    <section id="s-融合管线" data-section="null">
+      <h4>融合管线</h4>
+      <table>
+        <tr>
+          <th>测试</th>
+        </tr>
+        <tr>
+          <td>模型组合</td>
+        </tr>
+        <tr>
+          <td>测试内容</td>
+        </tr>
+        <tr>
+          <td>Embed+Rerank</td>
+        </tr>
+        <tr>
+          <td>e5-small + bge-reranker</td>
+        </tr>
+        <tr>
+          <td>✅ 已有</td>
+        </tr>
+        <tr>
+          <td>RAG</td>
+        </tr>
+        <tr>
+          <td>e5-small + bge-reranker + SmolLM2-135M</td>
+        </tr>
+        <tr>
+          <td>✅ 已有</td>
+        </tr>
+      </table>
+    </section>
+  </main>
+  <footer data-spec-footer="">
+    <address data-spec-ssot="">SSOT 定义者：algorithm-path-coverage.html</address>
+  </footer>
+</body>
+</html>

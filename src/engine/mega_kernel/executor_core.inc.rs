@@ -52,7 +52,7 @@ impl MegaKernelExecutor {
                 .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
 
         // Build slim config with only non-derivable fields.
-        // SPEC/39: mtp_config 已迁移到图拓扑（OpKind::MtpDraft），不再从 BusinessConfig 读取。
+        // SPEC/39: mtp_config 已迁移到图拓扑（Op::MtpDraft），不再从 BusinessConfig 读取。
         // ARCH-JIT-DATA-YIELDS: mtp_depth derived from topology, not graph.ops.iter().find_map.
         let topology = gllm_kernels::compiler::codegen::vm::topology::GraphTopologyAnalysis::analyze(&graph);
         let mtp_depth = topology.mtp_config.map(|c| c.depth).unwrap_or(0);
@@ -106,8 +106,6 @@ impl MegaKernelExecutor {
             let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
             let globals_size = weight_layout.total_bytes.saturating_sub(graph_globals_start);
             let total = hcfg.layer_blob_base_offset + total_layers_blob + globals_size;
-            eprintln!("[BLOB-LAYOUT] HETERO: num_segments={} small_segs={} large_segs={} total_layers_blob={}(0x{:x}) total={}(0x{:x})",
-                hcfg.num_segments, small_segs, large_segs, total_layers_blob, total_layers_blob, total, total);
             total
         } else if let Some(ref llcfg) = layer_loop_cfg {
             let num_layers = llcfg.num_layers;
@@ -116,16 +114,6 @@ impl MegaKernelExecutor {
             // Globals after layer area: final_norm, logits-producer, etc.
             let globals_start = base + stride;
             let globals_size = weight_layout.total_bytes.saturating_sub(globals_start);
-            eprintln!("[BLOB-LAYOUT] num_layers={} stride={}(0x{:x}) base_offset={}(0x{:x}) globals_start={}(0x{:x}) wl_total={}(0x{:x}) globals_size={}(0x{:x}) total_blob={}(0x{:x})",
-                num_layers, stride, stride, base, base, globals_start, globals_start,
-                weight_layout.total_bytes, weight_layout.total_bytes,
-                globals_size, globals_size,
-                base + num_layers * stride + globals_size, base + num_layers * stride + globals_size);
-            for (i, (tid, off)) in weight_layout.offsets.iter().enumerate() {
-                let is_global = *off >= globals_start;
-                let region = if *off < base { "PRE-LAYER" } else if is_global { "POST-LAYER" } else { "LAYER" };
-                eprintln!("[BLOB-LAYOUT]   wl[{}]: tid={} offset={}(0x{:x}) region={}", i, tid.0, off, off, region);
-            }
             base + num_layers * stride + globals_size
         } else {
             weight_layout.total_bytes
@@ -152,11 +140,6 @@ impl MegaKernelExecutor {
 
         let exec_code = output.layer_code;
         let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
-        {
-            let dump_path = "/tmp/jit_code_mega_auto.bin";
-            let _ = std::fs::write(dump_path, exec_code.code_bytes());
-            eprintln!("[JIT] Dumped {} bytes to {} entry_fn={:p}", exec_code.code_bytes().len(), dump_path, entry_fn);
-        }
 
         // §19 KV-OPT-009: Compile KIVI4 variant for compressed KV attention.
         // TEMP: disable KIVI4 compilation for GGUF models (no raw_floats) —
@@ -184,173 +167,6 @@ impl MegaKernelExecutor {
             geometry.num_layers,
             has_gemma_norm_residual,
         );
-
-        // Verify Q4_0 embed data in packed blob at offset 0
-        {
-            // Read first block of embed table (should be Q4_0: 2B f16 scale + 16B packed nibbles)
-            if weight_blob.len() >= 18 {
-                let scale_bits = u16::from_le_bytes([weight_blob[0], weight_blob[1]]);
-                let scale_f32 = half::f16::from_bits(scale_bits).to_f32();
-                let first_nibbles: Vec<String> = (0..8).map(|i| {
-                    let byte = weight_blob[2 + i];
-                    let lo = byte & 0x0F;
-                    let hi = (byte >> 4) & 0x0F;
-                    format!("{}({})", lo as i32 - 8, hi as i32 - 8)
-                }).collect();
-                eprintln!("[Q4-VERIFY] embed@0: scale_f16={:.6} (bits=0x{:04x}) nibbles=[{}]",
-                    scale_f32, scale_bits, first_nibbles.join(", "));
-                // Also check token 785's row
-                let tid = 785usize;
-                let row_stride = 576usize; // 32 blocks * 18 bytes
-                let row_off = tid * row_stride;
-                if row_off + 18 <= weight_blob.len() {
-                    let t_scale_bits = u16::from_le_bytes([weight_blob[row_off], weight_blob[row_off + 1]]);
-                    let t_scale = half::f16::from_bits(t_scale_bits).to_f32();
-                    let t_nibbles: Vec<String> = (0..4).map(|i| {
-                        let byte = weight_blob[row_off + 2 + i];
-                        format!("lo={}(f={:.4}) hi={}(f={:.4})",
-                            byte as i32 & 0xF, ((byte & 0xF) as f32 - 8.0) * t_scale,
-                            (byte >> 4) as i32 & 0xF, (((byte >> 4) & 0xF) as f32 - 8.0) * t_scale)
-                    }).collect();
-                    eprintln!("[Q4-VERIFY] token_{}@{}: scale={:.6} nibbles=[{}]",
-                        tid, row_off, t_scale, t_nibbles.join(", "));
-                }
-            }
-        }
-
-        // Verify embed data in packed blob (first hidden F32 values = embed row 0)
-        {
-            // Tied weight verify: find the global (non-layer) output projection weight.
-            // SPEC/39: no string-based "lm_head" search — identify by being the only
-            // non-"L0." weight that is large enough to be an output projection.
-            let lm_goff = named_offsets.iter()
-                .find(|(n, off)| !n.starts_with("L0.") && !n.contains("embed") && !n.contains("final_norm") && *off > 0)
-                .map(|(_, off)| *off);
-            if let Some(lm_goff) = lm_goff {
-                // logits-producer is a global weight packed at its graph offset — no layer
-                // loop stride adjustment needed (that applies to per-layer weights only).
-                let lm_blob_off = lm_goff;
-                if lm_blob_off + 32 <= weight_blob.len() {
-                    let embed_f32 = unsafe {
-                        std::slice::from_raw_parts(weight_blob.as_ptr() as *const f32, 8)
-                    };
-                    let lm_f32 = unsafe {
-                        std::slice::from_raw_parts(weight_blob[lm_blob_off..].as_ptr() as *const f32, 8)
-                    };
-                    let embed_vals: Vec<String> = embed_f32.iter().take(4).map(|v| format!("{:.4}", v)).collect();
-                    let lm_vals: Vec<String> = lm_f32.iter().take(4).map(|v| format!("{:.4}", v)).collect();
-                    let match_count = embed_f32.iter().zip(lm_f32.iter()).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
-                    eprintln!("[TIED-WEIGHT] embed@0=[{}] lm_head@{}(graph={},adj={} layer_loop)=[{}] match={}/8",
-                        embed_vals.join(","), lm_blob_off, lm_goff,
-                        if layer_loop_cfg.is_some() { "with" } else { "no" },
-                        lm_vals.join(","), match_count);
-                }
-            }
-            let embed_f32 = unsafe {
-                std::slice::from_raw_parts(
-                    weight_blob.as_ptr() as *const f32,
-                    8.min(weight_blob.len() / 4),
-                )
-            };
-            let first_8: Vec<String> = embed_f32.iter().take(8).map(|v| format!("{:.4}", v)).collect();
-            let any_nan = embed_f32.iter().any(|&v| v.is_nan());
-            eprintln!("[PACK-VERIFY] blob[0..8] as f32: [{}] any_nan={}", first_8.join(","), any_nan);
-        }
-        // Verify packed weight data at correct blob offsets
-        if let Some(ref llcfg) = layer_loop_cfg {
-            // L0.input_norm: graph offset = layer_blob_base_offset, blob offset = 0 * stride + graph_offset
-            let norm_graph_off = named_offsets.iter()
-                .find(|(n, _)| n == "L0.input_norm")
-                .map(|(_, off)| *off)
-                .unwrap_or(llcfg.layer_blob_base_offset);
-            if norm_graph_off + 32 <= weight_blob.len() {
-                let norm_f32 = unsafe {
-                    std::slice::from_raw_parts(
-                        weight_blob[norm_graph_off..].as_ptr() as *const f32,
-                        8,
-                    )
-                };
-                let first_8: Vec<String> = norm_f32.iter().take(8).map(|v| format!("{:.4}", v)).collect();
-                let any_nan = norm_f32.iter().any(|&v| v.is_nan());
-                eprintln!("[PACK-VERIFY] L0.input_norm at offset {}: [{}] any_nan={}", norm_graph_off, first_8.join(","), any_nan);
-            }
-            // L0.q_proj: graph offset from named_offsets
-            let q_proj_graph_off = named_offsets.iter()
-                .find(|(n, _)| n == "L0.q_proj")
-                .map(|(_, off)| *off)
-                .unwrap_or(0);
-            if q_proj_graph_off + 36 <= weight_blob.len() {
-                let q_f32 = unsafe {
-                    std::slice::from_raw_parts(
-                        weight_blob[q_proj_graph_off..].as_ptr() as *const f32,
-                        8.min((weight_blob.len() - q_proj_graph_off) / 4),
-                    )
-                };
-                let first_8: Vec<String> = q_f32.iter().take(8).map(|v| format!("{:.4}", v)).collect();
-                let any_nan = q_f32.iter().any(|&v| v.is_nan());
-                eprintln!("[PACK-VERIFY] L0.q_proj at offset {}: first_8_f32=[{}] any_nan={}",
-                    q_proj_graph_off, first_8.join(","), any_nan);
-                let raw = &weight_blob[q_proj_graph_off..q_proj_graph_off + 36];
-                let scale_bits = u16::from_le_bytes([raw[0], raw[1]]);
-                let scale_f16 = half::f16::from_bits(scale_bits);
-                let scale_f32 = scale_f16.to_f32();
-                let first_8_int8: Vec<i8> = raw[2..10].iter().map(|&b| b as i8).collect();
-                eprintln!("[PACK-VERIFY] L0.q_proj Q8_0 header: scale_f16={:.6} first_8_int8={:?}",
-                    scale_f32, first_8_int8);
-            }
-            // L1.input_norm: blob offset = 1 * stride + graph_offset
-            let l1_norm_off = llcfg.weight_stride + norm_graph_off;
-            if l1_norm_off + 32 <= weight_blob.len() {
-                let l1_f32 = unsafe {
-                    std::slice::from_raw_parts(weight_blob[l1_norm_off..].as_ptr() as *const f32, 8)
-                };
-                let first_8: Vec<String> = l1_f32.iter().take(8).map(|v| format!("{:.4}", v)).collect();
-                eprintln!("[PACK-VERIFY] L1.input_norm at offset {}: [{}]", l1_norm_off, first_8.join(","));
-            }
-            let l1_q_off = llcfg.weight_stride + q_proj_graph_off;
-            if l1_q_off + 32 <= weight_blob.len() {
-                let l1_q = unsafe {
-                    std::slice::from_raw_parts(weight_blob[l1_q_off..].as_ptr() as *const f32, 8)
-                };
-                let first_8: Vec<String> = l1_q.iter().take(8).map(|v| format!("{:.4}", v)).collect();
-                eprintln!("[PACK-VERIFY] L1.q_proj at offset {}: [{}]", l1_q_off, first_8.join(","));
-            }
-        }
-        // Verify norm weight values at actual hetero-computed offsets
-        {
-            if let Some(hcfg) = hetero_loop_cfg.as_ref() {
-                eprintln!("[NORM-WEIGHT-DIAG] blob_size={} layer_blob_base_offset={}", weight_blob.len(), hcfg.layer_blob_base_offset);
-            }
-            for &norm_name in &["L0.input_norm", "L0.q_norm", "L0.k_norm", "L0.post_attn_norm"] {
-                let norm_off = named_offsets.iter()
-                    .find(|(n, _)| n == &norm_name)
-                    .map(|(_, off)| *off);
-                if let Some(off) = norm_off {
-                    // Read from raw named_offsets offset first (template region)
-                    if off + 32 <= weight_blob.len() {
-                        let f32_vals = unsafe {
-                            std::slice::from_raw_parts(weight_blob[off..].as_ptr() as *const f32, 8)
-                        };
-                        let first_8: Vec<String> = f32_vals.iter().take(8).map(|v| format!("{:.6}", v)).collect();
-                        let mean: f32 = f32_vals.iter().sum::<f32>() / f32_vals.len() as f32;
-                        eprintln!("[NORM-WEIGHT-TEMPLATE] {} at template_off={}: [{}] mean={:.4}", norm_name, off, first_8.join(","), mean);
-                    }
-                    // Also try reading at hetero layer 0 absolute offset
-                    if let Some(hcfg) = hetero_loop_cfg.as_ref() {
-                        let type_base = hcfg.layer_blob_base_offset;
-                        let abs_off = type_base + off;
-                        if abs_off + 32 <= weight_blob.len() {
-                            let f32_vals = unsafe {
-                                std::slice::from_raw_parts(weight_blob[abs_off..].as_ptr() as *const f32, 8)
-                            };
-                            let first_8: Vec<String> = f32_vals.iter().take(8).map(|v| format!("{:.6}", v)).collect();
-                            let mean: f32 = f32_vals.iter().sum::<f32>() / f32_vals.len() as f32;
-                            eprintln!("[NORM-WEIGHT-HETERO] {} at base+off={}: [{}] mean={:.4}", norm_name, abs_off, first_8.join(","), mean);
-                        }
-                    }
-                }
-            }
-        }
 
         // Compile GPU PTX/HIP code if sm_version provided and GPU JIT backend available.
         #[cfg(any(feature = "cuda", feature = "hip"))]
@@ -603,15 +419,6 @@ impl MegaKernelExecutor {
         let output_size = max_new_tokens * (1 + mtp_depth);
         let mut output_tokens = vec![0u32; output_size];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total)];
-        eprintln!("[SCRATCHPAD-DBG] max_total={} scratchpad_bytes={} buffer_layout.total={}",
-            max_total, scratchpad.len(), mega.buffer_layout.total_scratchpad_bytes);
-        eprintln!("[SCRATCHPAD-DBG] logits_off={} vocab={} hidden={} max_seq_len={}",
-            mega.logits_scratch_offset, mega.vocab_size, mega.hidden, mega.max_seq_len);
-        eprintln!("[SCRATCHPAD-DBG] activation_a_off={} activation_b_off={} activation_bytes={}",
-            mega.buffer_layout.activation_a_offset, mega.buffer_layout.activation_b_offset,
-            mega.buffer_layout.activation_bytes);
-        eprintln!("[SCRATCHPAD-DBG] scratchpad_ptr={:p} scratchpad_end={:p}",
-            scratchpad.as_ptr(), unsafe { scratchpad.as_ptr().add(scratchpad.len()) });
 
         // Pre-fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
@@ -724,8 +531,6 @@ impl MegaKernelExecutor {
         // from it during attention, enabling the model to attend to all previous tokens.
         let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
         let mut kv_cache = if kv_cache_bytes > 0 {
-            eprintln!("[KV-CACHE] allocating {} bytes ({} layers, stride {} per layer)",
-                kv_cache_bytes, self.num_layers, mega.kv_layer_stride());
             vec![0u8; kv_cache_bytes]
         } else {
             Vec::new()

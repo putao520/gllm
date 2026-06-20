@@ -189,13 +189,14 @@ mod tests {
         )
         .expect("graph build should succeed");
 
-        // Single-template: 1 × 15 layer ops + 1 kv_write + 6 global ops = 22
-        // layer: input_norm + q + k + v + rope_q + rope_k + kv_write + mha + o + resid + post_norm
-        //        + gate + up + swiglu + down + ffn_resid = 15 + kv_write = 16
+        // Single-template: 1 × 15 layer ops + 6 global ops = 21
+        // layer: input_norm + q + k + v + rope_q + rope_k + mha + o + resid + post_norm
+        //        + gate + up + swiglu + down + ffn_resid = 15
+        // (kv_write removed: attention FromCache internally handles KV write)
         // global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
         assert_eq!(
             graph.ops.len(),
-            22,
+            21,
             "expected 22 ops, got {}: {:?}",
             graph.ops.len(),
             graph
@@ -242,9 +243,9 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .unwrap();
-        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+        if let Op::MultiHeadAttention(spec) = &mha.op {
             assert_eq!(spec.geometry.num_q_heads, 4);
             assert_eq!(spec.geometry.num_kv_heads, 2);
             assert_eq!(spec.geometry.head_dim, 16);
@@ -433,12 +434,12 @@ mod tests {
         let ln_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .count();
         assert_eq!(ln_count, 2, "1 template × 2 norms = 2 LayerNorm ops");
 
         // Verify Gelu
-        assert!(graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gelu)));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Gelu)));
     }
 
     #[test]
@@ -609,11 +610,12 @@ mod tests {
         )
         .expect("graph build should succeed");
 
-        // Single-template: 1 × 17 layer ops + 1 kv_write + 6 global ops = 24
-        // layer: input_norm + q + k + v + q_norm + k_norm + rope_q + rope_k + kv_write + mha + o + resid + post_norm
-        //        + gate + up + swiglu + down + ffn_resid = 17 + kv_write = 18
+        // Single-template: 1 × 17 layer ops + 6 global ops = 23
+        // layer: input_norm + q + k + v + q_norm + k_norm + rope_q + rope_k + mha + o + resid + post_norm
+        //        + gate + up + swiglu + down + ffn_resid = 17
+        // (kv_write removed: attention FromCache internally handles KV write)
         // global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
-        let expected = 18 + 6;
+        let expected = 17 + 6;
         assert_eq!(
             graph.ops.len(),
             expected,
@@ -631,7 +633,7 @@ mod tests {
         let hrn_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::HeadRmsNorm { .. }))
+            .filter(|op| matches!(op.op, Op::HeadRmsNorm { .. }))
             .count();
         assert_eq!(hrn_count, 2, "1 template × 2 (q+k) = 2 HeadRmsNorm ops");
     }
@@ -742,10 +744,10 @@ mod tests {
         //   MoE: moe_gate + topk = 2
         //   Per expert (4): gate_gemm + gate_mask + up_gemm + swiglu + down_gemm + cond_add = 6×4 = 24
         //   moe_resid = 1
-        //   kv_write = 1
-        //   Total per-layer = 10 + 2 + 24 + 1 + 1 = 38
+        //   (kv_write removed: attention FromCache internally handles KV write)
+        //   Total per-layer = 10 + 2 + 24 + 1 = 37
         // Global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
-        let expected = 38 + 6;
+        let expected = 37 + 6;
         assert_eq!(
             graph.ops.len(),
             expected,
@@ -763,21 +765,21 @@ mod tests {
         let moe_gate_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::MoEGate { .. }))
+            .filter(|op| matches!(op.op, Op::MoEGate { .. }))
             .count();
         assert_eq!(moe_gate_count, 1, "should have 1 MoEGate op");
 
         let topk_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::TopK { .. }))
+            .filter(|op| matches!(op.op, Op::TopK { .. }))
             .count();
         assert_eq!(topk_count, 1, "should have 1 TopK op");
 
         let cond_add_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::MoEConditionalAdd { .. }))
+            .filter(|op| matches!(op.op, Op::MoEConditionalAdd { .. }))
             .count();
         assert_eq!(
             cond_add_count, num_experts,
@@ -788,7 +790,7 @@ mod tests {
         let swiglu_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::SwiGlu))
+            .filter(|op| matches!(op.op, Op::SwiGlu))
             .count();
         assert_eq!(
             swiglu_count, num_experts,
@@ -1345,9 +1347,9 @@ mod tests {
         );
 
         // Verify the op kind is ValueNorm
-        match &v_norm.op_v2 {
+        match &v_norm.op {
             Op::ValueNorm(spec) => {}
-            other => panic!("v_norm should be OpKind::ValueNorm, got {:?}", other),
+            other => panic!("v_norm should be Op::ValueNorm, got {:?}", other),
         }
 
         // q_norm and k_norm should still be present
@@ -1609,14 +1611,14 @@ mod tests {
         // Verify no AltUp ops exist when has_per_layer_embedding=false
         assert!(
             !graph.ops.iter().any(|o| matches!(
-                &o.op_v2,
+                &o.op,
                 Op::AltUpPredict { .. } | Op::AltUpCorrect { .. } | Op::AltUpInject { .. }
             )),
             "AltUp ops should NOT exist when has_per_layer_embedding=false"
         );
     }
 
-    /// Verify that quantized weight types produce OpKind::QuantGemm instead of OpKind::Gemm.
+    /// Verify that quantized weight types produce Op::QuantGemm instead of Op::Gemm.
     #[test]
     fn auto_quantized_weights_produce_quant_gemm() {
         let config = make_config(1, 64, 4, 2, 16);
@@ -1731,7 +1733,7 @@ mod tests {
         let quant_gemms: Vec<_> = graph_q4_0
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::QuantGemm { .. }))
+            .filter(|op| matches!(op.op, Op::QuantGemm { .. }))
             .collect();
         assert!(
             quant_gemms.len() >= 4,
@@ -1741,7 +1743,7 @@ mod tests {
 
         // Verify each QuantGemm has Q4_0
         for op in &quant_gemms {
-            if let Op::QuantGemm(spec) = &op.op_v2 {
+            if let Op::QuantGemm(spec) = &op.op {
                 assert_eq!(
                     spec.quant_type,
                     gllm_kernels::quant::QuantType::Q4_0,
@@ -1755,7 +1757,7 @@ mod tests {
         let regular_gemms: Vec<_> = graph_q4_0
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .collect();
         // lm_head may still be Gemm if not in quant_types
         assert!(
@@ -1788,10 +1790,10 @@ mod tests {
         let q8_gemms: Vec<_> = graph_q8_0
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::QuantGemm { .. }))
+            .filter(|op| matches!(op.op, Op::QuantGemm { .. }))
             .collect();
         for op in &q8_gemms {
-            if let Op::QuantGemm(spec) = &op.op_v2 {
+            if let Op::QuantGemm(spec) = &op.op {
                 assert_eq!(spec.quant_type, gllm_kernels::quant::QuantType::Q8_0);
             }
         }
@@ -1819,7 +1821,7 @@ mod tests {
             .iter()
             .filter(|op| {
                 matches!(
-                    &op.op_v2,
+                    &op.op,
                     Op::QuantGemm(spec) if spec.quant_type == gllm_kernels::quant::QuantType::Q4K
                 )
             })
@@ -1933,7 +1935,7 @@ mod tests {
             let gemm = graph.ops.iter().find(|op| op.label == label);
             assert!(gemm.is_some(), "missing MTP Gemm op: {}", label);
             let gemm_op = gemm.unwrap();
-            match &gemm_op.op_v2 {
+            match &gemm_op.op {
                 Op::Gemm(spec) => {
                     let n = &spec.n;
                     let k = &spec.k;
@@ -2309,7 +2311,7 @@ mod tests {
             .iter()
             .filter(|op| {
                 matches!(
-                    &op.op_v2,
+                    &op.op,
                     Op::RoPE(spec) if matches!(&spec.rope_scaling, Some(RopeScaling::Yarn { .. }))
                 )
             })
@@ -2324,7 +2326,7 @@ mod tests {
 
         // Verify YaRN parameters
         for op in &yarn_rope_ops {
-            if let Op::RoPE(spec) = &op.op_v2 {
+            if let Op::RoPE(spec) = &op.op {
                 if let RopeScaling::Yarn {
                     factor,
                     beta_fast,
@@ -2345,14 +2347,14 @@ mod tests {
             graph
                 .ops
                 .iter()
-                .any(|op| matches!(op.op_v2, Op::MoEGate { .. })),
+                .any(|op| matches!(op.op, Op::MoEGate { .. })),
             "MoEGate op missing"
         );
         assert!(
             graph
                 .ops
                 .iter()
-                .any(|op| matches!(op.op_v2, Op::TopK { .. })),
+                .any(|op| matches!(op.op, Op::TopK { .. })),
             "TopK op missing"
         );
     }
@@ -2599,7 +2601,12 @@ mod tests {
     // ── analyze_architecture: FinalNorm-only decoder ──
 
     #[test]
-    fn analyze_decoder_with_final_norm_only() {
+    fn analyze_final_norm_without_output_head_is_encoder() {
+        // OE-4 root cause: FinalNorm alone is ambiguous — present in both
+        // decoder base models (Qwen3-0.6B-Base) and encoder models (Qwen3-Embedding).
+        // The disambiguator is OutputHead (lm_head): only decoders have it.
+        // FinalNorm + AttentionKey without OutputHead → Encoder, because
+        // encoder/embedding/reranker models have output_norm but no lm_head.
         let ri = make_role_index(vec![
             (TensorRole::Embedding, None, "embed.weight"),
             (TensorRole::FinalNorm, None, "norm.weight"),
@@ -2609,12 +2616,12 @@ mod tests {
         let features = analyze_architecture(&ri, &ws, None, None);
         assert_eq!(
             features.family,
-            Family::Decoder,
-            "FinalNorm alone → Decoder"
+            Family::Encoder,
+            "FinalNorm without OutputHead → Encoder (ambiguous, must be disambiguated by OutputHead)"
         );
         assert!(
             features.has_rope,
-            "Decoder with AttentionKey should have RoPE"
+            "Encoder with AttentionKey should still detect RoPE"
         );
     }
 
@@ -3266,9 +3273,9 @@ mod tests {
             .find(|op| op.label == "embed_gather")
             .expect("should have embed_gather op");
         assert!(
-            matches!(embed_op.op_v2, Op::QuantGather { .. }),
+            matches!(embed_op.op, Op::QuantGather { .. }),
             "quantized embed → QuantGather, got {:?}",
-            embed_op.op_v2
+            embed_op.op
         );
     }
 
@@ -3345,11 +3352,11 @@ mod tests {
         .expect("standard FFN graph should build");
 
         assert!(
-            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gelu)),
+            graph.ops.iter().any(|op| matches!(op.op, Op::Gelu)),
             "standard FFN should have Gelu activation"
         );
         assert!(
-            !graph.ops.iter().any(|op| matches!(op.op_v2, Op::SwiGlu)),
+            !graph.ops.iter().any(|op| matches!(op.op, Op::SwiGlu)),
             "standard FFN should NOT have SwiGlu"
         );
     }
@@ -4358,7 +4365,7 @@ mod tests {
             "decoder graph should have final_norm op"
         );
         assert!(
-            matches!(final_norm_op.unwrap().op_v2, Op::RmsNorm(..)),
+            matches!(final_norm_op.unwrap().op, Op::RmsNorm(..)),
             "final_norm should be RmsNorm when norm_type is RmsNorm"
         );
     }
@@ -4832,7 +4839,7 @@ mod tests {
         let quant_gemm_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::QuantGemm { .. }))
+            .filter(|op| matches!(op.op, Op::QuantGemm { .. }))
             .count();
         assert_eq!(
             quant_gemm_count, 2,
@@ -4843,7 +4850,7 @@ mod tests {
         let regular_gemm_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Gemm(..)))
+            .filter(|op| matches!(op.op, Op::Gemm(..)))
             .count();
         assert!(
             regular_gemm_count >= 5,
@@ -4931,7 +4938,7 @@ mod tests {
         let rope_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::RoPE { .. }))
+            .filter(|op| matches!(op.op, Op::RoPE { .. }))
             .collect();
         assert_eq!(
             rope_ops.len(),
@@ -4939,7 +4946,7 @@ mod tests {
             "decoder should have 2 RoPE ops (Q+K) even with theta=0.0"
         );
         for op in &rope_ops {
-            if let Op::RoPE(spec) = &op.op_v2 {
+            if let Op::RoPE(spec) = &op.op {
                 assert_eq!(spec.theta, 0.0, "RoPE theta should be 0.0 as configured");
             }
         }
@@ -5078,11 +5085,11 @@ mod tests {
 
         // Assert: Gelu present, no SwiGLU
         assert!(
-            graph.ops.iter().any(|op| matches!(op.op_v2, Op::Gelu)),
+            graph.ops.iter().any(|op| matches!(op.op, Op::Gelu)),
             "Standard FFN should have Gelu"
         );
         assert!(
-            !graph.ops.iter().any(|op| matches!(op.op_v2, Op::SwiGlu)),
+            !graph.ops.iter().any(|op| matches!(op.op, Op::SwiGlu)),
             "Standard FFN should not have SwiGlu"
         );
 
@@ -5239,7 +5246,7 @@ mod tests {
             .find(|op| op.label == "embed_gather")
             .expect("should have embed_gather op");
         assert!(
-            matches!(embed_op.op_v2, Op::QuantGather { .. }),
+            matches!(embed_op.op, Op::QuantGather { .. }),
             "quantized embed → QuantGather"
         );
 
@@ -5247,7 +5254,7 @@ mod tests {
         let quant_gemm_labels: Vec<&str> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::QuantGemm { .. }))
+            .filter(|op| matches!(op.op, Op::QuantGemm { .. }))
             .map(|op| op.label.as_str())
             .collect();
         assert!(
@@ -5473,11 +5480,11 @@ mod tests {
         let rope_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::RoPE { .. }))
+            .filter(|op| matches!(op.op, Op::RoPE { .. }))
             .collect();
         assert_eq!(rope_ops.len(), 2, "should have 2 RoPE ops");
         for op in &rope_ops {
-            if let Op::RoPE(spec) = &op.op_v2 {
+            if let Op::RoPE(spec) = &op.op {
                 assert_eq!(
                     spec.theta, 1_000_000.0,
                     "RoPE theta should be 1M as configured"
@@ -5566,7 +5573,7 @@ mod tests {
         let qk_norm_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|o| matches!(&o.op_v2, Op::QkNorm { .. }))
+            .filter(|o| matches!(&o.op, Op::QkNorm { .. }))
             .collect();
         assert_eq!(qk_norm_ops.len(), 2, "should have 2 QkNorm ops (Q and K)");
 
@@ -5575,7 +5582,7 @@ mod tests {
             .iter()
             .find(|o| o.label == "layer.qk_norm_q")
             .expect("Q QkNorm op should exist");
-        if let Op::QkNorm { head_dim: hd, .. } = &q_qk_norm.op_v2 {
+        if let Op::QkNorm { head_dim: hd, .. } = &q_qk_norm.op {
             assert_eq!(*hd, head_dim, "QkNorm head_dim should match config");
         }
 
@@ -5603,7 +5610,7 @@ mod tests {
             !graph
                 .ops
                 .iter()
-                .any(|o| matches!(&o.op_v2, Op::HeadRmsNorm { .. })),
+                .any(|o| matches!(&o.op, Op::HeadRmsNorm { .. })),
             "HeadRmsNorm should NOT exist when QkNorm is active"
         );
     }
@@ -5687,7 +5694,7 @@ mod tests {
             !graph
                 .ops
                 .iter()
-                .any(|o| matches!(&o.op_v2, Op::QkNorm { .. })),
+                .any(|o| matches!(&o.op, Op::QkNorm { .. })),
             "QkNorm ops should NOT exist when has_qk_norm=false"
         );
 

@@ -468,6 +468,7 @@ mod tests {
                 precompute: false,
             },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -927,6 +928,7 @@ mod tests {
         let no_pos = GeneratorForwardConfig {
             geometry: geo.clone(), rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None, rerank_no_token_id: None, moe_config: None,
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 }, callback_chain: CallbackChainHandle::new(),
         };
@@ -934,6 +936,7 @@ mod tests {
         let with_rerank = GeneratorForwardConfig {
             geometry: geo, rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: Some(1), rerank_no_token_id: Some(0), moe_config: None,
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 }, callback_chain: CallbackChainHandle::new(),
         };
@@ -946,6 +949,7 @@ mod tests {
         let cfg = GeneratorForwardConfig {
             geometry: minimal_geometry(), rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None, rerank_no_token_id: None, moe_config: None,
             paged_kv: PagedKvConfig { page_table: None, page_size: 16 }, callback_chain: CallbackChainHandle::new(),
         };
@@ -2012,6 +2016,7 @@ mod tests {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: true, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -2028,6 +2033,7 @@ mod tests {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Encoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: None,
@@ -2044,6 +2050,7 @@ mod tests {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: Some(crate::manifest::MoEConfig {
@@ -2066,6 +2073,7 @@ mod tests {
             geometry: minimal_geometry(),
             rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
             arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
             rerank_yes_token_id: Some(7386),
             rerank_no_token_id: Some(3617),
             moe_config: None,

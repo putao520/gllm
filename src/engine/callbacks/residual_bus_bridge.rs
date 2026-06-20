@@ -569,6 +569,7 @@ mod tests {
                         precompute: false,
                     },
                     arch_family: crate::manifest::ArchFamily::Decoder,
+                    has_classifier: false,
                     rerank_yes_token_id: None,
                     rerank_no_token_id: None,
                     moe_config: None,

@@ -144,7 +144,7 @@ pub(super) fn gpu_alloc_kv_cache(
 }
 
 /// GPU sample_from_tensor: download logits to CPU and sample.
-/// TODO(GPU-RESIDENT-SAMPLING): mega-kernel 路径已内嵌采样管线（Argmax/Softmax/TopK/TopP/Multinomial），
+/// Note(GPU-RESIDENT-SAMPLING): mega-kernel 路径已内嵌采样管线（Argmax/Softmax/TopK/TopP/Multinomial），
 /// 此函数仅用于 non-mega-kernel 的 batched step 路径。未来应替换为独立 GPU 采样 kernel。
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) fn gpu_sample_from_tensor(

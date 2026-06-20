@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
   <meta charset="utf-8">
-  <meta content="26-VMINSTR-RATIONALIZATION" name="spec-file">
-  <meta content="other" name="spec-category">
+  <meta name="spec-file" content="26-VMINSTR-RATIONALIZATION">
+  <meta name="spec-category" content="other">
 
   <script type="application/ld+json">
   { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"26-VMINSTR-RATIONALIZATION", "dependencies":[], "children":[] }
@@ -158,36 +158,27 @@
         </tr>
       </table>
     </section>
-    <section id="req-vr-001" data-req="REQ-VR-001" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§1 去类型化合并 (REQ-VR-001~004)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-001" id="req-vr-001">§1 去类型化合并 (REQ-VR-001~004)
       <p>将 VmInstr 中 dtype 硬编码在指令名中的变体（GGUF 加载 11 个、DotProduct 5 个、GPR 操作 11 个、Quant* 解码 18 个）合并为参数化指令，参照 Triton TTIR 设计原则使 dtype 存在于类型签名中而非指令名中，将总变体数从 142 精简至约 97 个。</p>
 
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-001" data-test="TEST-VR-001" data-req-ref="REQ-VR-012" data-test-categories="unit" <h3="">TEST-VR-001: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
-      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
-      
-    </section>
+    
 
-    <section id="req-vr-015" data-req="REQ-VR-015" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.1" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.1 GGUF 量化块加载合并 (REQ-VR-015)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-015" id="req-vr-015">§1.1 GGUF 量化块加载合并 (REQ-VR-015)
       <p>将 11 个 GgufXxxLoad 变体合并为 2 个参数化指令（QuantBlockLoad + QuantBiPlaneLoad），通过 BlockUnpackMode/BiPlaneMode 枚举描述解包策略，消除每新增一个 GGUF 量化格式就新增一个 VmInstr 变体的膨胀问题。</p>
       <strong>当前</strong>：11 个 GgufXxxLoad 变体，全部是 <code>load bytes → unpack → dequant → compute_dtype</code>，仅解包算法不同。compute_dtype 由 TensorMeta.dtype × DeviceProfile 推导，量化路径计算精度从权重 dtype 推导(多精度混合支持 F32/BF16/F16)，原生浮点路径保持原始精度。
       <strong>目标</strong>：2 个参数化变体 + 保留 2 个 scale 加载。
@@ -195,28 +186,19 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-015" data-test="TEST-VR-015" data-req-ref="REQ-VR-016" data-test-categories="unit" <h3="">TEST-VR-015: VmInstr去类型化合并测试<p>验证REQ-VR-015相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
-      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
-      
-    </section>
+    
 
     <section id="s1.1.1" data-section="1.1.1">
       <h5>§1.1.1 QuantBlockLoad — 单平面量化块加载</h5>
@@ -268,7 +250,7 @@
       <p>```</p>
       <strong>变更汇总</strong>：11 → 4（-7）
     </section>
-    <section id="req-vr-012" data-req="REQ-VR-012" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.2" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.2 Dot-Product 合并 (REQ-VR-12)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-012" id="req-vr-012">§1.2 Dot-Product 合并 (REQ-VR-12)
       <strong>当前</strong>：5 个 DotProduct 变体（Bf16Dot/Fp16Dot/Int8Dot/Int4x8Dot/Fp4Dot），差异仅在输入 dtype。
       <strong>目标</strong>：1 个参数化变体。
       <p>```</p>
@@ -292,30 +274,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-12" data-test="TEST-VR-12" data-req-ref="REQ-VR-012" data-test-categories="unit" <h3="">TEST-VR-12: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-012" data-test="TEST-VR-12" id="test-vr-12">TEST-VR-12: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-002" data-req="REQ-VR-002" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.3" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.3 GPR 整数操作合并 (REQ-VR-002)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.3" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-002" id="req-vr-002">§1.3 GPR 整数操作合并 (REQ-VR-002)
       <p>将 11 个 Gpr* 变体合并为 3 个参数化指令（GprBinOp/GprLoadImm/GprCondAction），新增 GPR 位逻辑运算（And/Or/Xor）和除法能力，消除 Quant* 专用的整数操作变体。</p>
       <strong>当前</strong>：11 个 Gpr* 变体，大部分是标量整数算术。
       <strong>目标</strong>：3 个参数化变体。
@@ -323,26 +302,23 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-002" data-test="TEST-VR-002" data-req-ref="REQ-VR-002" data-test-categories="unit" <h3="">TEST-VR-002: VmInstr去类型化合并测试<p>验证REQ-VR-002相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-002" data-test="TEST-VR-002" id="test-vr-002">TEST-VR-002: VmInstr去类型化合并测试<p>验证REQ-VR-002相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
@@ -399,35 +375,26 @@
       <p>```</p>
       <strong>变更汇总</strong>：11 → 3（+ 吸收 QuantIntDivConst/QuantIntMul = -9 净减）
     </section>
-    <section id="req-vr-004" data-req="REQ-VR-004" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.4" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.4 Quant* 解码指令去重 (REQ-VR-004)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-004" id="req-vr-004">§1.4 Quant* 解码指令去重 (REQ-VR-004)
       <p>删除 18 个 Quant* 变体中与通用指令语义完全重复的 10 个（QuantVecBitAnd/Or、QuantBroadcast、QuantFma、QuantScalarLoad 等），合并 QuantLoadF16toF32+QuantLoadI8toF32 为 QuantScalarCvtLoad，仅保留 7 个语义独特的量化指令。</p>
       <strong>当前</strong>：18 个 Quant* 变体。其中 10 个与通用指令语义完全重复。
     
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-004" data-test="TEST-VR-004" data-req-ref="REQ-VR-013" data-test-categories="unit" <h3="">TEST-VR-004: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
-      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
-      
-    </section>
+    
 
     <section id="s1.4.1" data-section="1.4.1">
       <h5>§1.4.1 删除 — 复用已有通用指令</h5>
@@ -561,7 +528,7 @@
       <p>```</p>
       <strong>变更汇总</strong>：18 → 7（-11）
     </section>
-    <section id="req-vr-017" data-req="REQ-VR-017" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.5" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§1.5 VecBinOp 扩展 (REQ-VR-017 续)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-017" id="req-vr-017">§1.5 VecBinOp 扩展 (REQ-VR-017 续)
       <p>为吸收 QuantVecShiftLeft/Right 和 GPR 位操作，扩展 VecOp：</p>
       <p>```</p>
       <p>VecOp (扩展):</p>
@@ -576,30 +543,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-017" data-test="TEST-VR-017" data-req-ref="REQ-VR-017" data-test-categories="unit" <h3="">TEST-VR-017: VmInstr去类型化合并测试<p>验证REQ-VR-017相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-017" data-test="TEST-VR-017" id="test-vr-017">TEST-VR-017: VmInstr去类型化合并测试<p>验证REQ-VR-017相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-011" data-req="REQ-VR-011" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="1.6" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§1.6 分布式通信 VmInstr 扩展 (REQ-VR-011, feature = "nccl")
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="1.6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-011" id="req-vr-011">§1.6 分布式通信 VmInstr 扩展 (REQ-VR-011, feature = "nccl")
       <p>&gt; <strong>关联 SPEC</strong>: gllm-nccl SPEC/02-ARCHITECTURE.md §5.3, gllm-nccl SPEC/07-PTX-INTRINSICS.md</p>
       <p>&gt; <strong>feature gate</strong>: <code>#[cfg(feature = "nccl")]</code> — 未启用时这些变体不存在于枚举中</p>
       <p>&gt; <strong>设计原则</strong>: JIT codegen 生成调用桩（call stub），链接到 gllm-nccl 提供的运行时函数。不内联通信实现（通信是跨设备操作，不能 JIT 内联）。</p>
@@ -607,26 +571,23 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-011" data-test="TEST-VR-011" data-req-ref="REQ-VR-011" data-test-categories="unit" <h3="">TEST-VR-011: VmInstr去类型化合并测试<p>验证REQ-VR-011相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-011" data-test="TEST-VR-011" id="test-vr-011">TEST-VR-011: VmInstr去类型化合并测试<p>验证REQ-VR-011相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
@@ -822,36 +783,27 @@
       <li>CPU 路径使用 <code>std::sync::Barrier</code>（Rust std），不需要 VmInstr</li>
       <p>&gt; <strong>注</strong>: 如果未来需要 JIT 内部更灵活的同步控制（如动态 barrier），可以扩展 VmInstr。当前设计中 SM 分区同步是编译时确定的 CTA 编排，不需要运行时 VmInstr。</p>
     </section>
-    <section id="req-vr-005" data-req="REQ-VR-005" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§2 缺失指令补全 (REQ-VR-005~010)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-005" id="req-vr-005">§2 缺失指令补全 (REQ-VR-005~010)
       <p>补全 VmInstr 指令集中缺失的关键能力：向量 Shuffle/Permute、向量 Lane 提取/插入、向量常量加载、原子 CAS、GPR 一元操作（Popcount/CLZ/ByteSwap），以及 Mxfp4/Nvfp4 合并到 QuantBlockLoad，使 TraceOp 到 VmInstr 映射完整覆盖所有算子需求。</p>
     
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-005" data-test="TEST-VR-005" data-req-ref="REQ-VR-014" data-test-categories="unit" <h3="">TEST-VR-005: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
-      <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
-      
-    </section>
+    
 
-    <section id="req-vr-018" data-req="REQ-VR-018" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.1" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.1 向量 Shuffle/Permute (REQ-VR-018)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-018" id="req-vr-018">§2.1 向量 Shuffle/Permute (REQ-VR-018)
       <strong>问题</strong>：<code>TraceOp::Permute</code> 当前用 identity copy 绕过，无法生成 <code>vpshufb</code>/<code>vpermd</code>/<code>TBL</code>。
       <p>```</p>
       <p>VecShuffle:</p>
@@ -871,30 +823,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-018" data-test="TEST-VR-018" data-req-ref="REQ-VR-018" data-test-categories="unit" <h3="">TEST-VR-018: VmInstr去类型化合并测试<p>验证REQ-VR-018相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-018" data-test="TEST-VR-018" id="test-vr-018">TEST-VR-018: VmInstr去类型化合并测试<p>验证REQ-VR-018相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-003" data-req="REQ-VR-003" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.2" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.2 向量 Lane 提取/插入 (REQ-VR-003)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-003" id="req-vr-003">§2.2 向量 Lane 提取/插入 (REQ-VR-003)
       <strong>问题</strong>：当前无法从 Vec 寄存器提取单个 lane 到 Scalar，也无法将 Scalar 插入 Vec 的指定 lane。这对于 Top-K 采样、batch argmax 等场景必需。
       <p>```</p>
       <p>VecExtractLane:</p>
@@ -917,30 +866,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-003" data-test="TEST-VR-003" data-req-ref="REQ-VR-003" data-test-categories="unit" <h3="">TEST-VR-003: VmInstr去类型化合并测试<p>验证REQ-VR-003相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-003" data-test="TEST-VR-003" id="test-vr-003">TEST-VR-003: VmInstr去类型化合并测试<p>验证REQ-VR-003相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-013" data-req="REQ-VR-013" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.3" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.3 GPR 位逻辑运算 (REQ-VR-13)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.3" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-013" id="req-vr-013">§2.3 GPR 位逻辑运算 (REQ-VR-13)
       <p>通过 §1.3 GprBinOp 的 GprOp 枚举新增 And/Or/Xor 三种位逻辑操作，补全 GPR 无法做位与/位或/异或的能力缺口，使权重加载中的位操作（如 K-Quant scale 解码）不再绕道 Quant* 变体。</p>
       <strong>问题</strong>：当前 GPR 无法做 AND/OR/XOR/NOT。权重加载中的位操作（如 K-Quant scale 解码）被迫绕道 Quant* 变体。
       <strong>已在 §1.3 GprBinOp 中覆盖</strong>：GprOp 新增 And/Or/Xor 三种操作。
@@ -948,30 +894,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-13" data-test="TEST-VR-13" data-req-ref="REQ-VR-013" data-test-categories="unit" <h3="">TEST-VR-13: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-013" data-test="TEST-VR-13" id="test-vr-13">TEST-VR-13: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-014" data-req="REQ-VR-014" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.4" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.4 向量常量加载 (REQ-VR-14)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-014" id="req-vr-014">§2.4 向量常量加载 (REQ-VR-14)
       <strong>问题</strong>：当前加载向量常量需要 Broadcast(ScalarExpr::Const) + 可能的 VecBinOp。对于整数常量掩码（如 0x0F broadcast），需要 QuantBroadcastInt。缺少通用的向量常量加载。
       <p>```</p>
       <p>VecLoadConst:</p>
@@ -987,30 +930,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-14" data-test="TEST-VR-14" data-req-ref="REQ-VR-014" data-test-categories="unit" <h3="">TEST-VR-14: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-014" data-test="TEST-VR-14" id="test-vr-14">TEST-VR-14: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-006" data-req="REQ-VR-006" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.5" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.5 原子 CAS (REQ-VR-006)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-006" id="req-vr-006">§2.5 原子 CAS (REQ-VR-006)
       <strong>问题</strong>：当前只有 AtomicAddU32/AtomicAddU64。缺少 Compare-And-Swap，这对于无锁数据结构（batch 并发、KV cache 页表更新）必需。
       <p>```</p>
       <p>AtomicCAS:</p>
@@ -1036,30 +976,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-006" data-test="TEST-VR-006" data-req-ref="REQ-VR-006" data-test-categories="unit" <h3="">TEST-VR-006: VmInstr去类型化合并测试<p>验证REQ-VR-006相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-006" data-test="TEST-VR-006" id="test-vr-006">TEST-VR-006: VmInstr去类型化合并测试<p>验证REQ-VR-006相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-007" data-req="REQ-VR-007" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.6" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.6 Popcount / CLZ / ByteSwap (REQ-VR-007)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-007" id="req-vr-007">§2.6 Popcount / CLZ / ByteSwap (REQ-VR-007)
       <strong>问题</strong>：当前只有 BitwiseGemm（内部用 popcnt）但无独立的位计数指令。CLZ 对于快速 log2 计算、ByteSwap 对于端序转换必需。
       <p>```</p>
       <p>GprUnaryOp:</p>
@@ -1080,30 +1017,27 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-007" data-test="TEST-VR-007" data-req-ref="REQ-VR-007" data-test-categories="unit" <h3="">TEST-VR-007: VmInstr去类型化合并测试<p>验证REQ-VR-007相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-007" data-test="TEST-VR-007" id="test-vr-007">TEST-VR-007: VmInstr去类型化合并测试<p>验证REQ-VR-007相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
-    <section id="req-vr-016" data-req="REQ-VR-016" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="2.7" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h4="">§2.7 Mxfp4/Nvfp4 合并到 QuantBlockLoad (REQ-VR-16 扩展)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.7" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-016" id="req-vr-016">§2.7 Mxfp4/Nvfp4 合并到 QuantBlockLoad (REQ-VR-16 扩展)
       <strong>问题</strong>：Mxfp4VecDequant 和 Nvfp4SubBlockDequant 是 E2M1 4-bit 反量化的两个变体（差异仅缩放格式：E8M0 vs UE4M3），应合并到 QuantBlockLoad 的 BlockUnpackMode。
       <p>```</p>
       <p>BlockUnpackMode (扩展):</p>
@@ -1116,20 +1050,17 @@
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
     <section id="s3" data-section="3">
       <h3>§3 变更总览</h3>
@@ -1804,32 +1735,29 @@
         </tr>
       </table>
     </section>
-    <section id="req-vr-008" data-req="REQ-VR-008" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="4" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§4 TraceOp→VmInstr 映射更新 (REQ-VR-008)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-008" id="req-vr-008">§4 TraceOp→VmInstr 映射更新 (REQ-VR-008)
       <p>auto_select.rs 中所有被删除 VmInstr 的映射必须更新为新变体。</p>
     
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-008" data-test="TEST-VR-008" data-req-ref="REQ-VR-008" data-test-categories="unit" <h3="">TEST-VR-008: VmInstr去类型化合并测试<p>验证REQ-VR-008相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-008" data-test="TEST-VR-008" id="test-vr-008">TEST-VR-008: VmInstr去类型化合并测试<p>验证REQ-VR-008相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
@@ -2160,32 +2088,29 @@
       <h4>§4.2 plan_lower.rs 中的 GgufXxxLoad 直接调用</h4>
       <p>plan_lower.rs 中任何直接 <code>prog.emit(VmInstr::GgufXxxLoad {...})</code> 的调用都必须替换为新的 QuantBlockLoad/QuantBiPlaneLoad。通过 grep 审计确认。</p>
     </section>
-    <section id="req-vr-009" data-req="REQ-VR-009" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="5" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§5 ISA Lowering 重构 (REQ-VR-009)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-009" id="req-vr-009">§5 ISA Lowering 重构 (REQ-VR-009)
       <p>重构 x86_lower/aarch64_lower/gpu_lower 中因合并和新增 VmInstr 变体而需要更新的 lowering 逻辑，确保每个新变体（QuantBlockLoad/QuantBiPlaneLoad/DotProduct/GprBinOp/GprCondAction/VecShuffle/VecExtractLane/VecInsertLane/VecLoadConst/AtomicCAS/GprUnaryOp）在三个 ISA 后端生成正确的机器指令。</p>
     
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-009" data-test="TEST-VR-009" data-req-ref="REQ-VR-009" data-test-categories="unit" <h3="">TEST-VR-009: VmInstr去类型化合并测试<p>验证REQ-VR-009相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-009" data-test="TEST-VR-009" id="test-vr-009">TEST-VR-009: VmInstr去类型化合并测试<p>验证REQ-VR-009相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
@@ -2205,32 +2130,29 @@
       <h4>§5.3 gpu_lower.rs</h4>
       <li>同 x86_lower.rs 结构，ISA 映射替换为 PTX/HIP/MSL 指令</li>
     </section>
-    <section id="req-vr-010" data-req="REQ-VR-010" data-req-status="implemented" data-req-domain="vr" data-req-category="business" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP-KIND,ENT-QUANT-PRECISION" data-req-api="API-VMINSTR" data-section="6" data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP-KIND ENT-QUANT-PRECISION" <h3="">§6 验证策略 (REQ-VR-010)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-010" id="req-vr-010">§6 验证策略 (REQ-VR-010)
       <p>定义 VmInstr 变更的端到端验证策略：每个新增/合并变体必须有 cargo check 编译通过、auto_select.rs 对应 match arm、三个 ISA 后端 lowering 正确、以及 VmInstr round-trip 单元测试，确保去类型化合并和指令补全不引入功能退化。</p>
     
       <div data-criteria="">
         <h5>验收标准</h5>
         <ol>
-        <li id="1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
-        <li id="2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
-        <li id="3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
-        <li id="4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
+        <li id="id-1" data-criterion="1">VmInstr 新增/合并变体编译通过: cargo check</li>
+        <li id="id-2" data-criterion="2">auto_select.rs 新增对应 match arm</li>
+        <li id="id-3" data-criterion="3">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</li>
+        <li id="id-4" data-criterion="4">单元测试: VmInstr round-trip 验证</li>
         </ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-op-kind" href="./26-VMINSTR-RATIONALIZATION#ent-op-kind" ENT-OP-KIND<="" a="">
-      
-      
-      </a></div>
+      </div>
     </section>
-    <section id="test-vr-010" data-test="TEST-VR-010" data-req-ref="REQ-VR-010" data-test-categories="unit" <h3="">TEST-VR-010: VmInstr去类型化合并测试<p>验证REQ-VR-010相关功能正确性</p>
-      <div id="vminstr-新增/合并变体编译通过:-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
+    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-010" data-test="TEST-VR-010" id="test-vr-010">TEST-VR-010: VmInstr去类型化合并测试<p>验证REQ-VR-010相关功能正确性</p>
+      <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
-      <div id="isa-lowering-(x86-64/aarch64/gpu)-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
-      <div id="单元测试:-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
+      <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
+      <div id="单元测试-vminstr-round-trip-验证" data-criterion="单元测试: VmInstr round-trip 验证">单元测试: VmInstr round-trip 验证</div>
       
     </section>
 
@@ -2513,19 +2435,19 @@
   
     <section data-section="entities">
       <h3>数据结构</h3>
-      <section data-entity-model-type="relational" data-entity="ENT-OP-KIND" id="ent-op-kind">
-        <h4>ENT-OP-KIND</h4>
+      <section id="ent-op" data-entity="ENT-OP" data-req-ref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-QUANT-PRECISION ENT-TRACE-OP ENT-VM-INSTR" data-xref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003">
+        <h4>ENT-OP</h4>
         <p>OpKind — 算子种类枚举</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>OpKind enum</td><td>算子变体名 (Gemm/RmsNorm/RoPE/Attention/Gather/MoEGate/etc.)</td></tr><tr data-field="input_count" data-type="number" data-required="true" <td="">input_count<td>number</td><td>是</td><td>≥1</td><td>输入 tensor 数量</td></tr>
 <tr data-field="output_count" data-type="number" data-required="true" <td="">output_count<td>number</td><td>是</td><td>≥1</td><td>输出 tensor 数量</td></tr><tr data-field="dtype" data-type="string" data-required="false" <td="">dtype<td>string</td><td>否</td><td>QuantPrecision</td><td>操作数据精度</td></tr><tr data-field="head_dim" data-type="number" data-required="false" <td="">head_dim<td>number</td><td>否</td><td>仅 Attention/RoPE/QkNorm</td><td>注意力头维度</td></tr>
 <tr data-field="eps" data-type="number" data-required="false" <td="">eps<td>number</td><td>否</td><td>仅 RmsNorm/LayerNorm/ValueNorm</td><td>归一化 epsilon</td></tr></table>
       </section>
-      <section data-entity-model-type="relational" data-entity="ENT-QUANT-PRECISION" id="ent-quant-precision"><h4>ENT-QUANT-PRECISION</h4><p>QuantPrecision — dtype精度枚举</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="kind" data-type="string" data-required="true" <td="">kind<td>string</td><td>是</td><td>F32/F16/BF16/TF32/FP8E4M3/FP8E5M2/FP6E2M3/FP6E3M2/FP4E2M1/INT8/INT4/INT2/INT1</td><td>DTypeKind 基础精度类型</td></tr>
+      <section id="ent-quant-precision" data-entity="ENT-QUANT-PRECISION" data-req-ref="REQ-QCG-001 REQ-QCG-002 REQ-QCG-003 REQ-QCG-004 REQ-QCG-005" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-OP ENT-QUANT-FORMAT-DESC ENT-QUANT-TYPE ENT-TRACE-OP ENT-VM-INSTR" data-xref="REQ-QCG-001 REQ-QCG-002 REQ-QCG-003 REQ-QCG-004 REQ-QCG-005"><h4>ENT-QUANT-PRECISION</h4><p>QuantPrecision — dtype精度枚举</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="kind" data-type="string" data-required="true" <td="">kind<td>string</td><td>是</td><td>F32/F16/BF16/TF32/FP8E4M3/FP8E5M2/FP6E2M3/FP6E3M2/FP4E2M1/INT8/INT4/INT2/INT1</td><td>DTypeKind 基础精度类型</td></tr>
 <tr data-field="packing" data-type="string" data-required="true" <td="">packing<td>string</td><td>是</td><td>Plain/MXBlock/GGML/GPTQ/AWQ/Bitnet</td><td>PackingFormat 存储打包方式</td></tr><tr data-field="block_size" data-type="number" data-required="true" <td="">block_size<td>number</td><td>是</td><td>0=不适用</td><td>量化块大小</td></tr><tr data-field="group_size" data-type="number" data-required="true" <td="">group_size<td>number</td><td>是</td><td>0=不适用</td><td>分组量化的组大小</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-TRACE-OP" id="ent-trace-op"><h4>ENT-TRACE-OP</h4><p>TraceOp — SSA中间表示算子（enum TraceOp in gllm-kernels/src/compiler/trace.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
+      <section id="ent-trace-op" data-entity="ENT-TRACE-OP" data-req-ref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003" data-entity-model-type="relational" data-entity-ref="ENT-ALGO-TEMPLATE ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-QUANT-PRECISION ENT-VM-INSTR" data-xref="REQ-CG-001 REQ-CG-016 REQ-CG-013 REQ-CG-002 REQ-CG-003"><h4>ENT-TRACE-OP</h4><p>TraceOp — SSA中间表示算子（enum TraceOp in gllm-kernels/src/compiler/trace.rs）</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>
 Input|Const|Add|Sub|Mul|Div|Fma|Neg|Abs|Exp|Sqrt|Rsqrt|Tanh|Recip|Log|Sigmoid|Max|Min|ConditionalBranch|QuantFma|BlockScale|Cast|HReduce|Prefetch|NonTemporalStore|BitExtract|Permute</td><td>枚举变体名</td></tr><tr data-field="input_index" data-type="number" data-required="false" <td="">input_index<td>number</td><td>否</td><td>u32, 仅 Input 变体</td><td>加载第 i 个输入元素</td></tr><tr data-field="const_value" data-type="number" data-required="false" <td="">const_value<td>number</td><td>否</td><td>
 f64, 仅 Const 变体</td><td>浮点常量值</td></tr><tr data-field="left_operand" data-type="number" data-required="false" <td="">left_operand<td>number</td><td>否</td><td>ValueId, 二元运算左操作数</td><td>Add/Sub/Mul/Div/Max/Min 的左操作数</td></tr><tr data-field="right_operand" data-type="number" data-required="false" <td="">right_operand<td>number</td><td>否</td><td>ValueId, 二元运算右操作数</td><td>Add/Sub/Mul/Div/Max/Min 的右操作数</td></tr><tr data-field="fma_third_operand" data-type="number" data-required="false" <td="">
 fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(a,b,c) = a*b+c 的 c</td></tr><tr data-field="reduce_kind" data-type="string" data-required="false" <td="">reduce_kind<td>string</td><td>否</td><td>Sum|Max|Min, 仅 HReduce 变体</td><td>水平归约操作类型</td></tr><tr data-field="quant_precision" data-type="string" data-required="false" <td="">quant_precision<td>string</td><td>否</td><td>QuantPrecision, 仅 QuantFma/Cast 变体</td><td>混合精度 dtype</td></tr></table></section>
-      <section data-entity-model-type="relational" data-entity="ENT-VM-INSTR" id="ent-vm-instr">
+      <section id="ent-vm-instr" data-entity="ENT-VM-INSTR" data-req-ref="REQ-OP-DISPATCH-001 REQ-OP-DISPATCH-002 REQ-OP-DISPATCH-003 REQ-CG-001 REQ-CG-016" data-entity-model-type="relational" data-entity-ref="ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE ENT-HW-OPT-ENGINE ENT-ISA-PROFILE ENT-OP ENT-PREDICATE ENT-QUANT-FORMAT-DESC ENT-QUANT-OFFSET-DSL" data-xref="REQ-OP-DISPATCH-001 REQ-OP-DISPATCH-002 REQ-OP-DISPATCH-003 REQ-CG-001 REQ-CG-016">
         <h4>ENT-VM-INSTR</h4>
         <p>VmInstr — 虚拟指令集 (102+指令)</p><table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="variant" data-type="string" data-required="true" <td="">variant<td>string</td><td>是</td><td>VecLoad|VecStore|Fma|LoopBegin|...</td><td>指令变体名 (102+种)</td></tr><tr data-field="dtype" data-type="string" data-required="true" <td="">dtype<td>string</td><td>是</td><td>QuantPrecision</td><td>数据精度类型</td></tr>
 <tr data-field="width" data-type="string" data-required="true" <td="">width<td>string</td><td>是</td><td>SimdWidth</td><td>SIMD宽度 (128/256/512/SVE)</td></tr><tr data-field="dst" data-type="string" data-required="false" <td="">dst<td>string</td><td>否</td><td>VRegId</td><td>目标寄存器</td></tr><tr data-field="src" data-type="string" data-required="false" <td="">src<td>string</td><td>否</td><td>VRegId</td><td>源寄存器</td></tr><tr data-field="offset" data-type="string" data-required="false" <td="">offset
@@ -2533,15 +2455,16 @@ fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(
       </section>
     </section>
 
-    <section data-section="apis">
+    <section id="artifact-interface" data-artifact-type="interface" data-section="apis">
       <h3>接口契约</h3>
       
     </section>
-<section data-api="POST /internal/vminstr/dispatch" id="post-/internal/vminstr/dispatch" data-api-type="internal" data-api-name="API-VMINSTR"><h4>POST /internal/vminstr/dispatch — VmInstr instruction set dispatch</h4><p>VmInstr 指令集调度接口，去类型化合并后的统一指令集。auto_lower_trace() 查表法自动选择，ComputePattern 驱动分发，禁止手写 per-OpKind match arm。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+<section id="api-vminstr" data-api="POST /internal/vminstr/dispatch" data-req-ref="REQ-OP-DISPATCH-001 REQ-OP-DISPATCH-002 REQ-OP-DISPATCH-003 REQ-VR-001 REQ-VR-015" data-api-type="internal" data-api-name="API-VMINSTR" data-xref="REQ-OP-DISPATCH-001 REQ-OP-DISPATCH-002 REQ-OP-DISPATCH-003 REQ-VR-001 REQ-VR-015"><h4>POST /internal/vminstr/dispatch — VmInstr instruction set dispatch</h4><p>VmInstr 指令集调度接口，去类型化合并后的统一指令集。auto_lower_trace() 查表法自动选择，ComputePattern 驱动分发，禁止手写 per-Op match arm。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="VmInstrDispatchResult"><td>200</td><td>成功</td><td>VmInstrDispatchResult</td></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section></main>
+<script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script>
   <footer data-spec-footer="">
     <address data-spec-ssot="">SSOT 定义者：26-VMINSTR-RATIONALIZATION.html</address>
   </footer>
-<section id="testing" data-tests-section=""><h2>测试用例</h2></section>
+<section id="testing" data-tests-section=""><h2>测试用例</h2><div id="test-vr-001" data-test="TEST-VR-001" data-req-ref="REQ-VR-001" data-test-categories="unit"><h4>TEST-VR-001: REQ-VR-001 单元测试</h4><p>验证 REQ-VR-001 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-vr-015" data-test="TEST-VR-015" data-req-ref="REQ-VR-015" data-test-categories="unit"><h4>TEST-VR-015: REQ-VR-015 单元测试</h4><p>验证 REQ-VR-015 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-vr-004" data-test="TEST-VR-004" data-req-ref="REQ-VR-004" data-test-categories="unit"><h4>TEST-VR-004: REQ-VR-004 单元测试</h4><p>验证 REQ-VR-004 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div id="test-vr-005" data-test="TEST-VR-005" data-req-ref="REQ-VR-005" data-test-categories="unit"><h4>TEST-VR-005: REQ-VR-005 单元测试</h4><p>验证 REQ-VR-005 的功能约束：编译/运行时行为符合 SPEC 定义，违规时返回 Err 或测试断言失败</p></div><div data-test-categories="unit" data-req-ref="REQ-VR-016" data-test="TEST-VR-016" id="test-vr-016"><h4>TEST-VR-016: REQ-VR-016 单元测试</h4><p>TODO: 为 REQ-VR-016 编写测试用例</p></div></section>
 <section id="gpu-batch-vminstr-extensions">
   <h3>§X GPU 并行指令族 + §Y Batch 推理指令族（变体数扩展）</h3>
 

@@ -1,7 +1,7 @@
 //! Gatekeeper Q-Tap ring buffer (SPEC §4.4).
 //!
 //! FusedAttentionLayer 的 Q-tap epilogue 将 `q_proj(hidden)[-1]` 写入此
-//! 双缓冲区. SemanticGatekeeperCallback 在 JIT SgDetect OpKind 中读取.
+//! 双缓冲区. SemanticGatekeeperCallback 在 JIT SgDetect Op 中读取.
 //!
 //! 同步协议: JIT 的 STG 指令 `release` 写 + bump step_index;
 //! callback `acquire` 读 step_index 验证. Step 不匹配则返回 StaleQTap.

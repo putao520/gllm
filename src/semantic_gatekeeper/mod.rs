@@ -4,7 +4,7 @@
 //!
 //! - 模型加载期预计算 3 个层级键 `K_L1/K_L2/K_L3` (描述文本 → tokenizer →
 //!   冻结 embed → 检测层 k_proj 投影)
-//! - 推理期每到检测层,JIT SgDetect/SgInject OpKind 从
+//! - 推理期每到检测层,JIT SgDetect/SgInject Op 从
 //!   `FusedAttentionLayer` 的 Q-tap ring buffer 读取 Q 向量,与层级键做
 //!   cosine 相似度打分路由 L1/L2/L3,触发 `KnowledgeProvider` 检索知识文本,
 //!   用主模型冻结 embed 编码成 `v_knowledge`,以残差相加方式注入.
@@ -135,7 +135,7 @@ pub struct AstContext<'a> {
 
 /// 知识源的多态抽象. 用户实现此 trait 挂接本地 / 远程知识库.
 ///
-/// SG 内核在检测层 JIT SgDetect OpKind 中调用 `retrieve`,返回 `None` 时 SG 不注入,
+/// SG 内核在检测层 JIT SgDetect Op 中调用 `retrieve`,返回 `None` 时 SG 不注入,
 /// hidden_state 保持原样 (NO_SILENT_FALLBACK 合规 — 显式 None 而非错误默认).
 pub trait KnowledgeProvider: Send + Sync {
     fn retrieve(
@@ -148,7 +148,7 @@ pub trait KnowledgeProvider: Send + Sync {
 
 /// 可选的语法哨兵,用于 AST 节点驱动的强制刷新 (SPEC §5).
 ///
-/// SG 内核在每个检测层 JIT SgDetect OpKind 前调用 `current_context`,若返回的
+/// SG 内核在每个检测层 JIT SgDetect Op 前调用 `current_context`,若返回的
 /// `node_kind` 与 `ActiveState.ast_node_kind` 不一致则强制 FullCompute.
 pub trait AstSentinel: Send + Sync {
     fn current_context<'a>(

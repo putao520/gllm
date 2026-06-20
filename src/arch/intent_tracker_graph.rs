@@ -691,7 +691,7 @@ mod tests {
         let has_mha = graph
             .ops
             .iter()
-            .any(|op| matches!(&op.op_v2, Op::MultiHeadAttention(spec) if matches!(spec.mask, AttentionMask::Causal)));
+            .any(|op| matches!(&op.op, Op::MultiHeadAttention(spec) if matches!(spec.mask, AttentionMask::Causal)));
         assert!(
             has_mha,
             "graph should contain a causal MultiHeadAttention op"
@@ -706,9 +706,9 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .unwrap();
-        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+        if let Op::MultiHeadAttention(spec) = &mha.op {
             assert!(
                 matches!(spec.mask, AttentionMask::Causal),
                 "attention should be causal for intent tracker"
@@ -724,9 +724,9 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .unwrap();
-        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+        if let Op::MultiHeadAttention(spec) = &mha.op {
             assert_eq!(spec.geometry.num_q_heads, config.num_heads);
             assert_eq!(spec.geometry.head_dim, config.head_dim);
         }
@@ -740,7 +740,7 @@ mod tests {
         let has_gather = graph
             .ops
             .iter()
-            .any(|op| matches!(op.op_v2, Op::Gather { .. }) && op.label == "role_gather");
+            .any(|op| matches!(op.op, Op::Gather { .. }) && op.label == "role_gather");
         assert!(
             has_gather,
             "graph should have a Gather op named 'role_gather'"
@@ -755,7 +755,7 @@ mod tests {
         let ln_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .count();
         assert_eq!(
             ln_count, 2,
@@ -771,7 +771,7 @@ mod tests {
         let silu_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Silu))
+            .filter(|op| matches!(op.op, Op::Silu))
             .count();
         // info MLP: 3 Silu, signal encoder: 2 Silu, task classifier: 2 Silu, diff classifier: 2 Silu = 9
         assert!(
@@ -788,7 +788,7 @@ mod tests {
         let pool_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .filter(|op| matches!(op.op, Op::MeanPool { .. }))
             .count();
         assert_eq!(
             pool_count, 2,
@@ -804,7 +804,7 @@ mod tests {
         let pools: Vec<_> = graph
             .ops
             .iter()
-            .filter_map(|op| match &op.op_v2 {
+            .filter_map(|op| match &op.op {
                 Op::MeanPool { cls_mode, .. } => Some(*cls_mode),
                 _ => None,
             })
@@ -821,7 +821,7 @@ mod tests {
         let gemm_bias_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .filter(|op| matches!(op.op, Op::GemmBias(..)))
             .count();
         // QKV projections (3) + info MLP (3) + signal encoder (3) + task classifier (3) + diff classifier (3) = 15
         assert!(
@@ -1347,7 +1347,7 @@ mod tests {
         let has_add = graph
             .ops
             .iter()
-            .any(|op| matches!(op.op_v2, Op::Add) && op.label == "add_role");
+            .any(|op| matches!(op.op, Op::Add) && op.label == "add_role");
         assert!(
             has_add,
             "graph should have Add op for role embedding injection"
@@ -1365,7 +1365,7 @@ mod tests {
         let mul_ops: Vec<&str> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .map(|op| op.label.as_str())
             .collect();
         assert!(
@@ -1426,7 +1426,7 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op should exist");
         // Assert: role embedding has 3 rows (user/assistant/system)
         if let Op::Gather {
@@ -1434,7 +1434,7 @@ mod tests {
             embed_dim,
             indices_kind,
             ..
-        } = &gather.op_v2
+        } = &gather.op
         {
             assert_eq!(*table_rows, 3, "role embedding table should have 3 rows");
             assert_eq!(*embed_dim, config.hidden_size);
@@ -1452,7 +1452,7 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op should exist");
         // Assert: Gather takes role_emb_weight table + roles indices
         assert_eq!(
@@ -1472,7 +1472,7 @@ mod tests {
         let ln_ops: Vec<f32> = graph
             .ops
             .iter()
-            .filter_map(|op| match &op.op_v2 {
+            .filter_map(|op| match &op.op {
                 Op::LayerNorm(spec) => Some(spec.eps),
                 _ => None,
             })
@@ -1495,10 +1495,10 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .expect("MHA op should exist");
         // Assert: intent tracker uses MHA (not GQA), so num_kv_heads == num_heads
-        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+        if let Op::MultiHeadAttention(spec) = &mha.op {
             assert_eq!(
                 spec.geometry.num_kv_heads, spec.geometry.num_q_heads,
                 "intent tracker MHA should have equal num_heads and num_kv_heads"
@@ -1516,10 +1516,10 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .expect("MHA op should exist");
         // Assert
-        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+        if let Op::MultiHeadAttention(spec) = &mha.op {
             assert!(
                 matches!(spec.sinks, SinksSpec::None),
                 "intent tracker should not use attention sinks"
@@ -1622,7 +1622,7 @@ mod tests {
         let gemm_bias_ops: Vec<&CompilerOp> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .filter(|op| matches!(op.op, Op::GemmBias(..)))
             .collect();
         // Assert: every GemmBias takes (input, weight, bias) = 3 inputs
         assert!(!gemm_bias_ops.is_empty(), "should have GemmBias ops");
@@ -1652,11 +1652,11 @@ mod tests {
         let gemm_bias_ops: Vec<&CompilerOp> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .filter(|op| matches!(op.op, Op::GemmBias(..)))
             .collect();
         // Assert: all GemmBias use trans_b=true (weight transposed for row-major storage)
         for op in &gemm_bias_ops {
-            if let Op::GemmBias(spec) = &op.op_v2 {
+            if let Op::GemmBias(spec) = &op.op {
                 let trans_b = &spec.trans_b;
                 assert!(trans_b, "GemmBias '{}' should have trans_b=true", op.label);
             }
@@ -1673,11 +1673,11 @@ mod tests {
         let pools: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .filter(|op| matches!(op.op, Op::MeanPool { .. }))
             .collect();
         // Assert: all MeanPool ops use config.hidden_size
         for pool in &pools {
-            if let Op::MeanPool { hidden, .. } = &pool.op_v2 {
+            if let Op::MeanPool { hidden, .. } = &pool.op {
                 assert_eq!(
                     *hidden, config.hidden_size,
                     "MeanPool hidden should match config.hidden_size"
@@ -1696,11 +1696,11 @@ mod tests {
         let pools: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::MeanPool { .. }))
+            .filter(|op| matches!(op.op, Op::MeanPool { .. }))
             .collect();
         // Assert
         for pool in &pools {
-            if let Op::MeanPool { seq_len, .. } = &pool.op_v2 {
+            if let Op::MeanPool { seq_len, .. } = &pool.op {
                 assert_eq!(
                     *seq_len, config.max_seq_len,
                     "MeanPool seq_len should match config.max_seq_len"
@@ -1912,7 +1912,7 @@ mod tests {
             .expect("info_sigmoid op should exist");
         // Assert
         assert!(
-            matches!(info_sigmoid.op_v2, Op::Silu),
+            matches!(info_sigmoid.op, Op::Silu),
             "info_sigmoid should be a Silu activation"
         );
     }
@@ -2010,11 +2010,11 @@ mod tests {
         assert!(gate_last.is_some(), "gate_last op should exist");
         assert!(gate_mean.is_some(), "gate_mean op should exist");
         assert!(
-            matches!(gate_last.unwrap().op_v2, Op::Mul),
+            matches!(gate_last.unwrap().op, Op::Mul),
             "gate_last should be Mul"
         );
         assert!(
-            matches!(gate_mean.unwrap().op_v2, Op::Mul),
+            matches!(gate_mean.unwrap().op, Op::Mul),
             "gate_mean should be Mul"
         );
     }
@@ -2031,7 +2031,7 @@ mod tests {
         assert!(ctx_ln.is_some(), "context_layernorm op should exist");
         let op = ctx_ln.unwrap();
         assert!(
-            matches!(op.op_v2, Op::LayerNorm(..)),
+            matches!(op.op, Op::LayerNorm(..)),
             "context_layernorm should be LayerNorm"
         );
         assert_eq!(
@@ -2051,7 +2051,7 @@ mod tests {
         let attn_ln = graph.ops.iter().find(|op| op.label == "attn_layernorm");
         // Assert
         assert!(attn_ln.is_some(), "attn_layernorm op should exist");
-        assert!(matches!(attn_ln.unwrap().op_v2, Op::LayerNorm(..)));
+        assert!(matches!(attn_ln.unwrap().op, Op::LayerNorm(..)));
     }
 
     #[test]
@@ -2107,7 +2107,7 @@ mod tests {
                 .find(|op| op.label == *label)
                 .unwrap_or_else(|| panic!("{} op should exist", label));
             assert!(
-                matches!(op.op_v2, Op::GemmBias(..)),
+                matches!(op.op, Op::GemmBias(..)),
                 "{} should be a GemmBias op",
                 label
             );
@@ -2235,7 +2235,7 @@ mod tests {
         let silu_ops: Vec<&CompilerOp> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Silu))
+            .filter(|op| matches!(op.op, Op::Silu))
             .collect();
         // Assert: Silu is elementwise, 1 input → 1 output
         assert!(!silu_ops.is_empty(), "should have SiLU ops");
@@ -2265,7 +2265,7 @@ mod tests {
         let add_ops: Vec<&CompilerOp> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .collect();
         // Assert: Add always takes 2 inputs, produces 1 output
         assert!(!add_ops.is_empty(), "should have Add ops");
@@ -2319,7 +2319,7 @@ mod tests {
         let ln_ops: Vec<&CompilerOp> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::LayerNorm(..)))
+            .filter(|op| matches!(op.op, Op::LayerNorm(..)))
             .collect();
         // Assert: LayerNorm takes (input, weight, bias)
         assert_eq!(ln_ops.len(), 2, "should have 2 LayerNorm ops");
@@ -2349,7 +2349,7 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .expect("MHA should exist");
         // Assert: MHA takes (Q, K, V)
         assert_eq!(mha.inputs.len(), 3, "MHA should have 3 inputs (Q, K, V)");
@@ -2550,10 +2550,10 @@ mod tests {
         let gather = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::Gather { .. }))
+            .find(|op| matches!(op.op, Op::Gather { .. }))
             .expect("Gather op should exist");
         // Assert: index_dim should be Symbolic (seq_len), not Concrete
-        if let Op::Gather { index_dim, .. } = &gather.op_v2 {
+        if let Op::Gather { index_dim, .. } = &gather.op {
             assert!(
                 matches!(index_dim, SymDim::Symbolic { .. }),
                 "Gather index_dim should be Symbolic for dynamic sequence length, found {:?}",
@@ -2572,10 +2572,10 @@ mod tests {
         let mha = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op_v2, Op::MultiHeadAttention(..)))
+            .find(|op| matches!(op.op, Op::MultiHeadAttention(..)))
             .expect("MHA op should exist");
         // Assert: MHA seq_len should be Symbolic (runtime-dynamic)
-        if let Op::MultiHeadAttention(spec) = &mha.op_v2 {
+        if let Op::MultiHeadAttention(spec) = &mha.op {
             assert!(
                 matches!(spec.seq_len, SymDim::Symbolic { .. }),
                 "MHA seq_len should be Symbolic, found {:?}",
@@ -2758,7 +2758,7 @@ mod tests {
         for label in &gemm_1d_labels {
             let op = graph.ops.iter().find(|op| op.label == *label);
             if let Some(op) = op {
-                if let Op::GemmBias(spec) = &op.op_v2 {
+                if let Op::GemmBias(spec) = &op.op {
                     let m = &spec.m;
                     assert!(
                         matches!(m, SymDim::Concrete(1)),
@@ -2783,7 +2783,7 @@ mod tests {
         for label in &gemm_2d_labels {
             let op = graph.ops.iter().find(|op| op.label == *label);
             if let Some(op) = op {
-                if let Op::GemmBias(spec) = &op.op_v2 {
+                if let Op::GemmBias(spec) = &op.op {
                     let m = &spec.m;
                     assert!(
                         matches!(m, SymDim::Symbolic { .. }),
@@ -2919,7 +2919,7 @@ mod tests {
         let silu_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Silu))
+            .filter(|op| matches!(op.op, Op::Silu))
             .count();
         // Assert: info MLP (3 Silu: relu0/relu1/sigmoid) + signal (2) + task (2) + diff (2) = 9
         assert_eq!(
@@ -2938,7 +2938,7 @@ mod tests {
         let gemm_bias_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::GemmBias(..)))
+            .filter(|op| matches!(op.op, Op::GemmBias(..)))
             .count();
         // Assert: QKV (3) + info MLP (3) + signal (3) + task (3) + diff (3) = 15
         assert_eq!(
@@ -2957,7 +2957,7 @@ mod tests {
         let mul_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Mul))
             .count();
         // Assert: v_modulate + gate_last + gate_mean = 3 Mul ops
         assert_eq!(
@@ -2976,7 +2976,7 @@ mod tests {
         let add_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op_v2, Op::Add))
+            .filter(|op| matches!(op.op, Op::Add))
             .count();
         // Assert: add_role + dual_context_add = 2 Add ops
         assert_eq!(
@@ -3144,7 +3144,7 @@ mod tests {
         let graph = build_intent_tracker_graph(&config, &weights).unwrap();
         // Assert: every GemmBias op is explicitly F32
         for op in &graph.ops {
-            if let Op::GemmBias(spec) = &op.op_v2 {
+            if let Op::GemmBias(spec) = &op.op {
                 let dtype = &spec.dtype;
                 assert_eq!(
                     *dtype,
@@ -3183,7 +3183,7 @@ mod tests {
                 .find(|op| op.label == *label)
                 .unwrap_or_else(|| panic!("1D GemmBias op '{}' should exist", label));
             assert!(
-                matches!(&op.op_v2, Op::GemmBias(spec) if matches!(spec.m, SymDim::Concrete(1))),
+                matches!(&op.op, Op::GemmBias(spec) if matches!(spec.m, SymDim::Concrete(1))),
                 "'{}' should be a GemmBias with M=Concrete(1)",
                 label
             );
