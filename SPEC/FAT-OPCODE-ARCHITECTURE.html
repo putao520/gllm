@@ -2,14 +2,14 @@
 <html lang="zh-CN" data-spec-root="gllm-kernels">
 <head>
   <meta charset="utf-8">
-  <title>FAT-OPCODE-ARCHITECTURE-V2 — 胖 Op 自描述架构</title>
+  <title>FAT-OPCODE-ARCHITECTURE — 胖 Op 自描述架构</title>
   <script type="application/ld+json">
   {
     "@context": "https://spec.gsc.local/v1",
     "@type": "SpecDocument",
-    "id": "FAT-OPCODE-ARCHITECTURE-V2",
+    "id": "FAT-OPCODE-ARCHITECTURE",
     "category": "architecture",
-    "title": "胖 Op 自描述架构（v2）— 零 context lowering",
+    "title": "胖 Op 自描述架构— 零 context lowering",
     "status": "draft",
     "generated": "2026-06-14",
     "supersedes": ["03-GRAPH-IR.html §1.2 OpKind"],
@@ -18,7 +18,7 @@
   </script>
 </head>
 <body><main data-spec-content="">
-<article data-spec-document="FAT-OPCODE-ARCHITECTURE-V2">
+<article data-spec-document="FAT-OPCODE-ARCHITECTURE">
 
 <section id="s0" data-section="0">
   <h2>胖 Op 自描述架构 — Op 唯一 IR + 零 context lowering</h2>
@@ -164,7 +164,7 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   <li><strong>Phase 3</strong>：Op 新类型 + 共存适配层</li>
   <li><strong>Phase 4-7</strong>：按类别迁移（Norm/Activation → Gemm/Quant → Attention/MoE/MLA → Structural/Embed/Vision-Audio）</li>
   <li><strong>Phase 8</strong>：VmInstr 自描述</li>
-  <li><strong>Phase 9</strong>：三仓 SPEC 同步 + JIT cache hash v2</li>
+  <li><strong>Phase 9</strong>：三仓 SPEC 同步 + JIT cache hash</li>
   <li><strong>Phase 10</strong>：OpKind 物理删除 + KvCacheWrite 删除 + KvSource BUILD 阶段策略 + op.inc.rs 重命名 + cache v3</li>
 </ol></section>
 
@@ -224,8 +224,8 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 
 <section id="req-fatop-003" data-req="REQ-FATOP-003" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="1">
 <h3>REQ-FATOP-003: OPCODE_VERSION JIT cache 版本管理 (v3)</h3>
-<p>OPCODE_VERSION u32 常量，Op enum 结构变更时 bump 版本号，旧缓存自动失效。OpKind 物理删除后 bump 到 v3，文件从 op_v2.inc.rs 重命名为 op.inc.rs。</p>
-<div data-req-criteria=""><h4>验收标准</h4><ol><li>OPCODE_VERSION 常量定义在 op.inc.rs（已从 op_v2.inc.rs 重命名）</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>OpKind 物理删除后版本号为 v3</li><li>版本变更无需手动清理 cache，自动失效</li></ol></div>
+<p>OPCODE_VERSION u32 常量，Op enum 结构变更时 bump 版本号，旧缓存自动失效。OpKind 物理删除后 bump 到 v3，文件从 op.inc.rs 重命名为 op.inc.rs。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>OPCODE_VERSION 常量定义在 op.inc.rs（已从 op.inc.rs 重命名）</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>OpKind 物理删除后版本号为 v3</li><li>版本变更无需手动清理 cache，自动失效</li></ol></div>
 
 <section id="req-fatop-004" data-req="REQ-FATOP-004" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec" data-req-api="POST /compile" data-section="1.1">
 <h3>REQ-FATOP-004: AttentionSpec kv_source 自描述</h3>
@@ -348,12 +348,12 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 <div data-req-criteria=""><h4>验收标准</h4><ol><li>Op::from_op_kind 在 gllm-kernels/src/compiler/ 中零非注释匹配</li><li>from_op_kind_norm_activation / gemm_quant / attention_moe / structural 4 子方法全部物理删除</li><li>BUILD 阶段直接构造 Op，无需翻译</li><li>grep -r from_op_kind kernels/src/compiler/ 零非注释匹配</li></ol></div>
 
 <section id="req-fatop-014" data-req="REQ-FATOP-014" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="4">
-<h3>REQ-FATOP-014: lower_op_v2 零 OpKind 反查（唯一 IR）</h3>
-<p>lower_op_v2 41 类别 100% 通过 Op Spec 获取参数，Op 是唯一 IR，零 OpKind 反查。dispatch_* OpKind match 全部死代码删除。key_from_op(op: &amp;Op) 替代 key_from_op_kind(kind: &amp;OpKind)。</p>
+<h3>REQ-FATOP-014: lower_op 零 OpKind 反查（唯一 IR）</h3>
+<p>lower_op 41 类别 100% 通过 Op Spec 获取参数，Op 是唯一 IR，零 OpKind 反查。dispatch_* OpKind match 全部死代码删除。key_from_op(op: &amp;Op) 替代 key_from_op_kind(kind: &amp;OpKind)。</p>
 <div data-req-criteria="">
 <h4>验收标准</h4>
 <ul>
-<li>lower_op_v2 41 类别 100% 通过 Op Spec 获取参数</li>
+<li>lower_op 41 类别 100% 通过 Op Spec 获取参数</li>
 <li>NormKind→OpKindKey 直接推导（不查 op.kind）</li>
 <li>dispatch_structural/dispatch_compute_pattern OpKind match 死代码删除（-1179 行）</li>
 <li>OpKind 适配层只在 from_op_kind 调用点存在</li>
@@ -361,9 +361,9 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 </div>
 
 <section id="req-fatop-015" data-req="REQ-FATOP-015" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="4">
-<h3>REQ-FATOP-015: CompilerOp.op_v2 唯一 IR 字段（.kind 已删除）</h3>
-<p>CompilerOp.op_v2 是唯一 IR 字段（CompilerOp.kind 已物理删除）。add_op(op: Op) / add_op_guarded(op: Op) 内部存储 op_v2。Lowering 路径直接读 op.op_v2，无 clone().or_else(from_op_kind) 缓存模式。</p>
-<div data-req-criteria=""><h4>验收标准</h4><ol><li>CompilerOp.op_v2 字段存在</li><li>add_op / add_op_guarded 内部缓存 op_v2</li><li>5 处 lowering 路径直接读 op.op_v2</li><li>测试 fixture 直接构造 Op，不经过 from_op_kind</li></ol></div>
+<h3>REQ-FATOP-015: CompilerOp.op 唯一 IR 字段（.kind 已删除）</h3>
+<p>CompilerOp.op 是唯一 IR 字段（CompilerOp.kind 已物理删除）。add_op(op: Op) / add_op_guarded(op: Op) 内部存储 Op。Lowering 路径直接读 op.op，无 clone().or_else(from_op_kind) 缓存模式。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>CompilerOp.op 字段存在</li><li>add_op / add_op_guarded 内部缓存 Op</li><li>5 处 lowering 路径直接读 op.op</li><li>测试 fixture 直接构造 Op，不经过 from_op_kind</li></ol></div>
 
 <section id="req-fatop-016" data-req="REQ-FATOP-016" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op,AttentionSpec,NormSpec,GemmSpec,CompileSession" data-req-api="POST /compile" data-section="5">
 <h3>REQ-FATOP-016: cargo check + cargo test --lib 全绿</h3>
@@ -392,9 +392,9 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 </div>
 
 <section id="req-fatop-018" data-req="REQ-FATOP-018" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile" data-section="5">
-<h3>REQ-FATOP-018: lowering 路径直接读 op_v2（无缓存 fallback）</h3>
-<p>5 处 lowering 路径直接读 op.op_v2（Op 是唯一 IR）。from_op_kind 已物理删除，lowering 路径无 clone().or_else() 缓存 fallback 模式。文件已从 op_v2.inc.rs 重命名为 op.inc.rs。</p>
-<div data-req-criteria=""><h4>验收标准</h4><ol><li>op.inc.rs 中 lowering 路径直接读 op.op_v2（无 or_else fallback）</li><li>context.inc.rs 中参数收集直接读 op.op_v2</li><li>pipeline.inc.rs 中采样/Gemm 识别直接读 op.op_v2</li><li>正常路径零 from_op_kind 调用</li></ol></div>
+<h3>REQ-FATOP-018: lowering 路径直接读 op（无缓存 fallback）</h3>
+<p>5 处 lowering 路径直接读 op.op（Op 是唯一 IR）。from_op_kind 已物理删除，lowering 路径无 clone().or_else() 缓存 fallback 模式。文件已从 op.inc.rs 重命名为 op.inc.rs。</p>
+<div data-req-criteria=""><h4>验收标准</h4><ol><li>op.inc.rs 中 lowering 路径直接读 op.op（无 or_else fallback）</li><li>context.inc.rs 中参数收集直接读 op.op</li><li>pipeline.inc.rs 中采样/Gemm 识别直接读 op.op</li><li>正常路径零 from_op_kind 调用</li></ol></div>
 
 <section id="req-fatop-019" data-req="REQ-FATOP-019" data-req-status="implemented" data-req-domain="FATOP" data-req-category="deployment" data-req-entity="Op,AttentionSpec,NormSpec,GemmSpec,CompileSession" data-req-api="POST /compile" data-section="5">
 <h3>REQ-FATOP-019: JIT cache hash 版本失效 (v3)</h3>
@@ -437,7 +437,7 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 <li>Op 枚举定义含 @trace REQ-FATOP-001 [entity:Op]</li>
 <li>Spec struct 定义含 @trace REQ-FATOP-002 [entity:AttentionSpec]</li>
 <li>CompileSession 含 @trace REQ-FATOP-008 [entity:CompileSession]</li>
-<li>lower_op_v2 含 @trace REQ-FATOP-014</li>
+<li>lower_op 含 @trace REQ-FATOP-014</li>
 </ul>
 </div>
 
@@ -560,13 +560,13 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="13">
 <h2>13. Dataflow 定义（编译数据流）</h2>
 
-<section id="df-fatop-001" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-FATOP-001" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-001: Op 直接构造 → CompilerOp.op_v2（OpKind 已删除）</h3>
-<p>BUILD 阶段直接构造 Op，add_op(op: Op) 存储 CompilerOp.op_v2。不再经过 OpKind → from_op_kind 翻译。KvSource 由 features.family 策略选择。</p>
+<section id="df-fatop-001" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-FATOP-001" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-001: Op 直接构造 → CompilerOp.op（OpKind 已删除）</h3>
+<p>BUILD 阶段直接构造 Op，add_op(op: Op) 存储 CompilerOp.op。不再经过 OpKind → from_op_kind 翻译。KvSource 由 features.family 策略选择。</p>
 <div data-dataflow-contract="">
 <h4>契约</h4>
 <ul>
 <li>from: graph_builder.add_op(op: Op, ...)</li>
-<li>to: CompilerOp.op_v2 = Op</li>
+<li>to: CompilerOp.op = Op</li>
 <li>transform: Family → KvSource 策略 → Op 直接构造（含完整 Spec struct）</li>
 <li>direction: sync（编译时一次性）</li>
 </ul>
@@ -579,13 +579,13 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "to": "api-umk-compile"
 }</script></section>
 
-<section id="df-fatop-002" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-FATOP-002" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-002: Op → lower_op_v2（lowering 入口，唯一 IR）</h3>
-<p>lowering 路径直接读 op.op_v2，Op 是唯一 IR，零 from_op_kind 调用。</p>
+<section id="df-fatop-002" data-flow-from="API-UMK-COMPILE" data-flow-to="API-VMINSTR" data-dataflow="DF-FATOP-002" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-002: Op → lower_op（lowering 入口，唯一 IR）</h3>
+<p>lowering 路径直接读 op.op，Op 是唯一 IR，零 from_op_kind 调用。</p>
 <div data-dataflow-contract="">
 <h4>契约</h4>
 <ul>
-<li>from: CompilerOp.op_v2 (Op, 不再 Option 缓存)</li>
-<li>to: lower_op_v2(prog, op: &amp;Op, sess)</li>
+<li>from: CompilerOp.op (Op, 不再 Option 缓存)</li>
+<li>to: lower_op(prog, op: &amp;Op, sess)</li>
 <li>transform: Op → VmInstr 序列（通过 Op Spec 直接获取参数）</li>
 <li>direction: sync（编译时一次性）</li>
 </ul>
@@ -652,7 +652,7 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 <h2>14. Module / Interface 定义</h2>
 
 <section id="mod-fatop-001" data-module="MOD-FATOP-001" data-module-kind="module"><h3>MOD-FATOP-001: op 模块（唯一 IR）</h3>
-<p>Op 枚举 + Spec struct。OpKind enum 已物理删除，from_op_kind 适配层已删除。文件从 op_v2.inc.rs 重命名为 op.inc.rs。</p>
+<p>Op 枚举 + Spec struct。OpKind enum 已物理删除，from_op_kind 适配层已删除。文件从 op.inc.rs 重命名为 op.inc.rs。</p>
 <div data-module-contains="">
 <h4>包含</h4>
 <ul>
@@ -731,12 +731,12 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 
 </section>
 </section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></section></article>
-<section id="req-fatop-023" data-req="REQ-FATOP-023" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-023 OpKind enum 物理删除 — Op 单 IR 收敛</h3><p>OpKind enum (81 变体) 物理删除。Op enum 是唯一 IR。add_op(kind: OpKind, ...) 替换为 add_op(op: Op)。编译管线零 OpKind 反查。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r OpKind src/ 零非注释匹配（OpKind enum 物理删除）</li><li>Op enum 是唯一 IR，编译管线零 OpKind 反查</li><li>add_op(kind: OpKind, ...) 替换为 add_op(op: Op)</li></ol></div></section><section id="req-fatop-024" data-req="REQ-FATOP-024" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-024 add_op(Op) 统一 API — OpKind 参数删除</h3><p>CompilerGraph API 简化为单参数：add_op(op: Op) / add_op_guarded(op: Op)。删除 add_op_with_op / add_op_guarded_with_op 双参数 API 和 kind_fallback 参数。key_from_op_kind 替换为 key_from_op。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r add_op_with_op src/ 零匹配（双参数 API 已删除）</li><li>add_op(op: Op) / add_op_guarded(op: Op) 单参数 API 存在</li><li>key_from_op 替代 key_from_op_kind</li><li>kind_fallback 参数已删除</li></ol></div></section><section id="req-fatop-025" data-req="REQ-FATOP-025" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-025 KvCacheWrite op 删除 — attention FromCache 内部覆盖 KV 写入</h3><p>Op::KvCacheWrite 是冗余 op — codegen 从未实现其 lowering (git 实证)，而 attention FromCache lowering 内部已通过 MemCopy K/V → kv_cache (dst=k_cache_base) 覆盖 KV 写入。移除冗余 op，消除触发未实现 lowering 的缺陷。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>Op::KvCacheWrite 变体不存在于 Op enum</li><li>attention FromCache lowering 内部覆盖 KV 写入（MemCopy K/V → kv_cache）</li><li>grep -r KvCacheWrite src/ 零 Op 构造匹配</li></ol></div></section><section id="req-fatop-026" data-req="REQ-FATOP-026" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec" data-req-api="POST /compile"><h3>REQ-FATOP-026 KvSource BUILD 阶段 family 驱动 — 符合 BUILD-COMPILE 边界</h3><p>KvSource 由 BUILD 阶段 features.family 决定，不再 hardcode KvSource::FromCache。Decoder → FromCache（generate loop 复用 KV cache）；Encoder → FromTensor（单遍消费当前图 K/V）。符合 ARCH-BUILD-COMPILE-BOUNDARY 铁律：BUILD 阶段做策略选择，COMPILE 阶段只读 AttentionSpec.kv_source。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>KvSource 由 features.family 决定非 hardcode</li><li>Decoder → KvSource::FromCache（generate loop 复用 KV cache）</li><li>Encoder → KvSource::FromTensor（单遍消费当前图 K/V）</li><li>COMPILE 阶段只读 AttentionSpec.kv_source，不传 Family</li></ol></div></section><section id="req-fatop-027" data-req="REQ-FATOP-027" data-req-status="implemented" data-req-domain="FATOP" data-req-category="deployment" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-027 OPCODE_VERSION v3 — OpKind 删除后 JIT cache 失效</h3><p>OpKind 物理删除后 OPCODE_VERSION 从 v2 bump 到 v3，旧缓存自动失效。版本注释说明 OpKind enum 删除 + CompilerOp.kind 字段删除 + add_op API 简化。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>OPCODE_VERSION 常量值 = 3</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>旧 JIT 缓存自动失效，冷启动一次性重编译</li><li>版本注释说明 OpKind enum 删除 + CompilerOp.kind 字段删除</li></ol></div></section><section id="req-fatop-028" data-req="REQ-FATOP-028" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-028 op_v2.inc.rs → op.inc.rs 文件重命名 — 唯一 IR 命名统一</h3><p>gllm-kernels 编译器中 op_v2.inc.rs 重命名为 op.inc.rs，反映 Op 作为唯一 IR 的收敛状态。不再有 v1/v2 双轨，命名统一。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>文件名 op.inc.rs 存在（op_v2.inc.rs 已重命名）</li><li>grep -r op_v2.inc.rs src/ 零匹配</li><li>OPCODE_VERSION 定义在 op.inc.rs</li></ol></div></section><section id="req-fatop-029" data-req="REQ-FATOP-029" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-029 OpKind 删除后测试基线 112037 — 0 failures</h3><p>OpKind 删除后测试基线：gllm-kernels 6838 passed (from_op_kind 死代码测试 -12)，gllm 44199 passed，0 failures。删除的 from_op_kind 测试是预期减少（翻译器本身已删除）。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>cargo test --lib 基线以一次真实实跑输出为准（gllm-kernels + gllm），禁止硬编码数字</li><li>基线满足加法恒等：kernels_passed + gllm_passed = total_passed（注：原文 6838+44199=51037，与曾记录的 112037 不符，须实跑校正，见 REQ-OE-4）</li><li>0 failures，声明须附实跑时间戳与命令</li><li>from_op_kind 死代码测试 -12 是预期减少</li></ol></div></section><section id="req-fatop-030" data-req="REQ-FATOP-030" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-030 from_op_kind translator 物理删除 — 零 OpKind 反查</h3><p>from_op_kind IR Translator 及其 4 个子方法物理删除。所有编译器 consumer 迁移到直接读取 Op。SemanticNode.op_kind → SemanticNode.op_v2。编译管线零 OpKind 反查。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r from_op_kind kernels/src/compiler/ 零非注释匹配</li><li>4 个子方法 from_op_kind_norm_activation/gemm_quant/attention_moe/structural 全部删除</li><li>SemanticNode.op_kind → SemanticNode.op_v2</li><li>编译管线零 OpKind 反查</li></ol></div></section><section id="req-fatop-031" data-req="REQ-FATOP-031" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-031 CompilerOp.kind 删除 — op_v2 成为唯一 IR 字段</h3><p>CompilerOp.kind 字段物理删除，op_v2 成为唯一 IR 字段。Lowering 路径直接读 op.op_v2，无 clone().or_else(from_op_kind) 缓存模式。测试 fixture 直接构造 Op。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>CompilerOp.kind 字段不存在（grep -r 'CompilerOp.*\.kind' 零匹配）</li><li>op.op_v2 是唯一 IR 字段</li><li>Lowering 路径直接读 op.op_v2，无 clone().or_else(from_op_kind)</li><li>测试 fixture 直接构造 Op</li></ol></div></section><section id="req-fatop-032" data-req="REQ-FATOP-032" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-032 gllm 全量 OpKind → Op 迁移（auto_graph/audio/vision/onnx/profiler）</h3><p>gllm 代码库全量 OpKind → Op 迁移：build_graph 153 处、audio/vision 176 处、onnx/graph_convert、profiler、small_graph、intent_tracker。所有 add_op_with_op/OpKind 构造替换为 add_op(Op) 直接构造。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r OpKind src/arch/ src/compat/ 零非注释匹配</li><li>build_graph 153 处已迁移到 add_op(Op)</li><li>audio/vision 176 处已迁移到 add_op(Op)</li><li>onnx/graph_convert、profiler、small_graph、intent_tracker 全部迁移</li></ol></div></section><section id="dec-fatop-002" data-decision="DEC-FATOP-002" data-decision-dimension="technical"><h3>DEC-FATOP-002: OpKind 物理删除 — 零向后兼容</h3>
+<section id="req-fatop-023" data-req="REQ-FATOP-023" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-023 OpKind enum 物理删除 — Op 单 IR 收敛</h3><p>OpKind enum (81 变体) 物理删除。Op enum 是唯一 IR。add_op(kind: OpKind, ...) 替换为 add_op(op: Op)。编译管线零 OpKind 反查。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r OpKind src/ 零非注释匹配（OpKind enum 物理删除）</li><li>Op enum 是唯一 IR，编译管线零 OpKind 反查</li><li>add_op(kind: OpKind, ...) 替换为 add_op(op: Op)</li></ol></div></section><section id="req-fatop-024" data-req="REQ-FATOP-024" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-024 add_op(Op) 统一 API — OpKind 参数删除</h3><p>CompilerGraph API 简化为单参数：add_op(op: Op) / add_op_guarded(op: Op)。删除 add_op_with_op / add_op_guarded_with_op 双参数 API 和 kind_fallback 参数。key_from_op_kind 替换为 key_from_op。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r add_op_with_op src/ 零匹配（双参数 API 已删除）</li><li>add_op(op: Op) / add_op_guarded(op: Op) 单参数 API 存在</li><li>key_from_op 替代 key_from_op_kind</li><li>kind_fallback 参数已删除</li></ol></div></section><section id="req-fatop-025" data-req="REQ-FATOP-025" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-025 KvCacheWrite op 删除 — attention FromCache 内部覆盖 KV 写入</h3><p>Op::KvCacheWrite 是冗余 op — codegen 从未实现其 lowering (git 实证)，而 attention FromCache lowering 内部已通过 MemCopy K/V → kv_cache (dst=k_cache_base) 覆盖 KV 写入。移除冗余 op，消除触发未实现 lowering 的缺陷。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>Op::KvCacheWrite 变体不存在于 Op enum</li><li>attention FromCache lowering 内部覆盖 KV 写入（MemCopy K/V → kv_cache）</li><li>grep -r KvCacheWrite src/ 零 Op 构造匹配</li></ol></div></section><section id="req-fatop-026" data-req="REQ-FATOP-026" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="AttentionSpec" data-req-api="POST /compile"><h3>REQ-FATOP-026 KvSource BUILD 阶段 family 驱动 — 符合 BUILD-COMPILE 边界</h3><p>KvSource 由 BUILD 阶段 features.family 决定，不再 hardcode KvSource::FromCache。Decoder → FromCache（generate loop 复用 KV cache）；Encoder → FromTensor（单遍消费当前图 K/V）。符合 ARCH-BUILD-COMPILE-BOUNDARY 铁律：BUILD 阶段做策略选择，COMPILE 阶段只读 AttentionSpec.kv_source。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>KvSource 由 features.family 决定非 hardcode</li><li>Decoder → KvSource::FromCache（generate loop 复用 KV cache）</li><li>Encoder → KvSource::FromTensor（单遍消费当前图 K/V）</li><li>COMPILE 阶段只读 AttentionSpec.kv_source，不传 Family</li></ol></div></section><section id="req-fatop-027" data-req="REQ-FATOP-027" data-req-status="implemented" data-req-domain="FATOP" data-req-category="deployment" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-027 OPCODE_VERSION v3 — OpKind 删除后 JIT cache 失效</h3><p>OpKind 物理删除后 OPCODE_VERSION 从 v2 bump 到 v3，旧缓存自动失效。版本注释说明 OpKind enum 删除 + CompilerOp.kind 字段删除 + add_op API 简化。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>OPCODE_VERSION 常量值 = 3</li><li>graph_content_hash 包含 OPCODE_VERSION</li><li>旧 JIT 缓存自动失效，冷启动一次性重编译</li><li>版本注释说明 OpKind enum 删除 + CompilerOp.kind 字段删除</li></ol></div></section><section id="req-fatop-028" data-req="REQ-FATOP-028" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-028 op.inc.rs → op.inc.rs 文件重命名 — 唯一 IR 命名统一</h3><p>gllm-kernels 编译器中 op.inc.rs 重命名为 op.inc.rs，反映 Op 作为唯一 IR 的收敛状态。不再有 v1/v2 双轨，命名统一。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>文件名 op.inc.rs 存在（op.inc.rs 已重命名）</li><li>grep -r op.inc.rs src/ 零匹配</li><li>OPCODE_VERSION 定义在 op.inc.rs</li></ol></div></section><section id="req-fatop-029" data-req="REQ-FATOP-029" data-req-status="implemented" data-req-domain="FATOP" data-req-category="operations" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-029 OpKind 删除后测试基线 112037 — 0 failures</h3><p>OpKind 删除后测试基线：gllm-kernels 6838 passed (from_op_kind 死代码测试 -12)，gllm 44199 passed，0 failures。删除的 from_op_kind 测试是预期减少（翻译器本身已删除）。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>cargo test --lib 基线以一次真实实跑输出为准（gllm-kernels + gllm），禁止硬编码数字</li><li>基线满足加法恒等：kernels_passed + gllm_passed = total_passed（注：原文 6838+44199=51037，与曾记录的 112037 不符，须实跑校正，见 REQ-OE-4）</li><li>0 failures，声明须附实跑时间戳与命令</li><li>from_op_kind 死代码测试 -12 是预期减少</li></ol></div></section><section id="req-fatop-030" data-req="REQ-FATOP-030" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-030 from_op_kind translator 物理删除 — 零 OpKind 反查</h3><p>from_op_kind IR Translator 及其 4 个子方法物理删除。所有编译器 consumer 迁移到直接读取 Op。SemanticNode.op_kind → SemanticNode.op。编译管线零 OpKind 反查。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r from_op_kind kernels/src/compiler/ 零非注释匹配</li><li>4 个子方法 from_op_kind_norm_activation/gemm_quant/attention_moe/structural 全部删除</li><li>SemanticNode.op_kind → SemanticNode.op</li><li>编译管线零 OpKind 反查</li></ol></div></section><section id="req-fatop-031" data-req="REQ-FATOP-031" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-031 CompilerOp.kind 删除 — op 成为唯一 IR 字段</h3><p>CompilerOp.kind 字段物理删除，op 成为唯一 IR 字段。Lowering 路径直接读 op.op，无 clone().or_else(from_op_kind) 缓存模式。测试 fixture 直接构造 Op。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>CompilerOp.kind 字段不存在（grep -r 'CompilerOp.*\.kind' 零匹配）</li><li>op.op 是唯一 IR 字段</li><li>Lowering 路径直接读 op.op，无 clone().or_else(from_op_kind)</li><li>测试 fixture 直接构造 Op</li></ol></div></section><section id="req-fatop-032" data-req="REQ-FATOP-032" data-req-status="implemented" data-req-domain="FATOP" data-req-category="architecture" data-req-entity="Op" data-req-api="POST /compile"><h3>REQ-FATOP-032 gllm 全量 OpKind → Op 迁移（auto_graph/audio/vision/onnx/profiler）</h3><p>gllm 代码库全量 OpKind → Op 迁移：build_graph 153 处、audio/vision 176 处、onnx/graph_convert、profiler、small_graph、intent_tracker。所有 add_op_with_op/OpKind 构造替换为 add_op(Op) 直接构造。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>grep -r OpKind src/arch/ src/compat/ 零非注释匹配</li><li>build_graph 153 处已迁移到 add_op(Op)</li><li>audio/vision 176 处已迁移到 add_op(Op)</li><li>onnx/graph_convert、profiler、small_graph、intent_tracker 全部迁移</li></ol></div></section><section id="dec-fatop-002" data-decision="DEC-FATOP-002" data-decision-dimension="technical"><h3>DEC-FATOP-002: OpKind 物理删除 — 零向后兼容</h3>
 <p>决策：OpKind enum 物理删除，零向后兼容。用户决策记录在 commit dae40ad "全量删除兼容层"。</p>
 <p>备选方案：(1) 保留 OpKind 作为兼容层 (2) 逐步弃用 OpKind (deprecated) (3) OpKind 物理删除 + 零向后兼容 [采纳]</p><script type="application/ld+json">{
   "@type": "Decision",
   "id": "DEC-FATOP-002",
-  "context": "FAT-OPCODE Phase 1-8 建立了双 IR (OpKind + Op/op_v2)，from_op_kind 作为翻译桥。Phase 9 将 Op 物理删除 OpKind，收敛到单一 IR。",
+  "context": "FAT-OPCODE Phase 1-8 建立了双 IR (OpKind + Op)，from_op_kind 作为翻译桥。Phase 9 将 Op 物理删除 OpKind，收敛到单一 IR。",
   "rationale": "1. from_op_kind 翻译层是临时基础设施，完成使命后应删除\n2. 双 IR 增加维护成本，每次新增 Op 需同步维护 OpKind + from_op_kind\n3. 兼容层违反用户 \"不需要向后兼容\" 的明确决策\n4. add_op_with_op 双参数 API 比单参数更复杂，迁移后简化"
 }</script></section><section id="cf-fatop-001" data-controlflow="CF-FATOP-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="api-weight-loader" data-controlflow-target="api-umk-compile"><script type="application/ld+json">{
   "@type": "Controlflow",
