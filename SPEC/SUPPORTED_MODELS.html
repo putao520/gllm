@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head><body><section id="testing" data-tests-section="" <h2="">测试用例
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head><body><section id="testing" data-tests-section="">测试用例
 
 
 
@@ -1226,7 +1226,7 @@
     <section id="s-req" data-section="req">
       <h2>需求 (REQ)</h2>
 
-    <section data-entity-ref="ENT-ARCH-REGISTRY ENT-MODEL-CONFIG" <h3="" data-req-api="POST /client/build" data-req-entity="ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-001" id="req-model-001">REQ-MODEL-001 (REQ-MODEL-001)
+    <section data-entity-ref="ENT-ARCH-REGISTRY ENT-MODEL-CONFIG" data-req-api="POST /client/build" data-req-entity="ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-001" id="req-model-001">REQ-MODEL-001 (REQ-MODEL-001)
       <p>ARCH_TABLE 架构令牌别名查找表：维护模型架构名称到内部架构令牌的完整映射，支持 GGUF/safetensors/ONNX 等多种格式的自动架构识别。所有已支持的模型架构必须在 ARCH_TABLE 中有注册条目。</p>
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1244,14 +1244,14 @@
       </div>
     </section>
 
-    <section data-level="integration" <h3="" data-test-categories="unit" data-req-ref="REQ-MODEL-001" data-test="TEST-MODEL-001" id="test-model-001">TEST-MODEL-001: 模型架构注册自动检测测试<p>验证REQ-MODEL-001相关功能正确性</p>
+    <section data-level="integration" data-test-categories="unit" data-req-ref="REQ-MODEL-001" data-test="TEST-MODEL-001" id="test-model-001">TEST-MODEL-001: 模型架构注册自动检测测试<p>验证REQ-MODEL-001相关功能正确性</p>
       <div id="arch-table-架构令牌别名查找表完整" data-criterion="ARCH_TABLE 架构令牌别名查找表完整">ARCH_TABLE 架构令牌别名查找表完整</div>
       <div id="所有已支持架构在-arch-table-中有注册条目" data-criterion="所有已支持架构在 ARCH_TABLE 中有注册条目">所有已支持架构在 ARCH_TABLE 中有注册条目</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-AUTO-GRAPH" <h3="" data-req-api="POST /client/build" data-req-entity="ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-002" id="req-model-002">REQ-MODEL-002 (REQ-MODEL-002)
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-AUTO-GRAPH" data-req-api="POST /client/build" data-req-entity="ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-002" id="req-model-002">REQ-MODEL-002 (REQ-MODEL-002)
       <p>Tensor-Name-Driven Graph Builder：基于模型权重张量名称模式自动检测模型架构，并构建对应的 CompilerGraph。所有支持的模型架构必须能通过张量名特征自动构建完整的计算图。</p>
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1270,14 +1270,14 @@
       </div>
     </section>
 
-    <section data-level="integration" <h3="" data-test-categories="unit" data-req-ref="REQ-MODEL-002" data-test="TEST-MODEL-002" id="test-model-002">TEST-MODEL-002: 模型架构注册自动检测测试<p>验证REQ-MODEL-002相关功能正确性</p>
+    <section data-level="integration" data-test-categories="unit" data-req-ref="REQ-MODEL-002" data-test="TEST-MODEL-002" id="test-model-002">TEST-MODEL-002: 模型架构注册自动检测测试<p>验证REQ-MODEL-002相关功能正确性</p>
       <div id="tensor-name-driven-graph-builder-正确检测张量名模式" data-criterion="Tensor-Name-Driven Graph Builder 正确检测张量名模式">Tensor-Name-Driven Graph Builder 正确检测张量名模式</div>
       <div id="所有支持的模型架构能自动构建-compilergraph" data-criterion="所有支持的模型架构能自动构建 CompilerGraph">所有支持的模型架构能自动构建 CompilerGraph</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES" <h3="" data-req-api="POST /client/build" data-req-entity="ENT-ARCHITECTURE-FEATURES" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-003" id="req-model-003">REQ-MODEL-003 (REQ-MODEL-003)
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES" data-req-api="POST /client/build" data-req-entity="ENT-ARCHITECTURE-FEATURES" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-003" id="req-model-003">REQ-MODEL-003 (REQ-MODEL-003)
       <p>ArchitectureFeatures 模型架构特征推导：从模型配置和权重元数据自动推导 GQA/MLA/MoE/SlidingWindow 等架构特征，为图构建和编译优化提供准确的架构能力描述。</p>
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1294,14 +1294,14 @@
       </div>
     </section>
 
-    <section data-level="integration" <h3="" data-test-categories="unit" data-req-ref="REQ-MODEL-003" data-test="TEST-MODEL-003" id="test-model-003">TEST-MODEL-003: 模型架构注册自动检测测试<p>验证REQ-MODEL-003相关功能正确性</p>
+    <section data-level="integration" data-test-categories="unit" data-req-ref="REQ-MODEL-003" data-test="TEST-MODEL-003" id="test-model-003">TEST-MODEL-003: 模型架构注册自动检测测试<p>验证REQ-MODEL-003相关功能正确性</p>
       <div id="architecturefeatures-从模型配置正确推导" data-criterion="ArchitectureFeatures 从模型配置正确推导">ArchitectureFeatures 从模型配置正确推导</div>
       <div id="gqa-mla-moe-slidingwindow-等特征检测正确" data-criterion="GQA/MLA/MoE/SlidingWindow 等特征检测正确">GQA/MLA/MoE/SlidingWindow 等特征检测正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-GRAPH-TYPE" <h3="" data-req-api="POST /client/build" data-req-entity="ENT-COMPILER-GRAPH,ENT-GRAPH-TYPE" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-004" id="req-model-004">REQ-MODEL-004 (REQ-MODEL-004)
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-GRAPH-TYPE" data-req-api="POST /client/build" data-req-entity="ENT-COMPILER-GRAPH,ENT-GRAPH-TYPE" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-004" id="req-model-004">REQ-MODEL-004 (REQ-MODEL-004)
       <p>GraphType 模型图类型覆盖：定义并区分 Decoder/Encoder/MoE/MLA 等模型图类型枚举，确保 GraphType 覆盖所有已支持的模型架构类型，为 JIT 编译提供正确的图类型标识。</p>
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1319,14 +1319,14 @@
       </div>
     </section>
 
-    <section data-level="integration" <h3="" data-test-categories="unit" data-req-ref="REQ-MODEL-004" data-test="TEST-MODEL-004" id="test-model-004">TEST-MODEL-004: 模型架构注册自动检测测试<p>验证REQ-MODEL-004相关功能正确性</p>
+    <section data-level="integration" data-test-categories="unit" data-req-ref="REQ-MODEL-004" data-test="TEST-MODEL-004" id="test-model-004">TEST-MODEL-004: 模型架构注册自动检测测试<p>验证REQ-MODEL-004相关功能正确性</p>
       <div id="graphtype-覆盖所有支持的模型类型" data-criterion="GraphType 覆盖所有支持的模型类型">GraphType 覆盖所有支持的模型类型</div>
       <div id="decoder-encoder-moe-mla-类型区分正确" data-criterion="Decoder/Encoder/MoE/MLA 类型区分正确">Decoder/Encoder/MoE/MLA 类型区分正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-RESOLVE-CONFIG" <h3="" data-req-api="POST /client/build" data-req-entity="ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-005" id="req-model-005">REQ-MODEL-005 (REQ-MODEL-005)
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-RESOLVE-CONFIG" data-req-api="POST /client/build" data-req-entity="ENT-MODEL-CONFIG" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-005" id="req-model-005">REQ-MODEL-005 (REQ-MODEL-005)
       <p>Config resolve 模型参数推导：从模型元数据（GGUF 键值对/safetensors metadata/config.json）正向推导 hidden_size/num_heads/num_layers 等关键模型参数，为图构建和编译提供完整的模型配置。</p>
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1344,14 +1344,14 @@
       </div>
     </section>
 
-    <section data-level="integration" <h3="" data-test-categories="unit" data-req-ref="REQ-MODEL-005" data-test="TEST-MODEL-005" id="test-model-005">TEST-MODEL-005: 模型架构注册自动检测测试<p>验证REQ-MODEL-005相关功能正确性</p>
+    <section data-level="integration" data-test-categories="unit" data-req-ref="REQ-MODEL-005" data-test="TEST-MODEL-005" id="test-model-005">TEST-MODEL-005: 模型架构注册自动检测测试<p>验证REQ-MODEL-005相关功能正确性</p>
       <div id="config-resolve-从-metadata-正确推导模型参数" data-criterion="Config resolve 从 metadata 正确推导模型参数">Config resolve 从 metadata 正确推导模型参数</div>
       <div id="hidden-size-num-heads-num-layers-等关键参数完整" data-criterion="hidden_size/num_heads/num_layers 等关键参数完整">hidden_size/num_heads/num_layers 等关键参数完整</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-INTENT-TRACKER" <h3="" data-req-api="POST /client/build" data-req-entity="ENT-MODEL-CONFIG,ENT-INTENT-TRACKER" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-006" id="req-model-006">REQ-MODEL-006 (REQ-MODEL-006)
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-INTENT-TRACKER" data-req-api="POST /client/build" data-req-entity="ENT-MODEL-CONFIG,ENT-INTENT-TRACKER" data-req-category="business" data-req-domain="model" data-req-status="implemented" data-req="REQ-MODEL-006" id="req-model-006">REQ-MODEL-006 (REQ-MODEL-006)
       <p>Intent Tracker 模型架构注册：将 Intent Tracker 分类模型注册到 ModelArchKey 体系，确保其拥有唯一的架构标识和独立的 GraphType，支持图构建器正确构建 Intent Tracker 推理图。</p>
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1369,7 +1369,7 @@
       </div>
     </section>
 
-    <section data-level="integration" <h3="" data-test-categories="unit" data-req-ref="REQ-MODEL-006" data-test="TEST-MODEL-006" id="test-model-006">TEST-MODEL-006: 模型架构注册自动检测测试<p>验证REQ-MODEL-006相关功能正确性</p>
+    <section data-level="integration" data-test-categories="unit" data-req-ref="REQ-MODEL-006" data-test="TEST-MODEL-006" id="test-model-006">TEST-MODEL-006: 模型架构注册自动检测测试<p>验证REQ-MODEL-006相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="modelarchkey-唯一标识-intent-tracker-模型" data-criterion="ModelArchKey 唯一标识 Intent Tracker 模型">ModelArchKey 唯一标识 Intent Tracker 模型</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>

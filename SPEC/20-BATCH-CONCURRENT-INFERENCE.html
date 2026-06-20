@@ -862,7 +862,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="001" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-001" id="req-bci-001">REQ-BCI-001: BatchContext flat memory 布局 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="001" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-001" id="req-bci-001">REQ-BCI-001: BatchContext flat memory 布局 ✅
       <p>定义 BatchContext 的 flat memory 布局（80 字节固定头 + num_seqs x 56 字节 per-seq 元数据），由 Executor 在构建时从 PagedScheduler、SessionKvCache 和运行中序列收集所有 per-seq 信息，拼接到一块 JIT 可直接通过偏移量访问的连续内存中。</p>
       <li>定义 <code>BATCH_CTX_HEADER_SIZE = 80</code>, <code>SEQ_META_STRIDE = 56</code> (14 × u32 fields)</li>
       <li>定义 per-seq 字段 offset: <code>PROMPT_LEN=0, KV_LEN=4, ROPE_POS_OFFSET=8, ...</code></li>
@@ -884,14 +884,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-001" data-test="TEST-BCI-001" id="test-bci-001">TEST-BCI-001: 批量并发推理统一架构测试<p>验证REQ-BCI-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-001" data-test="TEST-BCI-001" id="test-bci-001">TEST-BCI-001: 批量并发推理统一架构测试<p>验证REQ-BCI-001相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -899,7 +899,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="002" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-002" id="req-bci-002">REQ-BCI-002: ABI arg 22 batch_ctx_ptr + 向后兼容 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="002" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-002" id="req-bci-002">REQ-BCI-002: ABI arg 22 batch_ctx_ptr + 向后兼容 ✅
       <p>在 MegaKernelFn 的 23 参数 ABI 中新增 arg 22（batch_ctx_ptr），传入 BatchContext flat memory 的基地址。当 batch_ctx_ptr 为 NULL 时走 Phase 1.Legacy 单序列路径，实现零行为变更的向后兼容。</p>
       <li><code>MegaKernelFn</code> 新增 arg 22: <code>*const u8</code> (batch_ctx_ptr)</li>
       <li><code>MEGA_KERNEL_PARAMS</code> 和 <code>MEGA_KERNEL_STACK_OFFSETS</code> 追加 → <code>[rbp+144]</code></li>
@@ -918,14 +918,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-002" data-test="TEST-BCI-002" id="test-bci-002">TEST-BCI-002: 批量并发推理统一架构测试<p>验证REQ-BCI-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-002" data-test="TEST-BCI-002" id="test-bci-002">TEST-BCI-002: 批量并发推理统一架构测试<p>验证REQ-BCI-002相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -933,7 +933,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="003" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-003" id="req-bci-003">REQ-BCI-003: Mega-Kernel generate 循环 M 维度统一 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="003" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-003" id="req-bci-003">REQ-BCI-003: Mega-Kernel generate 循环 M 维度统一 ✅
       <p>将 mega-kernel 的 generate 循环从单序列扩展为 batch 统一结构：新增 Phase 2（Prefill，M = total_prefill_tokens）和改造 Phase 3（Decode step loop，M = num_active），batch_ctx_ptr 为 NULL 时走原有单序列逻辑。</p>
       <li>Phase 2 (Prefill): <code>M = total_prefill_tokens</code> → SymDim("prefill_M")</li>
       <li>Phase 3 (Decode): step loop, <code>M = num_active</code> → SymDim("decode_M")</li>
@@ -953,14 +953,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-003" data-test="TEST-BCI-003" id="test-bci-003">TEST-BCI-003: 批量并发推理统一架构测试<p>验证REQ-BCI-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-003" data-test="TEST-BCI-003" id="test-bci-003">TEST-BCI-003: 批量并发推理统一架构测试<p>验证REQ-BCI-003相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -968,7 +968,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="004" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-004" id="req-bci-004">REQ-BCI-004: Attention per-token seq_id 查找 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="004" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-004" id="req-bci-004">REQ-BCI-004: Attention per-token seq_id 查找 ✅
       <p>实现 Attention 层的 per-token seq_id 查找机制：Prefill 阶段通过 cumsum(prompt_lens) 搜索确定 token 归属的序列，Decode 阶段通过 active_seq_ids 数组直接映射，用于定位该序列在 page_table_flat 中的偏移以访问正确的 KV cache。</p>
       <li>Prefill 阶段: cumsum(prompt_lens) 搜索确定 token 属于哪条序列</li>
       <li>Decode 阶段: active_seq_ids 直接映射</li>
@@ -987,14 +987,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-004" data-test="TEST-BCI-004" id="test-bci-004">TEST-BCI-004: 批量并发推理统一架构测试<p>验证REQ-BCI-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-004" data-test="TEST-BCI-004" id="test-bci-004">TEST-BCI-004: 批量并发推理统一架构测试<p>验证REQ-BCI-004相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -1002,7 +1002,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="005" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-005" id="req-bci-005">REQ-BCI-005: PageTableAddr seq_index 参数化 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="005" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-005" id="req-bci-005">REQ-BCI-005: PageTableAddr seq_index 参数化 ✅
       <p>将 VmInstr::PageTableAddr 的 seq_index 字段从固定 None 改为接受运行时 seq_id 寄存器，使 KV 读取和写入地址计算支持 per-sequence 页表偏移，实现多序列共享同一个 page_table_flat 数组。</p>
       <li><code>VmInstr::PageTableAddr.seq_index</code> 从 <code>None</code> 改为 <code>Some(VRegId)</code></li>
       <li>JIT 地址计算: <code>page_table_flat[pt_offsets[seq] + logical_page]</code></li>
@@ -1021,14 +1021,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-005" data-test="TEST-BCI-005" id="test-bci-005">TEST-BCI-005: 批量并发推理统一架构测试<p>验证REQ-BCI-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-005" data-test="TEST-BCI-005" id="test-bci-005">TEST-BCI-005: 批量并发推理统一架构测试<p>验证REQ-BCI-005相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -1036,7 +1036,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="006" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-006" id="req-bci-006">REQ-BCI-006: Per-Sequence 采样与停止 JIT 实现 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="006" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-006" id="req-bci-006">REQ-BCI-006: Per-Sequence 采样与停止 JIT 实现 ✅
       <p>在 JIT 机器码中实现 per-sequence 采样和停止条件检查：每个序列独立读取自己的采样参数（temperature/top_k/top_p/eos），对 logits 对应行执行采样，检查 eos 匹配或 gen_count 达到上限后将 active_flag 置零。</p>
       <li>Logits 布局 <code>[M, vocab_size]</code> — per-seq 行偏移</li>
       <li>采样管线 (per-seq, 从 <code>sampling_params_ptr + seq × 16</code> 读取参数):</li>
@@ -1061,14 +1061,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-006" data-test="TEST-BCI-006" id="test-bci-006">TEST-BCI-006: 批量并发推理统一架构测试<p>验证REQ-BCI-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-006" data-test="TEST-BCI-006" id="test-bci-006">TEST-BCI-006: 批量并发推理统一架构测试<p>验证REQ-BCI-006相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -1076,7 +1076,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="007" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-007" id="req-bci-007">REQ-BCI-007: ContinuousBatcher 产出扩展 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="007" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-007" id="req-bci-007">REQ-BCI-007: ContinuousBatcher 产出扩展 ✅
       <p>扩展 ContinuousBatcher.build_batch() 的返回类型为 (ScheduledBatch, BatchPrepData)，其中 BatchPrepData 包含 prompt_lens、kv_lens、session_positions、sampling_params、page_tables 等构建 BatchContext 所需的全部中间数据。</p>
       <li><code>build_batch()</code> 返回 <code>(ScheduledBatch, BatchPrepData)</code> — prep data 包含所有构建 BatchContext 所需的中间数据</li>
       <li>BatchPrepData: prompt_lens, kv_lens, session_positions, sampling_params, page_tables</li>
@@ -1095,14 +1095,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-007" data-test="TEST-BCI-007" id="test-bci-007">TEST-BCI-007: 批量并发推理统一架构测试<p>验证REQ-BCI-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-007" data-test="TEST-BCI-007" id="test-bci-007">TEST-BCI-007: 批量并发推理统一架构测试<p>验证REQ-BCI-007相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -1110,7 +1110,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="008" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-008" id="req-bci-008">REQ-BCI-008: Executor batch 推理路径 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="008" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-008" id="req-bci-008">REQ-BCI-008: Executor batch 推理路径 ✅
       <p>实现从 Client 到 MegaKernelExecutor 的完整 batch 推理路径：generate_batch() 公共 API 接收多请求，构建 BatchContext，以 arg 22 传入 mega-kernel，单次 CALL 完成所有序列的 prefill + decode 全生命周期，最后从 ctx_mem 收集 per-seq 结果。</p>
       <li><code>generate_batch()</code> 公共 API (Client 层多请求并发)</li>
       <li>Scratchpad 分配: M 维度参数化，max_M × hidden</li>
@@ -1131,14 +1131,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-008" data-test="TEST-BCI-008" id="test-bci-008">TEST-BCI-008: 批量并发推理统一架构测试<p>验证REQ-BCI-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-008" data-test="TEST-BCI-008" id="test-bci-008">TEST-BCI-008: 批量并发推理统一架构测试<p>验证REQ-BCI-008相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -1146,7 +1146,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="009" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-009" id="req-bci-009">REQ-BCI-009: VariantKey batch 维度扩展 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="009" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-009" id="req-bci-009">REQ-BCI-009: VariantKey batch 维度扩展 ✅
       <p>在 VariantKey 中新增 batch_golden_size 字段，batch_size=1 时为 None 走 Single variant，batch_size=N 时通过 GoldenBucket 装筒映射到最近的 golden size，复用 VariantRegistry.find_closest() 的 constraint relaxation 机制。</p>
       <li><code>VariantKey</code> 新增 <code>batch_golden_size: Option&lt;usize&gt;</code></li>
       <li>batch_size=1 → None (当前 Single variant)</li>
@@ -1167,14 +1167,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-009" data-test="TEST-BCI-009" id="test-bci-009">TEST-BCI-009: 批量并发推理统一架构测试<p>验证REQ-BCI-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-009" data-test="TEST-BCI-009" id="test-bci-009">TEST-BCI-009: 批量并发推理统一架构测试<p>验证REQ-BCI-009相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>
@@ -1182,7 +1182,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="010" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-010" id="req-bci-010">REQ-BCI-010: MegaKernelBufferLayout M 维度参数化 ✅
+    <section data-entity-ref="ENT-BATCH-CONTEXT ENT-SEQUENCE-GROUP ENT-PAGED-SCHEDULER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="010" data-req-api="POST /internal/batch_context/build" data-req-entity="ENT-BATCH-CONTEXT,ENT-SEQUENCE-GROUP,ENT-PAGED-SCHEDULER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="bci" data-req-status="implemented" data-req="REQ-BCI-010" id="req-bci-010">REQ-BCI-010: MegaKernelBufferLayout M 维度参数化 ✅
       <p>扩展 MegaKernelBufferLayout 的 activation 和 logits sizing 从固定 max_seq_len 改为 max_M 参数化，Prefill 阶段 M = total_prefill_tokens、Decode 阶段 M = num_active_seqs，RoPE cache 保持按最大序列长度不变。</p>
       <li><code>from_graph_geometry_batched(geo, max_M, max_seq_len)</code> — 新增 max_M 参数</li>
       <li>Activation sizing: <code>max_M × hidden</code> (替代 <code>max_seq_len × hidden</code>)</li>
@@ -1202,14 +1202,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-BCI-010" data-test="TEST-BCI-010" id="test-bci-010">TEST-BCI-010: 批量并发推理统一架构测试<p>验证REQ-BCI-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-BCI-010" data-test="TEST-BCI-010" id="test-bci-010">TEST-BCI-010: 批量并发推理统一架构测试<p>验证REQ-BCI-010相关功能正确性</p>
       <div id="batchcontext-flat-memory-布局正确" data-criterion="BatchContext flat memory 布局正确">BatchContext flat memory 布局正确</div>
       <div id="per-token-seq-id-查找替代-csr-indptr" data-criterion="Per-token seq_id 查找替代 CSR indptr">Per-token seq_id 查找替代 CSR indptr</div>
       <div id="单次-call-完成-m-条序列全生命周期" data-criterion="单次 CALL 完成 M 条序列全生命周期">单次 CALL 完成 M 条序列全生命周期</div>

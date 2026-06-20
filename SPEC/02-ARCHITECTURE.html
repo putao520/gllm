@@ -2422,7 +2422,7 @@
       <p>  kernel 返回后: output_tokens_ptr 中已有完整结果</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.3" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-002" id="req-arch-002">8.10.3 GPU 权重管理 (REQ-ARCH-002)
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" data-section="8.10.3" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-002" id="req-arch-002">8.10.3 GPU 权重管理 (REQ-ARCH-002)
       <p>&gt; <strong>铁律</strong>: 权重在编译时一次性 htod 上传并常驻 GPU。推理热路径中 Rust 不发起任何权重传输操作。</p>
       <strong>编译时权重布局</strong>:
       <p>```</p>
@@ -2452,12 +2452,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-002" data-test="TEST-ARCH-002" id="TEST-ARCH-002">TEST-ARCH-002: 架构自动检测测试<p>验证REQ-ARCH-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARCH-002" data-test="TEST-ARCH-002" id="test-arch-002">TEST-ARCH-002: 架构自动检测测试<p>验证REQ-ARCH-002相关功能正确性</p>
       <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
       <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
       <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
@@ -2465,7 +2465,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.4" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-001" id="req-arch-001">8.10.4 KV Cache GPU 管理 (REQ-ARCH-001)
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" data-section="8.10.4" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-001" id="req-arch-001">8.10.4 KV Cache GPU 管理 (REQ-ARCH-001)
       <p>&gt; <strong>铁律</strong>: KV cache 在编译时在 GPU 分配。KV scatter/merge 全部在 GPU kernel 内完成。Rust 不参与。</p>
       <p>```</p>
       <p>编译时:</p>
@@ -2495,12 +2495,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-001" data-test="TEST-ARCH-001" id="TEST-ARCH-001">TEST-ARCH-001: 架构自动检测测试<p>验证REQ-ARCH-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARCH-001" data-test="TEST-ARCH-001" id="test-arch-001">TEST-ARCH-001: 架构自动检测测试<p>验证REQ-ARCH-001相关功能正确性</p>
       <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
       <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
       <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
@@ -2508,7 +2508,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.5" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-003" id="req-arch-003">8.10.5 Metal KV 直写 (REQ-ARCH-003)
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" data-section="8.10.5" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-003" id="req-arch-003">8.10.5 Metal KV 直写 (REQ-ARCH-003)
       <p>Metal 使用 unified memory (shared memory)，KV cache 的 CPU/GPU 指针相同。</p>
       <p>Mega-kernel 编译时直接使用该指针，无中间 buffer。</p>
       <p>```</p>
@@ -2532,12 +2532,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-003" data-test="TEST-ARCH-003" id="TEST-ARCH-003">TEST-ARCH-003: 架构自动检测测试<p>验证REQ-ARCH-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARCH-003" data-test="TEST-ARCH-003" id="test-arch-003">TEST-ARCH-003: 架构自动检测测试<p>验证REQ-ARCH-003相关功能正确性</p>
       <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
       <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
       <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>
@@ -2545,7 +2545,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" <h5="" data-section="8.10.6" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-004" id="req-arch-004">8.10.6 PagedKvView 三后端统一 (REQ-ARCH-004)
+    <section data-entity-ref="ENT-ARCHITECTURE-FEATURES ENT-MODEL-CONFIG ENT-COMPILER-GRAPH ENT-MODEL-ARCH-KEY" data-section="8.10.6" data-req-api="POST /compile" data-req-entity="ENT-ARCHITECTURE-FEATURES,ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH,ENT-MODEL-ARCH-KEY" data-req-category="architecture" data-req-domain="arch" data-req-status="implemented" data-req="REQ-ARCH-004" id="req-arch-004">8.10.6 PagedKvView 三后端统一 (REQ-ARCH-004)
       <p>Paged attention 的 page_table 管理在编译时由 Rust 构建，上传到 GPU 后 bake 进 kernel。</p>
       <p>Kernel 内部通过 page_table 查找物理页面地址，不经过 Rust。</p>
       <p>```</p>
@@ -2581,12 +2581,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARCH-004" data-test="TEST-ARCH-004" id="TEST-ARCH-004">TEST-ARCH-004: 架构自动检测测试<p>验证REQ-ARCH-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARCH-004" data-test="TEST-ARCH-004" id="test-arch-004">TEST-ARCH-004: 架构自动检测测试<p>验证REQ-ARCH-004相关功能正确性</p>
       <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
       <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
       <div id="architecturefeatures-推导正确" data-criterion="ArchitectureFeatures 推导正确">ArchitectureFeatures 推导正确</div>

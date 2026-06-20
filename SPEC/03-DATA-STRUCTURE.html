@@ -1897,7 +1897,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-MODEL-MANIFEST ENT-DEVICE-PROFILE" <h5="" data-section="6.3.2" data-req-api="POST /internal/loader/load" data-req-entity="ENT-MODEL-CONFIG,ENT-MODEL-MANIFEST,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="loader" data-req-status="implemented" data-req="REQ-LOADER-001" id="req-loader-001">6.3.2 SafeTensors 格式 (已实现 - REQ-LOADER-001)
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-MODEL-MANIFEST ENT-DEVICE-PROFILE" data-section="6.3.2" data-req-api="POST /internal/loader/load" data-req-entity="ENT-MODEL-CONFIG,ENT-MODEL-MANIFEST,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="loader" data-req-status="implemented" data-req="REQ-LOADER-001" id="req-loader-001">6.3.2 SafeTensors 格式 (已实现 - REQ-LOADER-001)
       <strong>张量名称模式</strong>:
       <li>Embedding: <code>model.embed_tokens.weight</code>, <code>embeddings.word_embeddings.weight</code>, <code>transformer.wte.weight</code></li>
       <li>Q Projection: <code>model.layers.{N}.self_attn.q_proj.weight</code>, <code>encoder.layer.{N}.attention.self.query.weight</code></li>
@@ -1978,7 +1978,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-LOADER-001" data-test="TEST-LOADER-001" id="TEST-LOADER-001">TEST-LOADER-001: 模型加载规范测试<p>验证REQ-LOADER-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LOADER-001" data-test="TEST-LOADER-001" id="test-loader-001">TEST-LOADER-001: 模型加载规范测试<p>验证REQ-LOADER-001相关功能正确性</p>
       <div id="模型加载-格式解析实现完整" data-criterion="模型加载/格式解析实现完整">模型加载/格式解析实现完整</div>
       <div id="零拷贝映射正确" data-criterion="零拷贝映射正确">零拷贝映射正确</div>
       <div id="并行加载无数据竞争" data-criterion="并行加载无数据竞争">并行加载无数据竞争</div>
@@ -1986,7 +1986,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-MODEL-MANIFEST ENT-DEVICE-PROFILE" <h5="" data-section="6.3.3" data-req-api="POST /internal/loader/load" data-req-entity="ENT-MODEL-CONFIG,ENT-MODEL-MANIFEST,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="loader" data-req-status="implemented" data-req="REQ-LOADER-002" id="req-loader-002">6.3.3 ONNX 格式 (已实现 - REQ-LOADER-002)
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-MODEL-MANIFEST ENT-DEVICE-PROFILE" data-section="6.3.3" data-req-api="POST /internal/loader/load" data-req-entity="ENT-MODEL-CONFIG,ENT-MODEL-MANIFEST,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="loader" data-req-status="implemented" data-req="REQ-LOADER-002" id="req-loader-002">6.3.3 ONNX 格式 (已实现 - REQ-LOADER-002)
       <strong>Initializer 名称模式</strong>:
       <li>Embedding: <code>embed_tokens.weight</code>, <code>embeddings.word_embeddings.weight</code>, <code>wte.weight</code></li>
       <li>Q Projection: <code>layers.{N}.self_attn.q_proj.weight</code>, <code>encoder.layer.{N}.attention.self.query.weight</code></li>
@@ -2061,7 +2061,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-LOADER-002" data-test="TEST-LOADER-002" id="TEST-LOADER-002">TEST-LOADER-002: 模型加载规范测试<p>验证REQ-LOADER-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LOADER-002" data-test="TEST-LOADER-002" id="test-loader-002">TEST-LOADER-002: 模型加载规范测试<p>验证REQ-LOADER-002相关功能正确性</p>
       <div id="模型加载-格式解析实现完整" data-criterion="模型加载/格式解析实现完整">模型加载/格式解析实现完整</div>
       <div id="零拷贝映射正确" data-criterion="零拷贝映射正确">零拷贝映射正确</div>
       <div id="并行加载无数据竞争" data-criterion="并行加载无数据竞争">并行加载无数据竞争</div>

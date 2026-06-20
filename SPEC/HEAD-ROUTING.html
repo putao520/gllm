@@ -300,7 +300,7 @@
       <li>越界 / NaN → <code>InvalidLayerAnchor</code> / <code>SemanticGatekeeperError::InvalidDepth</code></li>
       <p>Head Routing 未来可以复用 SG 的 <code>resolve_detection_layers</code> 基础设施,避免两份实现漂移。当前 HR 独立实现 <code>LayerAnchor::resolve</code>,保留独立测试覆盖。</p>
     </section>
-    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" <h3="" data-section="7" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-001" id="req-hr-001">§7 E2E 验收 (REQ-HR-001..005)
+    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" data-section="7" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-001" id="req-hr-001">§7 E2E 验收 (REQ-HR-001..005)
       <p>验证 Head Routing SDK 多头 API（generate/classify_binary/classify_multiway/encode_to_layer）运行时切换正确性。核心约束：零权重重载、零 JIT 重编译、HeadRouting 配置驱动路由正确、多头 API 输出与独立调用一致。同一 Client 实例可在四种 API 间自由切换，共享同一套 JIT 编译产物和权重。</p>
 
       <div data-criteria="">
@@ -322,7 +322,7 @@
     </section>
     
 
-    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" <h4="" data-section="001" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-006" id="req-hr-006">REQ-HR-006: Binary Classify
+    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" data-section="001" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-006" id="req-hr-006">REQ-HR-006: Binary Classify
       <p>```</p>
       <p>输入: SmolLM2-135M-Instruct, "Is water wet? Answer yes or no:", {positive="yes", negative="no", T=1.0}</p>
       <p>验收:</p>
@@ -348,7 +348,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HR-006" data-test="TEST-HR-006" id="test-hr-006">TEST-HR-006: Head Routing SDK测试<p>验证REQ-HR-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HR-006" data-test="TEST-HR-006" id="test-hr-006">TEST-HR-006: Head Routing SDK测试<p>验证REQ-HR-006相关功能正确性</p>
       <div id="多头-api-generate-classify-encode-运行时切换正确" data-criterion="多头 API generate/classify/encode 运行时切换正确">多头 API generate/classify/encode 运行时切换正确</div>
       <div id="零权重重载-零-jit-重编译" data-criterion="零权重重载、零 JIT 重编译">零权重重载、零 JIT 重编译</div>
       <div id="headrouting-配置驱动路由正确" data-criterion="HeadRouting 配置驱动路由正确">HeadRouting 配置驱动路由正确</div>
@@ -356,7 +356,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" <h4="" data-section="002" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-005" id="req-hr-005">REQ-HR-5: Multiway Classify
+    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" data-section="002" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-005" id="req-hr-005">REQ-HR-5: Multiway Classify
       <p>```</p>
       <p>输入: SmolLM2-135M-Instruct, prompt + ["sports", "politics", "technology"]</p>
       <p>验收:</p>
@@ -382,7 +382,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HR-005" data-test="TEST-HR-5" id="test-hr-5">TEST-HR-5: Head Routing SDK测试<p>验证REQ-HR-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HR-005" data-test="TEST-HR-5" id="test-hr-5">TEST-HR-5: Head Routing SDK测试<p>验证REQ-HR-001相关功能正确性</p>
       <div id="多头-api-generate-classify-encode-运行时切换正确" data-criterion="多头 API generate/classify/encode 运行时切换正确">多头 API generate/classify/encode 运行时切换正确</div>
       <div id="零权重重载-零-jit-重编译" data-criterion="零权重重载、零 JIT 重编译">零权重重载、零 JIT 重编译</div>
       <div id="headrouting-配置驱动路由正确" data-criterion="HeadRouting 配置驱动路由正确">HeadRouting 配置驱动路由正确</div>
@@ -390,7 +390,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" <h4="" data-section="003" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-002" id="req-hr-002">REQ-HR-002: Encode to Layer
+    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" data-section="003" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-002" id="req-hr-002">REQ-HR-002: Encode to Layer
       <p>```</p>
       <p>输入: SmolLM2-135M-Instruct, text, LayerAnchor::Relative(0.5), PoolMode::MeanPool</p>
       <p>验收 (Mega-Kernel output_mode_selector 已实现):</p>
@@ -416,7 +416,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HR-002" data-test="TEST-HR-002" id="test-hr-002">TEST-HR-002: Head Routing SDK测试<p>验证REQ-HR-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HR-002" data-test="TEST-HR-002" id="test-hr-002">TEST-HR-002: Head Routing SDK测试<p>验证REQ-HR-002相关功能正确性</p>
       <div id="多头-api-generate-classify-encode-运行时切换正确" data-criterion="多头 API generate/classify/encode 运行时切换正确">多头 API generate/classify/encode 运行时切换正确</div>
       <div id="零权重重载-零-jit-重编译" data-criterion="零权重重载、零 JIT 重编译">零权重重载、零 JIT 重编译</div>
       <div id="headrouting-配置驱动路由正确" data-criterion="HeadRouting 配置驱动路由正确">HeadRouting 配置驱动路由正确</div>
@@ -424,7 +424,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" <h4="" data-section="004" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-003" id="req-hr-003">REQ-HR-003: 模型不重载
+    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" data-section="004" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-003" id="req-hr-003">REQ-HR-003: 模型不重载
       <p>```</p>
       <p>输入: 同一 client 依次调用 generate / classify_binary / classify_multiway</p>
       <p>验收:</p>
@@ -449,7 +449,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HR-003" data-test="TEST-HR-003" id="test-hr-003">TEST-HR-003: Head Routing SDK测试<p>验证REQ-HR-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HR-003" data-test="TEST-HR-003" id="test-hr-003">TEST-HR-003: Head Routing SDK测试<p>验证REQ-HR-003相关功能正确性</p>
       <div id="多头-api-generate-classify-encode-运行时切换正确" data-criterion="多头 API generate/classify/encode 运行时切换正确">多头 API generate/classify/encode 运行时切换正确</div>
       <div id="零权重重载-零-jit-重编译" data-criterion="零权重重载、零 JIT 重编译">零权重重载、零 JIT 重编译</div>
       <div id="headrouting-配置驱动路由正确" data-criterion="HeadRouting 配置驱动路由正确">HeadRouting 配置驱动路由正确</div>
@@ -457,7 +457,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" <h4="" data-section="005" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-004" id="req-hr-004">REQ-HR-004: NO_ISLAND_MODULE 接入
+    <section data-entity-ref="ENT-HEAD-ROUTING ENT-MEGA-KERNEL-FN ENT-COMPILER-GRAPH" data-section="005" data-req-api="POST /internal/head_routing/apply" data-req-entity="ENT-HEAD-ROUTING,ENT-MEGA-KERNEL-FN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="hr" data-req-status="implemented" data-req="REQ-HR-004" id="req-hr-004">REQ-HR-004: NO_ISLAND_MODULE 接入
       <p>```</p>
       <p>静态验证:</p>
       <p>  grep -rn "classify_binary|classify_multiway|encode_to_layer" src/ --include="*.rs" \</p>
@@ -485,7 +485,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HR-004" data-test="TEST-HR-004" id="test-hr-004">TEST-HR-004: Head Routing SDK测试<p>验证REQ-HR-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HR-004" data-test="TEST-HR-004" id="test-hr-004">TEST-HR-004: Head Routing SDK测试<p>验证REQ-HR-004相关功能正确性</p>
       <div id="多头-api-generate-classify-encode-运行时切换正确" data-criterion="多头 API generate/classify/encode 运行时切换正确">多头 API generate/classify/encode 运行时切换正确</div>
       <div id="零权重重载-零-jit-重编译" data-criterion="零权重重载、零 JIT 重编译">零权重重载、零 JIT 重编译</div>
       <div id="headrouting-配置驱动路由正确" data-criterion="HeadRouting 配置驱动路由正确">HeadRouting 配置驱动路由正确</div>

@@ -21,7 +21,7 @@
       <p>&gt; <strong>生成日期</strong>: 2026-03-15</p>
       <p>&gt; <strong>关联 REQ</strong>: REQ-KV-EXT-001, REQ-KV-EXT-002, REQ-KERNELS-IQ-001~008, REQ-KERNELS-GPU-001~003</p>
     </section>
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGE-TABLE ENT-PAGED-SCHEDULER" <h3="" data-section="1" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="kv-ext" data-req-status="implemented" data-req="REQ-KV-EXT-001" id="req-kv-ext-001">功能 1: 自适应 Chunk 大小 (REQ-KV-EXT-001)
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGE-TABLE ENT-PAGED-SCHEDULER" data-section="1" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="kv-ext" data-req-status="implemented" data-req="REQ-KV-EXT-001" id="req-kv-ext-001">功能 1: 自适应 Chunk 大小 (REQ-KV-EXT-001)
     
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -35,14 +35,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="../ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
       
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-EXT-001" data-test="TEST-KV-EXT-001" id="test-kv-ext-001">TEST-KV-EXT-001: KV Cache智能优化测试<p>验证REQ-KV-EXT-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-EXT-001" data-test="TEST-KV-EXT-001" id="test-kv-ext-001">TEST-KV-EXT-001: KV Cache智能优化测试<p>验证REQ-KV-EXT-001相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -192,7 +192,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE" <h3="" data-section="2" data-req-api="POST /internal/dtype/compile" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="kernels-gpu" data-req-status="implemented" data-req="REQ-KERNELS-GPU-001" id="req-kernels-gpu-001">功能 2: GPU TileLevelFusion / ComputeRoot (REQ-KERNELS-GPU-001~003)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="2" data-req-api="POST /internal/dtype/compile" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="kernels-gpu" data-req-status="implemented" data-req="REQ-KERNELS-GPU-001" id="req-kernels-gpu-001">功能 2: GPU TileLevelFusion / ComputeRoot (REQ-KERNELS-GPU-001~003)
     
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -210,7 +210,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KERNELS-GPU-001" data-test="TEST-KERNELS-GPU-001" id="test-kernels-gpu-001">TEST-KERNELS-GPU-001: KERNELS功能测试<p>验证REQ-KERNELS-GPU-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KERNELS-GPU-001" data-test="TEST-KERNELS-GPU-001" id="test-kernels-gpu-001">TEST-KERNELS-GPU-001: KERNELS功能测试<p>验证REQ-KERNELS-GPU-001相关功能正确性</p>
       <div id="gpu-host-glue-函数编译通过-cargo-check-features-cuda" data-criterion="GPU host glue 函数编译通过: cargo check --features cuda">GPU host glue 函数编译通过: cargo check --features cuda</div>
       <div id="mega-kernel-gpu-launch-参数正确" data-criterion="Mega-Kernel GPU launch 参数正确">Mega-Kernel GPU launch 参数正确</div>
       <div id="gpu-cpu-数值对齐-同输入同输出" data-criterion="GPU/CPU 数值对齐: 同输入同输出">GPU/CPU 数值对齐: 同输入同输出</div>
@@ -489,7 +489,7 @@
       <p>2. <strong>客户端原生调用 (Client Direct Invocation)</strong></p>
       <p>   客户端 (CLI / Server) 侧引擎调度流须直接通过 <code>Executor</code> → <code>MegaKernelExecutor</code> 单次 CALL 完成推理，不经过 Backend trait 的 forward 方法。不再存在具有后台接管与降级逻辑的 <code>FallbackEmbedder</code>/<code>FallbackGenerator</code> 包装器。</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE" <h3="" data-section="5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="kernels-ptx" data-req-status="implemented" data-req="REQ-KERNELS-PTX-MV-001" id="req-kernels-ptx-mv-001">功能 5: PTX 算法多版本支持 (REQ-KERNELS-PTX-MV-001~005)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="kernels-ptx" data-req-status="implemented" data-req="REQ-KERNELS-PTX-MV-001" id="req-kernels-ptx-mv-001">功能 5: PTX 算法多版本支持 (REQ-KERNELS-PTX-MV-001~005)
     
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -507,7 +507,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KERNELS-PTX-MV-001" data-test="TEST-KERNELS-PTX-MV-001" id="test-kernels-ptx-mv-001">TEST-KERNELS-PTX-MV-001: KERNELS功能测试<p>验证REQ-KERNELS-PTX-MV-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KERNELS-PTX-MV-001" data-test="TEST-KERNELS-PTX-MV-001" id="test-kernels-ptx-mv-001">TEST-KERNELS-PTX-MV-001: KERNELS功能测试<p>验证REQ-KERNELS-PTX-MV-001相关功能正确性</p>
       <div id="功能实现完整且符合-spec-描述" data-criterion="功能实现完整且符合 SPEC 描述">功能实现完整且符合 SPEC 描述</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       <div id="单元测试覆盖核心逻辑" data-criterion="单元测试覆盖核心逻辑">单元测试覆盖核心逻辑</div>
@@ -1160,7 +1160,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN" <h3="" data-section="6" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN" data-req-category="business" data-req-domain="fusion-deep" data-req-status="implemented" data-req="REQ-FUSION-DEEP-001" id="req-fusion-deep-001">功能 6: 深度算子融合 (REQ-FUSION-DEEP-001~006)
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN" data-section="6" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN" data-req-category="business" data-req-domain="fusion-deep" data-req-status="implemented" data-req="REQ-FUSION-DEEP-001" id="req-fusion-deep-001">功能 6: 深度算子融合 (REQ-FUSION-DEEP-001~006)
     
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -1179,7 +1179,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUSION-DEEP-001" data-test="TEST-FUSION-DEEP-001" id="test-fusion-deep-001">TEST-FUSION-DEEP-001: 设备特化融合PASS测试<p>验证REQ-FUSION-DEEP-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUSION-DEEP-001" data-test="TEST-FUSION-DEEP-001" id="test-fusion-deep-001">TEST-FUSION-DEEP-001: 设备特化融合PASS测试<p>验证REQ-FUSION-DEEP-001相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -1583,7 +1583,7 @@
       <p>3. 融合算法全覆盖，无 fallback</p>
       <p>&gt; <strong>审计结果</strong>: 全部通过。详见审计 commit: <code>f5b885a2</code>, <code>6dd2f3e</code>, <code>8621a1a7</code>。</p>
     </section>
-    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" <h3="" data-section="8" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="jit-graph" data-req-status="implemented" data-req="REQ-JIT-GRAPH-1" id="req-jit-graph-1">功能 8：JIT 图通用化执行器 (REQ-JIT-GRAPH-1~003)
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" data-section="8" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="jit-graph" data-req-status="implemented" data-req="REQ-JIT-GRAPH-1" id="req-jit-graph-1">功能 8：JIT 图通用化执行器 (REQ-JIT-GRAPH-1~003)
       <p>&gt; <strong>SSOT</strong>: REQ-JIT-GRAPH-001 (SymDim Symbolic Shape) 和 REQ-JIT-GRAPH-003 (auto_graph → Mega-Kernel 端到端) 均已完成 🟢。</p>
       <p>&gt; SymDim 动态绑定机制的完整定义见 </p>
     
@@ -1603,7 +1603,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JIT-GRAPH-1" data-test="TEST-JIT-GRAPH-1" id="test-jit-graph-1">TEST-JIT-GRAPH-1: JIT功能测试<p>验证REQ-JIT-GRAPH-1相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JIT-GRAPH-1" data-test="TEST-JIT-GRAPH-1" id="test-jit-graph-1">TEST-JIT-GRAPH-1: JIT功能测试<p>验证REQ-JIT-GRAPH-1相关功能正确性</p>
       <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
       <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
       <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
@@ -1689,7 +1689,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" <h3="" data-section="10" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="jit-quant" data-req-status="implemented" data-req="REQ-JIT-QUANT-001" id="req-jit-quant-001">功能 10：量化算子符号化与 JIT 融合 (REQ-JIT-QUANT-001)
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-FUSION-PLAN" data-section="10" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-COMPILER-GRAPH,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="jit-quant" data-req-status="implemented" data-req="REQ-JIT-QUANT-001" id="req-jit-quant-001">功能 10：量化算子符号化与 JIT 融合 (REQ-JIT-QUANT-001)
       <p>&gt; <strong>关联 REQ</strong>: REQ-JIT-QUANT-001 (Symbolic Quantization IR)</p>
       <p>&gt; <strong>状态</strong>: 规划中 (📝 Planned)</p>
       <p>当前 <code>gllm-kernels</code> 中针对 28 种复杂量化格式（如 <code>IQ2_XXS</code>, <code>AWQ4</code>, <code>IQ1_S</code>），JIT 中的 <code>SemanticDAG</code> 无法在内部原生表示量化解包逻辑。这导致每个后端的汇编发射器（PTX, x86_64, AMX, Metal）都必须在特征层分别手写 <code>dequantize_*</code>。这种实现引发了 O(M×N) 的巨量维护成本，并导致 GPU trait 层产生了大量的 <code>unimplemented!</code> fallback。</p>
@@ -1711,7 +1711,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JIT-QUANT-001" data-test="TEST-JIT-QUANT-001" id="test-jit-quant-001">TEST-JIT-QUANT-001: JIT功能测试<p>验证REQ-JIT-QUANT-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JIT-QUANT-001" data-test="TEST-JIT-QUANT-001" id="test-jit-quant-001">TEST-JIT-QUANT-001: JIT功能测试<p>验证REQ-JIT-QUANT-001相关功能正确性</p>
       <div id="功能实现完整且符合-spec-描述" data-criterion="功能实现完整且符合 SPEC 描述">功能实现完整且符合 SPEC 描述</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       <div id="单元测试覆盖核心逻辑" data-criterion="单元测试覆盖核心逻辑">单元测试覆盖核心逻辑</div>

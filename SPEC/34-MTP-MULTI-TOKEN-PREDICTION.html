@@ -285,7 +285,7 @@
     <section id="s-req-清单" data-section="null">
       <h3>REQ 清单</h3>
     </section>
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="001" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-001" id="req-mtp-001">REQ-MTP-001: MTP 模型权重注册
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="001" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-001" id="req-mtp-001">REQ-MTP-001: MTP 模型权重注册
       <p>将 MTP 投影权重从模型文件加载并映射到 weight_blob。</p>
       <strong>设计</strong>:
       <strong>GGUF 权重名映射</strong>:
@@ -325,13 +325,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-MTP-001" data-test="TEST-MTP-001" id="test-mtp-001">TEST-MTP-001: 多Token预测测试<p>验证REQ-MTP-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-MTP-001" data-test="TEST-MTP-001" id="test-mtp-001">TEST-MTP-001: 多Token预测测试<p>验证REQ-MTP-001相关功能正确性</p>
       <div id="mtp-权重从模型文件加载并映射到-weight-blob" data-criterion="MTP 权重从模型文件加载并映射到 weight_blob">MTP 权重从模型文件加载并映射到 weight_blob</div>
       <div id="mtp-候选生成在-jit-内完成" data-criterion="MTP 候选生成在 JIT 内完成">MTP 候选生成在 JIT 内完成</div>
       <div id="verify-阶段验证候选-token-正确性" data-criterion="Verify 阶段验证候选 token 正确性">Verify 阶段验证候选 token 正确性</div>
@@ -340,7 +340,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="002" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-002" id="req-mtp-002">REQ-MTP-002: MTP ↔ Mega-Kernel 编排集成 (SPEC 32 联动)
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="002" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-002" id="req-mtp-002">REQ-MTP-002: MTP ↔ Mega-Kernel 编排集成 (SPEC 32 联动)
       <p>MTP 候选生成嵌入 SPEC 32 的 decode loop，通过 MegaKernelBusinessConfig.mtp_config 控制。</p>
       <strong>与 SPEC 32 的集成点</strong>:
       <p>```</p>
@@ -390,7 +390,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
@@ -398,7 +398,7 @@
     </section>
     
 
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="002" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-007" id="req-mtp-007">REQ-MTP-007: MTP Executor 集成路径
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="002" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-007" id="req-mtp-007">REQ-MTP-007: MTP Executor 集成路径
       <p>将 MTP 推测解码接入 generate 循环。</p>
       <strong>设计</strong>:
       <p>当前 generate 循环:</p>
@@ -448,13 +448,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-MTP-007" data-test="TEST-MTP-007" id="test-mtp-007">TEST-MTP-007: 多Token预测测试<p>验证REQ-MTP-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-MTP-007" data-test="TEST-MTP-007" id="test-mtp-007">TEST-MTP-007: 多Token预测测试<p>验证REQ-MTP-007相关功能正确性</p>
       <div id="mtp-权重从模型文件加载并映射到-weight-blob" data-criterion="MTP 权重从模型文件加载并映射到 weight_blob">MTP 权重从模型文件加载并映射到 weight_blob</div>
       <div id="mtp-候选生成在-jit-内完成" data-criterion="MTP 候选生成在 JIT 内完成">MTP 候选生成在 JIT 内完成</div>
       <div id="verify-阶段验证候选-token-正确性" data-criterion="Verify 阶段验证候选 token 正确性">Verify 阶段验证候选 token 正确性</div>
@@ -463,7 +463,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="003" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-006" id="req-mtp-006">REQ-MTP-6: MTP Mega-Kernel MTP 融合组（per-depth 投影 + argmax 循环） 完善
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="003" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-006" id="req-mtp-006">REQ-MTP-6: MTP Mega-Kernel MTP 融合组（per-depth 投影 + argmax 循环） 完善
       <p>完善 Mega-Kernel 内 MTP 候选生成（MTP 融合组（per-depth 投影 + argmax 循环））的完整实现。</p>
       <strong>设计</strong>:
       <p>MTP 融合组（per-depth 投影 + argmax 循环） 当前实现（<code>mega_kernel_emit.rs</code>）:</p>
@@ -506,13 +506,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-MTP-006" data-test="TEST-MTP-6" id="test-mtp-6">TEST-MTP-6: 多Token预测测试<p>验证REQ-MTP-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-MTP-006" data-test="TEST-MTP-6" id="test-mtp-6">TEST-MTP-6: 多Token预测测试<p>验证REQ-MTP-002相关功能正确性</p>
       <div id="mtp-权重从模型文件加载并映射到-weight-blob" data-criterion="MTP 权重从模型文件加载并映射到 weight_blob">MTP 权重从模型文件加载并映射到 weight_blob</div>
       <div id="mtp-候选生成在-jit-内完成" data-criterion="MTP 候选生成在 JIT 内完成">MTP 候选生成在 JIT 内完成</div>
       <div id="verify-阶段验证候选-token-正确性" data-criterion="Verify 阶段验证候选 token 正确性">Verify 阶段验证候选 token 正确性</div>
@@ -521,7 +521,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="004" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-003" id="req-mtp-003">REQ-MTP-003: MTP KV Cache 回滚
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="004" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-003" id="req-mtp-003">REQ-MTP-003: MTP KV Cache 回滚
       <p>MTP 候选验证失败时回滚 KV cache 条目。</p>
       <strong>设计</strong>:
       <p>```</p>
@@ -561,13 +561,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-MTP-003" data-test="TEST-MTP-003" id="test-mtp-003">TEST-MTP-003: 多Token预测测试<p>验证REQ-MTP-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-MTP-003" data-test="TEST-MTP-003" id="test-mtp-003">TEST-MTP-003: 多Token预测测试<p>验证REQ-MTP-003相关功能正确性</p>
       <div id="mtp-权重从模型文件加载并映射到-weight-blob" data-criterion="MTP 权重从模型文件加载并映射到 weight_blob">MTP 权重从模型文件加载并映射到 weight_blob</div>
       <div id="mtp-候选生成在-jit-内完成" data-criterion="MTP 候选生成在 JIT 内完成">MTP 候选生成在 JIT 内完成</div>
       <div id="verify-阶段验证候选-token-正确性" data-criterion="Verify 阶段验证候选 token 正确性">Verify 阶段验证候选 token 正确性</div>
@@ -576,7 +576,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="005" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-004" id="req-mtp-004">REQ-MTP-004: MTP 自适应回退
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="005" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-004" id="req-mtp-004">REQ-MTP-004: MTP 自适应回退
       <p>基于 EMA 接受率的 MTP 自适应启用/禁用。</p>
       <strong>设计</strong>:
       <p>```</p>
@@ -617,13 +617,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-MTP-004" data-test="TEST-MTP-004" id="test-mtp-004">TEST-MTP-004: 多Token预测测试<p>验证REQ-MTP-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-MTP-004" data-test="TEST-MTP-004" id="test-mtp-004">TEST-MTP-004: 多Token预测测试<p>验证REQ-MTP-004相关功能正确性</p>
       <div id="mtp-权重从模型文件加载并映射到-weight-blob" data-criterion="MTP 权重从模型文件加载并映射到 weight_blob">MTP 权重从模型文件加载并映射到 weight_blob</div>
       <div id="mtp-候选生成在-jit-内完成" data-criterion="MTP 候选生成在 JIT 内完成">MTP 候选生成在 JIT 内完成</div>
       <div id="verify-阶段验证候选-token-正确性" data-criterion="Verify 阶段验证候选 token 正确性">Verify 阶段验证候选 token 正确性</div>
@@ -632,7 +632,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" <h4="" data-section="006" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-005" id="req-mtp-005">REQ-MTP-005: MTP 模型注册与 E2E 验证
+    <section data-entity-ref="ENT-MTP-EXECUTOR ENT-EMA-TRACKER ENT-KV-CACHE ENT-MEGA-KERNEL-FN" data-section="006" data-req-api="POST /internal/mtp/predict" data-req-entity="ENT-MTP-EXECUTOR,ENT-EMA-TRACKER,ENT-KV-CACHE,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="mtp" data-req-status="implemented" data-req="REQ-MTP-005" id="req-mtp-005">REQ-MTP-005: MTP 模型注册与 E2E 验证
       <p>将 MTP 支持注册到模型架构系统，覆盖 DeepSeek V3 和 Qwen3。</p>
       <strong>设计</strong>:
       <strong>SPEC/11-MODELS.md 更新</strong>:
@@ -672,13 +672,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="./ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
+      <a data-xref-type="entity" data-xref-id="ent-kv-cache" href="../ARCH-DETAILED-DESIGNS#ent-kv-cache">ENT-KV-CACHE
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-MTP-005" data-test="TEST-MTP-005" id="test-mtp-005">TEST-MTP-005: 多Token预测测试<p>验证REQ-MTP-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-MTP-005" data-test="TEST-MTP-005" id="test-mtp-005">TEST-MTP-005: 多Token预测测试<p>验证REQ-MTP-005相关功能正确性</p>
       <div id="mtp-权重从模型文件加载并映射到-weight-blob" data-criterion="MTP 权重从模型文件加载并映射到 weight_blob">MTP 权重从模型文件加载并映射到 weight_blob</div>
       <div id="mtp-候选生成在-jit-内完成" data-criterion="MTP 候选生成在 JIT 内完成">MTP 候选生成在 JIT 内完成</div>
       <div id="verify-阶段验证候选-token-正确性" data-criterion="Verify 阶段验证候选 token 正确性">Verify 阶段验证候选 token 正确性</div>

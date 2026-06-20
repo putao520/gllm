@@ -1380,7 +1380,7 @@
     <section id="s7" data-section="7">
       <h3>7. 约束与铁律</h3>
     </section>
-    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-section="004" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-001" id="req-arb-001">REQ-ARB-001: SchedulingMode 不可变
+    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="004" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-001" id="req-arb-001">REQ-ARB-001: SchedulingMode 不可变
       <p>SchedulingMode 在 Client::builder().build() 时确定并嵌入 HwOptPlan，推理全程不可切换。切换模式需 swap_model() 重新加载，因为不同模式下 JIT 编译产物因 Roofline 翻转效应而完全不同。</p>
       <code>SchedulingMode</code> 在 <code>Client::builder().build()</code> 时确定，推理期间不可切换。切换模式需 <code>swap_model()</code> 重新加载，因为 JIT 编译产物因模式不同而不同。
     
@@ -1397,14 +1397,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="../12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="../12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       </a></a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARB-001" data-test="TEST-ARB-001" id="test-arb-001">TEST-ARB-001: 策略仲裁器测试<p>验证REQ-ARB-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARB-001" data-test="TEST-ARB-001" id="test-arb-001">TEST-ARB-001: 策略仲裁器测试<p>验证REQ-ARB-001相关功能正确性</p>
       <div id="schedulingmode-不可变-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
       <div id="arbiter-不直接决策-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
       <div id="所有系数正数-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
@@ -1412,7 +1412,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-section="005" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-002" id="req-arb-002">REQ-ARB-002: Arbiter 不直接决策
+    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="005" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-002" id="req-arb-002">REQ-ARB-002: Arbiter 不直接决策
       <p>Arbiter 只输出 <code>StrategyBias</code>（成本调制系数），不直接选择具体策略（如"使用 FA3"或"k_depth=2"）。具体决策始终由 HwOptEngine 的各 Solver 通过 Cost-Model 做出。Arbiter 通过调制成本函数间接影响决策方向。</p>
     
       <div data-criteria="">
@@ -1428,14 +1428,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="../12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="../12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       </a></a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARB-002" data-test="TEST-ARB-002" id="test-arb-002">TEST-ARB-002: 策略仲裁器测试<p>验证REQ-ARB-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARB-002" data-test="TEST-ARB-002" id="test-arb-002">TEST-ARB-002: 策略仲裁器测试<p>验证REQ-ARB-002相关功能正确性</p>
       <div id="schedulingmode-不可变-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
       <div id="arbiter-不直接决策-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
       <div id="所有系数正数-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
@@ -1443,7 +1443,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-section="006" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-003" id="req-arb-003">REQ-ARB-003: 所有系数正数
+    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="006" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-003" id="req-arb-003">REQ-ARB-003: 所有系数正数
       <p>StrategyBias 的所有字段必须大于 0.0，防止 CostModel 除零或项消失。batch_flexibility = 0.0 是唯一例外，表示"硬约束 batch=1"语义。validate() 使用 clamp 而非 panic 确保数值稳定性。</p>
       <code>StrategyBias</code> 的所有字段必须 &gt; 0.0。0.0 会导致 CostModel 除零或项消失。<code>batch_flexibility = 0.0</code> 是唯一例外，表示"硬约束 batch=1"。
     
@@ -1460,14 +1460,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="../12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="../12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       </a></a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARB-003" data-test="TEST-ARB-003" id="test-arb-003">TEST-ARB-003: 策略仲裁器测试<p>验证REQ-ARB-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARB-003" data-test="TEST-ARB-003" id="test-arb-003">TEST-ARB-003: 策略仲裁器测试<p>验证REQ-ARB-003相关功能正确性</p>
       <div id="schedulingmode-不可变-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
       <div id="arbiter-不直接决策-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
       <div id="所有系数正数-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
@@ -1475,7 +1475,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-section="007" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-004" id="req-arb-004">REQ-ARB-004: GraphProfile 一次性提取
+    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="007" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-004" id="req-arb-004">REQ-ARB-004: GraphProfile 一次性提取
       <p>GraphProfiler::profile() 在模型加载时从 OnnxGraph 和 ModelConfig 一次性提取完整拓扑特征向量（计算密度、融合机会、并行度、注意力特征等），结果嵌入 HwOptPlan，推理期间不重新提取。</p>
       <code>GraphProfiler::profile()</code> 在模型加载时调用一次，结果嵌入 <code>HwOptPlan</code>。推理期间不重新提取。图结构在推理期间不变。
     
@@ -1492,14 +1492,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="../12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="../12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       </a></a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARB-004" data-test="TEST-ARB-004" id="test-arb-004">TEST-ARB-004: 策略仲裁器测试<p>验证REQ-ARB-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARB-004" data-test="TEST-ARB-004" id="test-arb-004">TEST-ARB-004: 策略仲裁器测试<p>验证REQ-ARB-004相关功能正确性</p>
       <div id="schedulingmode-不可变-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
       <div id="arbiter-不直接决策-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
       <div id="所有系数正数-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
@@ -1507,7 +1507,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-section="008" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-005" id="req-arb-005">REQ-ARB-005: 禁止绕过 Arbiter
+    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="008" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-005" id="req-arb-005">REQ-ARB-005: 禁止绕过 Arbiter
       <p>下游模块禁止根据 <code>SchedulingMode</code> 做直接 if/else 分支决策。所有模式差异必须通过 <code>StrategyBias</code> 传导。</p>
       <p>```rust</p>
       <p>// ❌ 禁止</p>
@@ -1532,14 +1532,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="../12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="../12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       </a></a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARB-005" data-test="TEST-ARB-005" id="test-arb-005">TEST-ARB-005: 策略仲裁器测试<p>验证REQ-ARB-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARB-005" data-test="TEST-ARB-005" id="test-arb-005">TEST-ARB-005: 策略仲裁器测试<p>验证REQ-ARB-005相关功能正确性</p>
       <div id="schedulingmode-不可变-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
       <div id="arbiter-不直接决策-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
       <div id="所有系数正数-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>
@@ -1547,7 +1547,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h4="" data-section="009" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-006" id="req-arb-006">REQ-ARB-006: 与 JIT 缓存协议一致
+    <section data-entity-ref="ENT-STRATEGY-ARBITER ENT-SCHEDULING-MODE ENT-GRAPH-PROFILE ENT-STRATEGY-BIAS ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="009" data-req-api="POST /internal/strategy/arbitrate" data-req-entity="ENT-STRATEGY-ARBITER,ENT-SCHEDULING-MODE,ENT-GRAPH-PROFILE,ENT-STRATEGY-BIAS,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="arb" data-req-status="implemented" data-req="REQ-ARB-006" id="req-arb-006">REQ-ARB-006: 与 JIT 缓存协议一致
       <p>StrategyBias 影响 JIT 编译产物，因此 <code>ModelJitCache</code> 的缓存 key 必须包含 <code>SchedulingMode</code>：</p>
       <p>```</p>
       <p>cache_key = device_fingerprint + model_id + inference_mode</p>
@@ -1567,14 +1567,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="./12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="./12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-graph-profile" href="../12-STRATEGY-ARBITER#ent-graph-profile">ENT-GRAPH-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-strategy-bias" href="../12-STRATEGY-ARBITER#ent-strategy-bias">ENT-STRATEGY-BIAS
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       </a></a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ARB-006" data-test="TEST-ARB-006" id="test-arb-006">TEST-ARB-006: 策略仲裁器测试<p>验证REQ-ARB-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARB-006" data-test="TEST-ARB-006" id="test-arb-006">TEST-ARB-006: 策略仲裁器测试<p>验证REQ-ARB-006相关功能正确性</p>
       <div id="schedulingmode-不可变-从-batch-size-推导" data-criterion="SchedulingMode 不可变: 从 batch_size 推导">SchedulingMode 不可变: 从 batch_size 推导</div>
       <div id="arbiter-不直接决策-返回-bias-向量" data-criterion="Arbiter 不直接决策: 返回 bias 向量">Arbiter 不直接决策: 返回 bias 向量</div>
       <div id="所有系数正数-数值稳定性保证" data-criterion="所有系数正数: 数值稳定性保证">所有系数正数: 数值稳定性保证</div>

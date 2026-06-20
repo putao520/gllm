@@ -825,7 +825,7 @@
     <section id="s5" data-section="5">
       <h3>§5 REQ 列表</h3>
     </section>
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-001" id="req-grp-001">REQ-GRP-001: TensorLifetime 跨层扩展
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-001" id="req-grp-001">REQ-GRP-001: TensorLifetime 跨层扩展
       <p>扩展 <code>analyze_lifetimes()</code> 增加 <code>CrossLayerLifetime</code> 维度。检测 per-layer vs spanning-all-layers 张量。扩展 <code>BufferAllocation</code> 增加 <code>lifetimes</code> 字段。</p>
       <strong>文件</strong>: <code>buffer_alloc.rs</code>
     
@@ -843,12 +843,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-001" data-test="TEST-GRP-001" id="test-grp-001">TEST-GRP-001: 全图资源预规划测试<p>验证REQ-GRP-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-001" data-test="TEST-GRP-001" id="test-grp-001">TEST-GRP-001: 全图资源预规划测试<p>验证REQ-GRP-001相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -857,7 +857,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-002" id="req-grp-002">REQ-GRP-002: MemoryLayout 内存区间图着色
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-002" id="req-grp-002">REQ-GRP-002: MemoryLayout 内存区间图着色
       <p>将 interval coloring 结果组织为 <code>MemoryRegion</code> 列表，包含复用租户信息。规划 ping-pong 双 buffer 布局。</p>
       <strong>文件</strong>: <code>buffer_alloc.rs</code>
     
@@ -875,12 +875,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-002" data-test="TEST-GRP-002" id="test-grp-002">TEST-GRP-002: 全图资源预规划测试<p>验证REQ-GRP-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-002" data-test="TEST-GRP-002" id="test-grp-002">TEST-GRP-002: 全图资源预规划测试<p>验证REQ-GRP-002相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -889,7 +889,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-003" id="req-grp-003">REQ-GRP-003: GroupPressure 寄存器压力曲线
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-003" id="req-grp-003">REQ-GRP-003: GroupPressure 寄存器压力曲线
       <p>对每个融合组估计峰值寄存器需求。根据压力推导 <code>suggested_blocking</code>。标记需要 spill fence 的组。</p>
       <strong>文件</strong>: <code>resource_planner.rs</code>（新）
     
@@ -907,12 +907,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-003" data-test="TEST-GRP-003" id="test-grp-003">TEST-GRP-003: 全图资源预规划测试<p>验证REQ-GRP-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-003" data-test="TEST-GRP-003" id="test-grp-003">TEST-GRP-003: 全图资源预规划测试<p>验证REQ-GRP-003相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -921,7 +921,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="004" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-004" id="req-grp-004">REQ-GRP-004: StackBlueprint 栈帧蓝图
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="004" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-004" id="req-grp-004">REQ-GRP-004: StackBlueprint 栈帧蓝图
       <p>预计算完整栈布局: ABI args → callee saves → spill slots → debug region。从 GroupPressure 推导 spill slot 需求。</p>
       <strong>文件</strong>: <code>resource_planner.rs</code>（新）
     
@@ -939,12 +939,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-004" data-test="TEST-GRP-004" id="test-grp-004">TEST-GRP-004: 全图资源预规划测试<p>验证REQ-GRP-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-004" data-test="TEST-GRP-004" id="test-grp-004">TEST-GRP-004: 全图资源预规划测试<p>验证REQ-GRP-004相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -953,7 +953,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="005" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-005" id="req-grp-005">REQ-GRP-005: LoopInvariant 循环不变量推导
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="005" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-005" id="req-grp-005">REQ-GRP-005: LoopInvariant 循环不变量推导
       <p>从 CompilerGraph 推导层循环不变量 (RoPE 表、Norm gamma、配置常量、PackMap 基址)。分配固定 GPR 或栈 slot。</p>
       <strong>文件</strong>: <code>resource_planner.rs</code>（新）
     
@@ -971,12 +971,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-005" data-test="TEST-GRP-005" id="test-grp-005">TEST-GRP-005: 全图资源预规划测试<p>验证REQ-GRP-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-005" data-test="TEST-GRP-005" id="test-grp-005">TEST-GRP-005: 全图资源预规划测试<p>验证REQ-GRP-005相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -985,7 +985,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="006" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-006" id="req-grp-006">REQ-GRP-006: ConcurrencyPartition 并发资源分区
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="006" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-006" id="req-grp-006">REQ-GRP-006: ConcurrencyPartition 并发资源分区
       <p>batch &gt; 1 时区分 per-sequence (activation, KV, temp) vs shared (weights, config) 资源。计算 per-sequence scratchpad 布局。</p>
       <strong>文件</strong>: <code>resource_planner.rs</code>（新）
     
@@ -1003,12 +1003,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-006" data-test="TEST-GRP-006" id="test-grp-006">TEST-GRP-006: 全图资源预规划测试<p>验证REQ-GRP-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-006" data-test="TEST-GRP-006" id="test-grp-006">TEST-GRP-006: 全图资源预规划测试<p>验证REQ-GRP-006相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -1017,7 +1017,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="007" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-007" id="req-grp-007">REQ-GRP-007: GraphResourcePlan 汇总 + 验证
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="007" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-007" id="req-grp-007">REQ-GRP-007: GraphResourcePlan 汇总 + 验证
       <p>整合 Phase 1-6 产出为 <code>GraphResourcePlan</code>。执行一致性验证: buffer 无时序重叠、寄存器压力不超限、栈帧大小合理、不变量不引用 per-seq 资源。</p>
       <strong>文件</strong>: <code>resource_planner.rs</code>（新）
     
@@ -1035,12 +1035,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-007" data-test="TEST-GRP-007" id="test-grp-007">TEST-GRP-007: 全图资源预规划测试<p>验证REQ-GRP-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-007" data-test="TEST-GRP-007" id="test-grp-007">TEST-GRP-007: 全图资源预规划测试<p>验证REQ-GRP-007相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -1049,7 +1049,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-008" id="req-grp-008">REQ-GRP-008: plan_mega_kernel_resources() 编排入口
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-008" id="req-grp-008">REQ-GRP-008: plan_mega_kernel_resources() 编排入口
       <p>实现 <code>plan_mega_kernel_resources(graph, plan, profile) -&gt; GraphResourcePlan</code> 编排函数。接入 <code>compile()</code> 编译入口，在 VmInstr 发射之前调用。</p>
       <strong>文件</strong>: <code>mod.rs</code>（修改编译入口）
     
@@ -1067,12 +1067,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-008" data-test="TEST-GRP-008" id="test-grp-008">TEST-GRP-008: 全图资源预规划测试<p>验证REQ-GRP-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-008" data-test="TEST-GRP-008" id="test-grp-008">TEST-GRP-008: 全图资源预规划测试<p>验证REQ-GRP-008相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -1081,7 +1081,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="009" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-009" id="req-grp-009">REQ-GRP-009: 模板解释器资源感知集成
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="009" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-009" id="req-grp-009">REQ-GRP-009: 模板解释器资源感知集成
       <code>instantiate_template_with_plan()</code> 查询 <code>GraphResourcePlan</code>。GEMM 模板根据 <code>suggested_blocking</code> 调整展开度。面板加载根据 <code>BufferLayout</code> 计算地址。
       <strong>文件</strong>: <code>algo_interpreter.rs</code>（SPEC 27）
     
@@ -1099,12 +1099,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-009" data-test="TEST-GRP-009" id="test-grp-009">TEST-GRP-009: 全图资源预规划测试<p>验证REQ-GRP-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-009" data-test="TEST-GRP-009" id="test-grp-009">TEST-GRP-009: 全图资源预规划测试<p>验证REQ-GRP-009相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>
@@ -1113,7 +1113,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" <h4="" data-section="010" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-010" id="req-grp-010">REQ-GRP-010: E2E 验证 — 资源规划正确性
+    <section data-entity-ref="ENT-GRAPH-RESOURCE-PLAN ENT-BUFFER-LAYOUT ENT-STACK-BLUEPRINT ENT-COMPILER-GRAPH" data-section="010" data-req-api="POST /compile" data-req-entity="ENT-GRAPH-RESOURCE-PLAN,ENT-BUFFER-LAYOUT,ENT-STACK-BLUEPRINT,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="grp" data-req-status="implemented" data-req="REQ-GRP-010" id="req-grp-010">REQ-GRP-010: E2E 验证 — 资源规划正确性
       <p>验证:</p>
       <p>1. 单层模型: buffer 布局正确，无重叠</p>
       <p>2. 多层模型: ping-pong 正确，层间数据传递正确</p>
@@ -1135,12 +1135,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="./28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
+      <a data-xref-type="entity" data-xref-id="ent-stack-blueprint" href="../28-GRAPH-RESOURCE-PLANNER#ent-stack-blueprint">ENT-STACK-BLUEPRINT
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GRP-010" data-test="TEST-GRP-010" id="test-grp-010">TEST-GRP-010: 全图资源预规划测试<p>验证REQ-GRP-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GRP-010" data-test="TEST-GRP-010" id="test-grp-010">TEST-GRP-010: 全图资源预规划测试<p>验证REQ-GRP-010相关功能正确性</p>
       <div id="bufferlayout-内存区间图着色正确" data-criterion="BufferLayout 内存区间图着色正确">BufferLayout 内存区间图着色正确</div>
       <div id="loopinvariant-循环不变量推导正确" data-criterion="LoopInvariant 循环不变量推导正确">LoopInvariant 循环不变量推导正确</div>
       <div id="grouppressure-寄存器压力曲线正确" data-criterion="GroupPressure 寄存器压力曲线正确">GroupPressure 寄存器压力曲线正确</div>

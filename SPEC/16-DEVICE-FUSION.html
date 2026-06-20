@@ -374,7 +374,7 @@
     <section id="s-req-清单" data-section="null">
       <h3>REQ 清单</h3>
     </section>
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="001" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-001" id="req-fus-001">REQ-FUS-001: Profile 驱动融合分发
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="001" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-001" id="req-fus-001">REQ-FUS-001: Profile 驱动融合分发
       <p>FusionEngine 根据当前 HardwareProfile 选择特化融合规则集。</p>
       <strong>设计</strong>:
       <li><code>FusionEngine::fuse()</code> 接收 <code>&amp;DeviceProfile</code>，通过 <code>profile.hardware_tier()</code> 获取设备分级</li>
@@ -395,12 +395,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-001" data-test="TEST-FUS-001" id="test-fus-001">TEST-FUS-001: 设备特化融合PASS测试<p>验证REQ-FUS-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-001" data-test="TEST-FUS-001" id="test-fus-001">TEST-FUS-001: 设备特化融合PASS测试<p>验证REQ-FUS-001相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -408,7 +408,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="002" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-002" id="req-fus-002">REQ-FUS-002: GPU SM80+ Tensor Core 融合
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="002" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-002" id="req-fus-002">REQ-FUS-002: GPU SM80+ Tensor Core 融合
       <p>SM80/SM90/SM100 共享 Tensor Core GEMM 融合基础。</p>
       <strong>特化策略</strong>:
       <li>GEMM 融合使用 <code>TileMma</code> VmInstr（已实现），gpu_lower 生成 wgmma/mma.sync/wmma</li>
@@ -434,12 +434,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-002" data-test="TEST-FUS-002" id="test-fus-002">TEST-FUS-002: 设备特化融合PASS测试<p>验证REQ-FUS-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-002" data-test="TEST-FUS-002" id="test-fus-002">TEST-FUS-002: 设备特化融合PASS测试<p>验证REQ-FUS-002相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -447,7 +447,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="003" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-003" id="req-fus-003">REQ-FUS-003: GPU SM90 TMA 融合
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="003" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-003" id="req-fus-003">REQ-FUS-003: GPU SM90 TMA 融合
       <p>Hopper 特有 TMA (Tensor Memory Accelerator) 融合。</p>
       <strong>特化策略</strong>:
       <li>KV Cache 离散读取 → TMA 2D prefetch（禁止 <code>LDG</code>）</li>
@@ -470,12 +470,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-003" data-test="TEST-FUS-003" id="test-fus-003">TEST-FUS-003: 设备特化融合PASS测试<p>验证REQ-FUS-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-003" data-test="TEST-FUS-003" id="test-fus-003">TEST-FUS-003: 设备特化融合PASS测试<p>验证REQ-FUS-003相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -483,7 +483,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="004" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-004" id="req-fus-004">REQ-FUS-004: GPU SM100 FP4 融合
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="004" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-004" id="req-fus-004">REQ-FUS-004: GPU SM100 FP4 融合
       <p>Blackwell FP4/F6 原生精度融合。</p>
       <strong>特化策略</strong>:
       <li>Block Scale + FP4 native MMA（不模拟、不溢出防范）</li>
@@ -505,12 +505,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-004" data-test="TEST-FUS-004" id="test-fus-004">TEST-FUS-004: 设备特化融合PASS测试<p>验证REQ-FUS-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-004" data-test="TEST-FUS-004" id="test-fus-004">TEST-FUS-004: 设备特化融合PASS测试<p>验证REQ-FUS-004相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -518,7 +518,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="005" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-005" id="req-fus-005">REQ-FUS-005: SME2 outer product 融合
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="005" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-005" id="req-fus-005">REQ-FUS-005: SME2 outer product 融合
       <p>ARM SME2 ZA array outer product attention。</p>
       <strong>特化策略</strong>:
       <li>ZA array 2D 存储：消除显式 tile 管理节点</li>
@@ -541,12 +541,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-005" data-test="TEST-FUS-005" id="test-fus-005">TEST-FUS-005: 设备特化融合PASS测试<p>验证REQ-FUS-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-005" data-test="TEST-FUS-005" id="test-fus-005">TEST-FUS-005: 设备特化融合PASS测试<p>验证REQ-FUS-005相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -554,7 +554,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="006" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-006" id="req-fus-006">REQ-FUS-006: AVX-512+AMX tile 融合
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="006" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-006" id="req-fus-006">REQ-FUS-006: AVX-512+AMX tile 融合
       <p>Intel Sapphire Rapids+ AMX tile GEMM。</p>
       <strong>特化策略</strong>:
       <li>AMX <code>TDPBF16PS</code> 替代 BLIS 微内核（BF16 8×8 tile GEMM）</li>
@@ -577,12 +577,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-006" data-test="TEST-FUS-006" id="test-fus-006">TEST-FUS-006: 设备特化融合PASS测试<p>验证REQ-FUS-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-006" data-test="TEST-FUS-006" id="test-fus-006">TEST-FUS-006: 设备特化融合PASS测试<p>验证REQ-FUS-006相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -590,7 +590,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="007" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-007" id="req-fus-007">REQ-FUS-007: AVX10.2 深链 epilogue
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="007" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-007" id="req-fus-007">REQ-FUS-007: AVX10.2 深链 epilogue
       <p>AVX10.2 + APX (31 GPR) 的深链融合。</p>
       <strong>特化策略</strong>:
       <li>31 GPR 允许 ≥8 ops epilogue（无溢出到栈）</li>
@@ -613,12 +613,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-007" data-test="TEST-FUS-007" id="test-fus-007">TEST-FUS-007: 设备特化融合PASS测试<p>验证REQ-FUS-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-007" data-test="TEST-FUS-007" id="test-fus-007">TEST-FUS-007: 设备特化融合PASS测试<p>验证REQ-FUS-007相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -626,7 +626,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="008" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-008" id="req-fus-008">REQ-FUS-008: 量化感知融合
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="008" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-008" id="req-fus-008">REQ-FUS-008: 量化感知融合
       <p>VNNI/SVE2 dot product + 量化 GEMM 融合链。</p>
       <strong>特化策略</strong>:
       <li>x86: <code>VPDPBF16PS</code> / <code>VPDPBUSD</code> (VNNI) 量化 GEMM → 累加到 F32 → epilogue 融合</li>
@@ -652,12 +652,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-008" data-test="TEST-FUS-008" id="test-fus-008">TEST-FUS-008: 设备特化融合PASS测试<p>验证REQ-FUS-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-008" data-test="TEST-FUS-008" id="test-fus-008">TEST-FUS-008: 设备特化融合PASS测试<p>验证REQ-FUS-008相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>
@@ -665,7 +665,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" <h4="" data-section="009" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-009" id="req-fus-009">REQ-FUS-009: 融合代价模型
+    <section data-entity-ref="ENT-FUSION-PLAN ENT-DEVICE-PROFILE ENT-COMPUTE-PATTERN ENT-COMPILER-GRAPH" data-section="009" data-req-api="POST /internal/device/fusion" data-req-entity="ENT-FUSION-PLAN,ENT-DEVICE-PROFILE,ENT-COMPUTE-PATTERN,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="fus" data-req-status="implemented" data-req="REQ-FUS-009" id="req-fus-009">REQ-FUS-009: 融合代价模型
       <p>Roofline + register pressure + cache hierarchy 综合评估。</p>
       <strong>设计</strong>:
       <li>当前 <code>RooflineModel</code> 只考虑 compute/memory bound</li>
@@ -689,12 +689,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="./ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
+      <a data-xref-type="entity" data-xref-id="ent-compute-pattern" href="../ARCH-DETAILED-DESIGNS#ent-compute-pattern">ENT-COMPUTE-PATTERN
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-FUS-009" data-test="TEST-FUS-009" id="test-fus-009">TEST-FUS-009: 设备特化融合PASS测试<p>验证REQ-FUS-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-FUS-009" data-test="TEST-FUS-009" id="test-fus-009">TEST-FUS-009: 设备特化融合PASS测试<p>验证REQ-FUS-009相关功能正确性</p>
       <div id="融合-pass-识别模式正确" data-criterion="融合 PASS 识别模式正确">融合 PASS 识别模式正确</div>
       <div id="deviceprofile-驱动融合决策" data-criterion="DeviceProfile 驱动融合决策">DeviceProfile 驱动融合决策</div>
       <div id="融合后数值对齐-与逐算子执行结果一致" data-criterion="融合后数值对齐: 与逐算子执行结果一致">融合后数值对齐: 与逐算子执行结果一致</div>

@@ -1279,7 +1279,7 @@
         <section id="s11.1" data-section="11.1">
       <h4>11.1 核心 REQ</h4>
 
-    <section data-entity-ref="ENT-RESOURCE-KIND" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-001" id="req-jctx-001">ResourceKind 枚举覆盖所有设备类型 (REQ-JCTX-001)
+    <section data-entity-ref="ENT-RESOURCE-KIND" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-001" id="req-jctx-001">ResourceKind 枚举覆盖所有设备类型 (REQ-JCTX-001)
       <p>定义 9 种 ResourceKind 枚举变体（Gpr/SimdVec/Predicate/Tile/TileAccumulator/Stack/SharedMem/TensorMem/Barrier），统一覆盖 x86_64/AArch64/CUDA/HIP/Metal 所有设备类型的硬件资源分类。</p>
       
         <h5>验收标准</h5>
@@ -1295,7 +1295,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-001" data-test="TEST-JCTX-001" id="test-jctx-001">TEST-JCTX-001: JIT编译上下文资源管理测试<p>验证REQ-JCTX-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-001" data-test="TEST-JCTX-001" id="test-jctx-001">TEST-JCTX-001: JIT编译上下文资源管理测试<p>验证REQ-JCTX-001相关功能正确性</p>
       <div id="id-9-种-resourcekind-枚举变体完整定义" data-criterion="9 种 ResourceKind 枚举变体完整定义">9 种 ResourceKind 枚举变体完整定义</div>
       <div id="x86-64-aarch64-cuda-hip-metal-全映射覆盖" data-criterion="x86_64/AArch64/CUDA/HIP/Metal 全映射覆盖">x86_64/AArch64/CUDA/HIP/Metal 全映射覆盖</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1303,7 +1303,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-RESOURCE-BUDGET ENT-ISA-PROFILE" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-ISA-PROFILE" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-002" id="req-jctx-002">ResourceBudget 从 IsaProfile 正确派生 (REQ-JCTX-002)
+    <section data-entity-ref="ENT-RESOURCE-BUDGET ENT-ISA-PROFILE" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-ISA-PROFILE" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-002" id="req-jctx-002">ResourceBudget 从 IsaProfile 正确派生 (REQ-JCTX-002)
       <p>实现 ResourceBudget 从 IsaProfile 的一次性派生，为每种硬件配置（AVX2/AVX-512/AMX/NEON/SVE2/SME2/SM80/SM90/SM100 等）生成准确的物理资源上限，作为资源分配的门控阈值。</p>
       
         <h5>验收标准</h5>
@@ -1320,7 +1320,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-002" data-test="TEST-JCTX-002" id="test-jctx-002">TEST-JCTX-002: JIT编译上下文资源管理测试<p>验证REQ-JCTX-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-002" data-test="TEST-JCTX-002" id="test-jctx-002">TEST-JCTX-002: JIT编译上下文资源管理测试<p>验证REQ-JCTX-002相关功能正确性</p>
       <div id="resourcebudget-从-isaprofile-正确派生" data-criterion="ResourceBudget 从 IsaProfile 正确派生">ResourceBudget 从 IsaProfile 正确派生</div>
       <div id="每种硬件配置的-budget-与-spec-数值一致" data-criterion="每种硬件配置的 budget 与 SPEC 数值一致">每种硬件配置的 budget 与 SPEC 数值一致</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1328,7 +1328,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-003" id="req-jctx-003">JitContext allocate/release 生命周期追踪 (REQ-JCTX-003)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-003" id="req-jctx-003">JitContext allocate/release 生命周期追踪 (REQ-JCTX-003)
       <p>实现 JitContext 的 allocate/release 接口，对每个资源实例的 alloc→live→release→free 全生命周期进行追踪，通过事件时间线记录分配/释放历史，支持 per-instruction 资源快照查询。</p>
       
         <h5>验收标准</h5>
@@ -1344,7 +1344,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-003" data-test="TEST-JCTX-003" id="test-jctx-003">TEST-JCTX-003: JIT编译上下文资源管理测试<p>验证REQ-JCTX-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-003" data-test="TEST-JCTX-003" id="test-jctx-003">TEST-JCTX-003: JIT编译上下文资源管理测试<p>验证REQ-JCTX-003相关功能正确性</p>
       <div id="jitcontext-allocate-release-生命周期追踪完整" data-criterion="JitContext allocate/release 生命周期追踪完整">JitContext allocate/release 生命周期追踪完整</div>
       <div id="tile-alloc-live-release-free-全程可追踪" data-criterion="Tile: alloc → live → release → free 全程可追踪">Tile: alloc → live → release → free 全程可追踪</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1352,7 +1352,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-004" id="req-jctx-004">峰值查询接口 (REQ-JCTX-004)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-004" id="req-jctx-004">峰值查询接口 (REQ-JCTX-004)
       <p>实现 peak() 查询接口，返回指定 ResourceKind 的历史最大同时活跃实例数，支持 GPR/SimdVec 等寄存器类资源的峰值使用统计，供融合决策和编译后诊断使用。</p>
       
         <h5>验收标准</h5>
@@ -1368,7 +1368,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-004" data-test="TEST-JCTX-004" id="test-jctx-004">TEST-JCTX-004: JIT编译上下文资源管理测试<p>验证REQ-JCTX-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-004" data-test="TEST-JCTX-004" id="test-jctx-004">TEST-JCTX-004: JIT编译上下文资源管理测试<p>验证REQ-JCTX-004相关功能正确性</p>
       <div id="peak-gpr-返回-gpr-历史最大同时活跃数" data-criterion="peak(Gpr) 返回 GPR 历史最大同时活跃数">peak(Gpr) 返回 GPR 历史最大同时活跃数</div>
       <div id="peak-simdvec-返回向量寄存器峰值" data-criterion="peak(SimdVec) 返回向量寄存器峰值">peak(SimdVec) 返回向量寄存器峰值</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1376,7 +1376,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-005" id="req-jctx-005">内存类资源用量追踪 (REQ-JCTX-005)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-005" id="req-jctx-005">内存类资源用量追踪 (REQ-JCTX-005)
       <p>实现 mem_used/mem_available 接口，追踪 SMEM/TMEM/Stack 三种内存类资源的已用量和可用量，支持 declare_smem_usage/declare_tmem_usage/update_stack_budget 动态预算更新。</p>
       
         <h5>验收标准</h5>
@@ -1392,7 +1392,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-005" data-test="TEST-JCTX-005" id="test-jctx-005">TEST-JCTX-005: JIT编译上下文资源管理测试<p>验证REQ-JCTX-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-005" data-test="TEST-JCTX-005" id="test-jctx-005">TEST-JCTX-005: JIT编译上下文资源管理测试<p>验证REQ-JCTX-005相关功能正确性</p>
       <div id="smem-tmem-stack-的已用量和可用量准确" data-criterion="SMEM/TMEM/Stack 的已用量和可用量准确">SMEM/TMEM/Stack 的已用量和可用量准确</div>
       <div id="mem-used-sharedmem-和-mem-available-sharedmem-语义正确" data-criterion="mem_used(SharedMem) 和 mem_available(SharedMem) 语义正确">mem_used(SharedMem) 和 mem_available(SharedMem) 语义正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1400,7 +1400,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-006" id="req-jctx-006">预算门控 (REQ-JCTX-006)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-006" id="req-jctx-006">预算门控 (REQ-JCTX-006)
       <p>实现资源分配前的预算门控机制，超出 capacity 的 allocate 调用返回 ResourceExhausted 错误（含当前峰值、上限、建议），每个 ResourceKind 独立检查，防止运行时资源溢出崩溃。</p>
       
         <h5>验收标准</h5>
@@ -1416,7 +1416,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-006" data-test="TEST-JCTX-006" id="test-jctx-006">TEST-JCTX-006: JIT编译上下文资源管理测试<p>验证REQ-JCTX-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-006" data-test="TEST-JCTX-006" id="test-jctx-006">TEST-JCTX-006: JIT编译上下文资源管理测试<p>验证REQ-JCTX-006相关功能正确性</p>
       <div id="超出-capacity-的-allocate-返回-err-而非-panic" data-criterion="超出 capacity 的 allocate 返回 Err 而非 panic">超出 capacity 的 allocate 返回 Err 而非 panic</div>
       <div id="每个-resourcekind-都有独立-capacity-检查" data-criterion="每个 ResourceKind 都有独立 capacity 检查">每个 ResourceKind 都有独立 capacity 检查</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1424,7 +1424,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-007" id="req-jctx-007">ResourceReport 诊断报告 (REQ-JCTX-007)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.1" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-007" id="req-jctx-007">ResourceReport 诊断报告 (REQ-JCTX-007)
       <p>实现编译完成后的 ResourceReport 诊断输出，包含每种 ResourceKind 的峰值使用量、物理容量、利用率和警告（NearExhaustion/Leak/AsymmetricUsage），辅助性能调优和问题定位。</p>
       
         <h5>验收标准</h5>
@@ -1440,7 +1440,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-007" data-test="TEST-JCTX-007" id="test-jctx-007">TEST-JCTX-007: JIT编译上下文资源管理测试<p>验证REQ-JCTX-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-007" data-test="TEST-JCTX-007" id="test-jctx-007">TEST-JCTX-007: JIT编译上下文资源管理测试<p>验证REQ-JCTX-007相关功能正确性</p>
       <div id="编译后可输出-peak-capacity-utilization-warnings" data-criterion="编译后可输出 peak/capacity/utilization/warnings">编译后可输出 peak/capacity/utilization/warnings</div>
       <div id="resourcereport-包含所有-resourcekind-诊断信息" data-criterion="ResourceReport 包含所有 ResourceKind 诊断信息">ResourceReport 包含所有 ResourceKind 诊断信息</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1451,7 +1451,7 @@
         <section id="s11.2" data-section="11.2">
       <h4>11.2 集成 REQ</h4>
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-010" id="req-jctx-010">X86Lower 接入 JitContext (REQ-JCTX-010)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-010" id="req-jctx-010">X86Lower 接入 JitContext (REQ-JCTX-010)
       <p>将 X86Lower 中的 AMX Tile 分配（amx_tile_dtype: Option<dtype>）迁移到 JitContext.allocate(ResourceKind::Tile) 追踪，所有 AMX 相关资源操作通过 JitContext API 管理，替代分散的 bool/Option 追踪。</dtype></p>
       
         <h5>验收标准</h5>
@@ -1467,7 +1467,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-010" data-test="TEST-JCTX-010" id="test-jctx-010">TEST-JCTX-010: JIT编译上下文资源管理测试<p>验证REQ-JCTX-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-010" data-test="TEST-JCTX-010" id="test-jctx-010">TEST-JCTX-010: JIT编译上下文资源管理测试<p>验证REQ-JCTX-010相关功能正确性</p>
       <div id="amx-tile-alloc-release-通过-jitcontext-追踪" data-criterion="AMX Tile alloc/release 通过 JitContext 追踪">AMX Tile alloc/release 通过 JitContext 追踪</div>
       <div id="x86lower-所有资源操作通过-jitcontext-api" data-criterion="X86Lower 所有资源操作通过 JitContext API">X86Lower 所有资源操作通过 JitContext API</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1475,7 +1475,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-011" id="req-jctx-011">AArch64Lower 接入 JitContext (REQ-JCTX-011)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-011" id="req-jctx-011">AArch64Lower 接入 JitContext (REQ-JCTX-011)
       <p>将 AArch64Lower 中的 SME ZA Tile 分配迁移到 JitContext.allocate(ResourceKind::Tile) 追踪，所有 ARM 矩阵扩展相关资源操作通过 JitContext API 管理。</p>
       
         <h5>验收标准</h5>
@@ -1491,7 +1491,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-011" data-test="TEST-JCTX-011" id="test-jctx-011">TEST-JCTX-011: JIT编译上下文资源管理测试<p>验证REQ-JCTX-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-011" data-test="TEST-JCTX-011" id="test-jctx-011">TEST-JCTX-011: JIT编译上下文资源管理测试<p>验证REQ-JCTX-011相关功能正确性</p>
       <div id="sme-za-tile-alloc-release-通过-jitcontext-追踪" data-criterion="SME ZA Tile alloc/release 通过 JitContext 追踪">SME ZA Tile alloc/release 通过 JitContext 追踪</div>
       <div id="aarch64lower-所有资源操作通过-jitcontext-api" data-criterion="AArch64Lower 所有资源操作通过 JitContext API">AArch64Lower 所有资源操作通过 JitContext API</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1499,7 +1499,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-012" id="req-jctx-012">GpuLower 接入 JitContext (REQ-JCTX-012)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-012" id="req-jctx-012">GpuLower 接入 JitContext (REQ-JCTX-012)
       <p>将 GpuLower 中的 TMEM 分配（tmem_allocated: bool）、SMEM scratch 用量、Barrier 管理迁移到 JitContext 追踪，通过 declare_tmem_usage/declare_smem_usage/allocate(Barrier) 替代隐式状态。</p>
       
         <h5>验收标准</h5>
@@ -1515,7 +1515,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-012" data-test="TEST-JCTX-012" id="test-jctx-012">TEST-JCTX-012: JIT编译上下文资源管理测试<p>验证REQ-JCTX-012相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-012" data-test="TEST-JCTX-012" id="test-jctx-012">TEST-JCTX-012: JIT编译上下文资源管理测试<p>验证REQ-JCTX-012相关功能正确性</p>
       <div id="tmem-smem-barrier-通过-jitcontext-追踪" data-criterion="TMEM/SMEM/Barrier 通过 JitContext 追踪">TMEM/SMEM/Barrier 通过 JitContext 追踪</div>
       <div id="gpulower-所有资源操作通过-jitcontext-api" data-criterion="GpuLower 所有资源操作通过 JitContext API">GpuLower 所有资源操作通过 JitContext API</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1523,7 +1523,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT ENT-REG-ALLOCATOR" <h5="" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-013" id="req-jctx-013">RegAllocator 消费 JitContext.budget (REQ-JCTX-013)
+    <section data-entity-ref="ENT-JIT-CONTEXT ENT-REG-ALLOCATOR" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-013" id="req-jctx-013">RegAllocator 消费 JitContext.budget (REQ-JCTX-013)
       <p>将 RegAllocator 的分配约束从独立计算改为从 JitContext.budget 读取，确保寄存器分配上限与 JitContext 追踪的物理资源上限一致，消除预算来源分裂。</p>
       
         <h5>验收标准</h5>
@@ -1540,7 +1540,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-013" data-test="TEST-JCTX-013" id="test-jctx-013">TEST-JCTX-013: JIT编译上下文资源管理测试<p>验证REQ-JCTX-013相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-013" data-test="TEST-JCTX-013" id="test-jctx-013">TEST-JCTX-013: JIT编译上下文资源管理测试<p>验证REQ-JCTX-013相关功能正确性</p>
       <div id="分配约束从-jitcontext.budget-读取而非独立计算" data-criterion="分配约束从 JitContext.budget 读取而非独立计算">分配约束从 JitContext.budget 读取而非独立计算</div>
       <div id="regallocator-所有查询通过-jitcontext-接口" data-criterion="RegAllocator 所有查询通过 JitContext 接口">RegAllocator 所有查询通过 JitContext 接口</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1548,7 +1548,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-014" id="req-jctx-014">融合决策使用 JitContext 查询 (REQ-JCTX-014)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.2" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-014" id="req-jctx-014">融合决策使用 JitContext 查询 (REQ-JCTX-014)
       <p>在 Phase 2 融合 pass 和 Phase 2.5 StrategySelector 中使用 JitContext 查询资源余量（SMEM 可用量、Tile 可用数），使融合决策从静态规则匹配进化为动态资源查询。</p>
       
         <h5>验收标准</h5>
@@ -1564,7 +1564,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-014" data-test="TEST-JCTX-014" id="test-jctx-014">TEST-JCTX-014: JIT编译上下文资源管理测试<p>验证REQ-JCTX-014相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-014" data-test="TEST-JCTX-014" id="test-jctx-014">TEST-JCTX-014: JIT编译上下文资源管理测试<p>验证REQ-JCTX-014相关功能正确性</p>
       <div id="smem-余量检查通过-mem-available-sharedmem" data-criterion="SMEM 余量检查通过 mem_available(SharedMem)">SMEM 余量检查通过 mem_available(SharedMem)</div>
       <div id="融合决策查询-jitcontext-获取资源余量" data-criterion="融合决策查询 JitContext 获取资源余量">融合决策查询 JitContext 获取资源余量</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1575,7 +1575,7 @@
         <section id="s11.3" data-section="11.3">
       <h4>11.3 质量 REQ</h4>
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-020" id="req-jctx-020">推理运行时零引用 (REQ-JCTX-020)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-020" id="req-jctx-020">推理运行时零引用 (REQ-JCTX-020)
       <p>确保 JitContext 仅在编译时存在，不出现在 MegaKernel ABI 参数、StackFrame 运行时结构、Mega-Kernel CALL 执行路径中，推理热路径对 JitContext 零引用、零开销。</p>
       
         <h5>验收标准</h5>
@@ -1591,7 +1591,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-020" data-test="TEST-JCTX-020" id="test-jctx-020">TEST-JCTX-020: JIT编译上下文资源管理测试<p>验证REQ-JCTX-020相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-020" data-test="TEST-JCTX-020" id="test-jctx-020">TEST-JCTX-020: JIT编译上下文资源管理测试<p>验证REQ-JCTX-020相关功能正确性</p>
       <div id="grep-jitcontext-在-executor-运行时代码中无结果" data-criterion="grep &quot;JitContext&quot; 在 executor/ 运行时代码中无结果">grep "JitContext" 在 executor/ 运行时代码中无结果</div>
       <div id="jitcontext-仅在编译时存在" data-criterion="JitContext 仅在编译时存在">JitContext 仅在编译时存在</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1599,7 +1599,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-021" id="req-jctx-021">双重释放检测 (REQ-JCTX-021)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-021" id="req-jctx-021">双重释放检测 (REQ-JCTX-021)
       <p>实现 release 时对已 Free 资源的检测，双重释放触发编译时 panic（而非运行时崩溃），覆盖所有 ResourceKind，防止资源管理错误导致的未定义行为。</p>
       
         <h5>验收标准</h5>
@@ -1615,7 +1615,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-021" data-test="TEST-JCTX-021" id="test-jctx-021">TEST-JCTX-021: JIT编译上下文资源管理测试<p>验证REQ-JCTX-021相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-021" data-test="TEST-JCTX-021" id="test-jctx-021">TEST-JCTX-021: JIT编译上下文资源管理测试<p>验证REQ-JCTX-021相关功能正确性</p>
       <div id="release-已-free-资源触发编译时-panic" data-criterion="release 已 Free 资源触发编译时 panic">release 已 Free 资源触发编译时 panic</div>
       <div id="双重释放检测覆盖所有-resourcekind" data-criterion="双重释放检测覆盖所有 ResourceKind">双重释放检测覆盖所有 ResourceKind</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1623,7 +1623,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-022" id="req-jctx-022">资源泄漏检测 (REQ-JCTX-022)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-022" id="req-jctx-022">资源泄漏检测 (REQ-JCTX-022)
       <p>实现编译结束时的资源泄漏检查，验证 Tile/Barrier 等必须释放的资源已全部回到 Free 状态，泄漏检测覆盖所有已分配资源，编译期发现泄漏而非运行时。</p>
       
         <h5>验收标准</h5>
@@ -1639,7 +1639,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-022" data-test="TEST-JCTX-022" id="test-jctx-022">TEST-JCTX-022: JIT编译上下文资源管理测试<p>验证REQ-JCTX-022相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-022" data-test="TEST-JCTX-022" id="test-jctx-022">TEST-JCTX-022: JIT编译上下文资源管理测试<p>验证REQ-JCTX-022相关功能正确性</p>
       <div id="编译结束检查-tile-barrier-已全部释放" data-criterion="编译结束检查 Tile/Barrier 已全部释放">编译结束检查 Tile/Barrier 已全部释放</div>
       <div id="资源泄漏检测覆盖所有已分配资源" data-criterion="资源泄漏检测覆盖所有已分配资源">资源泄漏检测覆盖所有已分配资源</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1647,7 +1647,7 @@
     </section>
 
 
-    <section data-entity-ref="ENT-JIT-CONTEXT" <h5="" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-023" id="req-jctx-023">所有硬件 Profile 测试 (REQ-JCTX-023)
+    <section data-entity-ref="ENT-JIT-CONTEXT" data-section="11.3" data-req-api="POST /internal/jit/context" data-req-entity="ENT-JIT-CONTEXT" data-req-category="business" data-req-domain="jctx" data-req-status="implemented" data-req="REQ-JCTX-023" id="req-jctx-023">所有硬件 Profile 测试 (REQ-JCTX-023)
       <p>实现 12 种 HardwareProfile × 9 种 ResourceKind = 108 组预算测试，验证所有硬件配置的 ResourceBudget 值与 SPEC 定义一致，确保 JitContext 在全平台正确初始化。</p>
       
         <h5>验收标准</h5>
@@ -1663,7 +1663,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-JCTX-023" data-test="TEST-JCTX-023" id="test-jctx-023">TEST-JCTX-023: JIT编译上下文资源管理测试<p>验证REQ-JCTX-023相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-JCTX-023" data-test="TEST-JCTX-023" id="test-jctx-023">TEST-JCTX-023: JIT编译上下文资源管理测试<p>验证REQ-JCTX-023相关功能正确性</p>
       <div id="id-12-种-hardwareprofile-9-种-resourcekind-108-组预算测试" data-criterion="12 种 HardwareProfile × 9 种 ResourceKind = 108 组预算测试">12 种 HardwareProfile × 9 种 ResourceKind = 108 组预算测试</div>
       <div id="所有硬件-profile-的预算值与-spec-一致" data-criterion="所有硬件 Profile 的预算值与 SPEC 一致">所有硬件 Profile 的预算值与 SPEC 一致</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>

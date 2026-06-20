@@ -26,7 +26,7 @@
 
       <section id="artifact-interface" data-artifact-type="interface" data-section="1">
         <h3>§1 REQ-UMK 接口契约</h3>
-<section <h4="" data-entity-ref="ENT-INFERENCE-COMPILER ENT-COMPILE-CONFIG ENT-MEGA-KERNEL-FN" data-section="1.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-001" id="req-umk-001">§1.1 唯一编译入口 (REQ-UMK-001)
+<section data-entity-ref="ENT-INFERENCE-COMPILER ENT-COMPILE-CONFIG ENT-MEGA-KERNEL-FN" data-section="1.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-001" id="req-umk-001">§1.1 唯一编译入口 (REQ-UMK-001)
       <p>确立 <code>InferenceCompiler::compile()</code> 为编译器唯一公开方法，接受任意拓扑的 <code>CompilerGraph</code> 并产出 <code>CompileOutput</code>。消除所有独立编译路径（<code>compile_graph</code>、<code>compile_mega_kernel_from_graph</code>、<code>compile_forward</code>），1 个 Gather op 的 SG 小图、RmsNorm+Gemm 的 K 投影图、完整 35 层 decoder 图全部走同一入口。编译器零图结构假设，模型形态差异 100% 由图拓扑编码。</p>
       <pre><code class="language-rust">impl InferenceCompiler {
     pub fn compile(
@@ -60,7 +60,7 @@
       </div>
     </section>
 
-<section <h4="" data-entity-ref="ENT-MEGA-KERNEL-FN ENT-MEGA-KERNEL-FN" data-section="2.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-002" id="req-umk-002">§2.1 唯一函数签名：MegaKernelFn (REQ-UMK-002)
+<section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-MEGA-KERNEL-FN" data-section="2.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-002" id="req-umk-002">§2.1 唯一函数签名：MegaKernelFn (REQ-UMK-002)
       <p>所有编译产物（1-op 小图、encoder、decoder、vision、audio）使用 <code>MegaKernelFn</code> ABI：</p>
       <pre><code class="language-rust">pub type MegaKernelFn = unsafe extern "C" fn(
     *const u32,   // arg 0:  input_ids_ptr
@@ -103,7 +103,7 @@
       </div>
     </section>
 
-<section <h4="" data-entity-ref="ENT-FUSION-GROUP ENT-GROUP-MARKER" data-section="1.3" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-003" id="req-umk-003">§1.3 Phase 3 必须图结构无关 -- 详细重构规范 (REQ-UMK-003)
+<section data-entity-ref="ENT-FUSION-GROUP ENT-GROUP-MARKER" data-section="1.3" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-003" id="req-umk-003">§1.3 Phase 3 必须图结构无关 -- 详细重构规范 (REQ-UMK-003)
       <strong>当前（违反设计）</strong>：<code>compile_mega_kernel_vm()</code> 硬编码 Phase 0-8：
       <pre><code>Phase 0: prologue + weight_ptr + scratchpad
 Phase 1: embed (Gather op)
@@ -140,7 +140,7 @@ Phase N: epilogue + ret</code></pre>
       </div>
     </section>
 
-<section <h4="" data-entity-ref="ENT-MEGA-KERNEL-FN ENT-INFERENCE-COMPILER" data-section="1.5" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-004" id="req-umk-004">§1.5 辅助小图（SG Level Keys 预计算、Vision/Audio 编码）(REQ-UMK-004)
+<section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-INFERENCE-COMPILER" data-section="1.5" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-004" id="req-umk-004">§1.5 辅助小图（SG Level Keys 预计算、Vision/Audio 编码）(REQ-UMK-004)
       <p>SG 的 <code>EmbedLookupOnlyGraph</code>（Gather-only）、<code>KProjOnlyGraph</code>（RmsNorm+Gemm）等辅助图也通过同一个 <code>compile()</code> 入口编译，使用同一个 MegaKernelFn ABI。</p>
       <p>调用时：</p>
       <ul>
@@ -168,7 +168,7 @@ Phase N: epilogue + ret</code></pre>
       </div>
     </section>
 
-<section <h4="" data-entity-ref="ENT-MEGA-KERNEL-FN" data-section="4.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-006" id="req-umk-006">§4.1 图输出 → scratchpad output region (REQ-UMK-006)
+<section data-entity-ref="ENT-MEGA-KERNEL-FN" data-section="4.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-006" id="req-umk-006">§4.1 图输出 → scratchpad output region (REQ-UMK-006)
       <p>编译器将 <code>CompilerGraph.outputs[0]</code> 重定向到 <code>scratchpad + logits_scratch_offset</code>（紧接在所有中间 tensor 和 RoPE cache 之后）。调用方从该区域读取结果。</p>
       <ul>
         <li>Decoder：lm_head 输出 logits → scratchpad 中间区域（prefill）或直接采样</li>
@@ -191,7 +191,7 @@ Phase N: epilogue + ret</code></pre>
       </div>
     </section>
 
-<section <h4="" data-entity-ref="ENT-COMPILE-CONFIG" data-section="1.1.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-011" id="req-umk-011">REQ-UMK-011 CompileConfig 定义 (REQ-UMK-011)<p data-req-description="">
+<section data-entity-ref="ENT-COMPILE-CONFIG" data-section="1.1.1" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-011" id="req-umk-011">REQ-UMK-011 CompileConfig 定义 (REQ-UMK-011)<p data-req-description="">
 定义 CompileConfig 结构体，仅携带编译器所需的非图推导参数。BusinessConfig 已彻底分离——编译器不持有 BusinessConfig 引用，结构上保证编译器无法访问 output_modes 等业务字段。debug_jit 是编译器唯一直接读取的非图推导参数，因为它影响全局 codegen 行为（INT3 插入、source map 生成），无法通过 OpKind 表达。</p>
       <p>定义 <code>CompileConfig</code> 结构体，仅携带编译器所需的非图推导参数（内存上界、权重偏移映射、采样配置、设备能力等）。禁止包含任何图结构假设字段（<code>is_encoder</code>/<code>inference_mode</code>/<code>vocab_size</code>/<code>num_layers</code>/<code>hidden</code>），这些信息全部由 <code>CompilerGraph</code> 拓扑自动推导。字段来源严格遵循 ARCH-DATA-FLOW-CONTRACT，每个字段都有唯一合法来源。</p>
       <pre><code class="language-rust">/// 编译配置 -- 携带编译器需要的非图推导参数。

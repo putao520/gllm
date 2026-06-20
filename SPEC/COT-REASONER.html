@@ -376,7 +376,7 @@
       <li><code>step_budget &lt; MIN_STEP_TOKENS (8)</code> → 提前终止,设 <code>stopped=BudgetExhausted</code></li>
       <li>已产出 step 保留在 trace 中,不因后续截断而回滚</li>
     </section>
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h3="" data-section="7" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-007" id="req-cot-007">§7 Step Hook API — 推理引擎级思考控制 (REQ-COT-007..009)
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="7" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-007" id="req-cot-007">§7 Step Hook API — 推理引擎级思考控制 (REQ-COT-007..009)
       <p>实现 Step Hook 推理引擎级思考控制机制。用户通过 <code>ReasoningStepHook</code> trait 注册到 <code>ReasoningBuilder</code>，引擎在每个 CoT 推理步骤的执行前后触发 hook 回调。支持四种流程控制动作（Continue/Skip/InjectPrompt/Halt）和知识注入（inject_text/modified_temperature），实现动态 prompt 补充、温度调节和提前终止等推理控制能力。</p>
 
       <div data-criteria="">
@@ -678,7 +678,7 @@
       <li><code>GenerationFailed(s)</code> → <code>ClientError::RuntimeError(format!("cot_reasoner: {s}"))</code></li>
       <li><code>InvalidConfig(s)</code> → <code>ClientError::RuntimeError(format!("cot_reasoner invalid config: {s}"))</code></li>
     </section>
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h3="" data-section="9" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-001" id="req-cot-001">§9 E2E 验收 (REQ-COT-001..009)
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="9" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-001" id="req-cot-001">§9 E2E 验收 (REQ-COT-001..009)
     
       <div data-criteria="">
         <h5>验收标准</h5>
@@ -700,7 +700,7 @@
     </section>
     
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="001" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-011" id="req-cot-011">REQ-COT-011: Manual 模式 budget 精确控制
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="001" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-011" id="req-cot-011">REQ-COT-011: Manual 模式 budget 精确控制
       <p>```</p>
       <p>输入: SmolLM2-135M-Instruct, Manual { max_reasoning_tokens=200, step_count=3 }</p>
       <p>验收:</p>
@@ -728,7 +728,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-011" data-test="TEST-COT-011" id="test-cot-011">TEST-COT-011: CoT推理模式测试<p>验证REQ-COT-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-011" data-test="TEST-COT-011" id="test-cot-011">TEST-COT-011: CoT推理模式测试<p>验证REQ-COT-011相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -737,7 +737,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="002" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-009" id="req-cot-009">REQ-COT-9: Auto 模式 pattern-match 停止
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="002" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-009" id="req-cot-009">REQ-COT-9: Auto 模式 pattern-match 停止
       <p>```</p>
       <p>输入: Auto { max_total_tokens=1024, entropy_threshold=None, stop_patterns=["Final Answer:"] }</p>
       <p>     + 模板注入 "Final Answer:" 前缀的自然语言场景</p>
@@ -767,7 +767,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-009" data-test="TEST-COT-9" id="test-cot-9">TEST-COT-9: CoT推理模式测试<p>验证REQ-COT-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-009" data-test="TEST-COT-9" id="test-cot-9">TEST-COT-9: CoT推理模式测试<p>验证REQ-COT-001相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -776,7 +776,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="003" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-002" id="req-cot-002">REQ-COT-002: Auto 模式 entropy-convergence 停止
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="003" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-002" id="req-cot-002">REQ-COT-002: Auto 模式 entropy-convergence 停止
       <p>```</p>
       <p>输入: Auto { entropy_threshold=Some(0.5), stop_patterns=vec![] } + 触发重复输出的 prompt</p>
       <p>验收:</p>
@@ -804,7 +804,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-002" data-test="TEST-COT-002" id="test-cot-002">TEST-COT-002: CoT推理模式测试<p>验证REQ-COT-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-002" data-test="TEST-COT-002" id="test-cot-002">TEST-COT-002: CoT推理模式测试<p>验证REQ-COT-002相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -813,7 +813,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="004" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-003" id="req-cot-003">REQ-COT-003: Reasoning trace 完整保留
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="004" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-003" id="req-cot-003">REQ-COT-003: Reasoning trace 完整保留
       <p>```</p>
       <p>输入: Manual { step_count=3 } 成功跑完</p>
       <p>验收:</p>
@@ -841,7 +841,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-003" data-test="TEST-COT-003" id="test-cot-003">TEST-COT-003: CoT推理模式测试<p>验证REQ-COT-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-003" data-test="TEST-COT-003" id="test-cot-003">TEST-COT-003: CoT推理模式测试<p>验证REQ-COT-003相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -850,7 +850,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="005" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-004" id="req-cot-004">REQ-COT-004: 与 SG 正交
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="005" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-004" id="req-cot-004">REQ-COT-004: 与 SG 正交
       <p>```</p>
       <p>输入: Client 先 register_semantic_gatekeeper(cfg) 再 reason(...)</p>
       <p>验收:</p>
@@ -878,7 +878,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-004" data-test="TEST-COT-004" id="test-cot-004">TEST-COT-004: CoT推理模式测试<p>验证REQ-COT-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-004" data-test="TEST-COT-004" id="test-cot-004">TEST-COT-004: CoT推理模式测试<p>验证REQ-COT-004相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -887,7 +887,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="006" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-005" id="req-cot-005">REQ-COT-005: NO_ISLAND_MODULE
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="006" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-005" id="req-cot-005">REQ-COT-005: NO_ISLAND_MODULE
       <p>```</p>
       <p>静态验证:</p>
       <p>  grep -rn "Client::reason|client.reason(" src/ tests/ --include="*.rs" \</p>
@@ -917,7 +917,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-005" data-test="TEST-COT-005" id="test-cot-005">TEST-COT-005: CoT推理模式测试<p>验证REQ-COT-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-005" data-test="TEST-COT-005" id="test-cot-005">TEST-COT-005: CoT推理模式测试<p>验证REQ-COT-005相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -926,7 +926,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="007" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-010" id="req-cot-010">REQ-COT-010: Step Hook trait 定义与生命周期
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="007" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-010" id="req-cot-010">REQ-COT-010: Step Hook trait 定义与生命周期
       <p>```</p>
       <p>输入: 实现 ReasoningStepHook trait 的结构体,通过 ReasoningBuilder::with_step_hook 注册</p>
       <p>验收:</p>
@@ -956,7 +956,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-010" data-test="TEST-COT-010" id="test-cot-010">TEST-COT-010: CoT推理模式测试<p>验证REQ-COT-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-010" data-test="TEST-COT-010" id="test-cot-010">TEST-COT-010: CoT推理模式测试<p>验证REQ-COT-010相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -965,7 +965,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="008" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-006" id="req-cot-006">REQ-COT-006: StepContext 包含 accumulated reasoning text
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="008" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-006" id="req-cot-006">REQ-COT-006: StepContext 包含 accumulated reasoning text
       <p>```</p>
       <p>输入: 注册 hook 执行 Manual 3 步 reasoning</p>
       <p>验收:</p>
@@ -996,7 +996,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-006" data-test="TEST-COT-006" id="test-cot-006">TEST-COT-006: CoT推理模式测试<p>验证REQ-COT-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-006" data-test="TEST-COT-006" id="test-cot-006">TEST-COT-006: CoT推理模式测试<p>验证REQ-COT-006相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>
@@ -1005,7 +1005,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" <h4="" data-section="009" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-008" id="req-cot-008">REQ-COT-8: StepAction 支持 Continue/Skip/InjectPrompt/Halt
+    <section data-entity-ref="ENT-COT-REASONER ENT-CALLBACK-CHAIN ENT-MEGA-KERNEL-FN" data-section="009" data-req-api="POST /client/cot/reason" data-req-entity="ENT-COT-REASONER,ENT-CALLBACK-CHAIN,ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="cot" data-req-status="implemented" data-req="REQ-COT-008" id="req-cot-008">REQ-COT-8: StepAction 支持 Continue/Skip/InjectPrompt/Halt
       <p>```</p>
       <p>输入: 分别注册返回不同 StepAction 的 hook</p>
       <p>验收:</p>
@@ -1038,7 +1038,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COT-008" data-test="TEST-COT-8" id="test-cot-8">TEST-COT-8: CoT推理模式测试<p>验证REQ-COT-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COT-008" data-test="TEST-COT-8" id="test-cot-8">TEST-COT-8: CoT推理模式测试<p>验证REQ-COT-007相关功能正确性</p>
       <div id="cot-推理模式实现完整" data-criterion="CoT 推理模式实现完整">CoT 推理模式实现完整</div>
       <div id="step-hook-推理引擎级思考控制正确" data-criterion="Step Hook 推理引擎级思考控制正确">Step Hook 推理引擎级思考控制正确</div>
       <div id="manual-auto-模式切换正确" data-criterion="Manual/Auto 模式切换正确">Manual/Auto 模式切换正确</div>

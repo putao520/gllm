@@ -104,7 +104,7 @@
       <h4>解决策略</h4>
       <p>不是修单个 bug，而是构建四层声明式基础设施，从结构上消除所有此类 bug 的产生条件。</p>
     </section>
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="" data-section="1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-001" id="req-lc-001">§1 VReg 生命周期语义标注 (REQ-LC-001~003)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-001" id="req-lc-001">§1 VReg 生命周期语义标注 (REQ-LC-001~003)
       <p>为 JIT 虚拟寄存器引入 LifecycleTag 语义标注体系，自动推导每个 VReg 的生命周期角色（LoopInvariant/LoopCarried/BodyLocal/CrossScope/Global），并据此调整物理寄存器分配优先级和 spill 策略，从结构上消除寄存器分配器覆盖循环不变量等系统性缺陷。</p>
 
       <div data-criteria="">
@@ -120,7 +120,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -151,7 +151,7 @@
 
 
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="1.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-013" id="req-lc-013">§1.1 LifecycleTag 枚举 (REQ-LC-013)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="1.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-013" id="req-lc-013">§1.1 LifecycleTag 枚举 (REQ-LC-013)
       <p>在 <code>reg_alloc.rs</code> 的 <code>LiveInterval</code> 中新增语义标签：</p>
       <p>```</p>
       <p>LifecycleTag:</p>
@@ -237,7 +237,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -247,7 +247,7 @@
     
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="1.3" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-002" id="req-lc-002">§1.3 分配优先级调整 (REQ-LC-002)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="1.3" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-002" id="req-lc-002">§1.3 分配优先级调整 (REQ-LC-002)
       <p>当前 <code>allocate()</code> 仅有 Counter 的 no-spill 特殊政策。新增基于 LifecycleTag 的分配优先级：</p>
       <p>```</p>
       <p>分配优先级 (高→低):</p>
@@ -281,14 +281,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="" data-section="2" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-004" id="req-lc-004">§2 基于 Scope 的 Spill Slot 管理 (REQ-LC-004~006)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="2" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-004" id="req-lc-004">§2 基于 Scope 的 Spill Slot 管理 (REQ-LC-004~006)
       <p>用 ScopedSpillAllocator 替代当前的顺序单调 spill 分配，实现基于 scope 的 slot 分配与回收，使 ScopeBegin/ScopeEnd 真正参与内存管理，支持嵌套 scope 下的 slot 复用和 CrossScope 变量的安全保留。</p>
 
       <div data-criteria="">
@@ -304,14 +304,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="2.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-014" id="req-lc-014">§2.1 ScopedSpillAllocator (REQ-LC-014)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="2.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-014" id="req-lc-014">§2.1 ScopedSpillAllocator (REQ-LC-014)
       <p>替代当前的顺序单调分配 <code>spill_offset += size</code>：</p>
       <p>```</p>
       <p>ScopedSpillAllocator:</p>
@@ -371,14 +371,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="2.2" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-003" id="req-lc-003">§2.2 ScopeBegin/ScopeEnd 接入 (REQ-LC-003)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="2.2" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-003" id="req-lc-003">§2.2 ScopeBegin/ScopeEnd 接入 (REQ-LC-003)
       <p>当前 ScopeBegin/ScopeEnd 是空操作（<code>referenced_vregs</code> 返回空 vec）。改为：</p>
       <li>ScopeBegin: 推入 <code>scope_stack</code>，分配 <code>ScopeId</code>，传递给 <code>ScopedSpillAllocator</code></li>
       <li>ScopeEnd: 弹出 <code>scope_stack</code>，触发 <code>scope_end(scope_id)</code> 释放该 scope 的所有 spill slot</li>
@@ -402,7 +402,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -410,7 +410,7 @@
     
 
     
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-LC-018" data-test="TEST-LC-11" id="test-lc-11">TEST-LC-11: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LC-018" data-test="TEST-LC-11" id="test-lc-11">TEST-LC-11: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-004相关功能正确性</p>
       <div id="声明式基础设施结构体-枚举定义完整且编译通过-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
       <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
       <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
@@ -418,7 +418,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="" data-section="3" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-007" id="req-lc-007">§3 量化感知偏移计算 DSL (REQ-LC-007~009)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="3" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-007" id="req-lc-007">§3 量化感知偏移计算 DSL (REQ-LC-007~009)
       <p>定义 QuantOffsetDsl 声明式偏移计算基础设施，从 QuantFormatDescriptor 自动推导量化数据的 block stride、data offset、scale offset 等参数，严格分离输入偏移（block_bytes）与输出偏移（compute_dtype.elem_bytes），消除手写偏移公式导致的 NaN 传播。</p>
 
       <div data-criteria="">
@@ -434,14 +434,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="3.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-015" id="req-lc-015">§3.1 QuantLayoutExpr (REQ-LC-015)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="3.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-015" id="req-lc-015">§3.1 QuantLayoutExpr (REQ-LC-015)
       <p>在 <code>OffsetExpr</code> 基础上，新增量化感知偏移计算语义。不修改 <code>OffsetExpr</code> 枚举，而是在 <code>emit_quant_gather_trace_driven</code> 等函数中通过 <code>QuantFormatDescriptor</code> 自动推导偏移：</p>
       <p>```</p>
       <p>QuantOffsetDsl:</p>
@@ -479,14 +479,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="3.2" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-005" id="req-lc-005">§3.2 输入 vs 输出偏移分离 (REQ-LC-005)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="3.2" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-005" id="req-lc-005">§3.2 输入 vs 输出偏移分离 (REQ-LC-005)
       <p>当前 NaN 的关键混淆：<strong>输入偏移</strong>使用量化格式的 block_bytes (Q4_0=18)，<strong>输出偏移</strong>使用 compute_dtype 的 elem_bytes。两者语义不同但在代码中都使用 <code>block_size * elem</code> 计算。</p>
       <strong>约束</strong>:
       <strong>禁止规则</strong>:
@@ -554,14 +554,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="3.3" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-006" id="req-lc-006">§3.3 emit_quant_gather 参数化约束 (REQ-LC-006)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="3.3" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-006" id="req-lc-006">§3.3 emit_quant_gather 参数化约束 (REQ-LC-006)
       <code>emit_quant_gather_trace_driven</code> 的所有偏移计算必须通过 <code>QuantOffsetDsl</code> 方法推导：
       <p>```</p>
       <p>必须使用 QuantOffsetDsl 的位置:</p>
@@ -587,14 +587,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h3="" data-section="4" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-010" id="req-lc-010">§4 Post-Hoc 一致性验证 Pass (REQ-LC-010~012)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="4" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-010" id="req-lc-010">§4 Post-Hoc 一致性验证 Pass (REQ-LC-010~012)
       <p>在 verify.rs 中新增物理寄存器冲突检测、spill slot 一致性、量化偏移合理性、循环嵌套生命周期安全四条验证规则，并引入编译时数值模拟，在编译期即发现解量化 trace 的数学错误而非等到运行时出现 NaN。</p>
 
       <div data-criteria="">
@@ -610,12 +610,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-LC-010" data-test="TEST-LC-010" id="test-lc-010">TEST-LC-010: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LC-010" data-test="TEST-LC-010" id="test-lc-010">TEST-LC-010: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-010相关功能正确性</p>
       <div id="声明式基础设施结构体-枚举定义完整且编译通过-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
       <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
       <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
@@ -624,7 +624,7 @@
     </section>
 
     -LC-010" data-xref-type="req" href="25-JIT-LIFECYCLE-INFRASTRUCTURE.html#REQ-LC-010"&gt;REQ-LC-010
-    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" <h4="" data-section="4.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-016" id="req-lc-016">§4.1 验证规则扩展 (REQ-LC-016)
+    <section data-entity-ref="ENT-VREG-LIFECYCLE-TAG ENT-SCOPED-SPILL-ALLOCATOR ENT-QUANT-OFFSET-DSL ENT-VM-INSTR" data-section="4.1" data-req-api="POST /internal/jit/lifecycle" data-req-entity="ENT-VREG-LIFECYCLE-TAG,ENT-SCOPED-SPILL-ALLOCATOR,ENT-QUANT-OFFSET-DSL,ENT-VM-INSTR" data-req-category="business" data-req-domain="lc" data-req-status="implemented" data-req="REQ-LC-016" id="req-lc-016">§4.1 验证规则扩展 (REQ-LC-016)
       <p>在 <code>verify.rs</code> 的 <code>verify_vm_program</code> 中新增 4 条验证规则：</p>
       <strong>规则 6: 物理寄存器冲突检测</strong>
       <p>```</p>
@@ -676,7 +676,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -687,7 +687,7 @@
       <div id="与已有代码集成无编译错误" data-criterion="与已有代码集成无编译错误">与已有代码集成无编译错误</div>
       
     
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-LC-022" data-test="TEST-LC-12" id="test-lc-12">TEST-LC-12: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LC-022" data-test="TEST-LC-12" id="test-lc-12">TEST-LC-12: JIT生命周期基础设施数据结构测试<p>验证REQ-LC-007相关功能正确性</p>
       <div id="声明式基础设施结构体-枚举定义完整且编译通过-cargo-check" data-criterion="声明式基础设施结构体/枚举定义完整且编译通过: cargo check">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</div>
       <div id="字段类型和语义符合-spec-描述" data-criterion="字段类型和语义符合 SPEC 描述">字段类型和语义符合 SPEC 描述</div>
       <div id="单元测试覆盖核心逻辑路径" data-criterion="单元测试覆盖核心逻辑路径">单元测试覆盖核心逻辑路径</div>
@@ -840,8 +840,8 @@
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">声明式基础设施结构体/枚举定义完整且编译通过: cargo check</li><li id="id-2" data-criterion="2">字段类型和语义符合 SPEC 描述</li><li id="id-3" data-criterion="3">单元测试覆盖核心逻辑路径</li><li id="id-4" data-criterion="4">与已有代码集成无编译错误</li></ol></td>
       <div data-entity-api-xrefs="">
       
-      <a data-xref-type="entity" data-xref-id="ent-scoped-spill-allocator" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-scoped-spill-allocator">ENT-SCOPED-SPILL-ALLOCATOR
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-scoped-spill-allocator" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-scoped-spill-allocator">ENT-SCOPED-SPILL-ALLOCATOR
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></a></div>
@@ -867,7 +867,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -883,7 +883,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -898,7 +898,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -920,7 +920,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -935,7 +935,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -950,7 +950,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -965,7 +965,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>
@@ -987,7 +987,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="./25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
+      <a data-xref-type="entity" data-xref-id="ent-quant-offset-dsl" href="../25-JIT-LIFECYCLE-INFRASTRUCTURE#ent-quant-offset-dsl">ENT-QUANT-OFFSET-DSL
       
       
       </a></div>

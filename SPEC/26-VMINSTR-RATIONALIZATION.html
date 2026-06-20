@@ -158,7 +158,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-001" id="req-vr-001">§1 去类型化合并 (REQ-VR-001~004)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-001" id="req-vr-001">§1 去类型化合并 (REQ-VR-001~004)
       <p>将 VmInstr 中 dtype 硬编码在指令名中的变体（GGUF 加载 11 个、DotProduct 5 个、GPR 操作 11 个、Quant* 解码 18 个）合并为参数化指令，参照 Triton TTIR 设计原则使 dtype 存在于类型签名中而非指令名中，将总变体数从 142 精简至约 97 个。</p>
 
       <div data-criteria="">
@@ -178,7 +178,7 @@
     </section>
     
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-015" id="req-vr-015">§1.1 GGUF 量化块加载合并 (REQ-VR-015)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1.1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-015" id="req-vr-015">§1.1 GGUF 量化块加载合并 (REQ-VR-015)
       <p>将 11 个 GgufXxxLoad 变体合并为 2 个参数化指令（QuantBlockLoad + QuantBiPlaneLoad），通过 BlockUnpackMode/BiPlaneMode 枚举描述解包策略，消除每新增一个 GGUF 量化格式就新增一个 VmInstr 变体的膨胀问题。</p>
       <strong>当前</strong>：11 个 GgufXxxLoad 变体，全部是 <code>load bytes → unpack → dequant → compute_dtype</code>，仅解包算法不同。compute_dtype 由 TensorMeta.dtype × DeviceProfile 推导，量化路径计算精度从权重 dtype 推导(多精度混合支持 F32/BF16/F16)，原生浮点路径保持原始精度。
       <strong>目标</strong>：2 个参数化变体 + 保留 2 个 scale 加载。
@@ -250,7 +250,7 @@
       <p>```</p>
       <strong>变更汇总</strong>：11 → 4（-7）
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-012" id="req-vr-012">§1.2 Dot-Product 合并 (REQ-VR-12)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1.2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-012" id="req-vr-012">§1.2 Dot-Product 合并 (REQ-VR-12)
       <strong>当前</strong>：5 个 DotProduct 变体（Bf16Dot/Fp16Dot/Int8Dot/Int4x8Dot/Fp4Dot），差异仅在输入 dtype。
       <strong>目标</strong>：1 个参数化变体。
       <p>```</p>
@@ -286,7 +286,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-012" data-test="TEST-VR-12" id="test-vr-12">TEST-VR-12: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-012" data-test="TEST-VR-12" id="test-vr-12">TEST-VR-12: VmInstr去类型化合并测试<p>验证REQ-VR-001相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -294,7 +294,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.3" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-002" id="req-vr-002">§1.3 GPR 整数操作合并 (REQ-VR-002)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1.3" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-002" id="req-vr-002">§1.3 GPR 整数操作合并 (REQ-VR-002)
       <p>将 11 个 Gpr* 变体合并为 3 个参数化指令（GprBinOp/GprLoadImm/GprCondAction），新增 GPR 位逻辑运算（And/Or/Xor）和除法能力，消除 Quant* 专用的整数操作变体。</p>
       <strong>当前</strong>：11 个 Gpr* 变体，大部分是标量整数算术。
       <strong>目标</strong>：3 个参数化变体。
@@ -314,7 +314,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-002" data-test="TEST-VR-002" id="test-vr-002">TEST-VR-002: VmInstr去类型化合并测试<p>验证REQ-VR-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-002" data-test="TEST-VR-002" id="test-vr-002">TEST-VR-002: VmInstr去类型化合并测试<p>验证REQ-VR-002相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -375,7 +375,7 @@
       <p>```</p>
       <strong>变更汇总</strong>：11 → 3（+ 吸收 QuantIntDivConst/QuantIntMul = -9 净减）
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-004" id="req-vr-004">§1.4 Quant* 解码指令去重 (REQ-VR-004)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1.4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-004" id="req-vr-004">§1.4 Quant* 解码指令去重 (REQ-VR-004)
       <p>删除 18 个 Quant* 变体中与通用指令语义完全重复的 10 个（QuantVecBitAnd/Or、QuantBroadcast、QuantFma、QuantScalarLoad 等），合并 QuantLoadF16toF32+QuantLoadI8toF32 为 QuantScalarCvtLoad，仅保留 7 个语义独特的量化指令。</p>
       <strong>当前</strong>：18 个 Quant* 变体。其中 10 个与通用指令语义完全重复。
     
@@ -528,7 +528,7 @@
       <p>```</p>
       <strong>变更汇总</strong>：18 → 7（-11）
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="1.5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-017" id="req-vr-017">§1.5 VecBinOp 扩展 (REQ-VR-017 续)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1.5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-017" id="req-vr-017">§1.5 VecBinOp 扩展 (REQ-VR-017 续)
       <p>为吸收 QuantVecShiftLeft/Right 和 GPR 位操作，扩展 VecOp：</p>
       <p>```</p>
       <p>VecOp (扩展):</p>
@@ -555,7 +555,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-017" data-test="TEST-VR-017" id="test-vr-017">TEST-VR-017: VmInstr去类型化合并测试<p>验证REQ-VR-017相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-017" data-test="TEST-VR-017" id="test-vr-017">TEST-VR-017: VmInstr去类型化合并测试<p>验证REQ-VR-017相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -563,7 +563,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="1.6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-011" id="req-vr-011">§1.6 分布式通信 VmInstr 扩展 (REQ-VR-011, feature = "nccl")
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="1.6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-011" id="req-vr-011">§1.6 分布式通信 VmInstr 扩展 (REQ-VR-011, feature = "nccl")
       <p>&gt; <strong>关联 SPEC</strong>: gllm-nccl SPEC/02-ARCHITECTURE.md §5.3, gllm-nccl SPEC/07-PTX-INTRINSICS.md</p>
       <p>&gt; <strong>feature gate</strong>: <code>#[cfg(feature = "nccl")]</code> — 未启用时这些变体不存在于枚举中</p>
       <p>&gt; <strong>设计原则</strong>: JIT codegen 生成调用桩（call stub），链接到 gllm-nccl 提供的运行时函数。不内联通信实现（通信是跨设备操作，不能 JIT 内联）。</p>
@@ -583,7 +583,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-011" data-test="TEST-VR-011" id="test-vr-011">TEST-VR-011: VmInstr去类型化合并测试<p>验证REQ-VR-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-011" data-test="TEST-VR-011" id="test-vr-011">TEST-VR-011: VmInstr去类型化合并测试<p>验证REQ-VR-011相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -783,7 +783,7 @@
       <li>CPU 路径使用 <code>std::sync::Barrier</code>（Rust std），不需要 VmInstr</li>
       <p>&gt; <strong>注</strong>: 如果未来需要 JIT 内部更灵活的同步控制（如动态 barrier），可以扩展 VmInstr。当前设计中 SM 分区同步是编译时确定的 CTA 编排，不需要运行时 VmInstr。</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-005" id="req-vr-005">§2 缺失指令补全 (REQ-VR-005~010)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-005" id="req-vr-005">§2 缺失指令补全 (REQ-VR-005~010)
       <p>补全 VmInstr 指令集中缺失的关键能力：向量 Shuffle/Permute、向量 Lane 提取/插入、向量常量加载、原子 CAS、GPR 一元操作（Popcount/CLZ/ByteSwap），以及 Mxfp4/Nvfp4 合并到 QuantBlockLoad，使 TraceOp 到 VmInstr 映射完整覆盖所有算子需求。</p>
     
       <div data-criteria="">
@@ -803,7 +803,7 @@
     </section>
     
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-018" id="req-vr-018">§2.1 向量 Shuffle/Permute (REQ-VR-018)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.1" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-018" id="req-vr-018">§2.1 向量 Shuffle/Permute (REQ-VR-018)
       <strong>问题</strong>：<code>TraceOp::Permute</code> 当前用 identity copy 绕过，无法生成 <code>vpshufb</code>/<code>vpermd</code>/<code>TBL</code>。
       <p>```</p>
       <p>VecShuffle:</p>
@@ -835,7 +835,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-018" data-test="TEST-VR-018" id="test-vr-018">TEST-VR-018: VmInstr去类型化合并测试<p>验证REQ-VR-018相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-018" data-test="TEST-VR-018" id="test-vr-018">TEST-VR-018: VmInstr去类型化合并测试<p>验证REQ-VR-018相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -843,7 +843,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-003" id="req-vr-003">§2.2 向量 Lane 提取/插入 (REQ-VR-003)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.2" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-003" id="req-vr-003">§2.2 向量 Lane 提取/插入 (REQ-VR-003)
       <strong>问题</strong>：当前无法从 Vec 寄存器提取单个 lane 到 Scalar，也无法将 Scalar 插入 Vec 的指定 lane。这对于 Top-K 采样、batch argmax 等场景必需。
       <p>```</p>
       <p>VecExtractLane:</p>
@@ -878,7 +878,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-003" data-test="TEST-VR-003" id="test-vr-003">TEST-VR-003: VmInstr去类型化合并测试<p>验证REQ-VR-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-003" data-test="TEST-VR-003" id="test-vr-003">TEST-VR-003: VmInstr去类型化合并测试<p>验证REQ-VR-003相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -886,7 +886,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.3" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-013" id="req-vr-013">§2.3 GPR 位逻辑运算 (REQ-VR-13)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.3" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-013" id="req-vr-013">§2.3 GPR 位逻辑运算 (REQ-VR-13)
       <p>通过 §1.3 GprBinOp 的 GprOp 枚举新增 And/Or/Xor 三种位逻辑操作，补全 GPR 无法做位与/位或/异或的能力缺口，使权重加载中的位操作（如 K-Quant scale 解码）不再绕道 Quant* 变体。</p>
       <strong>问题</strong>：当前 GPR 无法做 AND/OR/XOR/NOT。权重加载中的位操作（如 K-Quant scale 解码）被迫绕道 Quant* 变体。
       <strong>已在 §1.3 GprBinOp 中覆盖</strong>：GprOp 新增 And/Or/Xor 三种操作。
@@ -906,7 +906,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-013" data-test="TEST-VR-13" id="test-vr-13">TEST-VR-13: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-013" data-test="TEST-VR-13" id="test-vr-13">TEST-VR-13: VmInstr去类型化合并测试<p>验证REQ-VR-004相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -914,7 +914,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-014" id="req-vr-014">§2.4 向量常量加载 (REQ-VR-14)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-014" id="req-vr-014">§2.4 向量常量加载 (REQ-VR-14)
       <strong>问题</strong>：当前加载向量常量需要 Broadcast(ScalarExpr::Const) + 可能的 VecBinOp。对于整数常量掩码（如 0x0F broadcast），需要 QuantBroadcastInt。缺少通用的向量常量加载。
       <p>```</p>
       <p>VecLoadConst:</p>
@@ -942,7 +942,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-014" data-test="TEST-VR-14" id="test-vr-14">TEST-VR-14: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-014" data-test="TEST-VR-14" id="test-vr-14">TEST-VR-14: VmInstr去类型化合并测试<p>验证REQ-VR-005相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -950,7 +950,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-006" id="req-vr-006">§2.5 原子 CAS (REQ-VR-006)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-006" id="req-vr-006">§2.5 原子 CAS (REQ-VR-006)
       <strong>问题</strong>：当前只有 AtomicAddU32/AtomicAddU64。缺少 Compare-And-Swap，这对于无锁数据结构（batch 并发、KV cache 页表更新）必需。
       <p>```</p>
       <p>AtomicCAS:</p>
@@ -988,7 +988,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-006" data-test="TEST-VR-006" id="test-vr-006">TEST-VR-006: VmInstr去类型化合并测试<p>验证REQ-VR-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-006" data-test="TEST-VR-006" id="test-vr-006">TEST-VR-006: VmInstr去类型化合并测试<p>验证REQ-VR-006相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -996,7 +996,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-007" id="req-vr-007">§2.6 Popcount / CLZ / ByteSwap (REQ-VR-007)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-007" id="req-vr-007">§2.6 Popcount / CLZ / ByteSwap (REQ-VR-007)
       <strong>问题</strong>：当前只有 BitwiseGemm（内部用 popcnt）但无独立的位计数指令。CLZ 对于快速 log2 计算、ByteSwap 对于端序转换必需。
       <p>```</p>
       <p>GprUnaryOp:</p>
@@ -1029,7 +1029,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-007" data-test="TEST-VR-007" id="test-vr-007">TEST-VR-007: VmInstr去类型化合并测试<p>验证REQ-VR-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-007" data-test="TEST-VR-007" id="test-vr-007">TEST-VR-007: VmInstr去类型化合并测试<p>验证REQ-VR-007相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -1037,7 +1037,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h4="" data-section="2.7" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-016" id="req-vr-016">§2.7 Mxfp4/Nvfp4 合并到 QuantBlockLoad (REQ-VR-16 扩展)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="2.7" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-016" id="req-vr-016">§2.7 Mxfp4/Nvfp4 合并到 QuantBlockLoad (REQ-VR-16 扩展)
       <strong>问题</strong>：Mxfp4VecDequant 和 Nvfp4SubBlockDequant 是 E2M1 4-bit 反量化的两个变体（差异仅缩放格式：E8M0 vs UE4M3），应合并到 QuantBlockLoad 的 BlockUnpackMode。
       <p>```</p>
       <p>BlockUnpackMode (扩展):</p>
@@ -1735,7 +1735,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-008" id="req-vr-008">§4 TraceOp→VmInstr 映射更新 (REQ-VR-008)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="4" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-008" id="req-vr-008">§4 TraceOp→VmInstr 映射更新 (REQ-VR-008)
       <p>auto_select.rs 中所有被删除 VmInstr 的映射必须更新为新变体。</p>
     
       <div data-criteria="">
@@ -1753,7 +1753,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-008" data-test="TEST-VR-008" id="test-vr-008">TEST-VR-008: VmInstr去类型化合并测试<p>验证REQ-VR-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-008" data-test="TEST-VR-008" id="test-vr-008">TEST-VR-008: VmInstr去类型化合并测试<p>验证REQ-VR-008相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -2088,7 +2088,7 @@
       <h4>§4.2 plan_lower.rs 中的 GgufXxxLoad 直接调用</h4>
       <p>plan_lower.rs 中任何直接 <code>prog.emit(VmInstr::GgufXxxLoad {...})</code> 的调用都必须替换为新的 QuantBlockLoad/QuantBiPlaneLoad。通过 grep 审计确认。</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-009" id="req-vr-009">§5 ISA Lowering 重构 (REQ-VR-009)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="5" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-009" id="req-vr-009">§5 ISA Lowering 重构 (REQ-VR-009)
       <p>重构 x86_lower/aarch64_lower/gpu_lower 中因合并和新增 VmInstr 变体而需要更新的 lowering 逻辑，确保每个新变体（QuantBlockLoad/QuantBiPlaneLoad/DotProduct/GprBinOp/GprCondAction/VecShuffle/VecExtractLane/VecInsertLane/VecLoadConst/AtomicCAS/GprUnaryOp）在三个 ISA 后端生成正确的机器指令。</p>
     
       <div data-criteria="">
@@ -2106,7 +2106,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-009" data-test="TEST-VR-009" id="test-vr-009">TEST-VR-009: VmInstr去类型化合并测试<p>验证REQ-VR-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-009" data-test="TEST-VR-009" id="test-vr-009">TEST-VR-009: VmInstr去类型化合并测试<p>验证REQ-VR-009相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>
@@ -2130,7 +2130,7 @@
       <h4>§5.3 gpu_lower.rs</h4>
       <li>同 x86_lower.rs 结构，ISA 映射替换为 PTX/HIP/MSL 指令</li>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" <h3="" data-section="6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-010" id="req-vr-010">§6 验证策略 (REQ-VR-010)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-OP ENT-QUANT-PRECISION" data-section="6" data-req-api="POST /internal/vminstr/dispatch" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-OP,ENT-QUANT-PRECISION" data-req-category="business" data-req-domain="vr" data-req-status="implemented" data-req="REQ-VR-010" id="req-vr-010">§6 验证策略 (REQ-VR-010)
       <p>定义 VmInstr 变更的端到端验证策略：每个新增/合并变体必须有 cargo check 编译通过、auto_select.rs 对应 match arm、三个 ISA 后端 lowering 正确、以及 VmInstr round-trip 单元测试，确保去类型化合并和指令补全不引入功能退化。</p>
     
       <div data-criteria="">
@@ -2148,7 +2148,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-VR-010" data-test="TEST-VR-010" id="test-vr-010">TEST-VR-010: VmInstr去类型化合并测试<p>验证REQ-VR-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-VR-010" data-test="TEST-VR-010" id="test-vr-010">TEST-VR-010: VmInstr去类型化合并测试<p>验证REQ-VR-010相关功能正确性</p>
       <div id="vminstr-新增-合并变体编译通过-cargo-check" data-criterion="VmInstr 新增/合并变体编译通过: cargo check">VmInstr 新增/合并变体编译通过: cargo check</div>
       <div id="auto-select.rs-新增对应-match-arm" data-criterion="auto_select.rs 新增对应 match arm">auto_select.rs 新增对应 match arm</div>
       <div id="isa-lowering-x86-64-aarch64-gpu-生成正确指令" data-criterion="ISA lowering (x86_64/AArch64/GPU) 生成正确指令">ISA lowering (x86_64/AArch64/GPU) 生成正确指令</div>

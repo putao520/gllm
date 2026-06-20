@@ -934,7 +934,7 @@
     <section id="s-req-清单" data-section="null">
       <h3>REQ 清单</h3>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h4="" data-section="64" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-001" id="req-cg-001">AArch64 补齐 (REQ-CG-001 ~ REQ-CG-007)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="64" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-001" id="req-cg-001">AArch64 补齐 (REQ-CG-001 ~ REQ-CG-007)
       <p>AArch64 后端补齐 VmInstr 覆盖：scalar ops、gather ops、vector control、LLM ops、GPR ops、callback、atomic 等全部 VmInstr 变体在 AArch64 NEON/SVE ISA 上的 lowering 实现，确保 x86_64 已覆盖的所有指令在 ARM 后端同样可用。每个 VmInstr 映射到对应的 AArch64 指令（如 ScalarLoad→LDR、VecBinOp→FADD/FMUL、Argmax→FMAXV 等），不支持的变体返回 CompilerError::CodegenViolation。</p>
 
       <div data-criteria="">
@@ -950,13 +950,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-016" id="req-cg-016">REQ-CG-016: AArch64 scalar ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-016" id="req-cg-016">REQ-CG-016: AArch64 scalar ops
       <p>在 AArch64 后端实现 ScalarLoad/ScalarStore/ScalarToIndex/IntMulStride 四个标量 VmInstr 的 ISA lowering。ScalarLoad 映射到 LDR S/W 指令加载 float/int 标量寄存器，ScalarStore 映射到 STR S/W，ScalarToIndex 使用 FCVTZS 完成 float→int 转换，IntMulStride 使用 MUL 完成标量整数乘法。这些是所有其他算子的基础依赖。</p>
       <li><strong>变体</strong>: ScalarLoad, ScalarStore, ScalarToIndex, IntMulStride</li>
       <li><strong>指令映射</strong>:</li>
@@ -979,11 +979,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-016" data-test="TEST-CG-016" id="test-cg-016">TEST-CG-016: 设备特化codegen测试<p>验证REQ-CG-016相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-016" data-test="TEST-CG-016" id="test-cg-016">TEST-CG-016: 设备特化codegen测试<p>验证REQ-CG-016相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -991,7 +991,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-013" id="req-cg-013">REQ-CG-13: AArch64 gather ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-013" id="req-cg-013">REQ-CG-13: AArch64 gather ops
       <p>在 AArch64 后端实现 GatherLoad/ScatterStore/TableLookup 三个聚集内存操作 VmInstr 的 lowering。GatherLoad 使用 NEON TBL/TBL2 指令完成向量查表加载，ScatterStore 通过逐元素 STR 加索引计算实现，TableLookup 直接映射到 TBL 指令。Gather 是 embedding lookup 的核心操作。</p>
       <li><strong>变体</strong>: GatherLoad, ScatterStore, TableLookup</li>
       <li><strong>指令映射</strong>:</li>
@@ -1013,11 +1013,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-013" data-test="TEST-CG-13" id="test-cg-13">TEST-CG-13: 设备特化codegen测试<p>验证REQ-CG-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-013" data-test="TEST-CG-13" id="test-cg-13">TEST-CG-13: 设备特化codegen测试<p>验证REQ-CG-001相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1025,7 +1025,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-002" id="req-cg-002">REQ-CG-002: AArch64 vector control
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-002" id="req-cg-002">REQ-CG-002: AArch64 vector control
       <p>在 AArch64 后端实现 VecUnaryOp/VecCast/VecCmp/ConditionalSelect 四个向量控制流 VmInstr 的 lowering。VecUnaryOp 的 sqrt/exp/log/sin 通过 libm 调用或 SVE 近似实现，VecCast 使用 FCVTN/FCVTL 完成 F32↔BF16/F16 转换，VecCmp 映射到 FCMEQ/FCMGT 加 predicate register，ConditionalSelect 使用 FCSEL/BSEL 实现 NEON 位选择。</p>
       <li><strong>变体</strong>: VecUnaryOp, VecCast, VecCmp, ConditionalSelect</li>
       <li><strong>指令映射</strong>:</li>
@@ -1048,11 +1048,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-002" data-test="TEST-CG-002" id="test-cg-002">TEST-CG-002: 设备特化codegen测试<p>验证REQ-CG-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-002" data-test="TEST-CG-002" id="test-cg-002">TEST-CG-002: 设备特化codegen测试<p>验证REQ-CG-002相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1060,7 +1060,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="004" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-003" id="req-cg-003">REQ-CG-003: AArch64 LLM ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="004" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-003" id="req-cg-003">REQ-CG-003: AArch64 LLM ops
       <p>在 AArch64 后端实现 Argmax/TemperatureScale/StoreToken/CheckStopCondition/BreakLoop 五个（OutputModeDispatch 已删除, SPEC/39 §7） LLM 推理专用 VmInstr 的 lowering。Argmax 使用 NEON FMAXV 加线性扫描实现，TemperatureScale 使用 FMUL 标量乘法，StoreToken 使用 STR W 存储 32-bit token ID，CheckStopCondition 使用标量比较加条件分支，BreakLoop 使用循环计数器递减加 CBNZ 条件跳回。</p>
       <li><strong>变体</strong>: Argmax, TemperatureScale, StoreToken, CheckStopCondition, BreakLoop</li>
       <li><strong>设计</strong>:</li>
@@ -1085,11 +1085,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-003" data-test="TEST-CG-003" id="test-cg-003">TEST-CG-003: 设备特化codegen测试<p>验证REQ-CG-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-003" data-test="TEST-CG-003" id="test-cg-003">TEST-CG-003: 设备特化codegen测试<p>验证REQ-CG-003相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1097,7 +1097,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="005" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-004" id="req-cg-004">REQ-CG-004: AArch64 GPR ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="005" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-004" id="req-cg-004">REQ-CG-004: AArch64 GPR ops
       <p>在 AArch64 后端实现 AddPtr/StoreU32ToStack/GprStoreToFrame/GprCmpExit/GprShl/GprSubConst/GprAdd 七个通用寄存器操作 VmInstr 的 lowering。所有变体映射到标准 AArch64 整数指令（ADD、STR、SUB、LSL、CMP、B.NE），是 mega-kernel generate loop 的必需操作。</p>
       <li><strong>变体</strong>: AddPtr, StoreU32ToStack, GprStoreToFrame, GprCmpExit, GprShl, GprSubConst, GprAdd</li>
       <li><strong>指令映射</strong>: 标准 AArch64 整数指令 (<code>ADD</code>, <code>STR</code>, <code>SUB</code>, <code>LSL</code>, <code>CMP</code>, <code>B.NE</code>)</li>
@@ -1116,11 +1116,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-004" data-test="TEST-CG-004" id="test-cg-004">TEST-CG-004: 设备特化codegen测试<p>验证REQ-CG-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-004" data-test="TEST-CG-004" id="test-cg-004">TEST-CG-004: 设备特化codegen测试<p>验证REQ-CG-004相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1128,7 +1128,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="006" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-005" id="req-cg-005">REQ-CG-005: AArch64 callback
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="006" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-005" id="req-cg-005">REQ-CG-005: AArch64 callback
       <p>在 AArch64 后端实现 LoadCallbackEntry/NativeCall 两个回调 VmInstr 的 lowering。LoadCallbackEntry 使用 LDR X 从 callback_table_ptr 加载函数指针，NativeCall 使用 BLR Xn 按 AAPCS64 调用约定执行外部函数（x0-x7 传参，x30 保存返回地址）。这是 Semantic Gatekeeper 和 Guardrail 回调机制的基础。</p>
       <li><strong>变体</strong>: LoadCallbackEntry, NativeCall</li>
       <li><strong>设计</strong>:</li>
@@ -1149,11 +1149,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-005" data-test="TEST-CG-005" id="test-cg-005">TEST-CG-005: 设备特化codegen测试<p>验证REQ-CG-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-005" data-test="TEST-CG-005" id="test-cg-005">TEST-CG-005: 设备特化codegen测试<p>验证REQ-CG-005相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1161,7 +1161,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="007" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-006" id="req-cg-006">REQ-CG-006: AArch64 atomic
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="007" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-006" id="req-cg-006">REQ-CG-006: AArch64 atomic
       <p>在 AArch64 后端实现 AtomicAddU64/MemFence 两个原子操作 VmInstr 的 lowering。AtomicAddU64 映射到 ARMv8.1 LSE 的 LDADD X 指令实现 64-bit 原子加法，MemFence 映射到 DMB ISH 实现 inner shareable 数据内存屏障。用于并发场景下的 KV cache 页管理和序列状态同步。</p>
       <li><strong>变体</strong>: AtomicAddU64, MemFence</li>
       <li><strong>指令映射</strong>:</li>
@@ -1182,11 +1182,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-006" data-test="TEST-CG-006" id="test-cg-006">TEST-CG-006: 设备特化codegen测试<p>验证REQ-CG-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-006" data-test="TEST-CG-006" id="test-cg-006">TEST-CG-006: 设备特化codegen测试<p>验证REQ-CG-006相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1194,7 +1194,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h4="" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-008" id="req-cg-008">GPU 补齐 (REQ-CG-008 ~ REQ-CG-014)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-008" id="req-cg-008">GPU 补齐 (REQ-CG-008 ~ REQ-CG-014)
       <p>GPU 后端补齐 VmInstr 覆盖：scalar ops、gather ops、vector control、LLM ops、GPR ops、callback、atomic 等全部 VmInstr 变体在 GPU PTX/HIP ISA 上的 lowering 实现。每个 VmInstr 映射到对应的 GPU 指令（如 ScalarLoad→ld.reg.f32、VecCast→cvt.rn.bf16.f32、Argmax→warp reduce max 等），确保与 x86_64 后端功能对等。GPU 专属指令（WarpSync/AsyncCopy）由 mega_kernel_emit 直接生成。</p>
 
       <div data-criteria="">
@@ -1210,13 +1210,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-017" id="req-cg-017">REQ-CG-017: GPU scalar ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-017" id="req-cg-017">REQ-CG-017: GPU scalar ops
       <p>在 GPU 后端实现 ScalarLoad/ScalarStore/ScalarToIndex/IntMulStride 四个标量 VmInstr 的 PTX/HIP lowering。ScalarLoad 映射到 PTX ld.reg.f32/s32 或 HIP __ldg，ScalarStore 映射到 st.local.f32/s32，ScalarToIndex 使用 cvt.rni.s32.f32 完成类型转换，IntMulStride 使用 mul.lo.s32 计算步长偏移。</p>
       <li><strong>变体</strong>: ScalarLoad, ScalarStore, ScalarToIndex, IntMulStride</li>
       <li><strong>指令映射</strong>:</li>
@@ -1239,11 +1239,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-017" data-test="TEST-CG-017" id="test-cg-017">TEST-CG-017: 设备特化codegen测试<p>验证REQ-CG-017相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-017" data-test="TEST-CG-017" id="test-cg-017">TEST-CG-017: 设备特化codegen测试<p>验证REQ-CG-017相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1251,7 +1251,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="009" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-007" id="req-cg-007">REQ-CG-007: GPU gather ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="009" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-007" id="req-cg-007">REQ-CG-007: GPU gather ops
       <p>在 GPU 后端实现 GatherLoad/ScatterStore/TableLookup 三个聚集内存操作 VmInstr 的 lowering。GatherLoad 使用 PTX 索引计算加 ld.global.f32 向量化加载，ScatterStore 使用 st.global.f32 向量化存储，TableLookup 使用 warp shuffle（SHFL）或 shared memory lookup 实现查表操作。</p>
       <li><strong>变体</strong>: GatherLoad, ScatterStore, TableLookup</li>
       <li><strong>设计</strong>:</li>
@@ -1273,11 +1273,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-007" data-test="TEST-CG-007" id="test-cg-007">TEST-CG-007: 设备特化codegen测试<p>验证REQ-CG-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-007" data-test="TEST-CG-007" id="test-cg-007">TEST-CG-007: 设备特化codegen测试<p>验证REQ-CG-007相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1285,7 +1285,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="010" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-014" id="req-cg-014">REQ-CG-14: GPU vector control
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="010" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-014" id="req-cg-014">REQ-CG-14: GPU vector control
       <p>在 GPU 后端实现 VecUnaryOp/VecCast/VecCmp/ConditionalSelect 四个向量控制流 VmInstr 的 lowering。VecUnaryOp(sqrt)映射到 PTX sqrt.rn.f32 或 HIP __fsqrt_rn，VecCast 使用 cvt.rn.bf16.f32/cvt.rn.f16.f32 完成精度转换，VecCmp 使用 setp.eq.f32/setp.gt.f32，ConditionalSelect 使用 selp.f32 predicated 选择。</p>
       <li><strong>变体</strong>: VecUnaryOp, VecCast, VecCmp, ConditionalSelect</li>
       <li><strong>指令映射</strong>:</li>
@@ -1308,11 +1308,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-014" data-test="TEST-CG-14" id="test-cg-14">TEST-CG-14: 设备特化codegen测试<p>验证REQ-CG-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-014" data-test="TEST-CG-14" id="test-cg-14">TEST-CG-14: 设备特化codegen测试<p>验证REQ-CG-008相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1320,7 +1320,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="011" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-009" id="req-cg-009">REQ-CG-009: GPU LLM ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="011" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-009" id="req-cg-009">REQ-CG-009: GPU LLM ops
       <p>在 GPU 后端实现 Argmax/TemperatureScale/StoreToken/CheckStopCondition/BreakLoop 五个 LLM（OutputModeDispatch 已删除, SPEC/39 §7） 推理专用 VmInstr 的 lowering。Argmax 使用 warp reduce max 加 ballot 加 find first set 实现并行最大值查找，TemperatureScale 使用 PTX mul.rn.f32，StoreToken 使用 st.global.u32，其余控制流指令使用 setp 加 bra 条件跳转实现。</p>
       <li><strong>变体</strong>: Argmax, TemperatureScale, StoreToken, CheckStopCondition, BreakLoop</li>
       <li><strong>设计</strong>:</li>
@@ -1345,11 +1345,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-009" data-test="TEST-CG-009" id="test-cg-009">TEST-CG-009: 设备特化codegen测试<p>验证REQ-CG-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-009" data-test="TEST-CG-009" id="test-cg-009">TEST-CG-009: 设备特化codegen测试<p>验证REQ-CG-009相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1357,7 +1357,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="012" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-010" id="req-cg-010">REQ-CG-010: GPU GPR ops
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="012" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-010" id="req-cg-010">REQ-CG-010: GPU GPR ops
       <p>在 GPU 后端实现 AddPtr/StoreU32ToStack/GprStoreToFrame/GprCmpExit/GprShl/GprSubConst/GprAdd 七个通用寄存器操作 VmInstr 的 lowering。使用 PTX .reg.u64/u32 寄存器操作加 add.u64/shl.b32/setp.eq.u32/bra 等指令实现，是 mega-kernel generate loop 在 GPU 上的必需操作。</p>
       <li><strong>变体</strong>: AddPtr, StoreU32ToStack, GprStoreToFrame, GprCmpExit, GprShl, GprSubConst, GprAdd</li>
       <li><strong>设计</strong>: PTX <code>.reg.u64/u32</code> 寄存器操作 + <code>add.u64</code> / <code>shl.b32</code> / <code>setp.eq.u32</code> / <code>bra</code></li>
@@ -1376,11 +1376,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-010" data-test="TEST-CG-010" id="test-cg-010">TEST-CG-010: 设备特化codegen测试<p>验证REQ-CG-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-010" data-test="TEST-CG-010" id="test-cg-010">TEST-CG-010: 设备特化codegen测试<p>验证REQ-CG-010相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1388,7 +1388,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="013" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-011" id="req-cg-011">REQ-CG-011: GPU callback
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="013" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-011" id="req-cg-011">REQ-CG-011: GPU callback
       <p>在 GPU 后端实现 LoadCallbackEntry/NativeCall 两个回调 VmInstr 的 lowering。LoadCallbackEntry 使用 PTX ld.global.u64 从 callback_table_ptr 读取函数指针，NativeCall 使用 PTX call 指令执行设备端函数。核心约束是 GPU callback 只能调用 device 函数，不能调用 host 函数，需要参数 marshalling。</p>
       <li><strong>变体</strong>: LoadCallbackEntry, NativeCall</li>
       <li><strong>设计</strong>:</li>
@@ -1410,11 +1410,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-011" data-test="TEST-CG-011" id="test-cg-011">TEST-CG-011: 设备特化codegen测试<p>验证REQ-CG-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-011" data-test="TEST-CG-011" id="test-cg-011">TEST-CG-011: 设备特化codegen测试<p>验证REQ-CG-011相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1422,7 +1422,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="014" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-012" id="req-cg-012">REQ-CG-012: GPU atomic
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="014" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-012" id="req-cg-012">REQ-CG-012: GPU atomic
       <p>在 GPU 后端实现 AtomicAddU64/MemFence 两个原子操作 VmInstr 的 lowering。AtomicAddU64 映射到 PTX atom.add.global.u64 实现 64-bit 全局原子加法，MemFence 映射到 PTX membar.cta/membar.gl 实现线程组级或全局级内存屏障。用于 GPU 并发场景下的序列状态同步和页管理。</p>
       <li><strong>变体</strong>: AtomicAddU64, MemFence</li>
       <li><strong>指令映射</strong>:</li>
@@ -1443,11 +1443,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-012" data-test="TEST-CG-012" id="test-cg-012">TEST-CG-012: 设备特化codegen测试<p>验证REQ-CG-012相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-012" data-test="TEST-CG-012" id="test-cg-012">TEST-CG-012: 设备特化codegen测试<p>验证REQ-CG-012相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1455,7 +1455,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h4="" data-section="015" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-015" id="req-cg-015">跨后端 (REQ-CG-015)
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="015" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-015" id="req-cg-015">跨后端 (REQ-CG-015)
       <p>auto_select 设备无关路由架构：auto_lower_trace_raw 根据 DeviceProfile 生成不同的 VmInstr 序列，实现编译时设备感知而不影响运行时。x86_64 生成 HotpatchSlot（用于 hot JMP patching），AArch64/GPU 跳过 HotpatchSlot（不支持该机制），GPU 额外生成 WarpSync/AsyncCopy 等 GPU 专属指令。架构分层确保 auto_select 层设备无关、ISA lowering 层设备特化。</p>
 
       <div data-criteria="">
@@ -1471,11 +1471,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-015" data-test="TEST-CG-015" id="test-cg-015">TEST-CG-015: 设备特化codegen测试<p>验证REQ-CG-015相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-015" data-test="TEST-CG-015" id="test-cg-015">TEST-CG-015: 设备特化codegen测试<p>验证REQ-CG-015相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>
@@ -1483,7 +1483,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" <h5="" data-section="015" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-018" id="req-cg-018">REQ-CG-018: auto_select device-aware
+    <section data-entity-ref="ENT-VM-INSTR ENT-TRACE-OP ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-OP ENT-COMPILER-GRAPH" data-section="015" data-req-api="POST /compile" data-req-entity="ENT-VM-INSTR,ENT-TRACE-OP,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-OP,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="cg" data-req-status="implemented" data-req="REQ-CG-018" id="req-cg-018">REQ-CG-018: auto_select device-aware
       <p>实现 auto_lower_trace_raw 的设备感知路由：根据 DeviceProfile 在编译时决定生成的 VmInstr 序列。x86_64 路径生成 HotpatchSlot 用于运行时热修补（JMP rel32），AArch64/GPU 路径跳过该指令（不支持），GPU 路径额外生成 WarpSync/AsyncCopy 等 GPU 专属同步和数据搬运指令。核心约束是设备差异在编译时确定，运行时零分支。</p>
       <li><strong>内容</strong>: <code>auto_lower_trace_raw</code> 根据 DeviceProfile 生成不同的 VmInstr 序列</li>
       <li><strong>示例</strong>:</li>
@@ -1505,11 +1505,11 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-CG-018" data-test="TEST-CG-018" id="test-cg-018">TEST-CG-018: 设备特化codegen测试<p>验证REQ-CG-018相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-CG-018" data-test="TEST-CG-018" id="test-cg-018">TEST-CG-018: 设备特化codegen测试<p>验证REQ-CG-018相关功能正确性</p>
       <div id="设备特化-codegen-编译通过-cargo-check" data-criterion="设备特化 codegen 编译通过: cargo check">设备特化 codegen 编译通过: cargo check</div>
       <div id="auto-select-设备无关路由正确" data-criterion="auto_select 设备无关路由正确">auto_select 设备无关路由正确</div>
       <div id="x86-64-aarch64-gpu-三后端-lowering-生成正确代码" data-criterion="x86_64/AArch64/GPU 三后端 lowering 生成正确代码">x86_64/AArch64/GPU 三后端 lowering 生成正确代码</div>

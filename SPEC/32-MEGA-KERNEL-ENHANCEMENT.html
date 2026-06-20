@@ -33,7 +33,7 @@
       <p>5. <strong>编译时硬件感知</strong>：DeviceProfile 驱动 SM 分区比例（沿 GPC 边界对齐）、tile 策略、prefill/decode code path 参数选择，零运行时退化</p>
       <p>6. <strong>推理热路径边界</strong>：推理热路径 = <code>input_ids_ptr</code> 到 <code>output_tokens_ptr</code>。Tokenize（text→IDs）和 detokenize（IDs→text）是请求级预/后处理，不在 Mega-Kernel 内执行，不违反 ARCH-RUST-IS-CODEGEN</p>
     </section>
-    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" <h3="" data-section="1" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-001" id="req-mko-001">§1 Prefill/Decode JMP Table 差异化 (REQ-MKO-001)
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" data-section="1" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-001" id="req-mko-001">§1 Prefill/Decode JMP Table 差异化 (REQ-MKO-001)
       <p>在单一 Mega-Kernel 内通过 ForwardPhaseDispatch 实现 prefill（compute-bound）和 decode（memory-bound）的差异化编译路径。batch mode 下通过 JMP Table 分流为 prefill_path、decode_path 和 mixed_path 三条路径，各自使用最优的 GEMM tile、attention 策略和 KV cache 访问模式。prefill 完成后直接 JMP 进入 decode loop，refill 引入新序列时 JMP 回 prefill_path，形成循环。Legacy 单序列模式不受影响。</p>
 
       <div data-criteria="">
@@ -49,7 +49,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -251,7 +251,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" <h3="" data-section="2" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-002" id="req-mko-002">§2 SM 分区 Ping-Pong 重叠执行 (REQ-MKO-002)
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" data-section="2" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-002" id="req-mko-002">§2 SM 分区 Ping-Pong 重叠执行 (REQ-MKO-002)
       <p>在单 Mega-Kernel 内通过 thread role 分区实现 decode 和 prefill 的 SM 重叠执行。CTA 按 GPC 对齐的 cluster 边界分为 decode 组和 prefill 组，同步原语按硬件分档选择：SM90+ 使用 cluster.sync 加 mbarrier 加 __threadfence_system()，SM80 使用 cooperative grid_sync，SM70-/CPU 使用 persistent ring barrier。DualBatchMeta 管理 Ping/Pong 双缓冲元数据，GLOBAL_SYNC 保证并发安全。</p>
 
       <div data-criteria="">
@@ -267,7 +267,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -629,7 +629,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" <h3="" data-section="3" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-003" id="req-mko-003">§3 自治连续批调度 (REQ-MKO-003)
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" data-section="3" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-003" id="req-mko-003">§3 自治连续批调度 (REQ-MKO-003)
       <p>Mega-Kernel decode loop 内通过 GPU 原子操作自治完成 page 分配/释放、序列压缩和请求补充，零 CPU 参与。RequestQueue 使用设备内存 ring buffer，三层池（pool_local/pool_cluster/pool_global）消除 90% 原子开销。compact 使用 warp-level prefix-scan 三阶段并行（标记、扫描、搬移），仅 refill 阶段由 CTA 0 独占。Mega-Kernel 退出前 drain 确保零页泄漏。</p>
 
       <div data-criteria="">
@@ -645,7 +645,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -919,7 +919,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" <h3="" data-section="4" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-004" id="req-mko-004">§4 Streaming Output（per-token）(REQ-MKO-004)
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" data-section="4" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-004" id="req-mko-004">§4 Streaming Output（per-token）(REQ-MKO-004)
       <p>实现 per-token 流式输出：每个采样的 token 写入 per-CTA sub-ring（零跨 CTA atomic），通过 per-CTA doorbell 通知 Rust 端。Rust 端通过 epoch_flag 阻塞等待消费 sub-rings，按 (seq_id, gen_idx) 排序合并后 detokenize 并 yield，支持 SSE/WebSocket 逐 token 流式输出。</p>
 
       <div data-criteria="">
@@ -935,7 +935,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1011,7 +1011,7 @@
       <p>```</p>
       <strong>流式支持</strong>：Rust 端在 Mega-Kernel 执行期间即可通过 epoch_flag 阻塞等待消费 sub-rings，实现逐 token 流式输出。Mega-Kernel 不需要等 Rust 消费，sub-ring 容量足够大时不会溢出。
     </section>
-    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" <h3="" data-section="5" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-005" id="req-mko-005">§5 硬件感知编译策略 (REQ-MKO-005)
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" data-section="5" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-005" id="req-mko-005">§5 硬件感知编译策略 (REQ-MKO-005)
       <p>&gt; <strong>演进自</strong>：<code>12-STRATEGY-ARBITER.md</code>; <code>02-HARDWARE.md</code> DeviceProfile; <code>02-ARCHITECTURE.md §13.12</code></p>
     
       <div data-criteria="">
@@ -1027,7 +1027,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1137,7 +1137,7 @@
       <p>多卡分布式: 显式引用 ../gllm-nccl/SPEC/08-DISTRIBUTED-PAGING.md（三层分页 L0/L1/L2）</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" <h3="" data-section="6" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-006" id="req-mko-006">§6 与已实装子系统的集成 (REQ-MKO-006)
+    <section data-entity-ref="ENT-MEGA-KERNEL-FN ENT-BATCH-CONTEXT ENT-DEVICE-PROFILE ENT-PAGED-SCHEDULER" data-section="6" data-req-api="POST /internal/mko/enhance" data-req-entity="ENT-MEGA-KERNEL-FN,ENT-BATCH-CONTEXT,ENT-DEVICE-PROFILE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="mko" data-req-status="implemented" data-req="REQ-MKO-006" id="req-mko-006">§6 与已实装子系统的集成 (REQ-MKO-006)
       <p>验证全量子系统（Semantic Gatekeeper、Guardrail、Head Routing、Intent Recall、CoT Reasoner、Session KV、Multimodal、Speculative Decoding、Early Exit、MoE Hot-Patch、Page Compression、Weight Paging、KV Optimization 等 14 个）在 prefill_path 和 decode_path 下行为不变。所有子系统共享内存在 GLOBAL_SYNC（含 __threadfence_system）后全局可见。BatchContext 扩展区追加在 seq_meta 数组之后，不侵入现有布局。</p>
 
       <div data-criteria="">
@@ -1153,7 +1153,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1529,7 +1529,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1548,7 +1548,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1567,7 +1567,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1586,7 +1586,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1605,7 +1605,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       
@@ -1624,7 +1624,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-device-profile" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-device-profile">ENT-DEVICE-PROFILE
       
       
       

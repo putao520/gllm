@@ -1164,7 +1164,7 @@
     <section id="s6" data-section="6">
       <h3>§6 REQ 列表</h3>
     </section>
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="001" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-001" id="req-at-001">REQ-AT-001: AlgoTemplate 数据模型
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="001" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-001" id="req-at-001">REQ-AT-001: AlgoTemplate 数据模型
       <p>定义 <code>AlgoTemplate</code>, <code>AlgoStep</code>, <code>AlgoParam</code>, <code>AlgoStrategy</code>, <code>DeviceReq</code>, <code>MicroKernelDef</code> 纯数据结构。零方法，零代码生成逻辑。</p>
       <strong>文件</strong>: <code>codegen/vm/algo_template.rs</code>（新）
     
@@ -1182,12 +1182,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-001" data-test="TEST-AT-001" id="test-at-001">TEST-AT-001: 算法模板声明式表达测试<p>验证REQ-AT-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-001" data-test="TEST-AT-001" id="test-at-001">TEST-AT-001: 算法模板声明式表达测试<p>验证REQ-AT-001相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1196,7 +1196,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="002" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-002" id="req-at-002">REQ-AT-002: TraceOp 结构型扩展
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="002" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-002" id="req-at-002">REQ-AT-002: TraceOp 结构型扩展
       <p>在 <code>trace.rs</code> 新增 TraceOp 变体: <code>Loop</code>, <code>PanelLoad</code>, <code>PanelStore</code>, <code>PackBuffer</code>, <code>SharedMemDeclare</code>, <code>AsyncCopyToShared</code>, <code>AsyncWaitGroup</code>, <code>SyncBarrier</code>, <code>TileConfig</code>, <code>TileMma</code>, <code>TileRelease</code>, <code>Softmax</code>。</p>
       <strong>文件</strong>: <code>codegen/vm/trace.rs</code>（修改）
     
@@ -1214,12 +1214,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-002" data-test="TEST-AT-002" id="test-at-002">TEST-AT-002: 算法模板声明式表达测试<p>验证REQ-AT-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-002" data-test="TEST-AT-002" id="test-at-002">TEST-AT-002: 算法模板声明式表达测试<p>验证REQ-AT-002相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1228,7 +1228,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="003" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-003" id="req-at-003">REQ-AT-003: auto_select 新增映射
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="003" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-003" id="req-at-003">REQ-AT-003: auto_select 新增映射
       <p>在 <code>auto_select.rs</code> 为 REQ-AT-002 新增的每个 TraceOp 变体实现 <code>dispatch_trace_op</code> match arm。所有映射产 VmInstr，不绕过管线。</p>
       <strong>文件</strong>: <code>codegen/vm/auto_select.rs</code>（修改）
     
@@ -1246,12 +1246,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-003" data-test="TEST-AT-003" id="test-at-003">TEST-AT-003: 算法模板声明式表达测试<p>验证REQ-AT-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-003" data-test="TEST-AT-003" id="test-at-003">TEST-AT-003: 算法模板声明式表达测试<p>验证REQ-AT-003相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1260,7 +1260,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="004" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-004" id="req-at-004">REQ-AT-004: GEMM 模板库
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="004" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-004" id="req-at-004">REQ-AT-004: GEMM 模板库
       <p>定义 5 个 GEMM 模板: <code>GEMM_NAIVE</code>, <code>GEMM_BLIS</code>, <code>GEMM_AMX_TILE</code>, <code>GEMM_GPU_TILED</code>, <code>GEMM_GPU_PIPELINED</code>。</p>
       <strong>文件</strong>: <code>codegen/vm/algo_templates/gemm.rs</code>（新）
     
@@ -1278,12 +1278,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-004" data-test="TEST-AT-004" id="test-at-004">TEST-AT-004: 算法模板声明式表达测试<p>验证REQ-AT-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-004" data-test="TEST-AT-004" id="test-at-004">TEST-AT-004: 算法模板声明式表达测试<p>验证REQ-AT-004相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1292,7 +1292,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="005" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-005" id="req-at-005">REQ-AT-005: Attention + Norm + RoPE + MoE 模板库
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="005" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-005" id="req-at-005">REQ-AT-005: Attention + Norm + RoPE + MoE 模板库
       <p>定义 Attention (MHA/GQA/MLA)、Norm (RmsNorm/LayerNorm)、RoPE (Standard/Partial)、MoE (Router/TopK/Packed) 模板。</p>
       <strong>文件</strong>: <code>codegen/vm/algo_templates/attention.rs</code>, <code>norm.rs</code>, <code>rope.rs</code>, <code>moe.rs</code>（新）
     
@@ -1310,12 +1310,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-005" data-test="TEST-AT-005" id="test-at-005">TEST-AT-005: 算法模板声明式表达测试<p>验证REQ-AT-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-005" data-test="TEST-AT-005" id="test-at-005">TEST-AT-005: 算法模板声明式表达测试<p>验证REQ-AT-005相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1324,7 +1324,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="006" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-006" id="req-at-006">REQ-AT-006: 模板解释器
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="006" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-006" id="req-at-006">REQ-AT-006: 模板解释器
       <p>实现 <code>instantiate_template()</code>: 遍历 AlgoStep 树，翻译为 <code>Vec&lt;TraceOp&gt;</code>。每个 AlgoStep 映射到对应 TraceOp 变体。微核展开为 TraceOp::Loop + Fma 序列。</p>
       <strong>文件</strong>: <code>codegen/vm/algo_interpreter.rs</code>（新）
     
@@ -1342,12 +1342,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-006" data-test="TEST-AT-006" id="test-at-006">TEST-AT-006: 算法模板声明式表达测试<p>验证REQ-AT-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-006" data-test="TEST-AT-006" id="test-at-006">TEST-AT-006: 算法模板声明式表达测试<p>验证REQ-AT-006相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1356,7 +1356,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="007" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-007" id="req-at-007">REQ-AT-007: 模板注册表 + 策略选择
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="007" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-007" id="req-at-007">REQ-AT-007: 模板注册表 + 策略选择
       <p>实现 <code>select_template()</code>, <code>DeviceReq::priority()</code>, <code>DeviceProfile::satisfies()</code>。</p>
       <strong>文件</strong>: <code>codegen/vm/algo_templates/mod.rs</code>（新）
     
@@ -1374,12 +1374,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-007" data-test="TEST-AT-007" id="test-at-007">TEST-AT-007: 算法模板声明式表达测试<p>验证REQ-AT-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-007" data-test="TEST-AT-007" id="test-at-007">TEST-AT-007: 算法模板声明式表达测试<p>验证REQ-AT-007相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1388,7 +1388,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="008" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-008" id="req-at-008">REQ-AT-008: GEMM emit 函数迁移
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="008" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-008" id="req-at-008">REQ-AT-008: GEMM emit 函数迁移
       <code>emit_gemm_inline_with_hook</code> → <code>select_template()</code> + <code>instantiate_template()</code> + <code>auto_lower_trace()</code>。删除 5 个手写 GEMM emit 函数。
       <strong>文件</strong>: <code>codegen/vm/plan_lower.rs</code>
     
@@ -1406,12 +1406,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-008" data-test="TEST-AT-008" id="test-at-008">TEST-AT-008: 算法模板声明式表达测试<p>验证REQ-AT-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-008" data-test="TEST-AT-008" id="test-at-008">TEST-AT-008: 算法模板声明式表达测试<p>验证REQ-AT-008相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1420,7 +1420,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="009" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-009" id="req-at-009">REQ-AT-009: Norm/RoPE/MoE emit 函数迁移
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="009" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-009" id="req-at-009">REQ-AT-009: Norm/RoPE/MoE emit 函数迁移
       <code>emit_normlike_inline</code>, <code>emit_rope_inline</code>, <code>emit_moe_*_inline</code> → 模板解释器 + <code>auto_lower_trace()</code>。
       <strong>文件</strong>: <code>codegen/vm/plan_lower.rs</code>
     
@@ -1438,12 +1438,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-009" data-test="TEST-AT-009" id="test-at-009">TEST-AT-009: 算法模板声明式表达测试<p>验证REQ-AT-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-009" data-test="TEST-AT-009" id="test-at-009">TEST-AT-009: 算法模板声明式表达测试<p>验证REQ-AT-009相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1452,7 +1452,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="010" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-010" id="req-at-010">REQ-AT-010: Sampling 模板 + 迁移
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="010" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-010" id="req-at-010">REQ-AT-010: Sampling 模板 + 迁移
       <p>定义采样管线模板 (Argmax → TemperatureScale → Softmax → TopK → TopP → Multinomial)。迁移手写采样 VmInstr 序列。</p>
       <strong>文件</strong>: <code>codegen/vm/algo_templates/sampling.rs</code>（新）, <code>plan_lower.rs</code>
     
@@ -1470,12 +1470,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-010" data-test="TEST-AT-010" id="test-at-010">TEST-AT-010: 算法模板声明式表达测试<p>验证REQ-AT-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-010" data-test="TEST-AT-010" id="test-at-010">TEST-AT-010: 算法模板声明式表达测试<p>验证REQ-AT-010相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>
@@ -1484,7 +1484,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" <h4="" data-section="011" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-011" id="req-at-011">REQ-AT-011: 验证 — 数值对齐
+    <section data-entity-ref="ENT-ALGO-TEMPLATE ENT-TRACE-OP ENT-COMPILER-GRAPH ENT-DEVICE-PROFILE" data-section="011" data-req-api="POST /internal/algo/template" data-req-entity="ENT-ALGO-TEMPLATE,ENT-TRACE-OP,ENT-COMPILER-GRAPH,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="at" data-req-status="implemented" data-req="REQ-AT-011" id="req-at-011">REQ-AT-011: 验证 — 数值对齐
       <p>所有迁移后通过 <code>cargo test --lib</code> + E2E 测试验证数值一致。模板产出与原手写 emit 函数语义等价。</p>
     
       <div data-criteria="">
@@ -1501,12 +1501,12 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="./INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
+      <a data-xref-type="entity" data-xref-id="ent-compiler-graph" href="../INTENT#ent-compiler-graph">ENT-COMPILER-GRAPH
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-AT-011" data-test="TEST-AT-011" id="test-at-011">TEST-AT-011: 算法模板声明式表达测试<p>验证REQ-AT-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-AT-011" data-test="TEST-AT-011" id="test-at-011">TEST-AT-011: 算法模板声明式表达测试<p>验证REQ-AT-011相关功能正确性</p>
       <div id="algotemplate-纯数据模型描述算法循环" data-criterion="AlgoTemplate 纯数据模型描述算法循环">AlgoTemplate 纯数据模型描述算法循环</div>
       <div id="traceop-结构型扩展正确" data-criterion="TraceOp 结构型扩展正确">TraceOp 结构型扩展正确</div>
       <div id="模板解释器-algostep-vec-traceop-转换正确" data-criterion="模板解释器 AlgoStep→Vec<TraceOp> 转换正确">模板解释器 AlgoStep→Vec&lt;TraceOp&gt; 转换正确</div>

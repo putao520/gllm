@@ -404,7 +404,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h3="" data-section="8" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-001" id="req-gr-001">§8 E2E 验收 (REQ-GR-001..005)
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" data-section="8" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-001" id="req-gr-001">§8 E2E 验收 (REQ-GR-001..005)
       <p>验证 Guardrail SDK 的探针 post_node 回调正确性、三种 SafetyPolicy（HaltAndVeto/LogOnly/SampleDowngrade）行为正确性、与 SG/HR 正交集成、以及 E2E veto 阻止不安全输出的完整链路。Guardrail 通过 <code>attach_guardrail</code> 注册到 CallbackChain，在 anchor 层的 post_node 回调中执行安全检测，与 SG 知识注入和 HR 多头路由完全正交。</p>
 
       <div data-criteria="">
@@ -426,7 +426,7 @@
     </section>
     
 
-    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="001" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-006" id="req-gr-006">REQ-GR-006: 零探针不触发 veto
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" data-section="001" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-006" id="req-gr-006">REQ-GR-006: 零探针不触发 veto
       <p>```</p>
       <p>输入: SmolLM2-135M-Instruct, GuardProbeWeights { weight=[0...], bias=0 },</p>
       <p>      HaltAndVeto { threshold: 0.99 }</p>
@@ -455,7 +455,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-006" data-test="TEST-GR-006" id="test-gr-006">TEST-GR-006: Guardrail SDK测试<p>验证REQ-GR-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GR-006" data-test="TEST-GR-006" id="test-gr-006">TEST-GR-006: Guardrail SDK测试<p>验证REQ-GR-006相关功能正确性</p>
       <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
       <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
       <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
@@ -463,7 +463,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="002" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-005" id="req-gr-005">REQ-GR-5: HaltAndVeto 触发
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" data-section="002" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-005" id="req-gr-005">REQ-GR-5: HaltAndVeto 触发
       <p>```</p>
       <p>输入: weight=[0...], bias=+20 (sigmoid(20) ≈ 1.0),</p>
       <p>      HaltAndVeto { threshold: 0.5 }</p>
@@ -491,7 +491,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-005" data-test="TEST-GR-5" id="test-gr-5">TEST-GR-5: Guardrail SDK测试<p>验证REQ-GR-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GR-005" data-test="TEST-GR-5" id="test-gr-5">TEST-GR-5: Guardrail SDK测试<p>验证REQ-GR-001相关功能正确性</p>
       <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
       <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
       <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
@@ -499,7 +499,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="003" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-002" id="req-gr-002">REQ-GR-002: LogOnly 不改变生成
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" data-section="003" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-002" id="req-gr-002">REQ-GR-002: LogOnly 不改变生成
       <p>```</p>
       <p>输入: weight=[0...], bias=+100, LogOnly</p>
       <p>基准: 无 guardrail 时 classify_binary 分数 = baseline</p>
@@ -527,7 +527,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-002" data-test="TEST-GR-002" id="test-gr-002">TEST-GR-002: Guardrail SDK测试<p>验证REQ-GR-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GR-002" data-test="TEST-GR-002" id="test-gr-002">TEST-GR-002: Guardrail SDK测试<p>验证REQ-GR-002相关功能正确性</p>
       <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
       <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
       <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
@@ -535,7 +535,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="004" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-003" id="req-gr-003">REQ-GR-003: SampleDowngrade 记录温度
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" data-section="004" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-003" id="req-gr-003">REQ-GR-003: SampleDowngrade 记录温度
       <p>```</p>
       <p>输入: SampleDowngrade { min_temperature: 0.3 }</p>
       <p>验收:</p>
@@ -561,7 +561,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-003" data-test="TEST-GR-003" id="test-gr-003">TEST-GR-003: Guardrail SDK测试<p>验证REQ-GR-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GR-003" data-test="TEST-GR-003" id="test-gr-003">TEST-GR-003: Guardrail SDK测试<p>验证REQ-GR-003相关功能正确性</p>
       <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
       <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
       <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>
@@ -569,7 +569,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" <h4="" data-section="005" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-004" id="req-gr-004">REQ-GR-004: attach / detach 生命周期
+    <section data-entity-ref="ENT-GUARDRAIL-PROBE ENT-SAFETY-POLICY ENT-CALLBACK-CHAIN" data-section="005" data-req-api="POST /client/guardrail/attach" data-req-entity="ENT-GUARDRAIL-PROBE,ENT-SAFETY-POLICY,ENT-CALLBACK-CHAIN" data-req-category="business" data-req-domain="gr" data-req-status="implemented" data-req="REQ-GR-004" id="req-gr-004">REQ-GR-004: attach / detach 生命周期
       <p>```</p>
       <p>验收:</p>
       <p>  (a) 多次 attach 返回单调递增 id</p>
@@ -595,7 +595,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-GR-004" data-test="TEST-GR-004" id="test-gr-004">TEST-GR-004: Guardrail SDK测试<p>验证REQ-GR-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-GR-004" data-test="TEST-GR-004" id="test-gr-004">TEST-GR-004: Guardrail SDK测试<p>验证REQ-GR-004相关功能正确性</p>
       <div id="guardrail-探针-post-node-回调正确" data-criterion="Guardrail 探针 post_node 回调正确">Guardrail 探针 post_node 回调正确</div>
       <div id="safetypolicy-haltandveto-logonly-sampledowngrade-正确" data-criterion="SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确">SafetyPolicy HaltAndVeto/LogOnly/SampleDowngrade 正确</div>
       <div id="与-sg-hr-正交集成" data-criterion="与 SG/HR 正交集成">与 SG/HR 正交集成</div>

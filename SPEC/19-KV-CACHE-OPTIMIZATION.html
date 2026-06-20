@@ -618,7 +618,7 @@
     <section id="s7" data-section="7">
       <h3>§7 REQ 清单</h3>
     </section>
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="001" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-001" id="req-kv-opt-001">REQ-KV-OPT-001: KvPageHeader 扩展 48B
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="001" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-001" id="req-kv-opt-001">REQ-KV-OPT-001: KvPageHeader 扩展 48B
       <p>KvPageHeader 从 40B 扩展为 48B，新增 quant_meta 区域（precision_tier, sink_mask, channel_bitmap_lo, k_scale_offset, v_scale_factor）和调度元数据区域（pipeline_id, layer_mask, tier_age, deopt_flags）。</p>
       <strong>文件</strong>: <code>src/kv_cache/mod.rs</code>
     
@@ -634,20 +634,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-001" data-test="TEST-KV-OPT-001" id="test-kv-opt-001">TEST-KV-OPT-001: KV Cache智能优化测试<p>验证REQ-KV-OPT-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-001" data-test="TEST-KV-OPT-001" id="test-kv-opt-001">TEST-KV-OPT-001: KV Cache智能优化测试<p>验证REQ-KV-OPT-001相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="002" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-002" id="req-kv-opt-002">REQ-KV-OPT-002: Epilogue 遥测 → importance_score 评分
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="002" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-002" id="req-kv-opt-002">REQ-KV-OPT-002: Epilogue 遥测 → importance_score 评分
       <p>Rust 调度器在 wave 间读取 KvPageHeader.telemetry，计算 0-255 的 importance_score，回写到 KvPageHeader.importance_score 字段。</p>
       <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code> (新增)
     
@@ -663,20 +663,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-002" data-test="TEST-KV-OPT-002" id="test-kv-opt-002">TEST-KV-OPT-002: KV Cache智能优化测试<p>验证REQ-KV-OPT-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-002" data-test="TEST-KV-OPT-002" id="test-kv-opt-002">TEST-KV-OPT-002: KV Cache智能优化测试<p>验证REQ-KV-OPT-002相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="003" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-003" id="req-kv-opt-003">REQ-KV-OPT-003: PrecisionTier 自动升降级
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="003" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-003" id="req-kv-opt-003">REQ-KV-OPT-003: PrecisionTier 自动升降级
       <p>基于 importance_score + 层位置 + KvPipeline + PageState 四维交叉决策，自动升级/降级 page 的 precision_tier。升降级时执行 requantize 数据转换。</p>
       <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code>
     
@@ -692,20 +692,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-003" data-test="TEST-KV-OPT-003" id="test-kv-opt-003">TEST-KV-OPT-003: KV Cache智能优化测试<p>验证REQ-KV-OPT-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-003" data-test="TEST-KV-OPT-003" id="test-kv-opt-003">TEST-KV-OPT-003: KV Cache智能优化测试<p>验证REQ-KV-OPT-003相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="004" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-004" id="req-kv-opt-004">REQ-KV-OPT-004: KIVI4/2 量化写回 Epilogue
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="004" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-004" id="req-kv-opt-004">REQ-KV-OPT-004: KIVI4/2 量化写回 Epilogue
       <p>QKV GEMM Epilogue 尾段扩展：在 KV 写入 page 时根据当前页 precision_tier 执行 KIVI 异构量化（K per-channel + V per-token），量化在寄存器内完成，STG 写入压缩数据 + scale。</p>
       <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code> Epilogue 尾段
     
@@ -721,20 +721,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-004" data-test="TEST-KV-OPT-004" id="test-kv-opt-004">TEST-KV-OPT-004: KV Cache智能优化测试<p>验证REQ-KV-OPT-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-004" data-test="TEST-KV-OPT-004" id="test-kv-opt-004">TEST-KV-OPT-004: KV Cache智能优化测试<p>验证REQ-KV-OPT-004相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="005" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-005" id="req-kv-opt-005">REQ-KV-OPT-005: Per-Head 稀疏 Bitmap (MUSTAFAR)
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="005" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-005" id="req-kv-opt-005">REQ-KV-OPT-005: Per-Head 稀疏 Bitmap (MUSTAFAR)
       <p>Epilogue head_entropy_range 差异大于阈值时，设置 KvPageHeader.channel_bitmap 标记低活跃 head。Sparse Variant 的 Attention KV load 使用 bitmap 跳过零通道。</p>
       <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code> + <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code>
     
@@ -750,20 +750,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-005" data-test="TEST-KV-OPT-005" id="test-kv-opt-005">TEST-KV-OPT-005: KV Cache智能优化测试<p>验证REQ-KV-OPT-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-005" data-test="TEST-KV-OPT-005" id="test-kv-opt-005">TEST-KV-OPT-005: KV Cache智能优化测试<p>验证REQ-KV-OPT-005相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="006" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-006" id="req-kv-opt-006">REQ-KV-OPT-006: Sink Token 动态保护 (SinkQ)
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="006" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-006" id="req-kv-opt-006">REQ-KV-OPT-006: Sink Token 动态保护 (SinkQ)
       <p>importance_score &gt; 200 或 softmax_max_avg &gt; SINK_THRESHOLD 的 page 标记 sink_mask。sink_mask 非零的 page precision_tier 锁定为 FP16，禁止降级。Epilogue 首次写入时检测。</p>
       <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code>
     
@@ -779,20 +779,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-006" data-test="TEST-KV-OPT-006" id="test-kv-opt-006">TEST-KV-OPT-006: KV Cache智能优化测试<p>验证REQ-KV-OPT-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-006" data-test="TEST-KV-OPT-006" id="test-kv-opt-006">TEST-KV-OPT-006: KV Cache智能优化测试<p>验证REQ-KV-OPT-006相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="007" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-007" id="req-kv-opt-007">REQ-KV-OPT-007: System Prompt 压缩复用 (KVzip)
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="007" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-007" id="req-kv-opt-007">REQ-KV-OPT-007: System Prompt 压缩复用 (KVzip)
       <p>KvPrefixIndex 匹配的 system prompt 页在首次 prefill 后执行 KVzip importance scoring。高重要性页保持 FP16，低重要性页降级到 KIVI2/Sparse。标记为 query-agnostic，ref_count 引用管理。</p>
       <strong>文件</strong>: <code>src/scheduler/prefix_index.rs</code> + <code>kv_optimizer.rs</code>
     
@@ -808,20 +808,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-007" data-test="TEST-KV-OPT-007" id="test-kv-opt-007">TEST-KV-OPT-007: KV Cache智能优化测试<p>验证REQ-KV-OPT-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-007" data-test="TEST-KV-OPT-007" id="test-kv-opt-007">TEST-KV-OPT-007: KV Cache智能优化测试<p>验证REQ-KV-OPT-007相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="008" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-008" id="req-kv-opt-008">REQ-KV-OPT-008: 跨层 Index 复用 (ChunkKV)
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="008" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-008" id="req-kv-opt-008">REQ-KV-OPT-008: 跨层 Index 复用 (ChunkKV)
       <p>仅在关键层（每 K 层）完整评估 importance_score，中间层复用最近关键层评分。K 值由离线校准确定。</p>
       <strong>文件</strong>: <code>src/scheduler/kv_optimizer.rs</code>
     
@@ -837,20 +837,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-008" data-test="TEST-KV-OPT-008" id="test-kv-opt-008">TEST-KV-OPT-008: KV Cache智能优化测试<p>验证REQ-KV-OPT-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-008" data-test="TEST-KV-OPT-008" id="test-kv-opt-008">TEST-KV-OPT-008: KV Cache智能优化测试<p>验证REQ-KV-OPT-008相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="009" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-009" id="req-kv-opt-009">REQ-KV-OPT-009: Mega-Kernel Variant 矩阵编译
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="009" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-009" id="req-kv-opt-009">REQ-KV-OPT-009: Mega-Kernel Variant 矩阵编译
       <p>为每个 PrecisionTier 编译独立 Attention KV load Variant。Variant 间共享 FFN/Norm/RoPE/Embed/lm_head 代码。build_batch 阶段按 tier 分组选择 Variant。</p>
       <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code> + <code>src/engine/mega_kernel.rs</code>
     
@@ -866,20 +866,20 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-009" data-test="TEST-KV-OPT-009" id="test-kv-opt-009">TEST-KV-OPT-009: KV Cache智能优化测试<p>验证REQ-KV-OPT-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-009" data-test="TEST-KV-OPT-009" id="test-kv-opt-009">TEST-KV-OPT-009: KV Cache智能优化测试<p>验证REQ-KV-OPT-009相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" <h4="" data-section="010" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-010" id="req-kv-opt-010">REQ-KV-OPT-010: Position-Agnostic System Prompt (CacheSlide)
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGED-SCHEDULER ENT-EPILOGUE-POLICY" data-section="010" data-req-api="POST /internal/kv/optimize" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGED-SCHEDULER,ENT-EPILOGUE-POLICY" data-req-category="business" data-req-domain="kv-opt" data-req-status="implemented" data-req="REQ-KV-OPT-010" id="req-kv-opt-010">REQ-KV-OPT-010: Position-Agnostic System Prompt (CacheSlide)
       <p>System prompt 页使用 position-agnostic 编码（跳过 RoPE 注入），decode 时通过 Weighted Correction Attention 补偿位置偏移。实现跨请求 KV 复用不受位置编码影响。</p>
       <strong>文件</strong>: <code>gllm-kernels/src/compiler/codegen/vm/plan_lower.rs</code> RoPE Epilogue + Attention
     
@@ -895,13 +895,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="./ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
+      <a data-xref-type="entity" data-xref-id="ent-paged-scheduler" href="../ARCH-DETAILED-DESIGNS#ent-paged-scheduler">ENT-PAGED-SCHEDULER
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-OPT-010" data-test="TEST-KV-OPT-010" id="test-kv-opt-010">TEST-KV-OPT-010: KV Cache智能优化测试<p>验证REQ-KV-OPT-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-OPT-010" data-test="TEST-KV-OPT-010" id="test-kv-opt-010">TEST-KV-OPT-010: KV Cache智能优化测试<p>验证REQ-KV-OPT-010相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>

@@ -231,7 +231,7 @@
       <p>}</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-FUSION-PLAN" <h4="" data-section="3.5" data-req-api="POST /internal/quant/pipeline" data-req-entity="ENT-COMPILER-GRAPH,ENT-MEGA-KERNEL-FN,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="pipeline" data-req-status="implemented" data-req="REQ-PIPELINE-001" id="req-pipeline-001">3.5 Embed+Rerank 融合管线 (REQ-PIPELINE-001)
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-FUSION-PLAN" data-section="3.5" data-req-api="POST /internal/quant/pipeline" data-req-entity="ENT-COMPILER-GRAPH,ENT-MEGA-KERNEL-FN,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="pipeline" data-req-status="implemented" data-req="REQ-PIPELINE-001" id="req-pipeline-001">3.5 Embed+Rerank 融合管线 (REQ-PIPELINE-001)
       <p>当 Client 挂载了 reranker 模型时，embed API 支持透明内部 rerank。用户体验与普通 embed 完全一致，但返回结果已按 query 相关性重排序。</p>
       <p>```rust</p>
       <p>// 前提：Client 已挂载 reranker</p>
@@ -282,7 +282,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-PIPELINE-001" data-test="TEST-PIPELINE-001" id="test-pipeline-001">TEST-PIPELINE-001: 管线功能测试<p>验证REQ-PIPELINE-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-PIPELINE-001" data-test="TEST-PIPELINE-001" id="test-pipeline-001">TEST-PIPELINE-001: 管线功能测试<p>验证REQ-PIPELINE-001相关功能正确性</p>
       <div id="融合管线实现完整且符合-spec-描述" data-criterion="融合管线实现完整且符合 SPEC 描述">融合管线实现完整且符合 SPEC 描述</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>
@@ -290,7 +290,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-FUSION-PLAN" <h4="" data-section="3.6" data-req-api="POST /internal/quant/pipeline" data-req-entity="ENT-COMPILER-GRAPH,ENT-MEGA-KERNEL-FN,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="pipeline" data-req-status="implemented" data-req="REQ-PIPELINE-002" id="req-pipeline-002">3.6 Embed+Rerank+LLM 完整 RAG 管线 (REQ-PIPELINE-002)
+    <section data-entity-ref="ENT-COMPILER-GRAPH ENT-MEGA-KERNEL-FN ENT-FUSION-PLAN" data-section="3.6" data-req-api="POST /internal/quant/pipeline" data-req-entity="ENT-COMPILER-GRAPH,ENT-MEGA-KERNEL-FN,ENT-FUSION-PLAN" data-req-category="business" data-req-domain="pipeline" data-req-status="implemented" data-req="REQ-PIPELINE-002" id="req-pipeline-002">3.6 Embed+Rerank+LLM 完整 RAG 管线 (REQ-PIPELINE-002)
       <p>当 Client 同时挂载了 reranker 和 generator 时，支持一体化 RAG：embed → rerank → LLM 生成。</p>
       <p>```rust</p>
       <p>let client = Client::builder()</p>
@@ -337,7 +337,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-PIPELINE-002" data-test="TEST-PIPELINE-002" id="test-pipeline-002">TEST-PIPELINE-002: 管线功能测试<p>验证REQ-PIPELINE-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-PIPELINE-002" data-test="TEST-PIPELINE-002" id="test-pipeline-002">TEST-PIPELINE-002: 管线功能测试<p>验证REQ-PIPELINE-002相关功能正确性</p>
       <div id="融合管线实现完整且符合-spec-描述" data-criterion="融合管线实现完整且符合 SPEC 描述">融合管线实现完整且符合 SPEC 描述</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       <div id="单元测试覆盖核心路径" data-criterion="单元测试覆盖核心路径">单元测试覆盖核心路径</div>

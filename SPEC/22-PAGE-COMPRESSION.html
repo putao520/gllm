@@ -807,7 +807,7 @@
       <li>在 §19 §2.1 现有 48B 基础上加 8B：codec(1) + compressed_size(4) + checksum(2) + storage_tier(1)</li>
       <li>验证：<code>std::mem::size_of::&lt;KvPageHeader&gt;() == 56</code></li>
     </section>
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-001" id="req-comp-001">REQ-COMP-001: CompressionCodec 枚举与选择算法
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-001" id="req-comp-001">REQ-COMP-001: CompressionCodec 枚举与选择算法
       <p>定义 CompressionCodec 枚举（None/Lz4/BitPackRle/NvcompAns/ZstdDict 五种变体），实现 select_codec(tier, hw, page_kind) 自动选择算法，权重页返回 None、KV 页按精度等级匹配最优 codec。</p>
       <li>实现 §3.1 的 4 个 codec 变体 (None/Lz4/BitPackRle/NvcompAns/ZstdDict)</li>
       <li>实现 §3.4 的 <code>select_codec(tier, hw, page_kind) -&gt; CompressionCodec</code></li>
@@ -828,14 +828,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-001" data-test="TEST-COMP-001" id="test-comp-001">TEST-COMP-001: 页级压缩+三级换入换出测试<p>验证REQ-COMP-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-001" data-test="TEST-COMP-001" id="test-comp-001">TEST-COMP-001: 页级压缩+三级换入换出测试<p>验证REQ-COMP-001相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -844,7 +844,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-002" id="req-comp-002">REQ-COMP-002: GPU JIT LZ4 解压
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-002" id="req-comp-002">REQ-COMP-002: GPU JIT LZ4 解压
       <p>实现 VmInstr::Lz4Decode 在 PTX/HIP/MSL 三后端的 JIT lowering，使用 shared memory 4KB 滑窗加 warp 协作 match copy，支持 CPU LZ4 编码后 GPU 端字节级 round-trip 解压。</p>
       <li>实现 <code>VmInstr::Lz4Decode { src, dst, size }</code> 在 PTX/HIP/MSL 三方言的 lowering</li>
       <li>shared memory 4KB 滑窗 + warp 协作 match copy</li>
@@ -864,14 +864,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-002" data-test="TEST-COMP-002" id="test-comp-002">TEST-COMP-002: 页级压缩+三级换入换出测试<p>验证REQ-COMP-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-002" data-test="TEST-COMP-002" id="test-comp-002">TEST-COMP-002: 页级压缩+三级换入换出测试<p>验证REQ-COMP-002相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -880,7 +880,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="004" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-003" id="req-comp-003">REQ-COMP-003: SIMD/GPU JIT BitPackRle 解压
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="004" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-003" id="req-comp-003">REQ-COMP-003: SIMD/GPU JIT BitPackRle 解压
       <p>实现 VmInstr::BitPackRleDecode 在 x86/AArch64/GPU 三平台的 JIT lowering，支持 KIVI4/KIVI2 nibble stream 的流式展开解码，全 lane 并行展开无分支。</p>
       <li>实现 <code>VmInstr::BitPackRleDecode { src, dst, tier }</code> 在 x86/ARM/GPU 三平台的 lowering</li>
       <li>KIVI4/KIVI2 nibble stream 流式展开</li>
@@ -900,14 +900,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-003" data-test="TEST-COMP-003" id="test-comp-003">TEST-COMP-003: 页级压缩+三级换入换出测试<p>验证REQ-COMP-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-003" data-test="TEST-COMP-003" id="test-comp-003">TEST-COMP-003: 页级压缩+三级换入换出测试<p>验证REQ-COMP-003相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -916,7 +916,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="005" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-004" id="req-comp-004">REQ-COMP-004: nvCOMP 集成 (feature-gated)
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="005" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-004" id="req-comp-004">REQ-COMP-004: nvCOMP 集成 (feature-gated)
       <p>通过 cargo feature "nvcomp" 启用 NVIDIA nvCOMP ANS 熵编码集成，运行时检测 nvCOMP 库存在后走硬件原生解压路径（100+ GB/s），缺失时自动回退到自研 LZ4。</p>
       <li><code>cargo feature = "nvcomp"</code> 启用</li>
       <li>runtime 检测 nvCOMP 库存在，否则 fallback 到 LZ4</li>
@@ -936,14 +936,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-004" data-test="TEST-COMP-004" id="test-comp-004">TEST-COMP-004: 页级压缩+三级换入换出测试<p>验证REQ-COMP-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-004" data-test="TEST-COMP-004" id="test-comp-004">TEST-COMP-004: 页级压缩+三级换入换出测试<p>验证REQ-COMP-004相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -952,7 +952,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="006" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-005" id="req-comp-005">REQ-COMP-005: StorageTier 三级
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="006" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-005" id="req-comp-005">REQ-COMP-005: StorageTier 三级
       <p>定义 StorageTier 三级存储层级枚举（GpuHbm/CpuDram/Nvme），与 06-RUNTIME Tier 和 21-WEIGHT-PAGING WeightTier 实现 From/TryFrom 双向转换，集成到 UnifiedVirtualPage.tier 字段。</p>
       <li>实现 <code>StorageTier::{GpuHbm, CpuDram, Nvme}</code></li>
       <li>集成到 §21 <code>UnifiedVirtualPage.tier</code>（不破坏 §21 的 WeightTier 语义）</li>
@@ -972,14 +972,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-005" data-test="TEST-COMP-005" id="test-comp-005">TEST-COMP-005: 页级压缩+三级换入换出测试<p>验证REQ-COMP-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-005" data-test="TEST-COMP-005" id="test-comp-005">TEST-COMP-005: 页级压缩+三级换入换出测试<p>验证REQ-COMP-005相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -988,7 +988,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="007" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-006" id="req-comp-006">REQ-COMP-006: Eviction Worker
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="007" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-006" id="req-comp-006">REQ-COMP-006: Eviction Worker
       <p>实现异步 Eviction Worker 线程，当 GPU HBM 压力超过 85% 时自动选取 importance_score 最低的页面批量压缩并 DMA 搬运到 CPU DRAM，随后释放 GPU 物理页。</p>
       <li>异步线程，HBM pressure &gt; 0.85 触发</li>
       <li>选 score 最低的 N 个 page，并行压缩 + DMA 到 DRAM</li>
@@ -1008,14 +1008,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-006" data-test="TEST-COMP-006" id="test-comp-006">TEST-COMP-006: 页级压缩+三级换入换出测试<p>验证REQ-COMP-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-006" data-test="TEST-COMP-006" id="test-comp-006">TEST-COMP-006: 页级压缩+三级换入换出测试<p>验证REQ-COMP-006相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1024,7 +1024,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-007" id="req-comp-007">REQ-COMP-007: Swap-In Worker
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="008" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-007" id="req-comp-007">REQ-COMP-007: Swap-In Worker
       <p>实现 Swap-In Worker，调度器通过 prefetch_swap_in(page_id) 触发，将压缩字节流从 DRAM DMA 传回 HBM 并标记为 lazy decode，下次 Mega-Kernel 读取时 JIT 解压。</p>
       <li>调度器调用 <code>prefetch_swap_in(page_id)</code></li>
       <li>DMA 压缩字节流 → HBM, lazy decode</li>
@@ -1044,14 +1044,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-007" data-test="TEST-COMP-007" id="test-comp-007">TEST-COMP-007: 页级压缩+三级换入换出测试<p>验证REQ-COMP-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-007" data-test="TEST-COMP-007" id="test-comp-007">TEST-COMP-007: 页级压缩+三级换入换出测试<p>验证REQ-COMP-007相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1060,7 +1060,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="009" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-008" id="req-comp-008">REQ-COMP-008: Mega-Kernel JIT 解压注入
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="009" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-008" id="req-comp-008">REQ-COMP-008: Mega-Kernel JIT 解压注入
       <p>在 Mega-Kernel attention epilogue 中插入 codec 检查逻辑：读取 page header.codec，非 None 时 JIT 调用对应解压 VmInstr（Lz4Decode/BitPackRleDecode/NvcompDecode），解压完成后写回 codec=None。</p>
       <li>attention kernel epilogue 检查 <code>header.codec</code></li>
       <li>codec != None → JIT 调用对应解压 VmInstr → 写回 codec=None</li>
@@ -1080,14 +1080,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-008" data-test="TEST-COMP-008" id="test-comp-008">TEST-COMP-008: 页级压缩+三级换入换出测试<p>验证REQ-COMP-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-008" data-test="TEST-COMP-008" id="test-comp-008">TEST-COMP-008: 页级压缩+三级换入换出测试<p>验证REQ-COMP-008相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1096,7 +1096,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="010" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-009" id="req-comp-009">REQ-COMP-009: 权重页压缩 (与 §21 协同)
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="010" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-009" id="req-comp-009">REQ-COMP-009: 权重页压缩 (与 §21 协同)
       <p>扩展 UnifiedVirtualPage 增加 codec/compressed_size/decompressed_size 字段，ExpertWeightPrefetcher 命中冷专家后调用解压，MoE 模型冷专家启用 BitPackRle 实现内存节省。</p>
       <li>扩展 <code>UnifiedVirtualPage</code> 加 codec/compressed_size/decompressed_size</li>
       <li>ExpertWeightPrefetcher 命中后调用解压</li>
@@ -1116,14 +1116,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-009" data-test="TEST-COMP-009" id="test-comp-009">TEST-COMP-009: 页级压缩+三级换入换出测试<p>验证REQ-COMP-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-009" data-test="TEST-COMP-009" id="test-comp-009">TEST-COMP-009: 页级压缩+三级换入换出测试<p>验证REQ-COMP-009相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1132,7 +1132,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="011" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-010" id="req-comp-010">REQ-COMP-010: 评分驱动迁出
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="011" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-010" id="req-comp-010">REQ-COMP-010: 评分驱动迁出
       <p>基于 §19 importance_score 实现 EvictionScorer，综合 tier_age（新页冷却期保护）和 layer 深度（浅层不积极压缩）多维评分，确保 hot pages 不被错误驱逐。</p>
       <li>基于 §19 §3.1 importance_score</li>
       <li>同时考虑 tier_age (新页不立即压缩) 和 layer 深度 (浅层不积极压缩)</li>
@@ -1152,14 +1152,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-010" data-test="TEST-COMP-010" id="test-comp-010">TEST-COMP-010: 页级压缩+三级换入换出测试<p>验证REQ-COMP-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-010" data-test="TEST-COMP-010" id="test-comp-010">TEST-COMP-010: 页级压缩+三级换入换出测试<p>验证REQ-COMP-010相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1168,7 +1168,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="012" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-011" id="req-comp-011">REQ-COMP-011: Cold-Tier ZstdDict
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="012" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-011" id="req-comp-011">REQ-COMP-011: Cold-Tier ZstdDict
       <p>NVMe 存储层使用 ZstdDict 字典压缩模式，离线训练每个模型一份共享字典，冷页换入时仅 CPU 端解压不上 GPU，实现 512K 长上下文 KV cache 在 NVMe 低占用存储。</p>
       <li>NVMe 层使用 ZstdDict</li>
       <li>离线训练字典（每个模型一份），cold-load 时只 CPU 解压（不上 GPU 直接解压）</li>
@@ -1188,14 +1188,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-011" data-test="TEST-COMP-011" id="test-comp-011">TEST-COMP-011: 页级压缩+三级换入换出测试<p>验证REQ-COMP-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-011" data-test="TEST-COMP-011" id="test-comp-011">TEST-COMP-011: 页级压缩+三级换入换出测试<p>验证REQ-COMP-011相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1204,7 +1204,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="013" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-012" id="req-comp-012">REQ-COMP-012: 数值正确性回归测试
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="013" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-012" id="req-comp-012">REQ-COMP-012: 数值正确性回归测试
       <p>验证压缩/解压 round-trip 的数值正确性：全 None 路径 vs Lz4 路径、全 None vs BitPackRle 路径、混合 codec batch 三种场景的输出 token 必须完全一致。</p>
       <li>TEST-COMP-001: 全 None 路径 vs Lz4 路径输出 token 完全一致</li>
       <li>TEST-COMP-002: 全 None 路径 vs BitPackRle 路径输出 token 完全一致</li>
@@ -1224,14 +1224,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-012" data-test="TEST-COMP-012" id="test-comp-012">TEST-COMP-012: 页级压缩+三级换入换出测试<p>验证REQ-COMP-012相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-012" data-test="TEST-COMP-012" id="test-comp-012">TEST-COMP-012: 页级压缩+三级换入换出测试<p>验证REQ-COMP-012相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1240,7 +1240,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="014" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-013" id="req-comp-013">REQ-COMP-013: PageMigrationActor 物理搬运
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="014" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-013" id="req-comp-013">REQ-COMP-013: PageMigrationActor 物理搬运
       <p>实现 PageMigrationActor 异步线程消费 MigrationQueue，处理 4 种 MigrationCommand（EvictToDram/PromoteToHbm/EvictToNvme/PromoteToDram），真实调用 backend cuMemcpy 和 NVMe pwrite/pread 完成物理数据搬运。</p>
       <li>实现 §7.5.1 异步 actor + 4 个 MigrationCommand 处理路径</li>
       <li>真实调用 backend cuMemcpy / NVMe pwrite/pread（不止更新页表元数据）</li>
@@ -1260,14 +1260,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-013" data-test="TEST-COMP-013" id="test-comp-013">TEST-COMP-013: 页级压缩+三级换入换出测试<p>验证REQ-COMP-013相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-013" data-test="TEST-COMP-013" id="test-comp-013">TEST-COMP-013: 页级压缩+三级换入换出测试<p>验证REQ-COMP-013相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1276,7 +1276,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="015" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-014" id="req-comp-014">REQ-COMP-014: NVMe Swap File
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="015" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-014" id="req-comp-014">REQ-COMP-014: NVMe Swap File
       <p>实现 NVMe Swap File 二进制格式（64B SwapFileHeader + 固定大小 slot 按 page_id 索引），使用 O_DIRECT + 4096 对齐 I/O 实现高性能 pwrite/pread，存储路径 ~/.gllm/swap/&lt;session_id&gt;.swap。</p>
       <li>实现 §7.5.3 文件格式：header + 固定大小 slot</li>
       <li>O_DIRECT + 4096 对齐 I/O</li>
@@ -1297,14 +1297,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-014" data-test="TEST-COMP-014" id="test-comp-014">TEST-COMP-014: 页级压缩+三级换入换出测试<p>验证REQ-COMP-014相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-014" data-test="TEST-COMP-014" id="test-comp-014">TEST-COMP-014: 页级压缩+三级换入换出测试<p>验证REQ-COMP-014相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>
@@ -1313,7 +1313,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" <h4="" data-section="016" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-015" id="req-comp-015">REQ-COMP-015: 端到端 Tier 流转
+    <section data-entity-ref="ENT-COMPRESSION-CODEC ENT-STORAGE-TIER ENT-PAGE-MIGRATION-ACTOR ENT-EVICTION-SCORER ENT-KV-PAGE-HEADER" data-section="016" data-req-api="POST /compile" data-req-entity="ENT-COMPRESSION-CODEC,ENT-STORAGE-TIER,ENT-PAGE-MIGRATION-ACTOR,ENT-EVICTION-SCORER,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="comp" data-req-status="implemented" data-req="REQ-COMP-015" id="req-comp-015">REQ-COMP-015: 端到端 Tier 流转
       <p>实现调度器触发协议（pressure 驱动 evict、缺页驱动 promote）和 Mega-Kernel 同步等待 swap-in 完成机制，验证 HBM 限制下长上下文自动 evict 到 DRAM 并按需回流的端到端 Tier 流转。</p>
       <li>调度器触发协议（§7.5.4）：pressure 触发 evict、缺页触发 promote</li>
       <li>Mega-Kernel 同步等待 swap-in 完成（§7.5.5）</li>
@@ -1333,14 +1333,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="./22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
-      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="./22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
+      <a data-xref-type="entity" data-xref-id="ent-page-migration-actor" href="../22-PAGE-COMPRESSION#ent-page-migration-actor">ENT-PAGE-MIGRATION-ACTOR
+      <a data-xref-type="entity" data-xref-id="ent-eviction-scorer" href="../22-PAGE-COMPRESSION#ent-eviction-scorer">ENT-EVICTION-SCORER
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-COMP-015" data-test="TEST-COMP-015" id="test-comp-015">TEST-COMP-015: 页级压缩+三级换入换出测试<p>验证REQ-COMP-015相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-COMP-015" data-test="TEST-COMP-015" id="test-comp-015">TEST-COMP-015: 页级压缩+三级换入换出测试<p>验证REQ-COMP-015相关功能正确性</p>
       <div id="页级压缩-codec-实现完整" data-criterion="页级压缩 codec 实现完整">页级压缩 codec 实现完整</div>
       <div id="压缩-解压-jit-codegen-三后端覆盖" data-criterion="压缩/解压 JIT codegen 三后端覆盖">压缩/解压 JIT codegen 三后端覆盖</div>
       <div id="pagemigrationactor-dma-nvme-传输正确" data-criterion="PageMigrationActor DMA + NVMe 传输正确">PageMigrationActor DMA + NVMe 传输正确</div>

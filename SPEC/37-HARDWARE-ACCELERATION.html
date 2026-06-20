@@ -296,7 +296,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="1" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-001" id="req-hwacc-001">1. Sparse Tensor Core 2:4 结构化稀疏 (REQ-HWACC-001)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="1" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-001" id="req-hwacc-001">1. Sparse Tensor Core 2:4 结构化稀疏 (REQ-HWACC-001)
       <p>利用 SM80+ Sparse Tensor Core 的 2:4 结构化稀疏模式实现 GEMM 吞吐量翻倍。实现 SparseGemm VmInstr 及 PTX lowering，DeviceProfile 驱动 has_sparse_tensor 硬件检测，无硬件支持时不生成特化代码。</p>
 
       <div data-criteria="">
@@ -312,14 +312,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-001" data-test="TEST-HWACC-001" id="test-hwacc-001">TEST-HWACC-001: 硬件加速全面集成测试<p>验证REQ-HWACC-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-001" data-test="TEST-HWACC-001" id="test-hwacc-001">TEST-HWACC-001: 硬件加速全面集成测试<p>验证REQ-HWACC-001相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -397,7 +397,7 @@
       <li>GEMM emit 根据 <code>has_sparse_tensor</code> 选择 <code>SparseGemm</code> vs <code>DotProduct</code></li>
       <li>SparseGemm + Epilogue 融合与 Dense GEMM 相同（累加器直接消费）</li>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="2" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-002" id="req-hwacc-002">2. SM100 原生 FP4 矩阵乘 (REQ-HWACC-002)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="2" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-002" id="req-hwacc-002">2. SM100 原生 FP4 矩阵乘 (REQ-HWACC-002)
       <p>利用 SM100+ Blackwell tcgen05.mma .f4 指令实现硬件原生 NVFP4 4-bit 浮点矩阵乘法，输入 4-bit E2M1 累加 F32 零软件解量化。实现 NativeFp4Gemm/NativeFp4SparseGemm VmInstr 及 DeviceProfile has_native_fp4 检测。</p>
 
       <div data-criteria="">
@@ -413,14 +413,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-002" data-test="TEST-HWACC-002" id="test-hwacc-002">TEST-HWACC-002: 硬件加速全面集成测试<p>验证REQ-HWACC-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-002" data-test="TEST-HWACC-002" id="test-hwacc-002">TEST-HWACC-002: 硬件加速全面集成测试<p>验证REQ-HWACC-002相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -512,7 +512,7 @@
       <p>    NVFP4 权重 → 软件解量化 (AVX2/AVX-512 LUT) → VFMA/VDPBF16PS</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="3" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-003" id="req-hwacc-003">3. 动态精度热切换 (REQ-HWACC-003)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="3" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-003" id="req-hwacc-003">3. 动态精度热切换 (REQ-HWACC-003)
       <p>实现 per-layer 运行时计算精度选择（FP16/FP8/NVFP4/INT8），通过 TraceOp::DynamicPrecisionSelect 分析权重视计后用 JMP table 选择对应 GEMM 变体，编译时生成全部路径运行时零切换开销。</p>
 
       <div data-criteria="">
@@ -528,14 +528,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-003" data-test="TEST-HWACC-003" id="test-hwacc-003">TEST-HWACC-003: 硬件加速全面集成测试<p>验证REQ-HWACC-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-003" data-test="TEST-HWACC-003" id="test-hwacc-003">TEST-HWACC-003: 硬件加速全面集成测试<p>验证REQ-HWACC-003相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -623,7 +623,7 @@
       <li>内存开销: 编译 4 个 GEMM 变体 → 代码量 4x (需 L1i 预算控制)</li>
       <li>适用场景: Prefill (长序列) — decode 每步只 1 token，不值得分析</li>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="4" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-004" id="req-hwacc-004">4. MX Microscaling 硬件原生路径 (REQ-HWACC-004)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="4" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-004" id="req-hwacc-004">4. MX Microscaling 硬件原生路径 (REQ-HWACC-004)
       <p>实现 OCP MX Microscaling 规范的硬件加速路径，SM100+ 走 tcgen05 原生 FP4/FP8/INT8，SM90 及以下走软件解量化后 WGMMA/mma.sync，QuantBlockLoad VmInstr 按 DeviceProfile 自动选择硬件原生或软件解量化路径。</p>
 
       <div data-criteria="">
@@ -639,14 +639,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-004" data-test="TEST-HWACC-004" id="test-hwacc-004">TEST-HWACC-004: 硬件加速全面集成测试<p>验证REQ-HWACC-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-004" data-test="TEST-HWACC-004" id="test-hwacc-004">TEST-HWACC-004: 硬件加速全面集成测试<p>验证REQ-HWACC-004相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -799,7 +799,7 @@
       <p>}</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="5" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-005" id="req-hwacc-005">5. TMA 2D Tensor Copy (REQ-HWACC-005)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="5" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-005" id="req-hwacc-005">5. TMA 2D Tensor Copy (REQ-HWACC-005)
       <p>&gt; <strong>状态</strong>: VmInstr + PTX lowering 已完成。详见 Phase 1 (<code>1cd2cbc0</code>) + Phase 2 (<code>13bc6b22</code>)。</p>
     
       <div data-criteria="">
@@ -815,14 +815,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-005" data-test="TEST-HWACC-005" id="test-hwacc-005">TEST-HWACC-005: 硬件加速全面集成测试<p>验证REQ-HWACC-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-005" data-test="TEST-HWACC-005" id="test-hwacc-005">TEST-HWACC-005: 硬件加速全面集成测试<p>验证REQ-HWACC-005相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -912,7 +912,7 @@
       <p>}</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="6" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-006" id="req-hwacc-006">6. Warp Specialization (REQ-HWACC-006)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="6" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-006" id="req-hwacc-006">6. Warp Specialization (REQ-HWACC-006)
       <p>&gt; <strong>状态</strong>: VmInstr 已实现。WarpRoleDeclare/WarpBarrierArrive/WarpBarrierWait。</p>
     
       <div data-criteria="">
@@ -928,14 +928,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-006" data-test="TEST-HWACC-006" id="test-hwacc-006">TEST-HWACC-006: 硬件加速全面集成测试<p>验证REQ-HWACC-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-006" data-test="TEST-HWACC-006" id="test-hwacc-006">TEST-HWACC-006: 硬件加速全面集成测试<p>验证REQ-HWACC-006相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -1003,7 +1003,7 @@
       <p>  WGMMA(smem_A, smem_B, acc);</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="7" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-007" id="req-hwacc-007">7. Cluster Cooperation (REQ-HWACC-007)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="7" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-007" id="req-hwacc-007">7. Cluster Cooperation (REQ-HWACC-007)
       <p>利用 SM90+ Thread Block Cluster 的 Distributed Shared Memory 实现跨 CTA KV Cache 共享和 AllReduce 局部聚合。实现 ClusterBarrierInit/ClusterStore/ClusterLoad VmInstr，用于 Prefill 拆分和多 tile softmax 聚合。</p>
 
       <div data-criteria="">
@@ -1019,14 +1019,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-007" data-test="TEST-HWACC-007" id="test-hwacc-007">TEST-HWACC-007: 硬件加速全面集成测试<p>验证REQ-HWACC-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-007" data-test="TEST-HWACC-007" id="test-hwacc-007">TEST-HWACC-007: 硬件加速全面集成测试<p>验证REQ-HWACC-007相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -1056,7 +1056,7 @@
       <p>2. <strong>AllReduce 局部</strong>: Cluster 内 warp reduce → 减少 global atomic</p>
       <p>3. <strong>Prefill 拆分</strong>: 大 prompt 拆到多 CTA，Cluster 内聚合 softmax max/sum</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="8" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-008" id="req-hwacc-008">8. TMEM (Tensor Memory) (REQ-HWACC-008)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="8" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-008" id="req-hwacc-008">8. TMEM (Tensor Memory) (REQ-HWACC-008)
       <p>利用 SM100+ TMEM 片上 tensor 专用存储（约 1MB/SM，延迟 &lt;1ns）优化 attention softmax score 暂存和 MoE expert 中间结果。实现 TmemAlloc/TmemLoad/TmemStore/TmemDealloc VmInstr 及 PTX lowering。</p>
 
       <div data-criteria="">
@@ -1072,14 +1072,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-008" data-test="TEST-HWACC-008" id="test-hwacc-008">TEST-HWACC-008: 硬件加速全面集成测试<p>验证REQ-HWACC-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-008" data-test="TEST-HWACC-008" id="test-hwacc-008">TEST-HWACC-008: 硬件加速全面集成测试<p>验证REQ-HWACC-008相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -1151,7 +1151,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="9" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-009" id="req-hwacc-009">9. FP8 Sparse GEMM (REQ-HWACC-009)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="9" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-009" id="req-hwacc-009">9. FP8 Sparse GEMM (REQ-HWACC-009)
       <p>实现 SM100+ FP8 输入与 2:4 稀疏同时生效的 SparseFp8Gemm VmInstr，相比 dense FP16 实现 4x 吞吐提升（2x 稀疏 + 2x FP8），需同时管理 2:4 稀疏掩码和 FP8 scale factor。</p>
 
       <div data-criteria="">
@@ -1167,14 +1167,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-009" data-test="TEST-HWACC-009" id="test-hwacc-009">TEST-HWACC-009: 硬件加速全面集成测试<p>验证REQ-HWACC-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-009" data-test="TEST-HWACC-009" id="test-hwacc-009">TEST-HWACC-009: 硬件加速全面集成测试<p>验证REQ-HWACC-009相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -1214,7 +1214,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="10" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-010" id="req-hwacc-010">10. Async Pipeline Double Buffering (REQ-HWACC-010)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="10" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-010" id="req-hwacc-010">10. Async Pipeline Double Buffering (REQ-HWACC-010)
       <p>&gt; <strong>状态</strong>: GEMM pipelined 已实现 (gemm_emit.rs)。使用 SharedMemAsyncStore + SharedMemAsyncWaitGroup。</p>
     
       <div data-criteria="">
@@ -1230,14 +1230,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-010" data-test="TEST-HWACC-010" id="test-hwacc-010">TEST-HWACC-010: 硬件加速全面集成测试<p>验证REQ-HWACC-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-010" data-test="TEST-HWACC-010" id="test-hwacc-010">TEST-HWACC-010: 硬件加速全面集成测试<p>验证REQ-HWACC-010相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -1271,7 +1271,7 @@
       <p>}</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="11" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-011" id="req-hwacc-011">11. NVFP4 Split-Plane 存储 (REQ-HWACC-011)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="11" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-011" id="req-hwacc-011">11. NVFP4 Split-Plane 存储 (REQ-HWACC-011)
       <p>&gt; <strong>状态</strong>: Loader 已实现 (nvfp4_pairing.rs)。支持 SafeTensors Split-Plane 布局。</p>
     
       <div data-criteria="">
@@ -1287,14 +1287,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-011" data-test="TEST-HWACC-011" id="test-hwacc-011">TEST-HWACC-011: 硬件加速全面集成测试<p>验证REQ-HWACC-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-011" data-test="TEST-HWACC-011" id="test-hwacc-011">TEST-HWACC-011: 硬件加速全面集成测试<p>验证REQ-HWACC-011相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>
@@ -1323,7 +1323,7 @@
       <p>// Epilogue: F32 累加器 × global_scale → F32 输出</p>
       <p>```</p>
     </section>
-    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" <h3="" data-section="12" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-012" id="req-hwacc-012">12. Structured 2:4 自动剪枝 (REQ-HWACC-012)
+    <section data-entity-ref="ENT-VM-INSTR ENT-DEVICE-PROFILE ENT-ISA-PROFILE ENT-HW-OPT-ENGINE ENT-SYSTEM-TOPOLOGY" data-section="12" data-req-api="POST /internal/hw/accel" data-req-entity="ENT-VM-INSTR,ENT-DEVICE-PROFILE,ENT-ISA-PROFILE,ENT-HW-OPT-ENGINE,ENT-SYSTEM-TOPOLOGY" data-req-category="business" data-req-domain="hwacc" data-req-status="implemented" data-req="REQ-HWACC-012" id="req-hwacc-012">12. Structured 2:4 自动剪枝 (REQ-HWACC-012)
       <p>&gt; <strong>状态</strong>: 已实现 (static_compression.rs::prune_dead_columns_24)。</p>
     
       <div data-criteria="">
@@ -1339,14 +1339,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="./37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
-      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="./37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
+      <a data-xref-type="entity" data-xref-id="ent-isa-profile" href="../37-HARDWARE-ACCELERATION#ent-isa-profile">ENT-ISA-PROFILE
+      <a data-xref-type="entity" data-xref-id="ent-hw-opt-engine" href="../37-HARDWARE-ACCELERATION#ent-hw-opt-engine">ENT-HW-OPT-ENGINE
       
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-HWACC-012" data-test="TEST-HWACC-012" id="test-hwacc-012">TEST-HWACC-012: 硬件加速全面集成测试<p>验证REQ-HWACC-012相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-HWACC-012" data-test="TEST-HWACC-012" id="test-hwacc-012">TEST-HWACC-012: 硬件加速全面集成测试<p>验证REQ-HWACC-012相关功能正确性</p>
       <div id="硬件加速-vminstr-ptx-lowering-实现" data-criterion="硬件加速 VmInstr + PTX lowering 实现">硬件加速 VmInstr + PTX lowering 实现</div>
       <div id="deviceprofile-驱动硬件能力检测" data-criterion="DeviceProfile 驱动硬件能力检测">DeviceProfile 驱动硬件能力检测</div>
       <div id="feature-gate-无硬件支持时不生成特化代码" data-criterion="feature gate: 无硬件支持时不生成特化代码">feature gate: 无硬件支持时不生成特化代码</div>

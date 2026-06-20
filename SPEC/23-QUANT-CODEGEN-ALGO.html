@@ -1381,7 +1381,7 @@
     <section id="s6" data-section="6">
       <h3>§6 REQ 清单</h3>
     </section>
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="001" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-001" id="req-qcg-001">REQ-QCG-001: QuantFormatDescriptor 元数据
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="001" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-001" id="req-qcg-001">REQ-QCG-001: QuantFormatDescriptor 元数据
       <p>实现 QuantFormatDescriptor 统一量化元数据描述结构，含 data_kind 字段对 31 种 QuantType 按计算语义分族（原生浮点/INT8/INT4/INT5/INT6/FP4/SuperLowBit），注册全部格式到 QuantFormatRegistry。</p>
       <li>实现 <code>QuantFormatDescriptor</code> 含 <code>data_kind: QuantDataKind</code> 字段</li>
       <li>注册 §0 清单中全部 QuantType（按族注册，同族共享 data_kind）</li>
@@ -1400,13 +1400,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-001" data-test="TEST-QCG-001" id="test-qcg-001">TEST-QCG-001: 全量化格式算法化测试<p>验证REQ-QCG-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-001" data-test="TEST-QCG-001" id="test-qcg-001">TEST-QCG-001: 全量化格式算法化测试<p>验证REQ-QCG-001相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1414,7 +1414,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="002" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-002" id="req-qcg-002">REQ-QCG-002: VmInstr 原生量化指令集
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="002" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-002" id="req-qcg-002">REQ-QCG-002: VmInstr 原生量化指令集
       <p>新增量化专用 VmInstr 变体（QuantWeightLoad/NibbleUnpack/SignExtend/HighBitMerge/CodebookLookup/ScaleLoad/Int8Dot/Int4x8Dot/Fp4Dot/Bf16Dot/Fp16Dot 等），实现 x86_64 ISA lowering 和寄存器分配/验证。</p>
       <li>新增 §4.3 列出的全部 VmInstr 变体</li>
       <li>每种指令在 x86_64 ISA lowering 实现</li>
@@ -1434,13 +1434,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-002" data-test="TEST-QCG-002" id="test-qcg-002">TEST-QCG-002: 全量化格式算法化测试<p>验证REQ-QCG-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-002" data-test="TEST-QCG-002" id="test-qcg-002">TEST-QCG-002: 全量化格式算法化测试<p>验证REQ-QCG-002相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1448,7 +1448,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="003" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-003" id="req-qcg-003">REQ-QCG-003: 参数化微核模板
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="003" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-003" id="req-qcg-003">REQ-QCG-003: 参数化微核模板
       <p>实现 emit_quant_gemm_tiled 统一参数化微核模板，通过 (QuantFormatDescriptor, DeviceProfile.dot_product_cap()) 驱动 prologue/compute/epilogue 三阶段自动实例化，一个模板覆盖所有量化格式和硬件组合。</p>
       <li>实现 <code>emit_quant_gemm_tiled</code> 统一微核模板</li>
       <li>实现 <code>emit_quant_prologue</code> / <code>emit_unpack_weight</code> / <code>emit_dot_product</code> 参数化组件</li>
@@ -1468,13 +1468,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-003" data-test="TEST-QCG-003" id="test-qcg-003">TEST-QCG-003: 全量化格式算法化测试<p>验证REQ-QCG-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-003" data-test="TEST-QCG-003" id="test-qcg-003">TEST-QCG-003: 全量化格式算法化测试<p>验证REQ-QCG-003相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1482,7 +1482,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="004" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-004" id="req-qcg-004">REQ-QCG-004: INT8 数据路径 (Q8_0/Q8_1/Q8K)
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="004" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-004" id="req-qcg-004">REQ-QCG-004: INT8 数据路径 (Q8_0/Q8_1/Q8K)
       <p>实现 INT8 整数量化路径，Int8Dot VmInstr 在 x86 VNNI (VPDPBUSD)、ARM SVE2 (SDOT)、GPU Tensor Core (IMMA/WMMA) 的 ISA lowering，支持 Q8_0/Q8_1/Q8K 格式的原生 dot-product 计算。</p>
       <li><code>Int8Dot</code> VmInstr 的各 ISA lowering (VPDPBUSD / SDOT / IMMA / WMMA)</li>
       <li><code>QuantizeF32ToI8</code> 激活量化指令</li>
@@ -1501,13 +1501,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-004" data-test="TEST-QCG-004" id="test-qcg-004">TEST-QCG-004: 全量化格式算法化测试<p>验证REQ-QCG-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-004" data-test="TEST-QCG-004" id="test-qcg-004">TEST-QCG-004: 全量化格式算法化测试<p>验证REQ-QCG-004相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1515,7 +1515,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="005" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-005" id="req-qcg-005">REQ-QCG-005: INT4 数据路径 (Q4_0/Q4_1/Q4K)
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="005" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-005" id="req-qcg-005">REQ-QCG-005: INT4 数据路径 (Q4_0/Q4_1/Q4K)
       <p>实现 INT4 量化路径，通过 NibbleUnpack + SignExtend 将 packed nibble 展开为 INT8 后走 dot-product，以及 GFX12 a4w8 原生 Int4x8Dot 路径，支持 Q4_0/Q4_1/Q4K 格式。</p>
       <li><code>NibbleUnpack</code> + <code>SignExtend</code> + <code>Int8Dot</code> 组合路径</li>
       <li><code>Int4x8Dot</code> 原生路径 (GFX12 a4w8 ISA lowering)</li>
@@ -1534,13 +1534,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-005" data-test="TEST-QCG-005" id="test-qcg-005">TEST-QCG-005: 全量化格式算法化测试<p>验证REQ-QCG-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-005" data-test="TEST-QCG-005" id="test-qcg-005">TEST-QCG-005: 全量化格式算法化测试<p>验证REQ-QCG-005相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1548,7 +1548,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="006" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-006" id="req-qcg-006">REQ-QCG-006: INT5/INT6 数据路径 (Q5_0/Q5_1/Q5K/Q6K)
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="006" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-006" id="req-qcg-006">REQ-QCG-006: INT5/INT6 数据路径 (Q5_0/Q5_1/Q5K/Q6K)
       <p>实现 INT5/INT6 量化路径，通过 HighBitMerge 指令将 qs 低位与 qh 高位合并为完整 5/6-bit 值，展开后走 INT8 dot-product，支持 Q5_0/Q5_1/Q5K/Q6K 格式。</p>
       <li><code>HighBitMerge</code> 指令 (qs+qh 合并)</li>
       <li>5/6-bit 展开 → INT8 dot-product 路径</li>
@@ -1567,13 +1567,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-006" data-test="TEST-QCG-006" id="test-qcg-006">TEST-QCG-006: 全量化格式算法化测试<p>验证REQ-QCG-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-006" data-test="TEST-QCG-006" id="test-qcg-006">TEST-QCG-006: 全量化格式算法化测试<p>验证REQ-QCG-006相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1581,7 +1581,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="007" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-007" id="req-qcg-007">REQ-QCG-007: 极低比特路径 (Q2K/Q3K)
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="007" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-007" id="req-qcg-007">REQ-QCG-007: 极低比特路径 (Q2K/Q3K)
       <p>实现 Q2K 2-bit 跨步解包和 Q3K hmask+qs 组合的极低比特展开路径，配合 SubScaleLoad/ScaleCombine 处理 K-Quant 多级缩放层次结构。</p>
       <li>2-bit/3-bit 特殊展开 + <code>SubScaleLoad</code> / <code>ScaleCombine</code></li>
       <li>K-Quant 多级 scale 加载</li>
@@ -1600,13 +1600,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-007" data-test="TEST-QCG-007" id="test-qcg-007">TEST-QCG-007: 全量化格式算法化测试<p>验证REQ-QCG-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-007" data-test="TEST-QCG-007" id="test-qcg-007">TEST-QCG-007: 全量化格式算法化测试<p>验证REQ-QCG-007相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1614,7 +1614,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="008" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-008" id="req-qcg-008">REQ-QCG-008: IQ Codebook 路径 (IQ1S..IQ4XS)
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="008" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-008" id="req-qcg-008">REQ-QCG-008: IQ Codebook 路径 (IQ1S..IQ4XS)
       <p>实现 IQ 系列超低比特量化路径，通过 CodebookLookup VmInstr 完成 A8/E8 代数格点查找表解码，codebook 常量嵌入 JIT 机器码 .rodata 段，覆盖 IQ1_S 到 IQ4_XS 全部 9 种 IQ 格式及 SqueezeLLM 和 TQ 系列。</p>
       <li><code>CodebookLookup</code> VmInstr 实现</li>
       <li>Codebook 常量数据嵌入 JIT 机器码 (.rodata / .const)</li>
@@ -1634,13 +1634,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-008" data-test="TEST-QCG-008" id="test-qcg-008">TEST-QCG-008: 全量化格式算法化测试<p>验证REQ-QCG-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-008" data-test="TEST-QCG-008" id="test-qcg-008">TEST-QCG-008: 全量化格式算法化测试<p>验证REQ-QCG-008相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1648,7 +1648,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="009" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-009" id="req-qcg-009">REQ-QCG-009: FP4 数据路径 (MXFP4/NVFP4)
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="009" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-009" id="req-qcg-009">REQ-QCG-009: FP4 数据路径 (MXFP4/NVFP4)
       <p>实现 FP4 浮点量化路径，SM100+ 走 tcgen05 FP4 硬件原生路径，其他平台走 E2M1 软件查表解码后 FMA。NVFP4 使用两级缩放（global x UE4M3 sub-block），MXFP4 使用单级 E8M0 缩放，两者共享 E2M1 16 值真值表。</p>
       <li><code>Fp4Dot</code> VmInstr 及 ISA lowering</li>
       <li>SM100+: tcgen05 FP4 原生路径 (Nvfp4 data_kind)</li>
@@ -1671,15 +1671,15 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="009" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-014" id="req-qcg-014">REQ-QCG-014a: NVFP4 E2M1 硬件原生路径
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="009" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-014" id="req-qcg-014">REQ-QCG-014a: NVFP4 E2M1 硬件原生路径
       <p>实现 SM100+ Nvfp4 data_kind 的硬件原生 FP4 GEMM 路径，使用 Nvfp4SubBlockDequant + Fp4Dot VmInstr，4 个 UE4M3 FP8 子块缩放融合进 Epilogue，x86/AArch64 无 FP4 硬件时走 MXFP4 共享的 E2M1 查表路径。</p>
       <li>SM100+ <code>Nvfp4</code> data_kind 走 <code>emit_quant_gemm_nvfp4</code>，使用 Nvfp4SubBlockDequant + Fp4Dot</li>
       <li>sub-block 16 元素 × 4 个 sub-block per block</li>
@@ -1699,13 +1699,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-014" data-test="TEST-QCG-014" id="test-qcg-014">TEST-QCG-014: 全量化格式算法化测试<p>验证REQ-QCG-014相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-014" data-test="TEST-QCG-014" id="test-qcg-014">TEST-QCG-014: 全量化格式算法化测试<p>验证REQ-QCG-014相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1713,7 +1713,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="010" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-010" id="req-qcg-010">REQ-QCG-010: AWQ4 Weight-Only 反量化路径
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="010" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-010" id="req-qcg-010">REQ-QCG-010: AWQ4 Weight-Only 反量化路径
       <p>实现 AWQ4 Weight-Only 量化路径，反量化公式 FP16_weight = (qw - zero_point_FP16) x scale_FP16，行优先连续 nibble 打包，GEMM 路径在寄存器内完成解包减零点乘缩放后送入 FP16 HMMA。</p>
       <li>AWQ4 是 Weight-Only 整数量化: 激活保持 FP16，权重压缩到 4-bit</li>
       <li>反量化公式: <code>FP16_weight = (qw - zero_point_FP16) × scale_FP16</code></li>
@@ -1737,15 +1737,15 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
     
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="010" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-015" id="req-qcg-015">REQ-QCG-015a: GPTQ4 Weight-Only 反量化路径
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="010" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-015" id="req-qcg-015">REQ-QCG-015a: GPTQ4 Weight-Only 反量化路径
       <p>实现 GPTQ4 Weight-Only 量化路径，反量化公式与 AWQ4 相同，关键差异为列交织打包（stride-16 利于 Warp 合并访存）和 INT4 packed zero-point（需 +1 偏移补偿），寄存器内反量化后送入 FP16 HMMA。</p>
       <li>GPTQ4 同属 Weight-Only 整数量化，反量化公式与 AWQ4 相同</li>
       <li>关键差异: 列交织打包 (stride-16)，zero-point 为 INT4 packed (8 个 zp 打包进 u32，需 +1 偏移)</li>
@@ -1768,13 +1768,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-015" data-test="TEST-QCG-015" id="test-qcg-015">TEST-QCG-015: 全量化格式算法化测试<p>验证REQ-QCG-015相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-015" data-test="TEST-QCG-015" id="test-qcg-015">TEST-QCG-015: 全量化格式算法化测试<p>验证REQ-QCG-015相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1782,7 +1782,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="013" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-011" id="req-qcg-011">REQ-QCG-011: QuantGather 算子
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="013" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-011" id="req-qcg-011">REQ-QCG-011: QuantGather 算子
       <p>实现 QuantGather 量化 embedding 查表算子，逐 block 解码量化权重后直接写出 compute_dtype hidden state（dtype 由 TensorMeta 推导），移除 Rust 端所有反量化代码。</p>
       <li>量化 embedding 查表: 逐 block 解码 → 直接写出 compute_dtype hidden state (dtype 由 TensorMeta 推导)</li>
       <li>移除 Rust 端所有反量化代码</li>
@@ -1801,13 +1801,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-011" data-test="TEST-QCG-011" id="test-qcg-011">TEST-QCG-011: 全量化格式算法化测试<p>验证REQ-QCG-011相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-011" data-test="TEST-QCG-011" id="test-qcg-011">TEST-QCG-011: 全量化格式算法化测试<p>验证REQ-QCG-011相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1815,7 +1815,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="011" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-012" id="req-qcg-012">REQ-QCG-12: 量化感知融合
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="011" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-012" id="req-qcg-012">REQ-QCG-12: 量化感知融合
       <p>实现 can_fuse_quant_aware 量化感知融合判断，同精度算子自由融合（QuantGemm + Residual + Norm 一气呵成），不同精度算子拆分为独立融合图，混合精度模型按层独立编译。</p>
       <li><code>can_fuse_quant_aware</code> 融合判断</li>
       <li>同精度算子吸附，不同精度拆分</li>
@@ -1834,13 +1834,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-012" data-test="TEST-QCG-12" id="test-qcg-12">TEST-QCG-12: 全量化格式算法化测试<p>验证REQ-QCG-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-012" data-test="TEST-QCG-12" id="test-qcg-12">TEST-QCG-12: 全量化格式算法化测试<p>验证REQ-QCG-009相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>
@@ -1848,7 +1848,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" <h4="" data-section="012" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-013" id="req-qcg-013">REQ-QCG-13: 移除 Rust 端反量化
+    <section data-entity-ref="ENT-QUANT-TYPE ENT-QUANT-PRECISION ENT-QUANT-FORMAT-DESC ENT-VM-INSTR ENT-DEVICE-PROFILE" data-section="012" data-req-api="POST /internal/quant/codegen" data-req-entity="ENT-QUANT-TYPE,ENT-QUANT-PRECISION,ENT-QUANT-FORMAT-DESC,ENT-VM-INSTR,ENT-DEVICE-PROFILE" data-req-category="business" data-req-domain="qcg" data-req-status="implemented" data-req="REQ-QCG-013" id="req-qcg-013">REQ-QCG-13: 移除 Rust 端反量化
       <p>清除 gllm/src/engine/ 目录下所有 Rust 端反量化代码，所有量化权重以原格式直传 JIT 管线，验证混合量化 GGUF（如 Q4_0 + Q6K lm_head）可直接推理。</p>
       <li><code>grep -rn "dequant" gllm/src/engine/</code> 无匹配</li>
       <li>所有量化权重原格式直传 JIT</li>
@@ -1867,13 +1867,13 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="./23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-quant-format-desc" href="../23-QUANT-CODEGEN-ALGO#ent-quant-format-desc">ENT-QUANT-FORMAT-DESC
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-QCG-013" data-test="TEST-QCG-13" id="test-qcg-13">TEST-QCG-13: 全量化格式算法化测试<p>验证REQ-QCG-010相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-QCG-013" data-test="TEST-QCG-13" id="test-qcg-13">TEST-QCG-13: 全量化格式算法化测试<p>验证REQ-QCG-010相关功能正确性</p>
       <div id="quantformatdescriptor-统一描述量化元数据" data-criterion="QuantFormatDescriptor 统一描述量化元数据">QuantFormatDescriptor 统一描述量化元数据</div>
       <div id="三级路径-native-assisted-dequantfma-覆盖" data-criterion="三级路径 Native/Assisted/DequantFMA 覆盖">三级路径 Native/Assisted/DequantFMA 覆盖</div>
       <div id="id-5-isa-5-算子-22-格式自动覆盖" data-criterion="5 ISA × 5 算子 × 22 格式自动覆盖">5 ISA × 5 算子 × 22 格式自动覆盖</div>

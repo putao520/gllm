@@ -1866,7 +1866,7 @@
     <section id="s-观测与调度-req-obs" data-section="null">
       <h3>观测与调度 (REQ-OBS)</h3>
     </section>
-    <section data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" <h4="" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="obs" data-req-status="implemented" data-req="REQ-OBS-001" id="req-obs-001">REQ-OBS-001: Epilogue 物理写入 (In-Place Logging)
+    <section data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="obs" data-req-status="implemented" data-req="REQ-OBS-001" id="req-obs-001">REQ-OBS-001: Epilogue 物理写入 (In-Place Logging)
       <li>彻底废除 CPU 侧的 <code>BasicObserver::capture()</code> 异步轮询。</li>
       <li>采用 GPU Kernel 尾部 (Epilogue) 的掩码计算直接通过 <code>STG</code> 指令写入 <code>KvPageHeader</code>。</li>
       <li><code>kv_fragmentation</code> 和 <code>logits_entropy</code> 等指标由 GPU 自主物理内存覆盖，不进入 CPU 主内存通信。</li>
@@ -1889,7 +1889,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-OBS-001" data-test="TEST-OBS-001" id="TEST-OBS-001">TEST-OBS-001: Epilogue物理写入测试<p>验证REQ-OBS-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-OBS-001" data-test="TEST-OBS-001" id="test-obs-001">TEST-OBS-001: Epilogue物理写入测试<p>验证REQ-OBS-001相关功能正确性</p>
       <div id="epilogue-物理写入实现正确" data-criterion="Epilogue 物理写入实现正确">Epilogue 物理写入实现正确</div>
       <div id="absolutepolicy-强制约束生效" data-criterion="AbsolutePolicy 强制约束生效">AbsolutePolicy 强制约束生效</div>
       <div id="跨步熔断零介入" data-criterion="跨步熔断零介入">跨步熔断零介入</div>
@@ -1897,7 +1897,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" <h4="" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="obs" data-req-status="implemented" data-req="REQ-OBS-002" id="req-obs-002">REQ-OBS-002: 单轨 AbsolutePolicy 强制约束
+    <section data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="obs" data-req-status="implemented" data-req="REQ-OBS-002" id="req-obs-002">REQ-OBS-002: 单轨 AbsolutePolicy 强制约束
       <li>剥夺原设计中由 CPU 切换精度模式的权力（移除 AccuracyFirst, Balanced, ThroughputFirst）。</li>
       <li>系统由 QuantType 直接驱动 JIT 生成硬件原生内核，推理过程中无类型判断分支。</li>
       <li>Scheduler 只能执行护栏级的吞吐保护 <code>AbsolutePolicy</code>，只改变 <code>admit_new_prefill</code> 等外围流水线压弹，绝不更改核心 <code>kernel_strategy</code>。</li>
@@ -1920,7 +1920,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-OBS-002" data-test="TEST-OBS-002" id="TEST-OBS-002">TEST-OBS-002: Epilogue物理写入测试<p>验证REQ-OBS-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-OBS-002" data-test="TEST-OBS-002" id="test-obs-002">TEST-OBS-002: Epilogue物理写入测试<p>验证REQ-OBS-002相关功能正确性</p>
       <div id="epilogue-物理写入实现正确" data-criterion="Epilogue 物理写入实现正确">Epilogue 物理写入实现正确</div>
       <div id="absolutepolicy-强制约束生效" data-criterion="AbsolutePolicy 强制约束生效">AbsolutePolicy 强制约束生效</div>
       <div id="跨步熔断零介入" data-criterion="跨步熔断零介入">跨步熔断零介入</div>
@@ -1928,7 +1928,7 @@
       
     </section>
 
-    <section data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" <h4="" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="obs" data-req-status="implemented" data-req="REQ-OBS-003" id="req-obs-003">REQ-OBS-003: 跨步熔断零介入
+    <section data-entity-ref="ENT-EPILOGUE-POLICY ENT-TELEMETRY-OFFSET ENT-KV-PAGE-HEADER" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-EPILOGUE-POLICY,ENT-TELEMETRY-OFFSET,ENT-KV-PAGE-HEADER" data-req-category="business" data-req-domain="obs" data-req-status="implemented" data-req="REQ-OBS-003" id="req-obs-003">REQ-OBS-003: 跨步熔断零介入
       <li>移除所有基于 CPU 延时反馈的“热切换（set_policy）”。</li>
       <li>Kernel 内部依靠硬编码门控实现条件跳过（Ragged Tensor Compaction）。</li>
       <li><strong>验收标准</strong>: OOM 或 Veto 直接由硬件指令流阻断（Trap），交由崩溃链或 GC 兜底。</li>
@@ -1950,7 +1950,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-OBS-003" data-test="TEST-OBS-003" id="TEST-OBS-003">TEST-OBS-003: Epilogue物理写入测试<p>验证REQ-OBS-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-OBS-003" data-test="TEST-OBS-003" id="test-obs-003">TEST-OBS-003: Epilogue物理写入测试<p>验证REQ-OBS-003相关功能正确性</p>
       <div id="epilogue-物理写入实现正确" data-criterion="Epilogue 物理写入实现正确">Epilogue 物理写入实现正确</div>
       <div id="absolutepolicy-强制约束生效" data-criterion="AbsolutePolicy 强制约束生效">AbsolutePolicy 强制约束生效</div>
       <div id="跨步熔断零介入" data-criterion="跨步熔断零介入">跨步熔断零介入</div>
@@ -1961,7 +1961,7 @@
     <section id="s-kv-cache-持久化-req-kv" data-section="null">
       <h3>KV Cache 持久化 (REQ-KV)</h3>
     </section>
-    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGE-TABLE ENT-PAGED-SCHEDULER" <h4="" data-section="005" data-req-api="POST /internal/hgal/manage" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="kv" data-req-status="implemented" data-req="REQ-KV-001" id="req-kv-001">REQ-KV-001: KV Cache 增量持久化
+    <section data-entity-ref="ENT-KV-CACHE ENT-KV-PAGE-HEADER ENT-PAGE-TABLE ENT-PAGED-SCHEDULER" data-section="005" data-req-api="POST /internal/hgal/manage" data-req-entity="ENT-KV-CACHE,ENT-KV-PAGE-HEADER,ENT-PAGE-TABLE,ENT-PAGED-SCHEDULER" data-req-category="business" data-req-domain="kv" data-req-status="implemented" data-req="REQ-KV-001" id="req-kv-001">REQ-KV-001: KV Cache 增量持久化
       <li><code>update_kv_cache()</code> 必须将 JIT 计算的 K/V 值写入 cache buffer</li>
       <li>增量 decode 复用已缓存的 K/V，不重新计算</li>
       <li><strong>验收标准</strong>: 多步 decode 中 KV cache buffer 包含正确的 K/V 数据</li>
@@ -1978,14 +1978,14 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-page-table" href="./ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
+      <a data-xref-type="entity" data-xref-id="ent-page-table" href="../ARCH-DETAILED-DESIGNS#ent-page-table">ENT-PAGE-TABLE
       
       
       
       
       </a></div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-KV-001" data-test="TEST-KV-001" id="TEST-KV-001">TEST-KV-001: KV Cache智能优化测试<p>验证REQ-KV-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-KV-001" data-test="TEST-KV-001" id="test-kv-001">TEST-KV-001: KV Cache智能优化测试<p>验证REQ-KV-001相关功能正确性</p>
       <div id="kv-cache-数据结构实现完整" data-criterion="KV cache 数据结构实现完整">KV cache 数据结构实现完整</div>
       <div id="pagedattention-内存管理正确" data-criterion="PagedAttention 内存管理正确">PagedAttention 内存管理正确</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
@@ -1995,7 +1995,7 @@
     <section id="s-错误处理-req-err" data-section="null">
       <h3>错误处理 (REQ-ERR)</h3>
     </section>
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" <h4="" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="err" data-req-status="implemented" data-req="REQ-ERR-001" id="req-err-001">REQ-ERR-001: 消除静默失败
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" data-section="001" data-req-api="POST /compile" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="err" data-req-status="implemented" data-req="REQ-ERR-001" id="req-err-001">REQ-ERR-001: 消除静默失败
       <li>所有 <code>let _ = memory_manager.*</code> 替换为 <code>?</code> 传播或 <code>log::warn!</code></li>
       <li>所有 <code>Err(_)</code> 替换为具体错误匹配</li>
       <li>所有 <code>unwrap_or(default)</code> 替换为 <code>?</code> 或显式错误处理</li>
@@ -2016,14 +2016,14 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ERR-001" data-test="TEST-ERR-001" id="TEST-ERR-001">TEST-ERR-001: 错误处理语义测试<p>验证REQ-ERR-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ERR-001" data-test="TEST-ERR-001" id="test-err-001">TEST-ERR-001: 错误处理语义测试<p>验证REQ-ERR-001相关功能正确性</p>
       <div id="错误处理语义正确" data-criterion="错误处理语义正确">错误处理语义正确</div>
       <div id="错误码覆盖所有失败场景" data-criterion="错误码覆盖所有失败场景">错误码覆盖所有失败场景</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" <h4="" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="err" data-req-status="implemented" data-req="REQ-ERR-002" id="req-err-002">REQ-ERR-002: OOM Halt 截断 (ARCH-ZERO-FALLBACK)
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" data-section="002" data-req-api="POST /compile" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="err" data-req-status="implemented" data-req="REQ-ERR-002" id="req-err-002">REQ-ERR-002: OOM Halt 截断 (ARCH-ZERO-FALLBACK)
       <li>物理显存分配失败时必须 <code>log::error!</code> 记录 <code>OOM Halt triggered</code></li>
       <li>系统必须当场返回架构级硬件越界错误，坚决禁止退回到 CPU</li>
       <li><strong>验收标准</strong>: OOM 时直接导致全进程/线程 Halt 并暴露 OOM 异常对象，无任何降级发生</li>
@@ -2042,14 +2042,14 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ERR-002" data-test="TEST-ERR-002" id="TEST-ERR-002">TEST-ERR-002: 错误处理语义测试<p>验证REQ-ERR-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ERR-002" data-test="TEST-ERR-002" id="test-err-002">TEST-ERR-002: 错误处理语义测试<p>验证REQ-ERR-002相关功能正确性</p>
       <div id="错误处理语义正确" data-criterion="错误处理语义正确">错误处理语义正确</div>
       <div id="错误码覆盖所有失败场景" data-criterion="错误码覆盖所有失败场景">错误码覆盖所有失败场景</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
-    <section data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" <h4="" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="err" data-req-status="implemented" data-req="REQ-ERR-003" id="req-err-003">REQ-ERR-003: Backend Detection 错误传播
+    <section data-entity-ref="ENT-MODEL-CONFIG ENT-COMPILER-GRAPH" data-section="003" data-req-api="POST /compile" data-req-entity="ENT-MODEL-CONFIG,ENT-COMPILER-GRAPH" data-req-category="business" data-req-domain="err" data-req-status="implemented" data-req="REQ-ERR-003" id="req-err-003">REQ-ERR-003: Backend Detection 错误传播
       <li><code>detection.rs</code> 的 <code>expect()</code> 替换为 <code>Result</code> 返回</li>
       <li>探测失败返回 <code>Err(BackendContextError)</code>，不 panic</li>
       <li><strong>验收标准</strong>: 后端探测失败时返回 Err 而非 panic</li>
@@ -2068,7 +2068,7 @@
       
       </div>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-ERR-003" data-test="TEST-ERR-003" id="TEST-ERR-003">TEST-ERR-003: 错误处理语义测试<p>验证REQ-ERR-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ERR-003" data-test="TEST-ERR-003" id="test-err-003">TEST-ERR-003: 错误处理语义测试<p>验证REQ-ERR-003相关功能正确性</p>
       <div id="错误处理语义正确" data-criterion="错误处理语义正确">错误处理语义正确</div>
       <div id="错误码覆盖所有失败场景" data-criterion="错误码覆盖所有失败场景">错误码覆盖所有失败场景</div>
       <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>

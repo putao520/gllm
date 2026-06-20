@@ -547,11 +547,11 @@
           <td>优先级</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
@@ -574,7 +574,7 @@
 <section id="req-sit-008" data-req="REQ-SIT-008" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER" data-req-api="POST /client/intent/encode"><h3>REQ-SIT-008</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><ol><li><strong>build_intent_tracker_graph()</strong> 产出 CompilerGraph 包含 OpKind::MultiHeadAttention，GPU codegen 路径通过 DeviceProfile 驱动 PTX/HIP/MSL 代码生成</li><li>Given DeviceProfile::Gpu{cuda} → 图中 MHA/GemmBias 算子走 GPU PTX codegen 路径</li><li>Given DeviceProfile::Gpu{rocm} → 图中算子走 GPU HIP (AMDGPU) codegen 路径</li><li>Given DeviceProfile::Gpu{metal} → 图中算子走 GPU Metal (AIR) codegen 路径</li><li>GPU 路径禁止调用 cuBLAS/rocBLAS（GPU GEMM 全 JIT 铁律）</li><li>编译通过: cargo check (feature gpu)</li></ol></div></section>
 
 <section id="req-sit-009" data-req="REQ-SIT-009" data-req-status="implemented" data-req-domain="sit" data-req-category="business" data-req-entity="ENT-INTENT-TRACKER" data-req-api="POST /client/intent/encode"><h3>REQ-SIT-009</h3><p>（需求定义见 SPEC 上文描述）</p><div data-criteria=""><ol><li><strong>IntentTracker::from_weights_bf16(config, weights_bf16, weight_shapes)</strong> 签名存在 (intent_tracker.rs:221-248)，BF16 raw bytes → F32 权重转换</li><li>Given 有效 BF16 权重 → Ok(IntentTracker)，内部 weights 全部为 F32，BF16 zeros → f32 zeros</li><li>Given BF16 转换元素数不匹配 → Err(TrackerError::LoadFailed) 且消息包含 "dequant"</li><li><strong>classify_turn_quant(embeddings_f16, roles, signals, context_turns, dequant_fn)</strong> 签名存在 (intent_tracker.rs:278-298)，F16 embeddings → F32 via dequant_fn → delegate to classify_turn</li><li>Given 有效 F16 embeddings + dequant_fn → Ok(Classification)，task_logits.len()==3, difficulty_logits.len()==4</li><li>Given embeddings_f16.len() != roles.len() → Err(TrackerError::InvalidInput)</li><li>F16 roundtrip: f16::from_f32(v).to_f32() 精度损失 &lt; 0.01</li><li>BF16 roundtrip: bf16::from_f32(v).to_f32() 精度损失 &lt; 0.01</li><li>IntentTracker::new() 加载 safetensors 时自动处理 F32/F16/BF16 dtype 转换 (intent_tracker.rs:170-188)</li></ol></div></section>
-<section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-001" data-test="TEST-SIT-001" id="test-sit-001">TEST-SIT-001: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-001相关功能正确性</p>
+<section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-001" data-test="TEST-SIT-001" id="test-sit-001">TEST-SIT-001: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-001相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -592,16 +592,16 @@
           <td>P0</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-002" data-test="TEST-SIT-002" id="test-sit-002">TEST-SIT-002: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-002" data-test="TEST-SIT-002" id="test-sit-002">TEST-SIT-002: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-002相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -617,16 +617,16 @@
           <td>P0</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-003" data-test="TEST-SIT-003" id="test-sit-003">TEST-SIT-003: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-003" data-test="TEST-SIT-003" id="test-sit-003">TEST-SIT-003: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-003相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -641,16 +641,16 @@
           <td>P0</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-004" data-test="TEST-SIT-004" id="test-sit-004">TEST-SIT-004: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-004" data-test="TEST-SIT-004" id="test-sit-004">TEST-SIT-004: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-004相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -666,16 +666,16 @@
           <td>P0</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-005" data-test="TEST-SIT-005" id="test-sit-005">TEST-SIT-005: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-005相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-005" data-test="TEST-SIT-005" id="test-sit-005">TEST-SIT-005: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-005相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -691,16 +691,16 @@
           <td>P0</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-006" data-test="TEST-SIT-006" id="test-sit-006">TEST-SIT-006: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-006相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-006" data-test="TEST-SIT-006" id="test-sit-006">TEST-SIT-006: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-006相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -716,16 +716,16 @@
           <td>P1</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-007" data-test="TEST-SIT-007" id="test-sit-007">TEST-SIT-007: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-007相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-007" data-test="TEST-SIT-007" id="test-sit-007">TEST-SIT-007: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-007相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -740,16 +740,16 @@
           <td>P1</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-008" data-test="TEST-SIT-008" id="test-sit-008">TEST-SIT-008: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-008相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-008" data-test="TEST-SIT-008" id="test-sit-008">TEST-SIT-008: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-008相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>
@@ -764,16 +764,16 @@
           <td>P2</td>
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Intent Tracker 模型架构注册正确</li><li id="id-2" data-criterion="2">Multi-head Attention + info_weight 实现</li><li id="id-3" data-criterion="3">预编码 embedding 输入路径正确</li><li id="id-4" data-criterion="4">编译通过: cargo check</li></ol></td><td data-xref-links="">
-  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
+  <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY  </a></td>
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="./INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
+      <a data-xref-type="entity" data-xref-id="ent-model-arch-key" href="../INTENT-TRACKER#ent-model-arch-key">ENT-MODEL-ARCH-KEY
       
       
       </a></div>
         
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-SIT-009" data-test="TEST-SIT-009" id="test-sit-009">TEST-SIT-009: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-009相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SIT-009" data-test="TEST-SIT-009" id="test-sit-009">TEST-SIT-009: Signal-Aware Intent Tracker测试<p>验证REQ-SIT-009相关功能正确性</p>
       <div id="intent-tracker-模型架构注册正确" data-criterion="Intent Tracker 模型架构注册正确">Intent Tracker 模型架构注册正确</div>
       <div id="multi-head-attention-info-weight-实现" data-criterion="Multi-head Attention + info_weight 实现">Multi-head Attention + info_weight 实现</div>
       <div id="预编码-embedding-输入路径正确" data-criterion="预编码 embedding 输入路径正确">预编码 embedding 输入路径正确</div>

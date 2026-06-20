@@ -541,7 +541,7 @@
         </tr>
       </table>
     </section>
-    <section data-entity-ref="ENT-EXECUTOR ENT-COORDINATOR ENT-CALLBACK-CHAIN ENT-BATCH-CONTEXT" <h3="" data-section="4" data-req-api="POST /internal/executor/decompose" data-req-entity="ENT-EXECUTOR,ENT-COORDINATOR,ENT-CALLBACK-CHAIN,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="decomp" data-req-status="implemented" data-req="REQ-DECOMP-001" id="req-decomp-001">§4 unsafe 消除 (REQ-DECOMP-001)
+    <section data-entity-ref="ENT-EXECUTOR ENT-COORDINATOR ENT-CALLBACK-CHAIN ENT-BATCH-CONTEXT" data-section="4" data-req-api="POST /internal/executor/decompose" data-req-entity="ENT-EXECUTOR,ENT-COORDINATOR,ENT-CALLBACK-CHAIN,ENT-BATCH-CONTEXT" data-req-category="business" data-req-domain="decomp" data-req-status="implemented" data-req="REQ-DECOMP-001" id="req-decomp-001">§4 unsafe 消除 (REQ-DECOMP-001)
       <p>消除 Executor 中的 unsafe 代码块，将裸指针（<code>*mut CallbackChain</code>、<code>*const u8</code>）替换为 safe wrapper 类型（Arc/Mutex）。核心约束：零行为变更纯结构重构、六个 Coordinator 职责划分清晰、ExecutorBuilder 四阶段构造模式。FFI 边界仍使用裸指针，但主结构体不持有裸指针，仅在 FFI 调用瞬间取裸指针。</p>
 
       <div data-criteria="">
@@ -557,7 +557,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -928,7 +928,7 @@
       <p>    callbacks/                — (不变)</p>
       <p>```</p>
     </section>
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-006" data-test="TEST-DECOMP-6" id="test-decomp-6">TEST-DECOMP-6: Executor分解架构测试<p>验证REQ-DECOMP-001相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-DECOMP-006" data-test="TEST-DECOMP-6" id="test-decomp-6">TEST-DECOMP-6: Executor分解架构测试<p>验证REQ-DECOMP-001相关功能正确性</p>
       <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
       <div id="coordinator-职责划分清晰-li-li-data-criterion-3-零行为变更纯结构重构" data-criterion="Coordinator 职责划分清晰<
     /li><li data-criterion=&quot;3&quot;>零行为变更纯结构重构">Coordinator 职责划分清晰&lt;
@@ -950,7 +950,7 @@
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 职责划分清晰&lt;
     /li&gt;
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-002" data-test="TEST-DECOMP-002" id="test-decomp-002">TEST-DECOMP-002: Executor分解架构测试<p>验证REQ-DECOMP-002相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-DECOMP-002" data-test="TEST-DECOMP-002" id="test-decomp-002">TEST-DECOMP-002: Executor分解架构测试<p>验证REQ-DECOMP-002相关功能正确性</p>
       <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
       <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
       <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
@@ -966,7 +966,7 @@
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 职责划分清晰</li><li id="id-3" data-criterion="3">
     零行为变
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-003" data-test="TEST-DECOMP-003" id="test-decomp-003">TEST-DECOMP-003: Executor分解架构测试<p>验证REQ-DECOMP-003相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-DECOMP-003" data-test="TEST-DECOMP-003" id="test-decomp-003">TEST-DECOMP-003: Executor分解架构测试<p>验证REQ-DECOMP-003相关功能正确性</p>
       <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
       <div id="coordinator-职责划分清晰" data-criterion="Coordinator 
     职责划分清晰">Coordinator 
@@ -979,7 +979,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -993,7 +993,7 @@
         </tr>
         <td data-criteria=""><ol><li id="id-1" data-criterion="1">Executor 分解架构实现完整</li><li id="id-2" data-criterion="2">Coordinator 
    
-    <section data-level="unit" <h3="" data-test-categories="unit" data-req-ref="REQ-DECOMP-004" data-test="TEST-DECOMP-004" id="test-decomp-004">TEST-DECOMP-004: Executor分解架构测试<p>验证REQ-DECOMP-004相关功能正确性</p>
+    <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-DECOMP-004" data-test="TEST-DECOMP-004" id="test-decomp-004">TEST-DECOMP-004: Executor分解架构测试<p>验证REQ-DECOMP-004相关功能正确性</p>
       <div id="executor-分解架构实现完整" data-criterion="Executor 分解架构实现完整">Executor 分解架构实现完整</div>
       <div id="coordinator-职责划分清晰" data-criterion="Coordinator 职责划分清晰">Coordinator 职责划分清晰</div>
       <div id="零行为变更纯结构重构" data-criterion="零行为变更纯结构重构">零行为变更纯结构重构</div>
@@ -1004,7 +1004,7 @@
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -1025,7 +1025,7 @@ i data-criterion="3"&gt;零行为变更纯结构重构<li id="id-4" data-criteri
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -1040,7 +1040,7 @@ i data-criterion="3"&gt;零行为变更纯结构重构<li id="id-4" data-criteri
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -1060,7 +1060,7 @@ a-criterion="4"&gt;编译通过: cargo check
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -1082,7 +1082,7 @@ a-criterion="4"&gt;编译通过: cargo check
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
@@ -1097,7 +1097,7 @@ a-criterion="4"&gt;编译通过: cargo check
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="./GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
+      <a data-xref-type="entity" data-xref-id="ent-callback-chain" href="../GUARDRAIL#ent-callback-chain">ENT-CALLBACK-CHAIN
       
       
       </a></div>
