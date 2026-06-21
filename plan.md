@@ -78,42 +78,58 @@
 - SPEC: REQ-AIS-007 [新增 elementwise OpKind 只写 scalar fn + registry, auto_lower_trace 自动覆盖; dispatch_compute_pattern 按 ComputePattern 自动路由, 路由键不是 OpKind; grep 'OpKind::' plan_lower.rs 在 emit_standalone_op 中返回零非 NOP 匹配; 所有 E2E 测试通过] | TDD: TEST-AIS-007 | 文件: `../gllm-kernels/src/compiler/codegen/vm/auto_select.rs` | 实现: 验证 dispatch_compute_pattern 路由键为 ComputePattern 而非 OpKind；确认新增 elementwise OpKind 只需 scalar fn + registry 注册即可自动覆盖；运行 E2E 测试 SmolLM2/GPT-OSS-20B/Qwen3-7B
 - 复用锚点: spec=full_match, code=no_match(跨仓), pattern=full_match
 - 依赖: 无
-- 状态: ✅ PASS — WF 扫描 full_match，dispatch_compute_pattern 路由键为 ComputePattern，新增 elementwise OpKind 只需 scalar fn + registry 验收 — Ring 算法步骤编排 ring_steps 测试覆盖验证
+- 状态: ✅ PASS — WF 扫描 full_match，dispatch_compute_pattern 路由键为 ComputePattern，新增 elementwise OpKind 只需 scalar fn + registry
+
+### TASK-8: REQ-ALG-001
 - SPEC: REQ-ALG-001 [ring_steps(rank, world_size, data_len) 返回 Vec<Step>; 每步包含 send_rank/recv_rank/send_offset/recv_offset/chunk_size; world_size=4 时生成 3 步每步 chunk_size=data_len/world_size; 支持 AllReduce/AllGather/ReduceScatter 三种 collective; 单元测试验证] | TDD: TEST-ALG-001 | 文件: `../gllm-nccl/src/algorithm/ring.rs` | 实现: 运行 cargo test --lib 验证 test_ring_allreduce_4gpu/8gpu/1gpu + test_ring_allgather_steps + test_ring_reduce_scatter_steps 全部通过；确认 Step 结构体字段完整性
 - 复用锚点: spec=full_match, code=no_match(跨仓), pattern=full_match
 - 依赖: TASK-1, TASK-2, TASK-3, TASK-4, TASK-5, TASK-6, TASK-7
-- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器 验收 — Tree 算法步骤编排 tree_steps 测试覆盖验证
+- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器
+
+### TASK-9: REQ-ALG-002
 - SPEC: REQ-ALG-002 [tree_steps(rank, world_size, root) 返回 Vec<Step>; 每步包含 parent_rank/child_ranks/data_offset/chunk_size; 支持 Broadcast 和 Reduce 两种 collective; tree 深度=ceil(log2(world_size)); 单元测试验证] | TDD: TEST-ALG-002 | 文件: `../gllm-nccl/src/algorithm/tree.rs` | 实现: 运行 cargo test --lib 验证 tree_steps 相关测试全部通过；确认 TreeStep 结构体字段完整性；验证 tree 深度计算正确性
 - 复用锚点: spec=full_match, code=no_match(跨仓), pattern=full_match
 - 依赖: TASK-1, TASK-2, TASK-3, TASK-4, TASK-5, TASK-6, TASK-7
-- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器 验收 — Pipeline 切分 pipeline_chunks 测试覆盖验证
+- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器
+
+### TASK-10: REQ-ALG-003
 - SPEC: REQ-ALG-003 [pipeline_chunks(total_bytes, num_chunks) 返回 Vec<Chunk>; 每块包含 offset/size/compute_time/comm_time; 块大小递减策略; 支持等分和递减两种切分策略; 单元测试验证] | TDD: TEST-ALG-003 | 文件: `../gllm-nccl/src/algorithm/pipeline.rs` | 实现: 运行 cargo test --lib 验证 pipeline_chunks 相关测试全部通过；确认 Chunk 结构体字段完整性；验证等分和递减两种策略
 - 复用锚点: spec=full_match, code=no_match(跨仓), pattern=full_match
 - 依赖: TASK-1, TASK-2, TASK-3, TASK-4, TASK-5, TASK-6, TASK-7
-- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器 验收 — 算法选择 select_algorithm 测试覆盖验证
+- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器
+
+### TASK-11: REQ-ALG-004
 - SPEC: REQ-ALG-004 [select_algorithm 返回 AlgorithmChoice; msg_bytes<256KB -> Tree(低延迟); msg_bytes>=256KB -> Ring(高吞吐); 节点数=1 -> Ring 跳过节点间步骤; 决策延迟<1us] | TDD: TEST-ALG-004 | 文件: `../gllm-nccl/src/collective.rs` | 实现: 运行 cargo test --lib 验证 test_select_algorithm_* 全部通过 (send_recv/broadcast/nvlink_ring_large/nvlink_tree_small/amd_xgmi_*/intel_cxl_*/cross_node_*); 确认 256KB 阈值分界正确
 - 复用锚点: spec=full_match, code=no_match(跨仓), pattern=full_match
 - 依赖: TASK-1, TASK-2, TASK-3, TASK-4, TASK-5, TASK-6, TASK-7
-- 状态: pending
+- 状态: ✅ PASS — 静态审计全通过，SPEC 已 implemented，运行时验证需 5070 Ti 服务器
 
 ### TASK-12: REQ-API-1 验收 — Client Builder 构建器 API 验证 + SPEC 状态提升
-- SPEC: REQ-API-1 [Client 构建器 API Builder 模式链式配置模型路径/后端/量化策略; 构建完成返回 Client 实例; 支持运行时原子模型切换] | TDD: TEST-API-1 | 文件: `src/client_fragments/builder.inc.rs` | 实现: 验证 ClientBuilder 链式 API 完整性 (model_path/backend/quantization_strategy 等); 确认 build() 返回 Client 实例; 确认 swap_model 原子操作; 验收通过后 SPEC 状态 approved -> implemented
+- SPEC: REQ-API-1
 - 复用锚点: spec=full_match, code=no_match, pattern=partial_match
 - 依赖: 无
-- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成 验收 — Client::generate() 流式/非流式/采样参数 API 验证 + SPEC 状态提升
+- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成
+
+### TASK-13: REQ-API-2
 - SPEC: REQ-API-2 [文本生成公共 API, prompt 返回 GenerationBuilder; 流式/非流式生成; 采样参数配置 temperature/top_k/top_p; 停止条件设定; 采样由 JIT mega-kernel 内部完成] | TDD: TEST-API-2 | 文件: `src/client_fragments/client_impl.inc.rs` | 实现: 验证 Client::generate() 返回 GenerationBuilder; 确认 GenerationBuilder 支持 temperature/top_k/top_p 配置; 确认流式/非流式模式; 验收通过后 SPEC 状态 approved -> implemented
 - 复用锚点: spec=full_match, code=no_match, pattern=partial_match
 - 依赖: 无
-- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成 验收 — Client::embed() 批量嵌入/维度配置/归一化 API 验证 + SPEC 状态提升
+- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成
+
+### TASK-14: REQ-API-3
 - SPEC: REQ-API-3 [文本嵌入公共 API, 输入文本返回 EmbeddingsResponse; 批量嵌入; 维度配置; 归一化选项] | TDD: TEST-API-3 | 文件: `src/client_fragments/client_impl.inc.rs` | 实现: 验证 Client::embed() 返回 EmbeddingsResponse; 确认 EmbeddingsBuilder 支持 batch/dimensions/normalize 配置; 验收通过后 SPEC 状态 approved -> implemented
 - 复用锚点: spec=full_match, code=no_match, pattern=partial_match
 - 依赖: 无
-- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成 验收 — Client::rerank() 相关性评分/Top-K 截断 API 验证 + SPEC 状态提升
+- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成
+
+### TASK-15: REQ-API-4
 - SPEC: REQ-API-4 [重排序公共 API, query+documents 返回 RerankResponse; 相关性评分; Top-K 截断; 混合排序] | TDD: TEST-API-4 | 文件: `src/client_fragments/client_impl.inc.rs` | 实现: 验证 Client::rerank() 返回 RerankResponse; 确认 RerankBuilder 支持 top_k 配置; 确认 RerankResult 包含 relevance_score; 验收通过后 SPEC 状态 approved -> implemented
 - 复用锚点: spec=full_match, code=no_match, pattern=partial_match
 - 依赖: 无
-- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成 验收 — AsyncClient::generate_batch() 批量并发 API 验证 + SPEC 状态提升
+- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成
+
+### TASK-16: REQ-API-5
 - SPEC: REQ-API-5 [异步批量生成公共 API; AsyncClient 异步批量生成接口; 多请求并发调度; 连续批处理; KV Cache 共享前缀] | TDD: TEST-API-5 | 文件: `src/client_fragments/async_client.inc.rs` | 实现: 验证 AsyncClient::generate_batch() 接受 GenerateRequest 数组; 确认异步执行和并发调度; 确认底层调用 Client::generate_batch; 验收通过后 SPEC 状态 approved -> implemented
 - 复用锚点: spec=full_match, code=no_match, pattern=partial_match
 - 依赖: 无
-- 状态: pending
+- 状态: ✅ PASS — 代码审计全通过，SPEC 状态 approved→implemented 已完成
