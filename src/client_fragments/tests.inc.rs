@@ -464,4 +464,99 @@ mod builder_and_client_tests {
         let result = Client::normalize_model_id("  my-model  ");
         assert_eq!(result.unwrap(), "my-model");
     }
+
+    // ── REQ-API-1: ClientBuilder 链式配置 API 验收 ──
+
+    /// Verify Client::builder() returns a fresh ClientBuilder (REQ-API-1).
+    #[test]
+    fn client_builder_entry_point() {
+        let builder = Client::builder();
+        // builder without model_id should fail with ModelNotFound
+        let result = builder.build();
+        match result {
+            Err(ClientError::ModelNotFound(_)) => {}
+            other => panic!("expected ModelNotFound, got unexpected result variant"),
+        }
+    }
+
+    /// Verify builder chaining propagates all fields (REQ-API-1).
+    ///
+    /// We cannot call .build() without a real model, but we can verify that
+    /// chaining returns a ClientBuilder (type-level check) and that the
+    /// final .build() fails with ModelNotFound (proving model_id was not
+    /// accidentally set by any chained method).
+    #[test]
+    fn builder_chaining_returns_client_builder() {
+        let builder = Client::builder()
+            .model("nonexistent-model")
+            .kind(ModelKind::Chat)
+            .backend(BackendType::Cpu)
+            .inference_mode(InferenceMode::Latency)
+            .compute_dtype(gllm_kernels::types::DType::F32)
+            .gguf_file_filter("Q8_0")
+            .debug_jit(false)
+            .weight_paging_enabled(false);
+
+        // Chaining completed — model_id is set, so build() should fail
+        // at model loading (not at "no model id").
+        let result = builder.build();
+        // The model doesn't exist, so we expect ModelNotFound or another
+        // loading error — but NOT the "no model id" error.
+        match result {
+            Err(ClientError::ModelNotFound(msg)) => {
+                // Should be a real model path, not "<no model id>"
+                assert!(!msg.contains("no model id"), "model_id was not set by .model()");
+            }
+            Err(_) => {
+                // Other loading errors (e.g. network) are acceptable
+            }
+            Ok(_) => panic!("expected error for nonexistent model, got Ok"),
+        }
+    }
+
+    /// Verify swap_model on empty client returns NoModelLoaded (REQ-API-1, REQ-API-7).
+    #[test]
+    fn swap_model_on_empty_client_returns_no_model_loaded() {
+        let client = Client::new_empty();
+        let result = client.swap_model("nonexistent");
+        match result {
+            Err(ClientError::NoModelLoaded) => {}
+            other => panic!("expected NoModelLoaded, got a different error variant"),
+        }
+    }
+
+    /// Verify swap_model with empty string returns ModelNotFound (REQ-API-1, REQ-API-7).
+    #[test]
+    fn swap_model_empty_string_fails() {
+        let client = Client::new_empty();
+        let result = client.swap_model("");
+        match result {
+            Err(ClientError::ModelNotFound(_)) => {}
+            other => panic!("expected ModelNotFound, got unexpected result variant"),
+        }
+    }
+
+    /// Verify Default trait for ClientBuilder matches new() (REQ-API-1).
+    #[test]
+    fn client_builder_default_matches_new() {
+        let _new_builder = ClientBuilder::new();
+        let _default_builder = ClientBuilder::default();
+        // Both should fail with the same error when building without model_id
+        let new_result = ClientBuilder::new().build();
+        let default_result = ClientBuilder::default().build();
+        assert!(matches!(new_result, Err(ClientError::ModelNotFound(_))));
+        assert!(matches!(default_result, Err(ClientError::ModelNotFound(_))));
+    }
+
+    /// Verify builder without model_id yields specific "no model id" error (REQ-API-1).
+    #[test]
+    fn builder_no_model_id_specific_error() {
+        let result = ClientBuilder::new().build();
+        match result {
+            Err(ClientError::ModelNotFound(msg)) => {
+                assert!(msg.contains("no model id"), "expected 'no model id' in error, got: {msg}");
+            }
+            other => panic!("expected ModelNotFound with 'no model id', got a different error variant"),
+        }
+    }
 }

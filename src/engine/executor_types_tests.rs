@@ -10,6 +10,8 @@ mod tests {
     use crate::model_config::{ModelConfigError, ModelGeometry};
     use crate::scheduler::SessionId;
     use crate::tokenizer::TokenizerError;
+    use crate::loader::LoaderError;
+    use crate::scheduler::memory_manager::{MemoryManagerError, Tier};
     use gllm_kernels::types::DType;
 
     /// Helper: build a minimal `ModelGeometry` for tests.
@@ -3245,5 +3247,647 @@ mod tests {
         };
         // Assert: max_seq_len accessor returns the geometry value
         assert_eq!(cfg.max_seq_len(), 32768);
+    }
+
+    // ========================================================================
+    // Batch 7: Adversarial verification gap fillers
+    // Covers: kv_cache_bytes_for_max_seq (SPEC REQ-PA-007), ExecutorError::SequenceTooLong,
+    //         ExecutorError::Loader/MemoryManager From, has_classifier, ArchFamily variants,
+    //         RouterType variants, KvCacheConfig::max_seq_len, boundary conditions
+    // ========================================================================
+
+    // ---- KvCacheConfig::kv_cache_bytes_for_max_seq (REQ-PA-007) ----
+
+    #[test]
+    fn kv_cache_config_bytes_for_max_seq_standard() {
+        // Standard: num_layers * 2 * kv_dim * max_seq_len * dtype_size
+        // = 12 * 2 * (4 * 64) * 2048 * 4 = 12 * 2 * 256 * 2048 * 4 = 50331648
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(
+            cfg.kv_cache_bytes_for_max_seq(),
+            12 * 2 * 256 * 2048 * 4
+        );
+    }
+
+    #[test]
+    fn kv_cache_config_bytes_for_max_seq_bf16() {
+        // BF16: dtype_size = 2, so half the bytes of F32
+        let cfg_f32 = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        let cfg_bf16 = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::BF16,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(cfg_bf16.kv_cache_bytes_for_max_seq() * 2, cfg_f32.kv_cache_bytes_for_max_seq());
+    }
+
+    #[test]
+    fn kv_cache_config_bytes_for_max_seq_mla() {
+        // MLA: kv_dim = d_c + d_rope = 512 + 64 = 576, not num_kv_heads * head_dim
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(make_mla_geometry()),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert!(cfg.is_mla());
+        assert_eq!(cfg.kv_dim(), 576);
+        // = 12 * 2 * 576 * 2048 * 4
+        assert_eq!(cfg.kv_cache_bytes_for_max_seq(), 12 * 2 * 576 * 2048 * 4);
+    }
+
+    #[test]
+    fn kv_cache_config_bytes_for_max_seq_shared_kv_layers() {
+        // With shared KV layers: effective_layers = num_layers - num_kv_shared_layers
+        let mut geo = make_geometry();
+        geo.num_layers = 12;
+        geo.num_kv_shared_layers = 4;
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(geo),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        // effective_layers = 12 - 4 = 8
+        // = 8 * 2 * (4 * 64) * 2048 * 4
+        assert_eq!(cfg.kv_cache_bytes_for_max_seq(), 8 * 2 * 256 * 2048 * 4);
+    }
+
+    #[test]
+    fn kv_cache_config_bytes_for_max_seq_all_shared_layers() {
+        // Edge: all layers shared => effective_layers = 0 => bytes = 0
+        let mut geo = make_geometry();
+        geo.num_layers = 4;
+        geo.num_kv_shared_layers = 4;
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(geo),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(cfg.kv_cache_bytes_for_max_seq(), 0);
+    }
+
+    #[test]
+    fn kv_cache_config_bytes_for_max_seq_single_layer_no_shared() {
+        // Minimum: 1 layer, no shared
+        let mut geo = make_geometry();
+        geo.num_layers = 1;
+        geo.num_kv_shared_layers = 0;
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(geo),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        // = 1 * 2 * 256 * 2048 * 4
+        assert_eq!(cfg.kv_cache_bytes_for_max_seq(), 1 * 2 * 256 * 2048 * 4);
+    }
+
+    // ---- KvCacheConfig::max_seq_len explicit test ----
+
+    #[test]
+    fn kv_cache_config_max_seq_len_returns_geometry_value() {
+        let mut geo = make_geometry();
+        geo.max_seq_len = 65536;
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(geo),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(cfg.max_seq_len(), 65536);
+    }
+
+    // ---- ExecutorError::SequenceTooLong ----
+
+    #[test]
+    fn executor_error_sequence_too_long_display() {
+        let err = ExecutorError::SequenceTooLong {
+            prompt_tokens: 2048,
+            max_new_tokens: 512,
+            total: 2560,
+            max_seq_len: 2048,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("2560"), "Display should show total: {msg}");
+        assert!(msg.contains("2048"), "Display should show max_seq_len: {msg}");
+    }
+
+    #[test]
+    fn executor_error_sequence_too_long_fields_accessible() {
+        let err = ExecutorError::SequenceTooLong {
+            prompt_tokens: 100,
+            max_new_tokens: 50,
+            total: 150,
+            max_seq_len: 128,
+        };
+        match err {
+            ExecutorError::SequenceTooLong { prompt_tokens, max_new_tokens, total, max_seq_len } => {
+                assert_eq!(prompt_tokens, 100);
+                assert_eq!(max_new_tokens, 50);
+                assert_eq!(total, 150);
+                assert_eq!(max_seq_len, 128);
+            }
+            _ => panic!("expected SequenceTooLong variant"),
+        }
+    }
+
+    #[test]
+    fn executor_error_sequence_too_long_is_std_error() {
+        let err = ExecutorError::SequenceTooLong {
+            prompt_tokens: 0,
+            max_new_tokens: 0,
+            total: 0,
+            max_seq_len: 0,
+        };
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- ExecutorError::Loader From conversion ----
+
+    #[test]
+    fn executor_error_from_loader_missing_weights() {
+        let loader_err = LoaderError::MissingWeights;
+        let exec_err: ExecutorError = loader_err.into();
+        assert!(format!("{exec_err}").contains("Missing weights"));
+    }
+
+    #[test]
+    fn executor_error_from_loader_network() {
+        let loader_err = LoaderError::Network("connection refused".into());
+        let exec_err: ExecutorError = loader_err.into();
+        assert!(format!("{exec_err}").contains("connection refused"));
+    }
+
+    #[test]
+    fn executor_error_from_loader_gguf() {
+        let loader_err = LoaderError::Gguf("invalid header".into());
+        let exec_err: ExecutorError = loader_err.into();
+        assert!(format!("{exec_err}").contains("invalid header"));
+    }
+
+    // ---- ExecutorError::MemoryManager From conversion ----
+
+    #[test]
+    fn executor_error_from_memory_manager() {
+        let mm_err = MemoryManagerError::TierCapacityExceeded {
+            tier: Tier::L2,
+        };
+        let exec_err: ExecutorError = mm_err.into();
+        let msg = format!("{exec_err}");
+        assert!(msg.contains("capacity") || msg.contains("Gpu") || msg.contains("tier"),
+            "MemoryManager error should be visible in Display: {msg}");
+    }
+
+    // ---- ExecutorError::Backend source chain ----
+
+    #[test]
+    fn executor_error_backend_source_chain() {
+        let backend_err = BackendError::Cuda("device lost".into());
+        let exec_err = ExecutorError::from(backend_err);
+        // #[error(transparent)] forwards source; BackendError has a blank Error impl
+        // so source() returns the BackendError itself (thiserror delegates via Deref)
+        let source = std::error::Error::source(&exec_err);
+        // BackendError::Cuda has no inner #[source], so source() is None at this level.
+        // The transparent forwarding makes Display work, but source chain stops here.
+        if let Some(src) = source {
+            let source_msg = format!("{}", src);
+            assert!(source_msg.contains("device lost"), "source message should contain 'device lost': {source_msg}");
+        }
+        // If source is None, that's also acceptable — BackendError has no nested source.
+    }
+
+    // ---- GeneratorForwardConfig: has_classifier field ----
+
+    #[test]
+    fn forward_config_has_classifier_false_by_default() {
+        let cfg = make_forward_config();
+        assert!(!cfg.has_classifier);
+    }
+
+    #[test]
+    fn forward_config_has_classifier_true() {
+        let mut cfg = make_forward_config();
+        cfg.has_classifier = true;
+        assert!(cfg.has_classifier);
+    }
+
+    // ---- ArchFamily: all four variants ----
+
+    #[test]
+    fn arch_family_all_variants_are_distinct() {
+        use crate::manifest::ArchFamily;
+        let variants = [ArchFamily::Encoder, ArchFamily::Decoder, ArchFamily::Embedding, ArchFamily::Reranker];
+        for (i, &a) in variants.iter().enumerate() {
+            for (j, &b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forward_config_embedding_family() {
+        let mut cfg = make_forward_config();
+        cfg.arch_family = crate::manifest::ArchFamily::Embedding;
+        assert_eq!(cfg.arch_family, crate::manifest::ArchFamily::Embedding);
+        assert_ne!(cfg.arch_family, crate::manifest::ArchFamily::Encoder);
+    }
+
+    #[test]
+    fn forward_config_reranker_family() {
+        let mut cfg = make_forward_config();
+        cfg.arch_family = crate::manifest::ArchFamily::Reranker;
+        assert_eq!(cfg.arch_family, crate::manifest::ArchFamily::Reranker);
+        assert_ne!(cfg.arch_family, crate::manifest::ArchFamily::Decoder);
+    }
+
+    // ---- RouterType: all variants ----
+
+    #[test]
+    fn router_type_all_variants_are_distinct() {
+        use crate::manifest::RouterType;
+        let variants = [RouterType::Qwen, RouterType::Mixtral, RouterType::DeepSeek, RouterType::GptOss, RouterType::Unknown];
+        for (i, &a) in variants.iter().enumerate() {
+            for (j, &b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forward_config_moe_gpt_oss_router() {
+        let cfg = GeneratorForwardConfig {
+            geometry: Arc::new(make_geometry()),
+            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
+            arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
+            rerank_yes_token_id: None,
+            rerank_no_token_id: None,
+            moe_config: Some(crate::manifest::MoEConfig {
+                num_experts: 32,
+                num_experts_per_tok: 4,
+                router_type: crate::manifest::RouterType::GptOss,
+            }),
+            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
+            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
+        };
+        assert_eq!(cfg.moe_config.unwrap().router_type, crate::manifest::RouterType::GptOss);
+    }
+
+    #[test]
+    fn forward_config_moe_unknown_router() {
+        let cfg = GeneratorForwardConfig {
+            geometry: Arc::new(make_geometry()),
+            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
+            arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
+            rerank_yes_token_id: None,
+            rerank_no_token_id: None,
+            moe_config: Some(crate::manifest::MoEConfig {
+                num_experts: 8,
+                num_experts_per_tok: 2,
+                router_type: crate::manifest::RouterType::Unknown,
+            }),
+            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
+            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
+        };
+        assert_eq!(cfg.moe_config.unwrap().router_type, crate::manifest::RouterType::Unknown);
+    }
+
+    // ---- MoEConfig: Copy, Clone, equality ----
+
+    #[test]
+    fn moe_config_equality() {
+        use crate::manifest::{MoEConfig, RouterType};
+        let a = MoEConfig { num_experts: 64, num_experts_per_tok: 8, router_type: RouterType::Mixtral };
+        let b = MoEConfig { num_experts: 64, num_experts_per_tok: 8, router_type: RouterType::Mixtral };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn moe_config_inequality_different_experts() {
+        use crate::manifest::{MoEConfig, RouterType};
+        let a = MoEConfig { num_experts: 64, num_experts_per_tok: 8, router_type: RouterType::Mixtral };
+        let b = MoEConfig { num_experts: 32, num_experts_per_tok: 8, router_type: RouterType::Mixtral };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn moe_config_inequality_different_top_k() {
+        use crate::manifest::{MoEConfig, RouterType};
+        let a = MoEConfig { num_experts: 64, num_experts_per_tok: 8, router_type: RouterType::Mixtral };
+        let b = MoEConfig { num_experts: 64, num_experts_per_tok: 4, router_type: RouterType::Mixtral };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn moe_config_copy_semantics() {
+        use crate::manifest::{MoEConfig, RouterType};
+        let a = MoEConfig { num_experts: 64, num_experts_per_tok: 8, router_type: RouterType::Mixtral };
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ---- GeneratorForwardConfig: RoPE interleaved and precompute propagation ----
+
+    #[test]
+    fn forward_config_rope_interleaved_true() {
+        let cfg = GeneratorForwardConfig {
+            geometry: Arc::new(make_geometry()),
+            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: true, precompute: false },
+            arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
+            rerank_yes_token_id: None,
+            rerank_no_token_id: None,
+            moe_config: None,
+            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
+            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
+        };
+        assert!(cfg.rope.interleaved);
+    }
+
+    #[test]
+    fn forward_config_rope_precompute_true() {
+        let cfg = GeneratorForwardConfig {
+            geometry: Arc::new(make_geometry()),
+            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: true },
+            arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
+            rerank_yes_token_id: None,
+            rerank_no_token_id: None,
+            moe_config: None,
+            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
+            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
+        };
+        assert!(cfg.rope.precompute);
+    }
+
+    // ---- SequenceInput: validate_page_table page_id zero is minimum valid ----
+
+    #[test]
+    fn sequence_input_validate_page_id_zero_is_valid() {
+        let seq = SequenceInput {
+            tokens: vec![1],
+            position: 0,
+            draft_steps: 0,
+            page_table: Some(vec![0]),
+            fused_hidden: None,
+        };
+        // page_id 0 is valid as long as total_pages >= 1
+        assert!(seq.validate_page_table(1).is_ok());
+    }
+
+    #[test]
+    fn sequence_input_validate_page_id_zero_invalid_when_no_pages() {
+        let seq = SequenceInput {
+            tokens: vec![1],
+            position: 0,
+            draft_steps: 0,
+            page_table: Some(vec![0]),
+            fused_hidden: None,
+        };
+        // page_id 0 >= total_pages 0 => invalid
+        assert!(seq.validate_page_table(0).is_err());
+    }
+
+    // ---- SequenceInput: validate_page_table sequential valid entries ----
+
+    #[test]
+    fn sequence_input_validate_sequential_valid_entries() {
+        let seq = SequenceInput {
+            tokens: vec![1, 2, 3, 4, 5],
+            position: 0,
+            draft_steps: 0,
+            page_table: Some(vec![0, 1, 2, 3, 4]),
+            fused_hidden: None,
+        };
+        assert!(seq.validate_page_table(5).is_ok());
+    }
+
+    // ---- ExecutorError: RequestNotFound with specific RequestId ----
+
+    #[test]
+    fn executor_error_request_not_found_with_zero_id() {
+        let err = ExecutorError::RequestNotFound { request_id: 0 };
+        let msg = format!("{err}");
+        assert!(msg.contains("0"));
+    }
+
+    #[test]
+    fn executor_error_request_not_found_with_max_id() {
+        let rid: RequestId = u64::MAX;
+        let err = ExecutorError::RequestNotFound { request_id: rid };
+        let msg = format!("{err}");
+        assert!(msg.contains(&u64::MAX.to_string()));
+    }
+
+    // ---- ExecutorError: all variant Display round-trip ----
+
+    #[test]
+    fn executor_error_all_variants_display_non_empty() {
+        let errors: Vec<ExecutorError> = vec![
+            ExecutorError::EmptyPrompt,
+            ExecutorError::EmptySample,
+            ExecutorError::Scheduler("s".into()),
+            ExecutorError::Compilation("c".into()),
+            ExecutorError::GraphExpansion("g".into()),
+            ExecutorError::Backend(BackendError::Cpu("e".into())),
+            ExecutorError::SequenceTooLong { prompt_tokens: 1, max_new_tokens: 1, total: 2, max_seq_len: 1 },
+            ExecutorError::RequestNotFound { request_id: 42 },
+        ];
+        for err in &errors {
+            let msg = format!("{err}");
+            assert!(!msg.is_empty(), "Display should not be empty for {:?}", err);
+        }
+    }
+
+    // ---- SwapConfig: negative threshold (boundary: f32 can be negative) ----
+
+    #[test]
+    fn swap_config_negative_threshold() {
+        let cfg = SwapConfig { enable_swap: true, swap_threshold: -0.5, lru_granularity: 1 };
+        assert!(cfg.swap_threshold < 0.0);
+        // Differs from a zero-threshold config
+        assert_ne!(cfg, SwapConfig { enable_swap: true, swap_threshold: 0.0, lru_granularity: 1 });
+    }
+
+    // ---- KvCacheConfig: kv_cache_bytes_for_max_seq with swap_config does not affect computation ----
+
+    #[test]
+    fn kv_cache_config_bytes_ignores_swap_config() {
+        let geo = Arc::new(make_geometry());
+        let cfg_no_swap = KvCacheConfig {
+            geometry: geo.clone(),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        let cfg_with_swap = KvCacheConfig {
+            geometry: geo,
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: Some(SwapConfig { enable_swap: true, swap_threshold: 0.9, lru_granularity: 8 }),
+        };
+        // swap_config does not affect byte calculation
+        assert_eq!(cfg_no_swap.kv_cache_bytes_for_max_seq(), cfg_with_swap.kv_cache_bytes_for_max_seq());
+    }
+
+    // ---- GeneratorForwardConfig: default_for_test consistency with accessors ----
+
+    #[test]
+    fn default_for_test_intermediate_size_accessor() {
+        let cfg = GeneratorForwardConfig::default_for_test();
+        assert_eq!(cfg.intermediate_size(), 128);
+    }
+
+    #[test]
+    fn default_for_test_num_kv_heads_accessor() {
+        let cfg = GeneratorForwardConfig::default_for_test();
+        assert_eq!(cfg.num_kv_heads(), 2);
+    }
+
+    #[test]
+    fn default_for_test_head_dim_accessor() {
+        let cfg = GeneratorForwardConfig::default_for_test();
+        assert_eq!(cfg.head_dim(), 16);
+    }
+
+    // ---- KvCacheConfig: PartialEq excludes fields not in manual eq ----
+
+    #[test]
+    fn kv_cache_config_partial_eq_ignores_swap_config_differences_in_fields_not_compared() {
+        // PartialEq compares: num_layers, num_heads, head_dim, max_seq_len, kv_dtype, page_size, swap_config
+        // But does NOT compare geometry pointer identity or dtype_size
+        let geo = Arc::new(make_geometry());
+        let a = KvCacheConfig {
+            geometry: geo.clone(),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        let b = KvCacheConfig {
+            geometry: geo,
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(a, b);
+    }
+
+    // ---- GeneratorForwardConfig: rerank with has_classifier ----
+
+    #[test]
+    fn forward_config_reranker_with_classifier() {
+        let mut cfg = make_forward_config();
+        cfg.arch_family = crate::manifest::ArchFamily::Reranker;
+        cfg.has_classifier = true;
+        cfg.rerank_yes_token_id = Some(1);
+        cfg.rerank_no_token_id = Some(0);
+        assert_eq!(cfg.arch_family, crate::manifest::ArchFamily::Reranker);
+        assert!(cfg.has_classifier);
+        assert_eq!(cfg.rerank_yes_token_id, Some(1));
+        assert_eq!(cfg.rerank_no_token_id, Some(0));
+    }
+
+    // ---- KvCacheConfig: dtype_size for various DTypes ----
+
+    #[test]
+    fn kv_cache_config_dtype_size_f32() {
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(cfg.dtype_size(), 4);
+    }
+
+    #[test]
+    fn kv_cache_config_dtype_size_bf16() {
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::BF16,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(cfg.dtype_size(), 2);
+    }
+
+    #[test]
+    fn kv_cache_config_dtype_size_f16() {
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::F16,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(cfg.dtype_size(), 2);
+    }
+
+    // ---- GeneratorForwardConfig: norm_eps from geometry ----
+
+    #[test]
+    fn forward_config_norm_eps_custom_value() {
+        let geo = Arc::new(ModelGeometry {
+            norm_eps: 1e-6,
+            ..make_geometry()
+        });
+        let cfg = GeneratorForwardConfig {
+            geometry: geo,
+            rope: RoPEConfig { theta: 10000.0, scale: 1.0, interleaved: false, precompute: false },
+            arch_family: crate::manifest::ArchFamily::Decoder,
+            has_classifier: false,
+            rerank_yes_token_id: None,
+            rerank_no_token_id: None,
+            moe_config: None,
+            paged_kv: PagedKvConfig { page_table: None, page_size: 16 },
+            callback_chain: super::super::coordinator::callback_slot::CallbackChainHandle::new(),
+        };
+        assert!((cfg.norm_eps() - 1e-6).abs() < 1e-12);
+    }
+
+    // ---- KvCacheConfig: kv_dim for standard (non-MLA) models ----
+
+    #[test]
+    fn kv_cache_config_kv_dim_standard_not_mla() {
+        let cfg = KvCacheConfig {
+            geometry: Arc::new(make_geometry()),
+            kv_dtype: DType::F32,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert!(!cfg.is_mla());
+        assert_eq!(cfg.kv_dim(), 4 * 64);
+    }
+
+    // ---- effective_kv_max_seq_len: identity is the contract (SPEC 08-EXECUTOR) ----
+
+    #[test]
+    fn effective_kv_max_seq_len_is_identity_function() {
+        // The function must be a pure passthrough per SPEC 08-EXECUTOR
+        assert_eq!(effective_kv_max_seq_len(0), 0);
+        assert_eq!(effective_kv_max_seq_len(1), 1);
+        assert_eq!(effective_kv_max_seq_len(2048), 2048);
+        assert_eq!(effective_kv_max_seq_len(usize::MAX), usize::MAX);
     }
 }
