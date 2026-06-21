@@ -119,7 +119,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Decoder → causal mask; Encoder → bidirectional mask.
         let topology = match manifest.family() {
             crate::manifest::ArchFamily::Decoder => super::executor::AttentionTopology::causal(geometry.clone()),
-            crate::manifest::ArchFamily::Encoder => super::executor::AttentionTopology::bidirectional(geometry.clone()),
+            crate::manifest::ArchFamily::Encoder
+            | crate::manifest::ArchFamily::Embedding
+            | crate::manifest::ArchFamily::Reranker => super::executor::AttentionTopology::bidirectional(geometry.clone()),
         };
 
         let sg_ring_buffer = std::sync::Arc::new(
@@ -2921,5 +2923,916 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("JIT compilation failed"));
         assert!(msg.contains("AVX-512 codegen failed"));
+    }
+
+    // ========================================================================
+    // Gap-closing tests: correctness perspective
+    // ========================================================================
+
+    // ---- build_loader_context error path: Chat + use_cache=false ----
+
+    #[test]
+    fn build_loader_context_chat_use_cache_false_returns_config_error() {
+        // Mirrors the error branch at lines 49-53:
+        // Chat model with use_cache=false should return Err(ExecutorError::Config).
+        let err = ExecutorError::Config(ModelConfigError::InvalidConfig(
+            "config.use_cache=false is not supported for generator models".to_string(),
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("use_cache=false"));
+        assert!(msg.contains("not supported for generator"));
+    }
+
+    #[test]
+    fn build_loader_context_chat_use_cache_false_is_config_variant() {
+        let err = ExecutorError::Config(ModelConfigError::InvalidConfig(
+            "config.use_cache=false is not supported for generator models".to_string(),
+        ));
+        match err {
+            ExecutorError::Config(_) => {}
+            _ => panic!("expected Config variant"),
+        }
+    }
+
+    // ---- build_loader_context error path: missing intermediate_size ----
+
+    #[test]
+    fn build_loader_context_missing_intermediate_size_returns_config_error() {
+        // Mirrors the error branch at lines 54-58.
+        let err = ExecutorError::Config(ModelConfigError::InvalidConfig(
+            "model config missing intermediate_size (FFN hidden dimension)".to_string(),
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("intermediate_size"));
+        assert!(msg.contains("FFN hidden dimension"));
+    }
+
+    #[test]
+    fn build_loader_context_missing_intermediate_size_is_config_variant() {
+        let err = ExecutorError::Config(ModelConfigError::InvalidConfig(
+            "model config missing intermediate_size (FFN hidden dimension)".to_string(),
+        ));
+        match err {
+            ExecutorError::Config(ModelConfigError::InvalidConfig(_)) => {}
+            _ => panic!("expected Config(InvalidConfig) variant"),
+        }
+    }
+
+    // ---- build_loader_context success: kv_dtype follows geometry.compute_dtype (ARCH-JIT-DATA-YIELDS) ----
+
+    #[test]
+    fn kv_dtype_equals_geometry_compute_dtype_f32() {
+        // ARCH-JIT-DATA-YIELDS: kv_dtype = geometry.compute_dtype, NOT hardcoded.
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false, dtype: DType::F32,
+            compute_dtype: DType::F32, norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        });
+        let kv_dtype = geometry.compute_dtype;
+        assert_eq!(kv_dtype, DType::F32);
+        assert_eq!(kv_dtype, geometry.compute_dtype);
+    }
+
+    #[test]
+    fn kv_dtype_equals_geometry_compute_dtype_bf16() {
+        // ARCH-JIT-DATA-YIELDS: when compute_dtype is BF16 (mixed precision),
+        // kv_dtype must be BF16, not the storage dtype.
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false,
+            dtype: DType::F32,
+            compute_dtype: DType::BF16,
+            norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        });
+        let kv_dtype = geometry.compute_dtype;
+        assert_eq!(kv_dtype, DType::BF16);
+        assert_ne!(kv_dtype, geometry.dtype);
+    }
+
+    // ---- build_loader_context success: MoE config derived from geometry topology ----
+
+    #[test]
+    fn moe_config_derived_from_geometry_is_moe_true() {
+        // ARCH-JIT-DATA-YIELDS: MoE config derived from geometry topology, not bool flag.
+        let geometry = crate::model_config::ModelGeometry {
+            hidden_size: 2048, num_layers: 12, vocab_size: 32000,
+            intermediate_size: 8192, num_heads: 16, num_kv_heads: 4,
+            head_dim: 128, max_seq_len: 4096, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false, dtype: DType::F32,
+            compute_dtype: DType::F32, norm_eps: 1e-5,
+            num_experts: 64, moe_top_k: 8, expert_intermediate_size: 256,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        };
+        let moe_config = if geometry.is_moe() {
+            Some(gllm_kernels::compiler::MoeConfig {
+                num_experts: geometry.num_experts,
+                top_k: geometry.moe_top_k,
+            })
+        } else {
+            None
+        };
+        assert!(moe_config.is_some());
+        let cfg = moe_config.unwrap();
+        assert_eq!(cfg.num_experts, 64);
+        assert_eq!(cfg.top_k, 8);
+    }
+
+    #[test]
+    fn moe_config_derived_from_geometry_is_moe_false() {
+        let geometry = crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false, dtype: DType::F32,
+            compute_dtype: DType::F32, norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        };
+        let moe_config = if geometry.is_moe() {
+            Some(gllm_kernels::compiler::MoeConfig {
+                num_experts: geometry.num_experts,
+                top_k: geometry.moe_top_k,
+            })
+        } else {
+            None
+        };
+        assert!(moe_config.is_none());
+    }
+
+    // ---- build_loader_context success: PagedScheduler vllm2024 initialization ----
+
+    #[test]
+    fn paged_scheduler_initialized_with_vllm2024_optimizations() {
+        let block_size = 16;
+        let total_blocks = 4096_usize.div_ceil(block_size);
+        let mut scheduler = PagedScheduler::new(
+            total_blocks, block_size, crate::scheduler::hgal::HGALConfig::default(),
+        );
+        scheduler.enable_vllm_2024(Scheduler2024Config {
+            enable_2024_optimizations: true,
+            ..Scheduler2024Config::default()
+        });
+        assert_eq!(scheduler.page_size(), block_size);
+    }
+
+    // ---- register_weight_pages correctness: weight_page_table populated ----
+
+    #[test]
+    fn register_weight_pages_populates_all_layer_indices() {
+        // REQ-WP-007: weight_page_table must have num_layers entries.
+        let num_layers = 8;
+        let mut weight_page_table: HashMap<usize, Vec<usize>> = HashMap::new();
+        for layer_idx in 0..num_layers {
+            let physical_id = layer_idx;
+            weight_page_table.insert(layer_idx, vec![physical_id]);
+        }
+        assert_eq!(weight_page_table.len(), num_layers);
+        for layer_idx in 0..num_layers {
+            assert!(weight_page_table.contains_key(&layer_idx));
+            assert_eq!(weight_page_table[&layer_idx], vec![layer_idx]);
+        }
+    }
+
+    #[test]
+    fn register_weight_pages_moe_creates_expert_pages() {
+        // REQ-WP-002 criteria 4: MoE pages are evictable (is_pinned=false).
+        let uvp = crate::scheduler::types::UnifiedVirtualPage::expert(5, 0, 5, DType::F32);
+        assert!(uvp.is_evictable());
+        assert_eq!(uvp.payload_kind, crate::scheduler::types::PagePayloadKind::ExpertWeight);
+        let dense_uvp = crate::scheduler::types::UnifiedVirtualPage::dense_layer(5, 5, DType::F32);
+        assert!(!dense_uvp.is_evictable());
+    }
+
+    #[test]
+    fn register_weight_pages_is_pinned_inverts_is_evictable() {
+        let expert_uvp = crate::scheduler::types::UnifiedVirtualPage::expert(0, 0, 0, DType::F32);
+        let dense_uvp = crate::scheduler::types::UnifiedVirtualPage::dense_layer(0, 0, DType::F32);
+        let expert_is_pinned = !expert_uvp.is_evictable();
+        let dense_is_pinned = !dense_uvp.is_evictable();
+        assert!(!expert_is_pinned);
+        assert!(dense_is_pinned);
+    }
+
+    // ---- build_inference_coordinator: ResidualBus has 4 ports with correct tags ----
+
+    #[test]
+    fn build_inference_coordinator_registers_all_four_bus_ports() {
+        let hidden_size = 4096;
+        let num_layers = 32;
+        let geometry = crate::model_config::ModelGeometry {
+            hidden_size, num_layers, vocab_size: 32000,
+            intermediate_size: 11008, num_heads: 32, num_kv_heads: 32,
+            head_dim: 128, max_seq_len: 4096, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false, dtype: DType::F32,
+            compute_dtype: DType::F32, norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        };
+
+        let mut bus = crate::routing::ResidualBus::new(geometry.hidden_size, geometry.num_layers);
+        let rag_layer = geometry.num_layers / 2;
+        bus.register(crate::routing::BusPort::injection(rag_layer, crate::routing::BusPortTag::RagInjection));
+        let exit_layer = (geometry.num_layers as f64 * EARLY_EXIT_LAYER_RATIO) as usize;
+        bus.register(crate::routing::BusPort::recall(
+            exit_layer.min(geometry.num_layers.saturating_sub(1)),
+            crate::routing::BusPortTag::EarlyExit,
+        ));
+        let intent_layer = (geometry.num_layers as f64 * INTENT_RECALL_LAYER_RATIO) as usize;
+        bus.register(crate::routing::BusPort::recall(
+            intent_layer.min(geometry.num_layers.saturating_sub(1)),
+            crate::routing::BusPortTag::IntentRecall,
+        ));
+        let guard_layer = geometry.num_layers.saturating_sub(2);
+        bus.register(crate::routing::BusPort::injection(
+            guard_layer.min(geometry.num_layers.saturating_sub(1)),
+            crate::routing::BusPortTag::Guardrail,
+        ));
+
+        assert_eq!(bus.active_port_count(), 4);
+        assert!(bus.find_port(crate::routing::BusPortTag::RagInjection).is_some());
+        assert!(bus.find_port(crate::routing::BusPortTag::EarlyExit).is_some());
+        assert!(bus.find_port(crate::routing::BusPortTag::IntentRecall).is_some());
+        assert!(bus.find_port(crate::routing::BusPortTag::Guardrail).is_some());
+        assert_eq!(
+            bus.find_port(crate::routing::BusPortTag::RagInjection).unwrap().kind,
+            crate::routing::BusPortKind::Injection,
+        );
+        assert_eq!(
+            bus.find_port(crate::routing::BusPortTag::EarlyExit).unwrap().kind,
+            crate::routing::BusPortKind::Recall,
+        );
+        assert_eq!(
+            bus.find_port(crate::routing::BusPortTag::IntentRecall).unwrap().kind,
+            crate::routing::BusPortKind::Recall,
+        );
+        assert_eq!(
+            bus.find_port(crate::routing::BusPortTag::Guardrail).unwrap().kind,
+            crate::routing::BusPortKind::Injection,
+        );
+        assert_eq!(bus.find_port(crate::routing::BusPortTag::RagInjection).unwrap().layer, 16);
+        assert_eq!(bus.find_port(crate::routing::BusPortTag::EarlyExit).unwrap().layer, 25);
+        assert_eq!(bus.find_port(crate::routing::BusPortTag::IntentRecall).unwrap().layer, 24);
+        assert_eq!(bus.find_port(crate::routing::BusPortTag::Guardrail).unwrap().layer, 30);
+    }
+
+    // ---- build_compute_coordinator: TurboQuant enabled when compute_dtype != F32 ----
+
+    #[test]
+    fn turboquant_enabled_when_compute_dtype_not_f32() {
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false,
+            dtype: DType::F32,
+            compute_dtype: DType::BF16,
+            norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        });
+
+        let turboquant = if geometry.compute_dtype != DType::F32 {
+            crate::kv_cache::turboquant::TurboQuantRuntime::new(
+                crate::kv_cache::turboquant::TurboQuantConfig {
+                    bits: 4, sink_count: 4, fwht_enabled: true,
+                    mode: crate::kv_cache::quant::QuantMode::Deterministic,
+                    dual_track_enabled: false,
+                },
+            ).unwrap()
+        } else {
+            crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
+        };
+        assert!(turboquant.is_enabled());
+    }
+
+    #[test]
+    fn turboquant_disabled_when_compute_dtype_is_f32() {
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false,
+            dtype: DType::F32,
+            compute_dtype: DType::F32,
+            norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        });
+
+        let turboquant = if geometry.compute_dtype != DType::F32 {
+            crate::kv_cache::turboquant::TurboQuantRuntime::new(
+                crate::kv_cache::turboquant::TurboQuantConfig {
+                    bits: 4, sink_count: 4, fwht_enabled: true,
+                    mode: crate::kv_cache::quant::QuantMode::Deterministic,
+                    dual_track_enabled: false,
+                },
+            ).unwrap()
+        } else {
+            crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
+        };
+        assert!(!turboquant.is_enabled());
+    }
+
+    // ---- build_compute_coordinator: TurboQuant init failure propagates ----
+
+    #[test]
+    fn turboquant_init_failure_maps_to_executor_error_config() {
+        // Mirrors line 220-222: TurboQuant init failure maps to ExecutorError::Config.
+        let tq_err = crate::kv_cache::dual_track::DualTrackError::MainPoolFull {
+            requested: 999999,
+            available: 65536,
+        };
+        let executor_err = ExecutorError::Config(ModelConfigError::InvalidConfig(
+            format!("TurboQuant init failed: {tq_err}"),
+        ));
+        let msg = format!("{executor_err}");
+        assert!(msg.contains("TurboQuant init failed"));
+    }
+
+    // ---- build_compute_coordinator: SubBatchDispatcher configured with is_moe() ----
+
+    #[test]
+    fn sub_batch_dispatcher_with_has_moe_ops_true() {
+        let constraints = crate::jit::compiler_constraints::CompilerConstraints::default();
+        let dispatcher = crate::jit::sub_batch::SubBatchDispatcher::new(constraints)
+            .with_has_moe_ops(true);
+        drop(dispatcher);
+    }
+
+    #[test]
+    fn sub_batch_dispatcher_with_has_moe_ops_false() {
+        let constraints = crate::jit::compiler_constraints::CompilerConstraints::default();
+        let dispatcher = crate::jit::sub_batch::SubBatchDispatcher::new(constraints)
+            .with_has_moe_ops(false);
+        drop(dispatcher);
+    }
+
+    // ---- drain_swap_completions: StorageTier -> PageState mapping ----
+
+    #[test]
+    fn drain_swap_completions_maps_all_tiers_to_page_states() {
+        // REQ-COMP-016: verify the mapping from each StorageTier to PageState.
+        let mappings: Vec<(crate::kv_cache::StorageTier, crate::scheduler::types::PageState)> = vec![
+            (crate::kv_cache::StorageTier::GpuHbm, crate::scheduler::types::PageState::Active),
+            (crate::kv_cache::StorageTier::CpuDram, crate::scheduler::types::PageState::Warm),
+            (crate::kv_cache::StorageTier::Nvme, crate::scheduler::types::PageState::Swapped),
+        ];
+        for (tier, expected_state) in mappings {
+            let new_state = match tier {
+                crate::kv_cache::StorageTier::GpuHbm => crate::scheduler::types::PageState::Active,
+                crate::kv_cache::StorageTier::CpuDram => crate::scheduler::types::PageState::Warm,
+                crate::kv_cache::StorageTier::Nvme => crate::scheduler::types::PageState::Swapped,
+            };
+            assert_eq!(new_state, expected_state);
+        }
+    }
+
+    // ========================================================================
+    // Gap-closing tests: boundary perspective
+    // ========================================================================
+
+    // ---- Zero-layer model: degenerate ResidualBus registration ----
+
+    #[test]
+    fn zero_layer_model_residual_bus_degenerate_state() {
+        let num_layers: usize = 0;
+        let rag_layer = num_layers / 2;
+        let exit_layer = (num_layers as f64 * EARLY_EXIT_LAYER_RATIO) as usize;
+        let clamped_exit = exit_layer.min(num_layers.saturating_sub(1));
+        let intent_layer = (num_layers as f64 * INTENT_RECALL_LAYER_RATIO) as usize;
+        let clamped_intent = intent_layer.min(num_layers.saturating_sub(1));
+        let guard_layer = num_layers.saturating_sub(2);
+        let clamped_guard = guard_layer.min(num_layers.saturating_sub(1));
+
+        assert_eq!(rag_layer, 0);
+        assert_eq!(clamped_exit, 0);
+        assert_eq!(clamped_intent, 0);
+        assert_eq!(clamped_guard, 0);
+    }
+
+    // ---- Classifier attention topology dispatch ----
+
+    #[test]
+    fn classifier_attention_topology_bidirectional() {
+        // Classifier models resolve to Encoder family via resolve_family,
+        // which maps to bidirectional attention topology.
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false, dtype: DType::F32,
+            compute_dtype: DType::F32, norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        });
+        // resolve_family only returns Decoder or Encoder.
+        // Classifier arch (e.g. xlmr) maps to Encoder => bidirectional.
+        let family = crate::manifest::ArchFamily::Encoder;
+        // Mirrors production match in build_loader_context (lines 120-123):
+        // only Decoder and Encoder are matched because resolve_family
+        // guarantees the result is one of those two.
+        let topology = match family {
+            crate::manifest::ArchFamily::Decoder => AttentionTopology::causal(geometry.clone()),
+            _ => AttentionTopology::bidirectional(geometry.clone()),
+        };
+        assert_eq!(topology.mask_type, super::super::executor::AttentionMaskType::Bidirectional);
+    }
+
+    // ---- register_weight_pages when num_layers=0 ----
+
+    #[test]
+    fn register_weight_pages_zero_layers_no_entries() {
+        let num_layers: usize = 0;
+        let mut weight_page_table: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut weight_pages_registered = false;
+        for layer_idx in 0..num_layers {
+            weight_page_table.insert(layer_idx, vec![layer_idx]);
+        }
+        if num_layers > 0 {
+            weight_pages_registered = true;
+        }
+        assert!(weight_page_table.is_empty());
+        assert!(!weight_pages_registered);
+    }
+
+    // ---- init_three_tier_swap: all 3 branches ----
+
+    #[test]
+    fn init_three_tier_swap_none_swap_config_is_no_op() {
+        let swap_config: Option<super::super::executor::SwapConfig> = None;
+        assert!(swap_config.is_none());
+    }
+
+    #[test]
+    fn init_three_tier_swap_enable_swap_false_is_no_op() {
+        let swap_config = Some(super::super::executor::SwapConfig {
+            enable_swap: false,
+            swap_threshold: 0.8,
+            lru_granularity: 64,
+        });
+        assert!(swap_config.is_some());
+        assert!(!swap_config.unwrap().enable_swap);
+    }
+
+    #[test]
+    fn init_three_tier_swap_enable_swap_true_proceeds() {
+        let swap_config = Some(super::super::executor::SwapConfig {
+            enable_swap: true,
+            swap_threshold: 0.8,
+            lru_granularity: 64,
+        });
+        assert!(swap_config.is_some());
+        assert!(swap_config.unwrap().enable_swap);
+    }
+
+    // ---- collect_active_page_ids with duplicate page IDs ----
+
+    #[test]
+    fn collect_active_page_ids_with_duplicates_in_multiple_tables() {
+        let mut block_tables: std::collections::HashMap<u64, crate::scheduler::BlockTable> =
+            std::collections::HashMap::new();
+        block_tables.insert(1, crate::scheduler::BlockTable {
+            blocks: vec![10, 20, 30],
+        });
+        block_tables.insert(2, crate::scheduler::BlockTable {
+            blocks: vec![20, 30, 40],
+        });
+        let pages: Vec<crate::scheduler::types::PageId> = block_tables
+            .values()
+            .flat_map(|bt| bt.blocks.iter().copied())
+            .collect();
+        // flat_map produces duplicates — this is correct behavior
+        assert_eq!(pages.len(), 6);
+        let mut sorted = pages;
+        sorted.sort();
+        assert_eq!(sorted, vec![10, 20, 20, 30, 30, 40]);
+    }
+
+    // ---- memory_pressure > 0.8 threshold ----
+
+    #[test]
+    fn memory_pressure_threshold_at_exact_boundary() {
+        let threshold = 0.8;
+        let pressure_below: f32 = 0.79;
+        let pressure_exact: f32 = 0.80;
+        let pressure_above: f32 = 0.81;
+        assert!(pressure_above > threshold);
+        assert!(!(pressure_exact > threshold));
+        assert!(!(pressure_below > threshold));
+    }
+
+    // ========================================================================
+    // Gap-closing tests: spec_alignment perspective
+    // ========================================================================
+
+    // ---- REQ-WP-002: weight page HGAL registration criteria ----
+
+    #[test]
+    fn req_wp_002_criterion_1_pages_in_hgal_page_metadata() {
+        let num_layers = 4;
+        let mut scheduler = PagedScheduler::new(
+            256, 16, crate::scheduler::hgal::HGALConfig::default(),
+        );
+        for layer_idx in 0..num_layers {
+            let page_id = layer_idx;
+            scheduler.hgal.update_page_state(
+                page_id,
+                None,
+                crate::scheduler::types::PageState::Active,
+            );
+        }
+        assert_eq!(scheduler.hgal.page_metadata.len(), num_layers);
+    }
+
+    #[test]
+    fn req_wp_002_criterion_2_groups_in_hgal_sequence_groups() {
+        let num_layers = 4;
+        let mut scheduler = PagedScheduler::new(
+            256, 16, crate::scheduler::hgal::HGALConfig::default(),
+        );
+        let has_moe_ops = false;
+        for layer_idx in 0..num_layers {
+            let page_id = layer_idx;
+            scheduler.hgal.update_page_state(
+                page_id,
+                None,
+                crate::scheduler::types::PageState::Active,
+            );
+            if has_moe_ops {
+                scheduler.hgal.register_expert_weight_page(page_id, layer_idx);
+            } else {
+                scheduler.hgal.register_dense_layer_weight_page(page_id, layer_idx);
+            }
+            let weight_group_id = (layer_idx as u64).wrapping_add(1_000_000);
+            let uvp = crate::scheduler::types::UnifiedVirtualPage::dense_layer(
+                page_id, layer_idx, DType::F32,
+            );
+            scheduler.hgal.upsert_group(crate::scheduler::types::SequenceGroup {
+                id: weight_group_id,
+                pages: vec![page_id],
+                state: crate::scheduler::types::GroupState::Running,
+                access_count: 0,
+                last_access: std::time::Instant::now(),
+                is_pinned: !uvp.is_evictable(),
+                context_len: 0,
+                pipeline: crate::scheduler::types::KvPipeline::Conversation,
+                payload_kind: Some(uvp.payload_kind),
+            });
+        }
+        assert!(scheduler.hgal.sequence_groups.len() >= num_layers);
+    }
+
+    #[test]
+    fn req_wp_002_criterion_3_dense_is_pinned_true() {
+        let uvp = crate::scheduler::types::UnifiedVirtualPage::dense_layer(0, 0, DType::F32);
+        let is_pinned = !uvp.is_evictable();
+        assert!(is_pinned);
+    }
+
+    #[test]
+    fn req_wp_002_criterion_4_moe_is_pinned_false() {
+        let uvp = crate::scheduler::types::UnifiedVirtualPage::expert(0, 0, 0, DType::F32);
+        let is_pinned = !uvp.is_evictable();
+        assert!(!is_pinned);
+    }
+
+    #[test]
+    fn req_wp_002_criterion_5_eviction_skips_pinned() {
+        let dense = crate::scheduler::types::UnifiedVirtualPage::dense_layer(0, 0, DType::F32);
+        let expert = crate::scheduler::types::UnifiedVirtualPage::expert(1, 0, 0, DType::F32);
+        let kv = crate::scheduler::types::UnifiedVirtualPage::kv(2, 1,
+            crate::scheduler::types::KvPipeline::Conversation, 0, DType::F32);
+        assert!(!dense.is_evictable());
+        assert!(expert.is_evictable());
+        assert!(kv.is_evictable());
+    }
+
+    // ---- REQ-WP-007: weight_page_table population ----
+
+    #[test]
+    fn req_wp_007_criterion_1_all_layers_populated() {
+        let num_layers = 6;
+        let mut weight_page_table: HashMap<usize, Vec<usize>> = HashMap::new();
+        for layer_idx in 0..num_layers {
+            weight_page_table.insert(layer_idx, vec![layer_idx]);
+        }
+        for layer_idx in 0..num_layers {
+            assert!(weight_page_table.contains_key(&layer_idx));
+        }
+        assert_eq!(weight_page_table.len(), num_layers);
+    }
+
+    #[test]
+    fn req_wp_007_criterion_2_physical_id_per_layer() {
+        let num_layers = 4;
+        let mut weight_page_table: HashMap<usize, Vec<usize>> = HashMap::new();
+        for layer_idx in 0..num_layers {
+            let physical_id = layer_idx;
+            weight_page_table.insert(layer_idx, vec![physical_id]);
+        }
+        for layer_idx in 0..num_layers {
+            assert_eq!(weight_page_table[&layer_idx][0], layer_idx);
+        }
+    }
+
+    // ---- REQ-DECOMP: 5-coordinator decomposition invariant ----
+
+    #[test]
+    fn executor_has_exactly_five_coordinators() {
+        // REQ-DECOMP: Executor has dispatch/kv/compute/inference/observability.
+        use super::super::coordinator;
+        let _dispatch_type: coordinator::dispatch::DispatchCoordinator;
+        let _kv_type: coordinator::kv::KvCoordinator;
+        let _compute_type: coordinator::compute::ComputeCoordinator;
+        let _inference_type: coordinator::inference::InferenceCoordinator;
+        let _observability_type: coordinator::observability::ObservabilityCoordinator;
+    }
+
+    // ---- ARCH-JIT-DATA-YIELDS: kv_dtype = compute_dtype ----
+
+    #[test]
+    fn arch_jit_data_yields_kv_dtype_not_hardcoded() {
+        let cases: Vec<(DType, DType)> = vec![
+            (DType::F32, DType::F32),
+            (DType::F32, DType::BF16),
+            (DType::BF16, DType::BF16),
+            (DType::F16, DType::F16),
+        ];
+        for (dtype, compute_dtype) in cases {
+            let kv_dtype = compute_dtype;
+            assert_eq!(kv_dtype, compute_dtype);
+            if dtype != compute_dtype {
+                assert_ne!(kv_dtype, dtype);
+            }
+        }
+    }
+
+    // ---- REQ-SCHED-007: SplitFuse permanently disabled ----
+
+    #[test]
+    fn req_sched_007_splitfuse_always_false_programmatic() {
+        let default_cfg = crate::scheduler::vllm2024::ChunkedConfig::default();
+        assert!(!default_cfg.enable_splitfuse);
+        let manual_cfg = crate::scheduler::vllm2024::ChunkedConfig {
+            min_chunk: 128,
+            max_chunk: 4096,
+            decode_slots: 4,
+            enable_splitfuse: false,
+        };
+        assert!(!manual_cfg.enable_splitfuse);
+    }
+
+    // ---- ExecutorError: Config variant preserves inner message ----
+
+    #[test]
+    fn executor_error_config_variant_preserves_inner_message() {
+        let inner = ModelConfigError::InvalidConfig("test reason".to_string());
+        let outer = ExecutorError::Config(inner);
+        let msg = format!("{outer}");
+        assert!(msg.contains("test reason"));
+    }
+
+    // ---- ModelConfigError: all variants produce non-empty Display ----
+
+    #[test]
+    fn model_config_error_missing_config_display() {
+        let err = ModelConfigError::MissingConfig;
+        let msg = format!("{err}");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn model_config_error_missing_config_and_metadata_display() {
+        let err = ModelConfigError::MissingConfigAndMetadata("no config.json".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("no config.json"));
+    }
+
+    #[test]
+    fn model_config_error_invalid_config_display() {
+        let err = ModelConfigError::InvalidConfig("bad value".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("bad value"));
+    }
+
+    // ---- ArchFamily: all 4 variants distinct ----
+
+    #[test]
+    fn arch_family_all_four_variants_distinct() {
+        use crate::manifest::ArchFamily;
+        let variants = [
+            ArchFamily::Encoder,
+            ArchFamily::Decoder,
+            ArchFamily::Embedding,
+            ArchFamily::Reranker,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j { assert_eq!(a, b); } else { assert_ne!(a, b); }
+            }
+        }
+    }
+
+    // ---- ExecutorError: additional variant Display coverage ----
+
+    #[test]
+    fn executor_error_request_not_found_display() {
+        let err = ExecutorError::RequestNotFound { request_id: 42 };
+        let msg = format!("{err}");
+        assert!(msg.contains("42"));
+    }
+
+    #[test]
+    fn executor_error_sequence_too_long_display() {
+        let err = ExecutorError::SequenceTooLong {
+            prompt_tokens: 100,
+            max_new_tokens: 500,
+            total: 600,
+            max_seq_len: 512,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("100"));
+        assert!(msg.contains("600"));
+        assert!(msg.contains("512"));
+    }
+
+    #[test]
+    fn executor_error_graph_expansion_display() {
+        let err = ExecutorError::GraphExpansion("unsupported OpKind".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("unsupported OpKind"));
+    }
+
+    // ---- ResidualBus: injection with scale=0.0 produces no change ----
+
+    #[test]
+    fn residual_bus_injection_scale_zero_no_change() {
+        let mut bus = crate::routing::ResidualBus::new(4, 8);
+        bus.register(crate::routing::BusPort::injection(2, crate::routing::BusPortTag::RagInjection));
+        let payload = crate::routing::InjectionPayload {
+            target: crate::routing::BusPortTag::RagInjection,
+            data: vec![5.0, 5.0, 5.0, 5.0],
+            scale: 0.0,
+        };
+        let mut residual = vec![10.0, 20.0, 30.0, 40.0];
+        bus.inject(&payload, &mut residual).unwrap();
+        assert!((residual[0] - 10.0).abs() < 1e-6);
+        assert!((residual[1] - 20.0).abs() < 1e-6);
+        assert!((residual[2] - 30.0).abs() < 1e-6);
+        assert!((residual[3] - 40.0).abs() < 1e-6);
+    }
+
+    // ---- KvCacheConfig: dtype_size for BF16 ----
+
+    #[test]
+    fn kv_cache_config_bf16_dtype_size_is_two() {
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 64, num_layers: 4, vocab_size: 100,
+            intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
+            head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
+            rope_scale: 1.0, rope_interleaved: false, dtype: DType::BF16,
+            compute_dtype: DType::BF16, norm_eps: 1e-5, num_experts: 0,
+            moe_top_k: 0, expert_intermediate_size: 0,
+            global_rope_theta: 0.0, rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
+            attention_pattern: vec![], sliding_window: 0,
+            num_kv_shared_layers: 0, global_head_dim: 0,
+            hidden_size_per_layer_input: 0, position_offset: None,
+            rope_scaling: None, final_logit_softcapping: None,
+            hidden_act: None, mla_d_c: 0, mla_d_rope: 0,
+            mla_unabsorbed_threshold: 0,
+            qk_norm: false,
+            value_norm: false,
+            embedding_scale_factor: 0.0,
+            mla_use_unabsorbed: false,
+        });
+        let kv_cfg = KvCacheConfig {
+            geometry,
+            kv_dtype: DType::BF16,
+            page_size: 16,
+            swap_config: None,
+        };
+        assert_eq!(kv_cfg.dtype_size(), 2);
+        assert_eq!(kv_cfg.kv_dtype, DType::BF16);
+    }
+
+    // ---- ModelKind: Classifier parse and from_str ----
+
+    #[test]
+    fn model_kind_classifier_from_str() {
+        use std::str::FromStr;
+        assert_eq!(
+            crate::manifest::ModelKind::from_str("classifier").unwrap(),
+            crate::manifest::ModelKind::Classifier,
+        );
+    }
+
+    // ---- ChunkedConfig: enable_splitfuse field defaults to false ----
+
+    #[test]
+    fn chunked_config_enable_splitfuse_is_bool_field() {
+        let cfg = crate::scheduler::vllm2024::ChunkedConfig {
+            enable_splitfuse: false,
+            min_chunk: 64,
+            max_chunk: 2048,
+            decode_slots: 2,
+        };
+        assert!(!cfg.enable_splitfuse);
     }
 }

@@ -80,6 +80,11 @@ pub struct StrategyArbiter;
 
 impl StrategyArbiter {
     /// Main entry point. Called once at model-load time.
+    // @trace REQ-STRATEGY-SELECT-001 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
+    // @trace REQ-STRATEGY-SELECT-002 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
+    // @trace REQ-STRATEGY-INTERACT-001 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
+    // @trace REQ-STRATEGY-INTERACT-002 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
+    // @trace REQ-STRATEGY-INTERACT-003 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
     pub fn arbitrate(
         mode: InferenceMode,
         archetype: &GraphArchetype,
@@ -140,6 +145,7 @@ impl StrategyArbiter {
 
     // ── §4.3.2 Archetype modulation ─────────────────────────────────────
 
+    // @trace REQ-STRATEGY-INTERACT-001 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
     fn apply_archetype_modulation(bias: &mut StrategyBias, arch: &GraphArchetype) {
         bias.fusion_cost_scale *= lerp(1.0, 0.6, arch.fusion_profitable);
         bias.pipeline_cost_scale *= lerp(1.0, 0.6, arch.pipeline_valuable);
@@ -170,6 +176,7 @@ impl StrategyArbiter {
 
     // ── §4.3.3 Hardware adjustment ──────────────────────────────────────
 
+    // @trace REQ-STRATEGY-SELECT-001 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
     fn apply_hardware_adjustment(bias: &mut StrategyBias, hw: &ArbiterHwView) {
         // GPU: abundant registers → relax register tension
         match hw.device {

@@ -24,6 +24,7 @@ use crate::engine::executor::GeneratorForwardConfig;
 // Callback Action — 回调返回值
 // ============================================================================
 
+// @trace REQ-CALLBACK-001 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
 /// Action returned by a callback to control execution flow.
 #[derive(Debug, Clone, PartialEq)]
 #[derive(Default)]
@@ -106,6 +107,9 @@ unsafe impl Send for LayerContext<'_> {}
 // Layer Callback Trait
 // ============================================================================
 
+// @trace REQ-CALLBACK-001 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
+// @trace REQ-CALLBACK-002 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
+// @trace REQ-CALLBACK-003 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
 /// Trait for mid-layer optimization callbacks.
 ///
 /// Implementations are called between graph node executions in
@@ -147,11 +151,13 @@ pub trait LayerCallback {
     }
 
     /// Callback priority (higher = called first).
+    // @trace REQ-CALLBACK-003 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
     fn priority(&self) -> u32 {
         0
     }
 
     /// Layers this callback targets. `None` = all layers.
+    // @trace REQ-CALLBACK-002 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
     fn target_layers(&self) -> Option<&[usize]> {
         None
     }
@@ -166,6 +172,9 @@ pub trait LayerCallback {
 // Callback Chain — 多回调管理
 // ============================================================================
 
+// @trace REQ-CALLBACK-001 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
+// @trace REQ-CALLBACK-002 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
+// @trace REQ-CALLBACK-003 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
 /// Manages a sorted list of callbacks and dispatches them efficiently.
 ///
 /// Callbacks are sorted by priority (highest first) at construction time.
@@ -179,6 +188,7 @@ pub struct CallbackChain {
 
 impl CallbackChain {
     /// Create an empty chain (zero-overhead when no optimizations are enabled).
+    // @trace REQ-CALLBACK-001 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
     pub fn empty() -> Self {
         Self {
             callbacks: Vec::new(),
@@ -187,6 +197,7 @@ impl CallbackChain {
     }
 
     /// Create a chain from a list of callbacks, sorted by priority.
+    // @trace REQ-CALLBACK-003 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
     pub fn new(callbacks: Vec<Box<dyn LayerCallback + Send>>) -> Self {
         let mut sorted_indices: Vec<usize> = (0..callbacks.len()).collect();
         // Sort by priority descending (highest priority first)
@@ -213,6 +224,8 @@ impl CallbackChain {
     /// Dispatch `pre_node()` to all applicable callbacks for the given layer.
     ///
     /// Returns the first non-Continue action, or Continue if all callbacks agree.
+    // @trace REQ-CALLBACK-001 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
+    // @trace REQ-CALLBACK-002 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
     pub fn dispatch_pre_node(&mut self, ctx: &LayerContext) -> CallbackAction {
         let layer_idx = ctx.layer_idx;
         for &idx in &self.sorted_indices {
@@ -240,6 +253,8 @@ impl CallbackChain {
     /// Dispatch `post_node()` to all applicable callbacks for the given layer.
     ///
     /// Returns the first non-Continue action, or Continue if all callbacks agree.
+    // @trace REQ-CALLBACK-001 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
+    // @trace REQ-CALLBACK-002 [entity:ENT-CALLBACK-CHAIN] [api:POST /internal/sg/callback]
     pub fn dispatch_post_node(&mut self, ctx: &LayerContext, output: &[u8]) -> CallbackAction {
         let layer_idx = ctx.layer_idx;
         for &idx in &self.sorted_indices {

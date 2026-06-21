@@ -12,6 +12,7 @@ use crate::kv_cache::LayerDonorInfo;
 use std::collections::HashMap;
 use thiserror::Error;
 
+/// @trace REQ-KV-ADDR-001 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockTable {
     // Maps logical block index -> physical block ID
@@ -79,6 +80,8 @@ pub enum SchedulerError {
     },
 }
 
+/// @trace REQ-KV-ADDR-001 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
+/// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
 pub struct PagedScheduler {
     pub(crate) hgal: HGALScheduler,
     allocator: BlockAllocator,
@@ -202,6 +205,7 @@ impl PagedScheduler {
     /// Returns None if the request has no block table (not yet scheduled).
     ///
     /// Safety: validates all page IDs are within [0, total_pages).
+    /// @trace REQ-KV-ADDR-001 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn get_page_table(&self, request_id: RequestId) -> Option<Vec<u32>> {
         self.block_tables.get(&request_id).map(|bt| {
             let total_pages = self.allocator.get_total_blocks();
@@ -233,6 +237,7 @@ impl PagedScheduler {
         self.block_tables.len()
     }
 
+    /// @trace REQ-KV-ADDR-001 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), SchedulerError> {
         // Calculate needed blocks for the context
         let needed_blocks = group.context_len.div_ceil(self.block_size);
@@ -277,6 +282,7 @@ impl PagedScheduler {
 
     /// Add a sequence with prefix reuse: checks the prefix tree first, reuses matched pages.
     /// Returns the number of tokens that were reused from the prefix cache.
+    /// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn add_sequence_with_prefix_reuse(
         &mut self,
         mut group: SequenceGroup,
@@ -344,12 +350,14 @@ impl PagedScheduler {
 
     /// Query the prefix tree for the longest matching prefix of `tokens`.
     /// Returns `Some(PrefixMatch)` if a shared prefix is found.
+    /// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn find_prefix(&self, tokens: &[TokenId]) -> Option<PrefixMatch> {
         self.prefix_index.find_longest_prefix(tokens)
     }
 
     /// Insert a completed prefill's token sequence into the prefix tree,
     /// mapping each token position to its corresponding virtual page.
+    /// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn insert_prefix(&mut self, request_id: RequestId, tokens: &[TokenId]) {
         let pages: Vec<VirtualPageId> = tokens
             .iter()
@@ -494,6 +502,7 @@ impl PagedScheduler {
         Ok(())
     }
 
+    /// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     fn restore_swapped_sequence(&mut self, request_id: RequestId) -> Result<(), SchedulerError> {
         let Some(storage_keys) = self.swapped_storage_keys.get(&request_id).cloned() else {
             return Ok(());
@@ -601,12 +610,14 @@ impl PagedScheduler {
         }
     }
 
+    /// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn on_swap_in(&mut self, _request_id: RequestId, page_indices: &[PageId]) {
         for &page_id in page_indices {
             self.hgal.on_swap_in(page_id);
         }
     }
 
+    /// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn on_page_evicted(&mut self, request_id: RequestId, page_indices: &[PageId]) {
         for &page_id in page_indices {
             self.hgal

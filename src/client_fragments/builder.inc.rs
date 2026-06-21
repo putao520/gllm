@@ -173,6 +173,8 @@ impl ClientBuilder {
     /// avoid loading duplicate weights. The reranker uses CLS→Classifier
     /// while the embedder uses MeanPool→L2Norm, but the underlying
     /// encoder forward pass is identical.
+    ///
+    /// @trace REQ-API-1 [entity:ENT-CLIENT] ClientBuilder::build() — 链式配置终结,返回 Client 实例
     pub fn build(self) -> Result<Client, ClientError> {
         let model_id = self
             .model_id

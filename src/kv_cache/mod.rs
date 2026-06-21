@@ -106,6 +106,7 @@ impl OomHaltError {
 /// V1 二进制兼容: V1 56B 头部字段偏移 0x00-0x2F 不变。V2 字段 sequence_id/logical_index/
 /// last_access_seq 位于偏移 0x30-0x3F，通过 ext_id 索引访问。旧代码只读 0x00-0x2F
 /// 区域，不受 V2 扩展影响。
+/// @trace REQ-KV-ADDR-001 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct KvPageHeader {

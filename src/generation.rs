@@ -150,6 +150,7 @@ impl GenerationChunk {
 ///
 /// On first call to `next()`, executes the full generation synchronously,
 /// then yields tokens one-by-one as `GenerationChunk`s.
+// @trace REQ-API-2 [entity:GenerationStream] streaming token iterator
 pub struct GenerationStream {
     state: Arc<ArcSwapOption<ClientState>>,
     phase: StreamPhase,
@@ -356,6 +357,7 @@ impl Iterator for GenerationStream {
 }
 
 /// Response from text generation (per SPEC 04-API-DESIGN §3.1).
+// @trace REQ-API-2 [entity:GenerationResponse] non-streaming generation result
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationResponse {
     /// Generated text.
@@ -370,6 +372,7 @@ pub struct GenerationResponse {
 }
 
 /// Builder for text generation (per SPEC 04-API-DESIGN §3.1).
+// @trace REQ-API-2 [entity:GenerationBuilder] [api:POST /client/generate]
 ///
 /// # Example
 ///
@@ -440,6 +443,7 @@ pub struct GenerationBuilder<'a> {
 }
 
 impl<'a> GenerationBuilder<'a> {
+    // @trace REQ-API-2 [entity:GenerationBuilder] [api:POST /client/generate] from_prompt constructor
     pub(crate) fn from_prompt(client: &'a Client, prompt: impl Into<String>) -> Self {
         Self {
             client,
@@ -485,24 +489,28 @@ impl<'a> GenerationBuilder<'a> {
     }
 
     /// Set maximum tokens to generate.
+    // @trace REQ-API-2 [entity:GenerationBuilder] sampling param: max_tokens
     pub fn max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = max_tokens;
         self
     }
 
     /// Set sampling temperature.
+    // @trace REQ-API-2 [entity:GenerationBuilder] sampling param: temperature
     pub fn temperature(mut self, temperature: f32) -> Self {
         self.temperature = temperature;
         self
     }
 
     /// Set top-k sampling parameter.
+    // @trace REQ-API-2 [entity:GenerationBuilder] sampling param: top_k
     pub fn top_k(mut self, top_k: usize) -> Self {
         self.top_k = top_k;
         self
     }
 
     /// Set top-p (nucleus) sampling parameter.
+    // @trace REQ-API-2 [entity:GenerationBuilder] sampling param: top_p
     pub fn top_p(mut self, top_p: f32) -> Self {
         self.top_p = top_p;
         self
@@ -515,6 +523,7 @@ impl<'a> GenerationBuilder<'a> {
     }
 
     /// Enable/disable streaming generation (per SPEC 04-API-DESIGN §3.1 REQ-GEN-004)
+    // @trace REQ-API-2 [entity:GenerationBuilder] stream mode toggle
     pub fn stream(mut self, enable: bool) -> Self {
         self.stream = enable;
         self
@@ -578,6 +587,7 @@ impl<'a> GenerationBuilder<'a> {
     /// Returns either:
     /// - `GenerationOutput::Response(...)`: Synchronous `Result<GenerationResponse, GllmError>`
     /// - `GenerationOutput::Stream(...)`: `GenerationStream` implementing `Iterator`
+    // @trace REQ-API-2 [entity:GenerationBuilder] [api:POST /client/generate] execute — stream/non-stream dispatch, sampling delegated to JIT mega-kernel
     ///
     /// # Example (Non-streaming)
     ///
@@ -692,6 +702,7 @@ impl<'a> GenerationBuilder<'a> {
 ///
 /// - `Response(...)`: Non-streaming, contains `Result<GenerationResponse, GllmError>`
 /// - `Stream(...)`: Streaming, contains `GenerationStream` (implements `Iterator`)
+// @trace REQ-API-2 [entity:GenerationOutput] stream/non-stream output dispatch
 pub enum GenerationOutput {
     /// Complete generation response (non-streaming)
     Response(Result<GenerationResponse, GllmError>),

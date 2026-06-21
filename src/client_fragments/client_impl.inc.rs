@@ -163,6 +163,7 @@ impl Client {
     // Construction
     // -----------------------------------------------------------------
 
+    /// @trace REQ-API-1 [entity:ENT-CLIENT] Client::builder() — Builder 模式入口
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
     }
@@ -215,6 +216,8 @@ impl Client {
     ///
     /// Atomically replaces the current model. The old model's resources
     /// are released once all in-flight operations complete.
+    ///
+    /// @trace REQ-API-1 [entity:ENT-CLIENT] load_model — Builder 构建后加载模型
     pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {
         let model_id = Self::normalize_model_id(model_id)?;
         let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency, None, None, false)?;
@@ -223,6 +226,8 @@ impl Client {
     }
 
     /// Unload the current model, releasing resources (sync).
+    ///
+    /// @trace REQ-API-1 [entity:ENT-CLIENT] unload_model — 释放模型资源
     pub fn unload_model(&self) -> Result<(), ClientError> {
         self.state.store(None);
         Ok(())
@@ -230,7 +235,13 @@ impl Client {
 
     /// Swap to a different model (sync, atomic).
     ///
-    /// If loading fails, the client will be in an empty state.
+    /// Atomic semantics: if `build_state` fails, the current model remains loaded
+    /// (rollback-on-failure). On success, `ArcSwapOption::store` atomically installs
+    /// the new state; in-flight reads continue using the old state until they
+    /// complete, after which the old model's resources are released automatically.
+    ///
+    /// @trace REQ-API-1 [entity:ENT-CLIENT] swap_model 原子模型切换
+    /// @trace REQ-API-7 [entity:ENT-CLIENT] swap_model 原子操作 + 自动释放旧模型
     pub fn swap_model(&self, model_id: &str) -> Result<(), ClientError> {
         let model_id = Self::normalize_model_id(model_id)?;
 
@@ -323,6 +334,7 @@ impl Client {
     }
 
     /// Create a text generation builder.
+    // @trace REQ-API-2 [api:POST /client/generate] Client::generate() entry point — returns GenerationBuilder
     pub fn generate(&self, prompt: impl Into<String>) -> crate::generation::GenerationBuilder<'_> {
         crate::generation::GenerationBuilder::from_prompt(self, prompt)
     }
@@ -1736,10 +1748,10 @@ impl Client {
         // Inject SG shim into executor so run_batch_forward includes it.
         {
             let mut executor = state.backend.executor_mut();
-            let shim = crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim {
-                inner: sg_arc,
+            let shim = crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim::new(
+                sg_arc,
                 hidden_size,
-            };
+            );
             executor.set_sg_callback_shim(shim);
         }
 

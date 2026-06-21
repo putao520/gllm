@@ -16,6 +16,7 @@ const ARCH_TABLE: &[(&str, &str, &str, Option<&str>)] = &[
     ("qwen2_5",         "qwen3",      "decoder", Some("qwen")),
     ("qwen2",           "qwen3",      "decoder", Some("qwen")),
     ("llama",           "llama",      "decoder", None),
+    ("llama4",          "llama4",     "decoder", None),       // REQ-MODEL-8
     ("smollm",          "llama",      "decoder", None),
     ("internlm",        "llama",      "decoder", None),
     ("mistral3",        "mistral3",   "decoder", None),
@@ -37,8 +38,13 @@ const ARCH_TABLE: &[(&str, &str, &str, Option<&str>)] = &[
     // Encoder family
     ("xlmr",            "xlmr",       "encoder", None),
     ("xlm_roberta",     "xlmr",       "encoder", None),
+    ("xlmroberta",      "xlmr",       "encoder", None),      // ForCausalLM suffix fix: normalized "xlmroberta" has own entry
     ("bert",            "xlmr",       "encoder", None),
     ("roberta",         "xlmr",       "encoder", None),
+    // Embedding family (REQ-MODEL-9: encoder weight topology + MeanPool output)
+    ("bge_m3",          "bge",        "embedding", None),
+    // Reranker family (REQ-MODEL-10: encoder weight topology + Classify output)
+    ("bge_reranker",    "bge",        "reranker", None),
     // Audio/Vision
     ("usm_conformer",   "usm_conformer", "encoder", None),
     ("siglip",          "siglip",     "encoder", None),
@@ -85,6 +91,8 @@ pub fn resolve_family(token: &str) -> Option<ArchFamily> {
         if t == norm {
             return Some(match family {
                 "encoder" => ArchFamily::Encoder,
+                "embedding" => ArchFamily::Embedding,
+                "reranker" => ArchFamily::Reranker,
                 _ => ArchFamily::Decoder,
             });
         }
@@ -96,6 +104,8 @@ pub fn resolve_family(token: &str) -> Option<ArchFamily> {
             if t == base {
                 return Some(match family {
                     "encoder" => ArchFamily::Encoder,
+                    "embedding" => ArchFamily::Embedding,
+                    "reranker" => ArchFamily::Reranker,
                     _ => ArchFamily::Decoder,
                 });
             }
@@ -133,7 +143,9 @@ mod tests {
     fn resolve_known_tokens() {
         assert_eq!(resolve_template_name("qwen3"), Some("qwen3"));
         assert_eq!(resolve_template_name("LlamaForCausalLM"), Some("llama"));
+        assert_eq!(resolve_template_name("llama4"), Some("llama4"));
         assert_eq!(resolve_template_name("xlmr"), Some("xlmr"));
+        assert_eq!(resolve_template_name("xlmroberta"), Some("xlmr"));
         assert_eq!(resolve_template_name("deepseek"), Some("deepseek"));
         assert_eq!(resolve_template_name("glm4"), Some("glm4"));
         assert_eq!(resolve_template_name("chatglm"), Some("glm4"));
@@ -147,6 +159,8 @@ mod tests {
         assert_eq!(resolve_family("qwen3"), Some(ArchFamily::Decoder));
         assert_eq!(resolve_family("xlmr"), Some(ArchFamily::Encoder));
         assert_eq!(resolve_family("siglip"), Some(ArchFamily::Encoder));
+        assert_eq!(resolve_family("bge_m3"), Some(ArchFamily::Embedding));
+        assert_eq!(resolve_family("bge_reranker"), Some(ArchFamily::Reranker));
     }
 
     #[test]
@@ -160,6 +174,8 @@ mod tests {
     fn is_valid() {
         assert!(is_valid_template("qwen3"));
         assert!(is_valid_template("xlmr"));
+        assert!(is_valid_template("llama4"));
+        assert!(is_valid_template("bge"));
         assert!(!is_valid_template("nonexistent"));
     }
 
@@ -325,7 +341,7 @@ mod tests {
 
     #[test]
     fn resolve_family_all_decoders() {
-        let decoder_tokens = ["qwen3", "llama", "mistral3", "phi4", "glm4", "gemma4", "deepseek", "gptoss"];
+        let decoder_tokens = ["qwen3", "llama", "llama4", "mistral3", "phi4", "glm4", "gemma4", "deepseek", "gptoss"];
         for token in decoder_tokens {
             assert_eq!(
                 resolve_family(token),
@@ -369,7 +385,7 @@ mod tests {
 
     #[test]
     fn resolve_moe_router_non_moe_models_return_none() {
-        let non_moe = ["llama", "mistral3", "phi4", "gemma4", "xlmr", "siglip"];
+        let non_moe = ["llama", "llama4", "mistral3", "phi4", "gemma4", "xlmr", "siglip", "bge"];
         for name in non_moe {
             assert_eq!(
                 resolve_moe_router(name),
@@ -424,6 +440,11 @@ mod tests {
         assert_eq!(ArchFamily::Encoder, ArchFamily::Encoder);
         assert_eq!(ArchFamily::Decoder, ArchFamily::Decoder);
         assert_ne!(ArchFamily::Encoder, ArchFamily::Decoder);
+        assert_eq!(ArchFamily::Embedding, ArchFamily::Embedding);
+        assert_eq!(ArchFamily::Reranker, ArchFamily::Reranker);
+        assert_ne!(ArchFamily::Embedding, ArchFamily::Decoder);
+        assert_ne!(ArchFamily::Reranker, ArchFamily::Encoder);
+        assert_ne!(ArchFamily::Embedding, ArchFamily::Reranker);
     }
 
     #[test]
@@ -444,8 +465,12 @@ mod tests {
     fn arch_family_debug() {
         let encoder = format!("{:?}", ArchFamily::Encoder);
         let decoder = format!("{:?}", ArchFamily::Decoder);
+        let embedding = format!("{:?}", ArchFamily::Embedding);
+        let reranker = format!("{:?}", ArchFamily::Reranker);
         assert!(encoder.contains("Encoder"), "Debug for Encoder should contain 'Encoder'");
         assert!(decoder.contains("Decoder"), "Debug for Decoder should contain 'Decoder'");
+        assert!(embedding.contains("Embedding"), "Debug for Embedding should contain 'Embedding'");
+        assert!(reranker.contains("Reranker"), "Debug for Reranker should contain 'Reranker'");
     }
 
     #[test]
@@ -454,8 +479,10 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(ArchFamily::Encoder);
         set.insert(ArchFamily::Decoder);
+        set.insert(ArchFamily::Embedding);
+        set.insert(ArchFamily::Reranker);
         set.insert(ArchFamily::Encoder); // duplicate
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.len(), 4);
     }
 
     // ── ARCH_TABLE consistency ──
@@ -478,8 +505,8 @@ mod tests {
     fn arch_table_family_values_are_valid() {
         for &(_, _, family, _) in ARCH_TABLE {
             assert!(
-                family == "decoder" || family == "encoder",
-                "family must be 'decoder' or 'encoder', got '{}'",
+                family == "decoder" || family == "encoder" || family == "embedding" || family == "reranker",
+                "family must be 'decoder', 'encoder', 'embedding', or 'reranker', got '{}'",
                 family
             );
         }
@@ -648,6 +675,8 @@ mod tests {
         assert_eq!(resolve_template_name("MinistralForCausalLM"), Some("mistral3"));
         assert_eq!(resolve_template_name("Phi4ForCausalLM"), Some("phi4"));
         assert_eq!(resolve_template_name("BertForCausalLM"), Some("xlmr"));
+        assert_eq!(resolve_template_name("Llama4ForCausalLM"), Some("llama4"));
+        assert_eq!(resolve_template_name("XLMRobertaForCausalLM"), Some("xlmr"));
     }
 
     #[test]
@@ -676,7 +705,7 @@ mod tests {
 
     // ── Additional tests (tests 65-77) ──
 
-    // @trace TEST-REG-65 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-65 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn normalize_token_digits_only() {
         // Arrange: input is purely numeric
@@ -687,7 +716,7 @@ mod tests {
         assert_eq!(result, "12345");
     }
 
-    // @trace TEST-REG-66 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-66 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn normalize_token_single_char() {
         // Arrange: single character inputs
@@ -697,7 +726,7 @@ mod tests {
         assert_eq!(normalize_token("5"), "5");
     }
 
-    // @trace TEST-REG-67 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-67 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_forcausallm_empty_base() {
         // Arrange: "ForCausalLM" alone — after stripping suffix, base is empty
@@ -707,7 +736,7 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // @trace TEST-REG-68 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-68 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_usm_conformer() {
         // Arrange: usm_conformer is an encoder architecture in the table
@@ -719,19 +748,19 @@ mod tests {
         assert_eq!(family, Some(ArchFamily::Encoder));
     }
 
-    // @trace TEST-REG-69 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-69 [req:REQ-MODEL-7] [level:unit]
     #[test]
     fn resolve_family_for_forcausallm_encoder_tokens() {
         // Arrange: ForCausalLM suffix on encoder-family tokens
         // Act & Assert: should still resolve to Encoder family
-        // Note: "XLMRoberta" normalizes to "xlmroberta" (no underscore) so
-        // the ForCausalLM base won't match "xlm_roberta" table entry.
+        // XLMRobertaForCausalLM normalizes to "xlmroberta" which now has its own
+        // ARCH_TABLE entry (separate from "xlm_roberta"), fixing the ForCausalLM gap.
         assert_eq!(resolve_family("BertForCausalLM"), Some(ArchFamily::Encoder));
         assert_eq!(resolve_family("RobertaForCausalLM"), Some(ArchFamily::Encoder));
-        assert_eq!(resolve_family("XLMRobertaForCausalLM"), None); // "xlmroberta" != "xlm_roberta"
+        assert_eq!(resolve_family("XLMRobertaForCausalLM"), Some(ArchFamily::Encoder));
     }
 
-    // @trace TEST-REG-70 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-70 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_family_deepseek_variant_tokens() {
         // Arrange: all deepseek variant tokens individually
@@ -741,7 +770,7 @@ mod tests {
         assert_eq!(resolve_family("kimi_k2"), Some(ArchFamily::Decoder));
     }
 
-    // @trace TEST-REG-71 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-71 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_moe_router_deepseek_variants_all_resolve() {
         // Arrange: all deepseek variants share canonical name "deepseek"
@@ -752,7 +781,7 @@ mod tests {
         assert_eq!(resolve_moe_router("kimi_k2"), None);
     }
 
-    // @trace TEST-REG-72 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-72 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_bert_and_roberta_aliases() {
         // Arrange: bert and roberta are token aliases for canonical "xlmr"
@@ -764,7 +793,7 @@ mod tests {
         assert_eq!(resolve_family("roberta"), Some(ArchFamily::Encoder));
     }
 
-    // @trace TEST-REG-73 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-73 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_family_signal_intent_tracker_both_forms() {
         // Arrange: signal_intent_tracker has two token forms (with and without underscore)
@@ -773,7 +802,7 @@ mod tests {
         assert_eq!(resolve_family("signalintenttracker"), Some(ArchFamily::Encoder));
     }
 
-    // @trace TEST-REG-74 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-74 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn is_valid_template_each_unique_canonical() {
         // Arrange: collect deduplicated canonical names
@@ -786,7 +815,7 @@ mod tests {
         }
     }
 
-    // @trace TEST-REG-75 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-75 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_qwen3moe_alias() {
         // Arrange: qwen3moe is a MoE variant of qwen3
@@ -800,7 +829,7 @@ mod tests {
         assert_eq!(router, Some(crate::manifest::RouterType::Qwen));
     }
 
-    // @trace TEST-REG-76 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-76 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_case_variations() {
         // Arrange: various case patterns for the same token
@@ -813,16 +842,17 @@ mod tests {
         assert_eq!(resolve_template_name("LLAMA"), Some("llama"));
     }
 
-    // @trace TEST-REG-77 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-77 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_family_for_all_table_tokens_consistency() {
         // Arrange: every token in ARCH_TABLE should resolve to a family
         // Act & Assert: no token should return None from resolve_family
         for &(token, _, family, _) in ARCH_TABLE {
-            let expected = if family == "encoder" {
-                ArchFamily::Encoder
-            } else {
-                ArchFamily::Decoder
+            let expected = match family {
+                "encoder" => ArchFamily::Encoder,
+                "embedding" => ArchFamily::Embedding,
+                "reranker" => ArchFamily::Reranker,
+                _ => ArchFamily::Decoder,
             };
             assert_eq!(
                 resolve_family(token),
@@ -836,7 +866,7 @@ mod tests {
 
     // ── Additional tests (tests 78-87) ──
 
-    // @trace TEST-REG-78 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-78 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn normalize_token_only_separators() {
         // Arrange: input consisting solely of separator characters
@@ -849,7 +879,7 @@ mod tests {
         assert_eq!(mixed, "____");
     }
 
-    // @trace TEST-REG-79 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-79 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_special_chars_in_input() {
         // Arrange: input with special characters that get filtered during normalization
@@ -861,7 +891,7 @@ mod tests {
         assert_eq!(resolve_template_name("deep$seek"), Some("deepseek"));
     }
 
-    // @trace TEST-REG-80 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-80 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_moe_router_all_canonicals_exhaustive_coverage() {
         // Arrange: collect all canonical names that have a MoE router
@@ -890,7 +920,7 @@ mod tests {
         }
     }
 
-    // @trace TEST-REG-81 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-81 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn is_valid_template_forcausallm_suffix_not_valid() {
         // Arrange: ForCausalLM suffixed names are not canonical names in the table
@@ -900,7 +930,7 @@ mod tests {
         assert!(!is_valid_template("Qwen3ForCausalLM"));
     }
 
-    // @trace TEST-REG-82 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-82 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_forcausallm_on_encoder_tokens() {
         // Arrange: ForCausalLM suffix on encoder-family tokens
@@ -910,12 +940,12 @@ mod tests {
         assert_eq!(resolve_template_name("SigLipForCausalLM"), Some("siglip"));
     }
 
-    // @trace TEST-REG-83 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-83 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_family_encoder_family_excludes_all_non_encoder_tokens() {
         // Arrange: decoder tokens must NOT resolve to Encoder family
         let decoder_tokens = [
-            "qwen3", "llama", "smollm", "internlm", "mistral3", "ministral",
+            "qwen3", "llama", "llama4", "smollm", "internlm", "mistral3", "ministral",
             "phi4", "glm4", "gemma4", "deepseek", "gptoss",
         ];
         // Act & Assert: every decoder token resolves to Decoder, never Encoder
@@ -924,9 +954,12 @@ mod tests {
             assert_ne!(family, Some(ArchFamily::Encoder), "'{}' should not be Encoder", token);
             assert_eq!(family, Some(ArchFamily::Decoder), "'{}' should be Decoder", token);
         }
+        // Embedding/Reranker tokens are distinct from both Encoder and Decoder
+        assert_eq!(resolve_family("bge_m3"), Some(ArchFamily::Embedding));
+        assert_eq!(resolve_family("bge_reranker"), Some(ArchFamily::Reranker));
     }
 
-    // @trace TEST-REG-84 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-84 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn arch_table_moe_tokens_have_matching_canonical() {
         // Arrange: every token with a MoE router must have its canonical name
@@ -947,7 +980,7 @@ mod tests {
         }
     }
 
-    // @trace TEST-REG-85 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-85 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_template_name_all_aliases_produce_same_canonical_as_primary() {
         // Arrange: groups of alias tokens that should share the same canonical name
@@ -957,9 +990,10 @@ mod tests {
             (&["mistral3", "ministral"], "mistral3"),
             (&["phi4", "phi4_mini", "phi3"], "phi4"),
             (&["glm4", "glm5", "chatglm"], "glm4"),
-            (&["deepseek", "deepseek_v3", "deepseek_r1", "kimi_k2"], "deepseek"),
-            (&["xlmr", "xlm_roberta", "bert", "roberta"], "xlmr"),
+            (&["deepseek", "deepseek_v3", "deepseekv3", "deepseek_r1", "deepseekr1", "kimi_k2"], "deepseek"),
+            (&["xlmr", "xlm_roberta", "xlmroberta", "bert", "roberta"], "xlmr"),
             (&["siglip", "siglip_vision_model"], "siglip"),
+            (&["bge_m3", "bge_reranker"], "bge"),
         ];
         // Act & Assert: every alias in each group must resolve to the same canonical
         for &(aliases, expected_canonical) in alias_groups {
@@ -975,7 +1009,7 @@ mod tests {
         }
     }
 
-    // @trace TEST-REG-86 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-86 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn resolve_family_forcausallm_suffix_on_moe_tokens() {
         // Arrange: ForCausalLM suffix on MoE-capable tokens should still resolve family
@@ -986,7 +1020,7 @@ mod tests {
         assert_eq!(resolve_family("GptOssForCausalLM"), Some(ArchFamily::Decoder));
     }
 
-    // @trace TEST-REG-87 [req:REQ-ARCH] [level:unit]
+    // @trace TEST-REG-87 [req:REQ-ARCH-AUTO-001] [level:unit]
     #[test]
     fn arch_table_router_is_consistent_across_aliases() {
         // Arrange: tokens that share the same canonical name should have the same
@@ -1006,6 +1040,141 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ── Additional tests (tests 88-97) — adversarial verification gap fixes ──
+
+    // @trace TEST-REG-88 [req:REQ-MODEL-9] [level:unit]
+    #[test]
+    fn resolve_family_embedding_models() {
+        // Arrange: bge_m3 is an embedding model (REQ-MODEL-9)
+        // Act & Assert: must resolve to ArchFamily::Embedding, not Decoder
+        assert_eq!(resolve_family("bge_m3"), Some(ArchFamily::Embedding));
+        assert_eq!(resolve_template_name("bge_m3"), Some("bge"));
+    }
+
+    // @trace TEST-REG-89 [req:REQ-MODEL-10] [level:unit]
+    #[test]
+    fn resolve_family_reranker_models() {
+        // Arrange: bge_reranker is a reranker model (REQ-MODEL-10)
+        // Act & Assert: must resolve to ArchFamily::Reranker, not Decoder
+        assert_eq!(resolve_family("bge_reranker"), Some(ArchFamily::Reranker));
+        assert_eq!(resolve_template_name("bge_reranker"), Some("bge"));
+    }
+
+    // @trace TEST-REG-90 [req:REQ-MODEL-8] [level:unit]
+    #[test]
+    fn resolve_llama4_token() {
+        // Arrange: llama4 is a REQ-MODEL-8 supported Generator model
+        // Act & Assert: must resolve correctly (was absent from ARCH_TABLE)
+        assert_eq!(resolve_template_name("llama4"), Some("llama4"));
+        assert_eq!(resolve_family("llama4"), Some(ArchFamily::Decoder));
+        assert_eq!(resolve_moe_router("llama4"), None);
+    }
+
+    // @trace TEST-REG-91 [req:REQ-MODEL-7] [level:unit]
+    #[test]
+    fn resolve_xlmroberta_forcausallm_fixed() {
+        // Arrange: XLMRobertaForCausalLM normalizes to "xlmroberta" (no underscore).
+        // Previously failed because only "xlm_roberta" was in the table.
+        // Now "xlmroberta" has its own entry, fixing the ForCausalLM gap.
+        // Act & Assert
+        assert_eq!(resolve_template_name("XLMRobertaForCausalLM"), Some("xlmr"));
+        assert_eq!(resolve_family("XLMRobertaForCausalLM"), Some(ArchFamily::Encoder));
+    }
+
+    // @trace TEST-REG-92 [req:REQ-ARCH-AUTO-001] [level:unit]
+    #[test]
+    fn resolve_deepseek_non_underscore_aliases() {
+        // Arrange: deepseekv3 and deepseekr1 are non-underscore aliases
+        // that previously had zero test coverage
+        // Act & Assert
+        assert_eq!(resolve_template_name("deepseekv3"), Some("deepseek"));
+        assert_eq!(resolve_template_name("deepseekr1"), Some("deepseek"));
+        assert_eq!(resolve_family("deepseekv3"), Some(ArchFamily::Decoder));
+        assert_eq!(resolve_family("deepseekr1"), Some(ArchFamily::Decoder));
+    }
+
+    // @trace TEST-REG-93 [req:REQ-ARCH-AUTO-001] [level:unit]
+    #[test]
+    fn arch_family_four_variants_are_distinct() {
+        // Arrange: ArchFamily now has 4 variants per ENT-ARCHITECTURE-FEATURES.family
+        // Act & Assert: all 4 variants must be pairwise distinct
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ArchFamily::Encoder);
+        set.insert(ArchFamily::Decoder);
+        set.insert(ArchFamily::Embedding);
+        set.insert(ArchFamily::Reranker);
+        assert_eq!(set.len(), 4, "all four ArchFamily variants must be distinct");
+    }
+
+    // @trace TEST-REG-94 [req:REQ-MODEL-9] [req:REQ-MODEL-10] [level:unit]
+    #[test]
+    fn embedding_reranker_not_misclassified_as_decoder() {
+        // Arrange: the old `_ => ArchFamily::Decoder` wildcard silently misclassified
+        // embedding/reranker models as Decoder (the original adversarial finding)
+        // Act & Assert: embedding/reranker models must NOT resolve to Decoder
+        assert_ne!(resolve_family("bge_m3"), Some(ArchFamily::Decoder));
+        assert_ne!(resolve_family("bge_reranker"), Some(ArchFamily::Decoder));
+        assert_ne!(resolve_family("bge_m3"), Some(ArchFamily::Encoder));
+        assert_ne!(resolve_family("bge_reranker"), Some(ArchFamily::Encoder));
+    }
+
+    // @trace TEST-REG-95 [req:REQ-MODEL-8] [level:unit]
+    #[test]
+    fn resolve_family_forcausallm_on_llama4() {
+        // Arrange: Llama4ForCausalLM should resolve as a decoder model
+        // Act & Assert
+        assert_eq!(resolve_template_name("Llama4ForCausalLM"), Some("llama4"));
+        assert_eq!(resolve_family("Llama4ForCausalLM"), Some(ArchFamily::Decoder));
+    }
+
+    // @trace TEST-REG-96 [req:REQ-ARCH-AUTO-001] [level:unit]
+    #[test]
+    fn arch_table_all_family_strings_are_mapped() {
+        // Arrange: every family string in ARCH_TABLE must have a corresponding
+        // ArchFamily variant (completeness check — catches unmapped family strings)
+        // Act & Assert
+        let mut families: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for &(_, _, family, _) in ARCH_TABLE {
+            families.insert(family);
+        }
+        for family in &families {
+            let mapped = match *family {
+                "encoder" => Some(ArchFamily::Encoder),
+                "decoder" => Some(ArchFamily::Decoder),
+                "embedding" => Some(ArchFamily::Embedding),
+                "reranker" => Some(ArchFamily::Reranker),
+                _ => None,
+            };
+            assert!(mapped.is_some(), "family '{}' has no ArchFamily mapping", family);
+        }
+    }
+
+    // @trace TEST-REG-97 [req:REQ-MODEL-8] [level:unit]
+    #[test]
+    fn arch_table_covers_all_req_model_8_generator_models() {
+        // Arrange: REQ-MODEL-8 lists supported Generator models that must all
+        // be resolvable through the registry
+        // Act & Assert: each generator model token must resolve to a canonical name
+        let generator_tokens = [
+            "qwen3", "llama", "llama4", "mistral3", "phi4", "glm4", "gemma4",
+            "deepseek", "gptoss",
+        ];
+        for token in &generator_tokens {
+            assert!(
+                resolve_template_name(token).is_some(),
+                "generator token '{}' must be in ARCH_TABLE (REQ-MODEL-8)",
+                token
+            );
+            assert_eq!(
+                resolve_family(token),
+                Some(ArchFamily::Decoder),
+                "generator token '{}' must resolve to Decoder (REQ-MODEL-8)",
+                token
+            );
         }
     }
 }

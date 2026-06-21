@@ -409,6 +409,13 @@ pub struct SemanticGatekeeperCallbackShim {
     pub hidden_size: usize,
 }
 
+impl SemanticGatekeeperCallbackShim {
+    /// Create a new shim wrapping the callback with the given hidden_size.
+    pub fn new(inner: Arc<std::sync::Mutex<SemanticGatekeeperCallback>>, hidden_size: usize) -> Self {
+        Self { inner, hidden_size }
+    }
+}
+
 impl LayerCallback for SemanticGatekeeperCallbackShim {
     fn priority(&self) -> u32 {
         SEMANTIC_GATEKEEPER_PRIORITY
@@ -735,30 +742,30 @@ mod tests {
     #[test]
     fn shim_priority_matches_callback() {
         let cb = make_callback();
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 4,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            4,
+        );
         assert_eq!(LayerCallback::priority(&shim), 90);
     }
 
     #[test]
     fn shim_name_matches_callback() {
         let cb = make_callback();
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 4,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            4,
+        );
         assert_eq!(LayerCallback::name(&shim), "SemanticGatekeeper");
     }
 
     #[test]
     fn shim_target_layers_empty_initially() {
         let cb = make_callback();
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 4,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            4,
+        );
         let layers = LayerCallback::target_layers(&shim);
         assert!(layers.is_some());
         assert!(layers.unwrap().is_empty());
@@ -767,10 +774,10 @@ mod tests {
     #[test]
     fn shim_hidden_size_stored() {
         let cb = make_callback();
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 128,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            128,
+        );
         assert_eq!(shim.hidden_size, 128);
     }
 
@@ -1497,10 +1504,10 @@ mod tests {
             0.5,
             4,
         );
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 4,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            4,
+        );
         let layers = LayerCallback::target_layers(&shim).unwrap();
         assert_eq!(layers, &[5, 10, 15]);
     }
@@ -1508,10 +1515,10 @@ mod tests {
     #[test]
     fn shim_wraps_callback_methods() {
         let cb = make_callback();
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 4,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            4,
+        );
         // Verify shim delegates to inner callback
         let inner = shim.inner.lock().unwrap();
         assert!((inner.alpha() - 0.5).abs() < 1e-6);
@@ -1767,10 +1774,10 @@ mod tests {
     fn shim_target_layers_poisoned_mutex_returns_none() {
         // Arrange: create a shim and poison its mutex
         let cb = make_callback();
-        let shim = SemanticGatekeeperCallbackShim {
-            inner: Arc::new(std::sync::Mutex::new(cb)),
-            hidden_size: 4,
-        };
+        let shim = SemanticGatekeeperCallbackShim::new(
+            Arc::new(std::sync::Mutex::new(cb)),
+            4,
+        );
 
         // Poison the mutex by panicking while holding the lock
         let inner_clone = Arc::clone(&shim.inner);

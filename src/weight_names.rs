@@ -187,9 +187,12 @@ use crate::manifest::ArchFamily;
 const DECODER_PREFIXES: &[&str] = &["", "model", "language_model", "model.language_model"];
 
 /// Unified entry point: get architecture prefixes by family.
+///
+/// Embedding/Reranker share Encoder weight topology (same prefix conventions)
+/// but are distinct ArchFamily variants for BUILD-stage strategy selection.
 pub fn arch_prefixes(family: ArchFamily) -> &'static [&'static str] {
     match family {
-        ArchFamily::Encoder => ENCODER_PREFIXES,
+        ArchFamily::Encoder | ArchFamily::Embedding | ArchFamily::Reranker => ENCODER_PREFIXES,
         ArchFamily::Decoder => DECODER_PREFIXES,
     }
 }

@@ -18,6 +18,7 @@ struct TrieNode {
     page_ref: Option<(VirtualPageId, usize)>,
 }
 
+/// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
 #[derive(Debug, Default)]
 pub struct KvPrefixIndex {
     root: TrieNode,
@@ -29,6 +30,7 @@ impl KvPrefixIndex {
     }
 
     /// O(n) 查找最长匹配前缀
+    /// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn find_longest_prefix(&self, tokens: &[TokenId]) -> Option<PrefixMatch> {
         let mut node = &self.root;
         let mut matched_pages = Vec::new();
@@ -64,6 +66,7 @@ impl KvPrefixIndex {
     }
 
     /// 插入新的 token 序列
+    /// @trace REQ-KV-ADDR-002 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn insert(&mut self, tokens: &[TokenId], pages: &[VirtualPageId]) {
         if tokens.is_empty() {
             return;

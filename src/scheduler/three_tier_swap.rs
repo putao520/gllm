@@ -235,6 +235,7 @@ impl Default for ThreeTierSwapConfig {
 /// iteration. It reads the current page metadata, computes importance scores
 /// for all pages, selects eviction candidates, and enqueues swap-in requests
 /// for pages needed by active sequences.
+/// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
 pub struct ThreeTierSwapCoordinator {
     /// Eviction worker (background thread).
     eviction_worker: Option<EvictionWorker>,
@@ -494,6 +495,7 @@ impl ThreeTierSwapCoordinator {
     ///
     /// # Returns
     /// A `TierMigrationPlan` with eviction candidates and swap-in requests.
+    /// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn build_batch(
         &self,
         active_pages: &[PageId],
@@ -798,6 +800,7 @@ impl ThreeTierSwapCoordinator {
     }
 
     /// Record a successful eviction completion (called from observer callback).
+    /// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn record_eviction_completed(
         &self,
         page_id: PageId,
@@ -835,6 +838,7 @@ impl ThreeTierSwapCoordinator {
     }
 
     /// Record a successful swap-in completion.
+    /// @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE] [api:POST /internal/paged_attention]
     pub fn record_swap_in_completed(
         &self,
         page_id: PageId,

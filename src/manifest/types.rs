@@ -142,12 +142,21 @@ pub type FileMap = &'static [(&'static str, &'static str)];
 pub const EMPTY_FILE_MAP: FileMap = &[];
 
 /// 架构族：决定权重命名约定和推理路径（真正的类型约束，不随配置扩展）
+///
+/// ENT-ARCHITECTURE-FEATURES.family constraint: Decoder/Encoder/Embedding/Reranker
+/// - Encoder/Embedding/Reranker 共享双向注意力权重拓扑，区别在于输出模式
+/// - Embedding: MeanPool 输出 (REQ-MODEL-9)
+/// - Reranker: Classify 输出 (REQ-MODEL-10)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArchFamily {
     /// BERT/XLM-R 编码器族：绝对位置编码，双向注意力
     Encoder,
     /// LLaMA/Qwen/GPT 解码器族：RoPE，因果注意力
     Decoder,
+    /// 嵌入模型族：双向注意力，MeanPool 输出，无生成循环 (REQ-MODEL-9)
+    Embedding,
+    /// 重排序模型族：双向注意力，Classify 输出，相关性评分 (REQ-MODEL-10)
+    Reranker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -415,7 +424,12 @@ mod tests {
     fn arch_family_variants() {
         assert_eq!(ArchFamily::Encoder, ArchFamily::Encoder);
         assert_eq!(ArchFamily::Decoder, ArchFamily::Decoder);
+        assert_eq!(ArchFamily::Embedding, ArchFamily::Embedding);
+        assert_eq!(ArchFamily::Reranker, ArchFamily::Reranker);
         assert_ne!(ArchFamily::Encoder, ArchFamily::Decoder);
+        assert_ne!(ArchFamily::Embedding, ArchFamily::Decoder);
+        assert_ne!(ArchFamily::Reranker, ArchFamily::Encoder);
+        assert_ne!(ArchFamily::Embedding, ArchFamily::Reranker);
     }
 
     // ── FileMap ──
@@ -483,6 +497,8 @@ mod tests {
     fn arch_family_debug() {
         assert!(format!("{:?}", ArchFamily::Encoder).contains("Encoder"));
         assert!(format!("{:?}", ArchFamily::Decoder).contains("Decoder"));
+        assert!(format!("{:?}", ArchFamily::Embedding).contains("Embedding"));
+        assert!(format!("{:?}", ArchFamily::Reranker).contains("Reranker"));
     }
 
     #[test]
