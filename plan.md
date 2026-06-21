@@ -42,7 +42,7 @@
 - SPEC: REQ-AIS-001 [auto_lower_trace() 覆盖全部已实现 TraceOp; 同类操作共享辅助函数; 未实现 TraceOp 返回 Err; 生成结果与原手写 lower_trace_body 数值 bit-exact] | TDD: TEST-AIS-001 | 文件: `../gllm-kernels/src/compiler/codegen/vm/auto_select.rs` | 实现: 审计 auto_lower_trace/auto_lower_trace_typed/auto_lower_trace_raw/auto_lower_trace_into/auto_lower_trace_multi 7 个入口函数，确认每个 TraceOp 变体均有 match arm 或返回 Err；验证 6 二元/5 一元/3 超越函数共享辅助函数；运行 cargo test --lib 验证 bit-exact
 - 复用锚点: spec=full_match, code=no_match(跨仓), pattern=full_match
 - 依赖: 无
-- 状态: ✅ PASS — @trace 注解已存在(gllm:2处 + gllm-kernels:9处)，oracle_gate 覆盖率 0% 为误报(跨仓扫描问题)
+- 状态: ✅ PASS — 客观验证: 94/94 TraceOp 变体全覆盖, 6二元/5一元/4超越共享辅助函数, gllm-kernels 6921 测试全绿, oracle_gate 覆盖率 0% 为扫描 bug(待修 gsc-spec)
 
 ### TASK-2: REQ-AIS-002 验收 — ComputePattern 自动分发完整性审计
 - SPEC: REQ-AIS-002 [Elementwise ops 全部走 auto_dispatch_elementwise; Norm/Gemm/Attention 走专用 lower; MoERouter 有专用 lower; 未实现 OpKind 返回 Err; 所有 E2E 测试通过] | TDD: TEST-AIS-002 | 文件: `../gllm-kernels/src/compiler/codegen/vm/plan_lower/compile.inc.rs` | 实现: 审计 emit_standalone_op 调度路径，确认 try_auto_dispatch_elementwise + lower_op 双层覆盖无缺口；验证 lower_op 中 Op match arm 完整性；grep 确认零 OpKind::Xxx => 非 NOP match arm 在 emit_standalone_op 中
