@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="" <head=""><head><meta charset="UTF-8"></head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="42-CPU-GPU-HETERO-ATTENTION">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"42-CPU-GPU-HETERO-ATTENTION", "dependencies":["02-ARCHITECTURE","06-TESTING-STRATEGY","07-LOADER","08-EXECUTOR","12-STRATEGY-ARBITER","18-SYMDIM-PAGED-KV","19-KV-CACHE-OPTIMIZATION","20-BATCH-CONCURRENT-INFERENCE","21-WEIGHT-PAGING","31-EXECUTOR-DECOMPOSITION","33-MLA-MATRIX-ABSORPTION","36-GLLM-WEIGHT-FORMAT","40-END-TO-END-DATA-FLOW"], "children":[] }
+  </script>
+
+<body>
+  <header data-spec-header="">
+    <h1>CPU-GPU 异构注意力协议 (ARCH-HETERO)</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>42-CPU-GPU-HETERO-ATTENTION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-cpu-gpu-异构注意力协议-arch-hetero" data-section="null">
+      <h2>CPU-GPU 异构注意力协议 (ARCH-HETERO)</h2>
+      <p>&gt; <strong>实现状态</strong>: 📋 设计完成 — REQ-HETERO-001~012 (编排层) + 关联扩展 REQ-KVOPT-011~013 / REQ-ARB-007~010 / REQ-WP-014~016 / REQ-MLA-010~012 / REQ-SYMDIM-011~013</p>
+    </section>
+    <section id="s-定位" data-section="null">
+      <h3>定位</h3>
+      <p>CPU-GPU 异构 1M 上下文推理架构的编排层 SPEC。协调 SPEC 12 (Strategy Arbiter)、SPEC 18 (SymDim/PagedKV)、SPEC 19 (KV Cache Optimization)、SPEC 21 (Weight Paging)、SPEC 33 (MLA Matrix Absorption) 五个 SPEC 的异构扩展，定义跨 SPEC 的协议约束和数据流契约。</p>
+      <p>&gt; <strong>SSOT</strong>: 本 SPEC 定义异构注意力的编排协议。各子系统的具体实现约束在其所属 SPEC 中定义，本 SPEC 仅定义跨系统交互契约。</p>
+      <p>&gt; 类比 SPEC 39 (统一编译器) 作为 SPEC 40 (数据流) 的前置，本 SPEC 作为各子系统异构扩展的前置编排层。</p>
+    </section>
+    <section id="s-前置原则" data-section="null">
+      <h3>前置原则</h3>
+      <p>1. <strong>复用优先</strong>：StorageTier::CpuDram / ThreeTierSwapCoordinator / ExpertWeightPrefetcher / ExpertThermalManager / SwapInWorker / dma_helpers.rs 均已实现，异构扩展是增量而非重写。</p>
+      <p>2. <strong>ARCH-RUST-IS-CODEGEN 不冲突</strong>：Block Indexer 在 build_batch 阶段执行（Rust 调度器层），不属于推理热路径。Indexer 产出 position list 传入 Mega-Kernel ABI，JIT 代码只消费结果。</p>
+      <p>3. <strong>SchedulingMode 不可变</strong>：运行时动态切换通过 Strategy Arbiter 重新 arbitrate + Tier 迁移实现，不是切换 SchedulingMode。</p>
+      <p>4. <strong>精度声明</strong>：MLA 吸收精度损失 = 0；两级 Block Indexer 漏检概率 &lt; 1e-6，总精度损失 &lt; FP8 量化误差 (~1e-3)；其余优化（Index 缓存/权重分页/KV DDR5/路由复用）位级精确。</p>
+    </section>
+    <section id="s-设计决策" data-section="null">
+      <h3>设计决策</h3>
+      <p><strong>DD-1</strong>: 新增独立 SPEC 42 而非扩展现有 SPEC。异构注意力是跨 SPEC 的横切关注点，独立 SPEC 作为编排层避免循环依赖。</p>
+      <p><strong>DD-2</strong>: 两级 Block Indexer 作为 SPEC 19 §8 新增章节。L1 粗筛消费 centroid 信号，L2 精筛消费 softmax_max 信号。</p>
+      <p><strong>DD-3</strong>: Strategy Arbiter 扩展为 HeteroArbiterProfile，新增 4 个 StrategyBias 字段。不修改现有 arbitrate() 签名，新增 arbitrate_hetero() 重载。</p>
+      <p><strong>DD-4</strong>: DDR5 KV 存储复用现有 StorageTier::CpuDram + ThreeTierSwapCoordinator，不新增 Tier。</p>
+      <p><strong>DD-5</strong>: 权重分页异构扩展作为 SPEC 21 §7 新增章节，复用 ExpertWeightPrefetcher + ExpertThermalManager。</p>
+      <p><strong>DD-6</strong>: MLA 吸收异构约束作为 SPEC 33 §6 新增章节，不改变数学模型。</p>
+      <p><strong>DD-7</strong>: Block Indexer 在 CPU 侧执行，不违反 ARCH-RUST-IS-CODEGEN。</p>
+      <p><strong>DD-8</strong>: IndexShare 每 4 层共享 indexer 作为 MlaConfig.index_share_interval 字段。</p>
+      <p><strong>DD-9</strong>: PCIe 传输 latent[top-2048] 走现有 DMA/swap-in pipeline，新增 SelectiveSwapInRequest。</p>
+      <p><strong>DD-10</strong>: 运行时动态切换通过 Strategy Arbiter 重新 arbitrate + swap model 实现，不违反 SchedulingMode 不可变铁律。</p>
+    </section>
+    <section id="s-前置依赖" data-section="null">
+      <h3>前置依赖</h3>
+      <p>1. <strong>REQ-BACKEND-CAP-001~003 (BackendCapabilityModel)</strong>：异构路径选择需要知道每个设备能执行哪些操作。REQ-BACKEND-CAP 完成前，异构仲裁仅支持 CPU+GPU 通用路径（CPU 做 Indexer，GPU 做 Attention）。BackendCapabilityModel 提供的 capability flags：<code>can_execute_attention</code>、<code>can_execute_indexer</code>、<code>supports_gpudirect_rdma</code> 决定异构操作的具体分发策略。</p>
+      <p>2. <strong>REQ-ABI-HETERO-001 (Mega-Kernel ABI 扩展)</strong>：SPEC 40 当前 22 参数 L0 签名无 position_list 参数。新增 REQ-ABI-HETERO-001 定义 position_list 通过 KernelContext 共享内存协议传入 JIT 代码的机制，而非扩展 ABI 签名本身。选择共享内存协议而非 ABI 扩展的原因：(a) position_list 长度动态（top-2048），不适合固定 ABI slot；(b) 共享内存协议与现有 KernelContext 扩展点一致；(c) 零 ABI 破坏性变更。</p>
+    </section>
+    <section id="s-风险" data-section="null">
+      <h3>风险评估</h3>
+      <p><strong>R-1: PCIe 带宽瓶颈（高风险）</strong>：8xB200 PCIe 5.0 x16 = 64 GB/s。DeepSeek V3 MLA 参数: d_c=512, d_rope=64, sizeof(f16)=2B → latent/position = 1152B。top-2048 positions × 4 layers (IndexShare) = 9.0MB/seq per share group。100 seq → 900MB → 14ms/次，为 10ms 目标的 1.4x。无 IndexShare 时每层 225MB → 3.4ms/层，61 层总计 207ms。缓解：IndexShare (4层共享 → 9.0MB/次) + GPUDirect RDMA + 异步双缓冲。</p>
+      <p><strong>R-2: CPU Indexer 延迟（低风险）</strong>：DDR5-5600 ~80GB/s 读取 6MB &lt; 0.1ms，CPU top-k 排序 &lt; 1ms，总延迟 &lt; 2ms。Batch=100 时需 Batch 融合（block representatives 只读一次）。</p>
+      <p><strong>R-3: 模型参数依赖（中风险）</strong>：基于 DeepSeek V3/R1（已注册）作为参考模型。GLM-5.2 753B 作为未来扩展。</p>
+    </section>
+    <section id="s-精度声明" data-section="null">
+      <h3>精度声明</h3>
+      <ul>
+        <li>MLA 吸收：数学等价变换，精度损失 = 0（SPEC 33 已验证 cos_sim &gt;= 0.999）</li>
+        <li>两级 Block Indexer：top-3 代表粗筛漏检概率 &lt; 1e-6，总精度损失 &lt; FP8 量化误差 (~1e-3)</li>
+        <li>Index 缓存：精确增量更新，精度损失 = 0</li>
+        <li>权重分页/KV DDR5：PCIe 传输位级精确，精度损失 = 0</li>
+        <li>路由复用：每次都算 Gate，精度损失 = 0</li>
+        <li>FP8 KV：与官方一致，精度损失 = FP8 量化误差</li>
+        <li>Q8 权重：精度 &gt;= FP8</li>
+      </ul>
+    </section>
+    <section id="s-依赖-spec" data-section="null">
+      <h3>依赖 SPEC</h3>
+      <table>
+        <tr><th>SPEC</th><th>扩展内容</th><th>新增 REQ</th></tr>
+        <tr><td>12-STRATEGY-ARBITER</td><td>HeteroArbiterProfile + 4 StrategyBias 字段</td><td>REQ-ARB-007~010</td></tr>
+        <tr><td>18-SYMDIM-PAGED-KV</td><td>DDR5 KV page 管理协议</td><td>REQ-SYMDIM-011~013</td></tr>
+        <tr><td>19-KV-CACHE-OPTIMIZATION</td><td>两级 Block Indexer + IndexShare + SelectiveSwapIn</td><td>REQ-KVOPT-011~013</td></tr>
+        <tr><td>21-WEIGHT-PAGING</td><td>Expert Offloading 异构协议 + PCIe 带宽感知</td><td>REQ-WP-014~016</td></tr>
+        <tr><td>33-MLA-MATRIX-ABSORPTION</td><td>MLA 吸收异构约束 + IndexShare</td><td>REQ-MLA-010~012</td></tr>
+      </table>
+    </section>
+    <section id="s-req-清单" data-section="null">
+      <h3>REQ 清单</h3>
+    </section>
+    <section id="s-数据结构" data-section="null">
+      <h3>数据结构</h3>
+    </section>
+    <section data-artifact-type="interface" id="artifact-interface" data-section="null">
+      <h3>接口契约</h3>
+    </section>
+    <section data-artifact-type="dataflow" id="artifact-dataflow" data-section="null">
+      <h3>数据流</h3>
+      <p>异构推理 decode step 完整数据流：</p>
+      <ol>
+        <li>build_batch: CPU Block Indexer 扫描 DDR5 上的 latent → top-2048 position list</li>
+        <li>build_batch: Strategy Arbiter arbitrate_hetero() → HeteroArbiterProfile 决策</li>
+        <li>SelectiveSwapIn: DMA 传输 latent[top-2048] DDR5 → GPU HBM</li>
+        <li>Expert Prefetch: PCIe 带宽感知预取 hot expert weights → GPU HBM</li>
+        <li>Mega-Kernel: GPU 侧 MLA absorbed attention + MoE FFN</li>
+        <li>MLA absorption: W_absorb 预计算在 GPU, K_rope up-projection 在 GPU</li>
+        <li>输出: logits → 采样 → next token</li>
+      </ol>
+    </section>
+    <section id="s-实施顺序" data-section="null">
+      <h3>实施顺序</h3>
+      <ol>
+        <li>Phase 1: HeteroArbiterProfile + StrategyBias 扩展 (SPEC 12)</li>
+        <li>Phase 2: DDR5 KV page 管理 (SPEC 18)</li>
+        <li>Phase 3: 两级 Block Indexer (SPEC 19)</li>
+        <li>Phase 4: Expert Offloading 异构协议 (SPEC 21)</li>
+        <li>Phase 5: MLA 吸收异构约束 (SPEC 33)</li>
+        <li>Phase 6: SelectiveSwapIn + PCIe 传输流水线 (本 SPEC)</li>
+        <li>Phase 7: 端到端集成验证</li>
+      </ol>
+    </section>
+    <section id="s-验证" data-section="null">
+      <h3>验证</h3>
+      <ul>
+        <li>Block Indexer 精度: top-3 代表粗筛 vs 全量精确注意力，漏检率 &lt; 1e-6</li>
+        <li>PCIe 传输正确性: latent DMA 传输后位级比对</li>
+        <li>异构端到端: DeepSeek V3 1M 上下文异构推理 vs 纯 GPU 基线，输出 KL 散度 &lt; FP8 量化误差</li>
+        <li>延迟: Indexer + DMA 传输 + Attention 总延迟 &lt; 20ms (decode step)</li>
+      </ul>
+    </section>
+  <section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-001" id="req-hetero-001"><h3>REQ-HETERO-001 HeteroArbiterProfile 异构拓扑描述</h3><p>新增 HeteroArbiterProfile 结构体描述 CPU+GPU+DDR5 异构拓扑组合。现有 ArbiterHwView 只有单设备视图，无法描述异构拓扑。HeteroArbiterProfile 包含 cpu_device/GpuDevice/ddr5_tier 字段，供 arbitrate_hetero() 使用。</p><div id="heteroarbiterprofile-包含-cpu-device:-devicefamily-/-gpu-device:-devicefamily-/-ddr5-tier:-storagetier-字段" data-criterion="HeteroArbiterProfile 包含 cpu_device: DeviceFamily / gpu_device: DeviceFamily / ddr5_tier: StorageTier 字段">HeteroArbiterProfile 包含 cpu_device: DeviceFamily / gpu_device: DeviceFamily / ddr5_tier: StorageTier 字段</div><div id="heteroarbiterprofile-实现时不得修改现有-arbiterhwview-结构体" data-criterion="HeteroArbiterProfile 实现时不得修改现有 ArbiterHwView 结构体">HeteroArbiterProfile 实现时不得修改现有 ArbiterHwView 结构体</div><div id="arbitrate-hetero()-接受-heteroarbiterprofile-参数，不修改现有-arbitrate()-签名" data-criterion="arbitrate_hetero() 接受 HeteroArbiterProfile 参数，不修改现有 arbitrate() 签名">arbitrate_hetero() 接受 HeteroArbiterProfile 参数，不修改现有 arbitrate() 签名</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-002" id="req-hetero-002"><h3>REQ-HETERO-002 StrategyBias 异构扩展字段</h3><p>现有 StrategyBias 新增 4 个异构字段：kv_offload_preference (KV 页驱逐偏好: GpuFirst/CpuFirst/Adaptive) / weight_offload_preference (权重驱逐偏好) / indexer_device_preference (Indexer 执行设备偏好: Cpu/Gpu) / hetero_batch_scale (异构批大小缩放因子)。这些字段仅在 HeteroArbiterProfile 存在时生效，单设备场景默认值不影响现有行为。</p><div id="strategybias-新增-kv-offload-preference:-kvoffloadpreference-枚举-(gpufirst/cpufirst/adaptive)" data-criterion="StrategyBias 新增 kv_offload_preference: KvOffloadPreference 枚举 (GpuFirst/CpuFirst/Adaptive)">StrategyBias 新增 kv_offload_preference: KvOffloadPreference 枚举 (GpuFirst/CpuFirst/Adaptive)</div><div id="strategybias-新增-weight-offload-preference:-weightoffloadpreference-枚举-(gpufirst/cpufirst/adaptive)" data-criterion="StrategyBias 新增 weight_offload_preference: WeightOffloadPreference 枚举 (GpuFirst/CpuFirst/Adaptive)">StrategyBias 新增 weight_offload_preference: WeightOffloadPreference 枚举 (GpuFirst/CpuFirst/Adaptive)</div><div id="strategybias-新增-indexer-device-preference:-indexerdevicepreference-枚举-(cpu/gpu)" data-criterion="StrategyBias 新增 indexer_device_preference: IndexerDevicePreference 枚举 (Cpu/Gpu)">StrategyBias 新增 indexer_device_preference: IndexerDevicePreference 枚举 (Cpu/Gpu)</div><div id="strategybias-新增-hetero-batch-scale:-f32,-值域-[0.1,-2.0],-默认-1.0" data-criterion="StrategyBias 新增 hetero_batch_scale: f32, 值域 [0.1, 2.0], 默认 1.0">StrategyBias 新增 hetero_batch_scale: f32, 值域 [0.1, 2.0], 默认 1.0</div><div id="单设备场景下-4-个新字段使用默认值，不改变现有-arbitrate()-行为" data-criterion="单设备场景下 4 个新字段使用默认值，不改变现有 arbitrate() 行为">单设备场景下 4 个新字段使用默认值，不改变现有 arbitrate() 行为</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-003" id="req-hetero-003"><h3>REQ-HETERO-003 arbitrate_hetero() 异构仲裁重载</h3><p>新增 arbitrate_hetero(bias: &amp;StrategyBias, profile: &amp;HeteroArbiterProfile) -&gt; ArbiterDecision 重载函数。不修改现有 arbitrate() 签名。异构仲裁基于 HeteroArbiterProfile 的 CPU+GPU+DDR5 拓扑信息，结合 StrategyBias 的 4 个异构字段，输出 KV offload 决策 / Weight offload 决策 / Indexer 设备选择 / Batch size 缩放。</p><div id="arbitrate-hetero()-签名不修改现有-arbitrate()-函数" data-criterion="arbitrate_hetero() 签名不修改现有 arbitrate() 函数">arbitrate_hetero() 签名不修改现有 arbitrate() 函数</div><div id="arbiterdecision-新增-kv-offload-target-/-weight-offload-target-/-indexer-device-字段" data-criterion="ArbiterDecision 新增 kv_offload_target / weight_offload_target / indexer_device 字段">ArbiterDecision 新增 kv_offload_target / weight_offload_target / indexer_device 字段</div><div id="当-heteroarbiterprofile-描述单设备拓扑时，arbitrate-hetero()-退化为-arbitrate()" data-criterion="当 HeteroArbiterProfile 描述单设备拓扑时，arbitrate_hetero() 退化为 arbitrate()">当 HeteroArbiterProfile 描述单设备拓扑时，arbitrate_hetero() 退化为 arbitrate()</div><div id="输出决策与-spec-12-定义的-strategyarbiter-约束一致" data-criterion="输出决策与 SPEC 12 定义的 StrategyArbiter 约束一致">输出决策与 SPEC 12 定义的 StrategyArbiter 约束一致</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-004" id="req-hetero-004"><h3>REQ-HETERO-004 两级 Block Indexer 协议</h3><p>定义两级 Block Indexer 的跨 SPEC 协议约束。L1 粗筛：对 block representatives (centroid) 计算注意力得分，选取 top-64 blocks；L2 精筛：对 L1 选中的 blocks 内 sub-blocks 计算精确注意力得分 (softmax_max)，选取 top-2048 positions。Indexer 在 CPU 侧 build_batch 阶段执行，产出 position list 传入 Mega-Kernel ABI。</p><div id="l1-粗筛消费-spec-19-定义的-centroid-信号-(kvpageheader.centroid)" data-criterion="L1 粗筛消费 SPEC 19 定义的 centroid 信号 (KvPageHeader.centroid)">L1 粗筛消费 SPEC 19 定义的 centroid 信号 (KvPageHeader.centroid)</div><div id="l2-精筛消费-spec-19-定义的-softmax-max-信号-(kvpageheader.softmax-max)" data-criterion="L2 精筛消费 SPEC 19 定义的 softmax_max 信号 (KvPageHeader.softmax_max)">L2 精筛消费 SPEC 19 定义的 softmax_max 信号 (KvPageHeader.softmax_max)</div><div id="indexer-在-build-batch-阶段执行，不在推理热路径" data-criterion="Indexer 在 build_batch 阶段执行，不在推理热路径">Indexer 在 build_batch 阶段执行，不在推理热路径</div><div id="top-3-代表粗筛漏检概率-<-1e-6" data-criterion="top-3 代表粗筛漏检概率 < 1e-6">top-3 代表粗筛漏检概率 &lt; 1e-6</div><div id="indexer-产出的-position-list-通过-kernelcontext-共享内存协议传入-jit-代码（见-req-abi-hetero-001，spec-40-扩展）" data-criterion="Indexer 产出的 position list 通过 KernelContext 共享内存协议传入 JIT 代码（见 REQ-ABI-HETERO-001，SPEC 40 扩展）">Indexer 产出的 position list 通过 KernelContext 共享内存协议传入 JIT 代码（见 REQ-ABI-HETERO-001，SPEC 40 扩展）</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-005" id="req-hetero-005"><h3>REQ-HETERO-005 IndexShare 跨层共享协议</h3><p>定义 IndexShare 跨层共享 indexer 的协议。MLA 模型 (DeepSeek V3/GLM-5) 的 KV 压缩 latent 在层间共享，Indexer 每 index_share_interval 层共享一次 indexer 结果，减少 PCIe 传输量和 CPU 计算量。index_share_interval 作为 MlaConfig.index_share_interval: Option&lt;usize&gt; 字段，None 表示无共享（每层独立 indexer）。</p><div id="indexshare-通过-mlaconfig.index-share-interval:-option<usize>-配置" data-criterion="IndexShare 通过 MlaConfig.index_share_interval: Option<usize> 配置">IndexShare 通过 MlaConfig.index_share_interval: Option&lt;usize&gt; 配置</div><div id="index-share-interval-=-some(4)-时，每-4-层共享一次-indexer-结果" data-criterion="index_share_interval = Some(4) 时，每 4 层共享一次 indexer 结果">index_share_interval = Some(4) 时，每 4 层共享一次 indexer 结果</div><div id="index-share-interval-=-none-时，每层独立执行-indexer" data-criterion="index_share_interval = None 时，每层独立执行 indexer">index_share_interval = None 时，每层独立执行 indexer</div><div id="indexshare-将-pcie-传输量从-2.25mb/层(无共享)-降低到-9.0mb/4层共享组（deepseek-v3:-d-c=512,-d-rope=64,-top-2048）" data-criterion="IndexShare 将 PCIe 传输量从 2.25MB/层(无共享) 降低到 9.0MB/4层共享组（DeepSeek V3: d_c=512, d_rope=64, top-2048）">IndexShare 将 PCIe 传输量从 2.25MB/层(无共享) 降低到 9.0MB/4层共享组（DeepSeek V3: d_c=512, d_rope=64, top-2048）</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-006" id="req-hetero-006"><h3>REQ-HETERO-006 SelectiveSwapIn 选择性传输协议</h3><p>定义 SelectiveSwapInRequest 类型，复用现有 SwapInWorker + DMA 通道，实现 position list 驱动的选择性 latent 传输（非全页传输）。latent[top-2048] 从 DDR5 传输到 GPU HBM。新增 SelectiveSwapInRequest 结构体，包含 position_list / source_tier / target_tier / completion_callback 字段。</p><div id="selectiveswapinrequest-复用现有-swapinworker-dma-通道" data-criterion="SelectiveSwapInRequest 复用现有 SwapInWorker DMA 通道">SelectiveSwapInRequest 复用现有 SwapInWorker DMA 通道</div><div id="position-list-驱动选择性传输，不传输完整页" data-criterion="position_list 驱动选择性传输，不传输完整页">position_list 驱动选择性传输，不传输完整页</div><div id="支持异步双缓冲：当前层计算时预取下一层-latent" data-criterion="支持异步双缓冲：当前层计算时预取下一层 latent">支持异步双缓冲：当前层计算时预取下一层 latent</div><div id="传输完成后通过-completion-callback-通知-kvcoordinator" data-criterion="传输完成后通过 completion_callback 通知 KvCoordinator">传输完成后通过 completion_callback 通知 KvCoordinator</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-007" id="req-hetero-007"><h3>REQ-HETERO-007 PCIe 传输流水线协议</h3><p>定义 PCIe 传输流水线协议，解决 R-1 带宽瓶颈风险。三重缓解策略：(1) IndexShare 减少 4x 传输量；(2) GPUDirect RDMA 绕过 CPU 中转（feature-gated by gpu_direct）；(3) 异步双缓冲当前层计算时预取下一层。定义 PCIe 带宽预算公式：bandwidth_required = latent_per_position * topk_positions * batch_size * layers_per_share / indexer_interval。</p><div id="pcie-带宽预算公式定义并在-arbitrate-hetero()-中校验" data-criterion="PCIe 带宽预算公式定义并在 arbitrate_hetero() 中校验">PCIe 带宽预算公式定义并在 arbitrate_hetero() 中校验</div><div id="bandwidth-required->-available-bandwidth-时返回-bandwidthinsufficient-决策" data-criterion="bandwidth_required > available_bandwidth 时返回 BandwidthInsufficient 决策">bandwidth_required &gt; available_bandwidth 时返回 BandwidthInsufficient 决策</div><div id="gpudirect-rdma-为-feature-gated-可选路径" data-criterion="GPUDirect RDMA 为 feature-gated 可选路径">GPUDirect RDMA 为 feature-gated 可选路径</div><div id="异步双缓冲：preload-next-layer-=-true-时，dma-引擎在当前层-attention-执行时启动下一层传输" data-criterion="异步双缓冲：preload_next_layer = true 时，DMA 引擎在当前层 attention 执行时启动下一层传输">异步双缓冲：preload_next_layer = true 时，DMA 引擎在当前层 attention 执行时启动下一层传输</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-008" id="req-hetero-008"><h3>REQ-HETERO-008 DDR5 KV 页管理协议</h3><p>DDR5 KV 存储复用现有 StorageTier::CpuDram + ThreeTierSwapCoordinator。不新增 StorageTier 变体。CpuDram 的语义就是 CPU 侧 DRAM，DDR5 只是代际。异构场景新增：DDR5 带宽感知的页迁移优先级（DDR5-5600 vs DDR4-3200 影响迁移策略）、latent page 连续性约束（MLA 模型 latent page 必须按 d_c 维度连续存储）。</p><div id="ddr5-kv-存储复用-storagetier::cpudram，不新增-tier-变体" data-criterion="DDR5 KV 存储复用 StorageTier::CpuDram，不新增 Tier 变体">DDR5 KV 存储复用 StorageTier::CpuDram，不新增 Tier 变体</div><div id="threetierswapcoordinator-gpuhbm<->cpudram-迁移-pipeline-复用" data-criterion="ThreeTierSwapCoordinator GpuHbm<->CpuDram 迁移 pipeline 复用">ThreeTierSwapCoordinator GpuHbm&lt;-&gt;CpuDram 迁移 pipeline 复用</div><div id="新增-ddr5-带宽感知页迁移优先级（req-symdim-011）" data-criterion="新增 DDR5 带宽感知页迁移优先级（REQ-SYMDIM-011）">新增 DDR5 带宽感知页迁移优先级（REQ-SYMDIM-011）</div><div id="新增-mla-latent-page-连续性约束（req-symdim-012）" data-criterion="新增 MLA latent page 连续性约束（REQ-SYMDIM-012）">新增 MLA latent page 连续性约束（REQ-SYMDIM-012）</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-009" id="req-hetero-009"><h3>REQ-HETERO-009 Expert Offloading 异构协议</h3><p>定义 Expert Offloading 在异构场景下的使用模式。复用现有 ExpertWeightPrefetcher (5 级热度) + ExpertThermalManager (4 级驻留)。异构场景新增：PCIe 带宽感知预取策略（基于 ExpertWeightPrefetcher.pcie_bandwidth_gbs 字段）、hot expert 驻留 GPU HBM / warm expert 驻留 DDR5 / cold expert 驻留 NVMe 的三级放置。</p><div id="expert-offloading-复用-expertweightprefetcher-+-expertthermalmanager" data-criterion="Expert Offloading 复用 ExpertWeightPrefetcher + ExpertThermalManager">Expert Offloading 复用 ExpertWeightPrefetcher + ExpertThermalManager</div><div id="pcie-带宽感知预取基于已有-pcie-bandwidth-gbs-字段" data-criterion="PCIe 带宽感知预取基于已有 pcie_bandwidth_gbs 字段">PCIe 带宽感知预取基于已有 pcie_bandwidth_gbs 字段</div><div id="三级放置：hot→gpu-hbm-/-warm→ddr5-/-cold→nvme" data-criterion="三级放置：hot→GPU HBM / warm→DDR5 / cold→NVMe">三级放置：hot→GPU HBM / warm→DDR5 / cold→NVMe</div><div id="expertweightprefetcher-预取时机与-selectiveswapin-dma-通道协调" data-criterion="ExpertWeightPrefetcher 预取时机与 SelectiveSwapIn DMA 通道协调">ExpertWeightPrefetcher 预取时机与 SelectiveSwapIn DMA 通道协调</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-010" id="req-hetero-010"><h3>REQ-HETERO-010 MLA 吸收异构实现约束</h3><p>定义 MLA 矩阵吸收在异构场景的实现约束。W_absorb 预计算在 GPU 侧执行，K_rope up-projection 在 GPU 侧执行，latent 传输从 DDR5 到 GPU HBM。这些是实现约束，不改变 SPEC 33 定义的数学模型。吸收后的 QK^T 计算在 GPU 侧完成，latent 还原在传输后进行。</p><div id="w-absorb-预计算在-gpu-侧，不改变吸收数学模型" data-criterion="W_absorb 预计算在 GPU 侧，不改变吸收数学模型">W_absorb 预计算在 GPU 侧，不改变吸收数学模型</div><div id="k-rope-up-projection-在-gpu-侧" data-criterion="K_rope up-projection 在 GPU 侧">K_rope up-projection 在 GPU 侧</div><div id="latent-传输从-ddr5-到-gpu-hbm-通过-selectiveswapin" data-criterion="latent 传输从 DDR5 到 GPU HBM 通过 SelectiveSwapIn">latent 传输从 DDR5 到 GPU HBM 通过 SelectiveSwapIn</div><div id="吸收后的-qk^t-计算在-gpu-侧完成" data-criterion="吸收后的 QK^T 计算在 GPU 侧完成">吸收后的 QK^T 计算在 GPU 侧完成</div><div id="spec-33-定义的-cos-sim->=-0.999-验证标准不变" data-criterion="SPEC 33 定义的 cos_sim >= 0.999 验证标准不变">SPEC 33 定义的 cos_sim &gt;= 0.999 验证标准不变</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-011" id="req-hetero-011"><h3>REQ-HETERO-011 运行时动态 Tier 迁移协议</h3><p>运行时动态切换通过 Strategy Arbiter 重新 arbitrate + Tier 迁移实现。Batch 增长导致 HBM 不够时，KvCoordinator 检测到 memory_pressure &gt; threshold，触发 KV 页从 GpuHbm 迁移到 CpuDram（现有 ThreeTierSwapCoordinator 已支持）。这是 Tier 迁移，不是 SchedulingMode 切换。memory_pressure 阈值由 arbitrate_hetero() 输出。</p><div id="动态-tier-迁移不修改-schedulingmode（req-arb-001-不可变铁律）" data-criterion="动态 Tier 迁移不修改 SchedulingMode（REQ-ARB-001 不可变铁律）">动态 Tier 迁移不修改 SchedulingMode（REQ-ARB-001 不可变铁律）</div><div id="memory-pressure->-threshold-时触发-gpuhbm→cpudram-迁移" data-criterion="memory_pressure > threshold 时触发 GpuHbm→CpuDram 迁移">memory_pressure &gt; threshold 时触发 GpuHbm→CpuDram 迁移</div><div id="threetierswapcoordinator-现有-pipeline-复用" data-criterion="ThreeTierSwapCoordinator 现有 pipeline 复用">ThreeTierSwapCoordinator 现有 pipeline 复用</div><div id="阈值由-arbitrate-hetero()-输出，不是硬编码" data-criterion="阈值由 arbitrate_hetero() 输出，不是硬编码">阈值由 arbitrate_hetero() 输出，不是硬编码</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-category="architecture" data-req-domain="HETERO" data-req-status="draft" data-req="REQ-HETERO-012" id="req-hetero-012"><h3>REQ-HETERO-012 异构端到端验证协议</h3><p>定义异构推理的端到端验证标准。基于 DeepSeek V3/R1 (已注册) 作为参考模型。验证项：(1) Block Indexer 精度：top-3 粗筛 vs 全量精确注意力漏检率 &lt; 1e-6；(2) PCIe 传输正确性：latent DMA 传输后位级比对；(3) 异构端到端：异构推理 vs 纯 GPU 基线，输出 KL 散度 &lt; FP8 量化误差；(4) 延迟：Indexer + DMA + Attention 总延迟 &lt; 20ms。</p><div id="block-indexer-精度：top-3-粗筛-vs-全量精确注意力漏检率-<-1e-6" data-criterion="Block Indexer 精度：top-3 粗筛 vs 全量精确注意力漏检率 < 1e-6">Block Indexer 精度：top-3 粗筛 vs 全量精确注意力漏检率 &lt; 1e-6</div><div id="pcie-传输正确性：latent-dma-传输后位级比对，0-bit-error" data-criterion="PCIe 传输正确性：latent DMA 传输后位级比对，0 bit error">PCIe 传输正确性：latent DMA 传输后位级比对，0 bit error</div><div id="异构端到端：vs-纯-gpu-基线输出-kl-散度-<-fp8-量化误差-(~1e-3)" data-criterion="异构端到端：vs 纯 GPU 基线输出 KL 散度 < FP8 量化误差 (~1e-3)">异构端到端：vs 纯 GPU 基线输出 KL 散度 &lt; FP8 量化误差 (~1e-3)</div><div id="延迟：indexer-+-dma-+-attention-总延迟-<-20ms-(decode-step,-single-sequence)" data-criterion="延迟：Indexer + DMA + Attention 总延迟 < 20ms (decode step, single sequence)">延迟：Indexer + DMA + Attention 总延迟 &lt; 20ms (decode step, single sequence)</div><div id="参考模型为-deepseek-v3/r1-(spec-11-已注册)" data-criterion="参考模型为 DeepSeek V3/R1 (SPEC 11 已注册)">参考模型为 DeepSeek V3/R1 (SPEC 11 已注册)</div><div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div></section><section data-req-ref="REQ-HETERO-003" data-api-type="internal" data-api-name="API-HETERO-ARBITRATE" data-api="POST /internal/hetero/arbitrate" id="post-/internal/hetero/arbitrate"><h4>POST /internal/hetero/arbitrate — 异构仲裁接口</h4><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-desc="策略偏好（含 4 个异构字段）" data-required="true" data-type="StrategyBias" data-param="bias"><td>bias</td><td>StrategyBias</td><td>是</td><td>策略偏好（含 4 个异构字段）</td></tr><tr data-desc="异构拓扑描述" data-required="true" data-type="HeteroArbiterProfile" data-param="profile"><td>profile</td><td>HeteroArbiterProfile</td><td>是</td><td>异构拓扑描述</td></tr><tr data-desc="当前 HBM 内存压力 [0, 1]" data-required="true" data-type="f32" data-param="memory_pressure"><td>memory_pressure</td><td>f32</td><td>是</td><td>当前 HBM 内存压力 [0, 1]</td></tr></table><script type="application/ld+json">{
+  "@type": "ApiResponse",
+  "source": "example",
+  "body": {
+    "kv_offload_target": "StorageTier",
+    "weight_offload_target": "StorageTier",
+    "indexer_device": "IndexerDevicePreference",
+    "batch_scale": "f32",
+    "migration_threshold": "f32"
+  }
+}</script><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section data-req-ref="REQ-HETERO-004" data-api-type="internal" data-api-name="API-HETERO-BLOCK-INDEX" data-api="POST /internal/hetero/block-index" id="post-/internal/hetero/block-index"><h4>POST /internal/hetero/block-index — Block Indexer 执行接口</h4><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-desc="DDR5 上的 latent 页头" data-required="true" data-type="&[KvPageHeader]" data-param="latent_pages"><td>latent_pages</td><td>&amp;[KvPageHeader]</td><td>是</td><td>DDR5 上的 latent 页头</td></tr><tr data-desc="当前 token 的 query 嵌入" data-required="true" data-type="&[f16]" data-param="query_embedding"><td>query_embedding</td><td>&amp;[f16]</td><td>是</td><td>当前 token 的 query 嵌入</td></tr><tr data-desc="Indexer 配置 (l1/l2 topk)" data-required="true" data-type="&BlockIndexerConfig" data-param="config"><td>config</td><td>&amp;BlockIndexerConfig</td><td>是</td><td>Indexer 配置 (l1/l2 topk)</td></tr></table><script type="application/ld+json">{
+  "@type": "ApiResponse",
+  "source": "example",
+  "body": {
+    "top_positions": "Vec<usize>",
+    "confidence": "f32"
+  }
+}</script><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section data-req-ref="REQ-HETERO-006" data-api-type="internal" data-api-name="API-HETERO-SELECTIVE-SWAP" data-api="POST /internal/hetero/selective-swap-in" id="post-/internal/hetero/selective-swap-in"><h4>POST /internal/hetero/selective-swap-in — 选择性 KV 传输接口</h4><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr><tr data-desc="选择性传输请求" data-required="true" data-type="SelectiveSwapInRequest" data-param="request"><td>request</td><td>SelectiveSwapInRequest</td><td>是</td><td>选择性传输请求</td></tr></table><script type="application/ld+json">{
+  "@type": "ApiResponse",
+  "source": "example",
+  "body": {
+    "bytes_transferred": "usize",
+    "latency_ms": "f32"
+  }
+}</script><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-schema="" data-status="200"><td>200</td><td>成功</td><td></td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table></section><section data-entity-model-type="memory-layout" data-entity="ENT-HETERO-ARBITER-PROFILE" id="ent-hetero-arbiter-profile"><h3>ENT-HETERO-ARBITER-PROFILE HeteroArbiterProfile 异构拓扑描述</h3><table data-entity-table="ENT-HETERO-ARBITER-PROFILE"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-constraints="非空" data-required="true" data-type="enum[x86_64,aarch64]" data-field="cpu_device"><td>cpu_device</td><td>enum[x86_64,aarch64]</td><td>是</td><td>非空</td><td>CPU 设备族</td></tr><tr data-constraints="非空" data-required="true" data-type="enum[Nvidia,Amd,Apple]" data-field="gpu_device"><td>gpu_device</td><td>enum[Nvidia,Amd,Apple]</td><td>是</td><td>非空</td><td>GPU 设备族</td></tr><tr data-constraints="= CpuDram" data-required="true" data-type="enum[CpuDram]" data-field="ddr5_tier"><td>ddr5_tier</td><td>enum[CpuDram]</td><td>是</td><td>= CpuDram</td><td>DDR5 存储层，复用 StorageTier::CpuDram</td></tr><tr data-constraints="> 0" data-required="true" data-type="float" data-field="pcie_bandwidth_gbs"><td>pcie_bandwidth_gbs</td><td>float</td><td>是</td><td>&gt; 0</td><td>PCIe 带宽 (GB/s)</td></tr><tr data-constraints="> 0" data-required="true" data-type="float" data-field="cpu_dram_bandwidth_gbs"><td>cpu_dram_bandwidth_gbs</td><td>float</td><td>是</td><td>&gt; 0</td><td>CPU DRAM 带宽 (GB/s)</td></tr></table><script type="application/ld+json">{
+  "@type": "EntityRelations",
+  "entity": "ENT-HETERO-ARBITER-PROFILE",
+  "relations": [
+    {
+      "target": "ENT-STRATEGY-BIAS",
+      "type": "consumed_by"
+    },
+    {
+      "target": "ENT-STRATEGY-ARBITER",
+      "type": "extends"
+    }
+  ]
+}</script></section><section data-entity-model-type="memory-layout" data-entity="ENT-BLOCK-INDEXER" id="ent-block-indexer"><h3>ENT-BLOCK-INDEXER Block Indexer 两级注意力索引</h3><table data-entity-table="ENT-BLOCK-INDEXER"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-constraints="默认 64" data-required="true" data-type="integer" data-field="l1_topk"><td>l1_topk</td><td>integer</td><td>是</td><td>默认 64</td><td>L1 粗筛 top-k blocks</td></tr><tr data-constraints="默认 2048" data-required="true" data-type="integer" data-field="l2_topk"><td>l2_topk</td><td>integer</td><td>是</td><td>默认 2048</td><td>L2 精筛 top-k positions</td></tr><tr data-constraints="> 0" data-required="true" data-type="integer" data-field="block_size"><td>block_size</td><td>integer</td><td>是</td><td>&gt; 0</td><td>Block 大小 (positions per block)</td></tr><tr data-constraints="None=独立" data-required="false" data-type="integer?" data-field="index_share_interval"><td>index_share_interval</td><td>integer?</td><td>否</td><td>None=独立</td><td>IndexShare 层间共享间隔</td></tr></table><script type="application/ld+json">{
+  "@type": "EntityRelations",
+  "entity": "ENT-BLOCK-INDEXER",
+  "relations": [
+    {
+      "target": "ENT-KV-PAGE-HEADER",
+      "type": "consumed_by"
+    },
+    {
+      "target": "ENT-PAGED-SCHEDULER",
+      "type": "called_by"
+    }
+  ]
+}</script></section><section data-entity-model-type="memory-layout" data-entity="ENT-SELECTIVE-SWAP-IN-REQUEST" id="ent-selective-swap-in-request"><h3>ENT-SELECTIVE-SWAP-IN-REQUEST SelectiveSwapIn 选择性传输请求</h3><table data-entity-table="ENT-SELECTIVE-SWAP-IN-REQUEST"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-constraints="非空" data-required="true" data-type="array<integer>" data-field="position_list"><td>position_list</td><td>array&lt;integer&gt;</td><td>是</td><td>非空</td><td>选择性传输的 position 列表</td></tr><tr data-constraints="= CpuDram" data-required="true" data-type="enum[CpuDram]" data-field="source_tier"><td>source_tier</td><td>enum[CpuDram]</td><td>是</td><td>= CpuDram</td><td>源 Tier (DDR5)</td></tr><tr data-constraints="= GpuHbm" data-required="true" data-type="enum[GpuHbm]" data-field="target_tier"><td>target_tier</td><td>enum[GpuHbm]</td><td>是</td><td>= GpuHbm</td><td>目标 Tier (GPU HBM)</td></tr><tr data-constraints="非空" data-required="true" data-type="string" data-field="completion_callback"><td>completion_callback</td><td>NotificationChannel</td><td>是</td><td>非空</td><td>传输完成通知通道，异步传输完成后发送信号通知 KvCoordinator</td></tr></table><script type="application/ld+json">{
+  "@type": "EntityRelations",
+  "entity": "ENT-SELECTIVE-SWAP-IN-REQUEST",
+  "relations": [
+    {
+      "target": "ENT-PAGE-TABLE",
+      "type": "reads"
+    },
+    {
+      "target": "ENT-KV-PAGE-HEADER",
+      "type": "reads"
+    }
+  ]
+}</script></section></main>
+
+  <section id="testing" data-tests-section="">
+    <h2>测试用例</h2>
+    <section data-req-ref="REQ-HETERO-001" data-test-case="TC-HETERO-001">
+      <h3>TC-HETERO-001: HeteroArbiterProfile 构造与拓扑描述</h3>
+      <p><strong>Arrange</strong>: 构建包含 x86_64 CPU + Nvidia GPU + CpuDram DDR5 的设备拓扑。</p>
+      <p><strong>Act</strong>: 调用 HeteroArbiterProfile::new() 构造实例，验证字段赋值。</p>
+      <p><strong>Assert</strong>: cpu_device == x86_64, gpu_device == Nvidia, ddr5_tier == CpuDram, pcie_bandwidth_gbs &gt; 0, cpu_dram_bandwidth_gbs &gt; 0。单设备构造返回 None 或退化配置。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-002" data-test-case="TC-HETERO-002">
+      <h3>TC-HETERO-002: StrategyBias 异构扩展字段默认值</h3>
+      <p><strong>Arrange</strong>: 构造 StrategyBias 默认实例（无 HeteroArbiterProfile）。</p>
+      <p><strong>Act</strong>: 读取 4 个异构字段值。</p>
+      <p><strong>Assert</strong>: kv_offload_preference == Adaptive, weight_offload_preference == Adaptive, indexer_device_preference == Cpu, hetero_batch_scale == 1.0。arbitrate() 行为与无异构字段时完全一致。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-003" data-test-case="TC-HETERO-003">
+      <h3>TC-HETERO-003: arbitrate_hetero() 单设备退化</h3>
+      <p><strong>Arrange</strong>: 构造 HeteroArbiterProfile 单设备拓扑（仅 GPU，无 CPU DDR5 tier）。</p>
+      <p><strong>Act</strong>: 调用 arbitrate_hetero()。</p>
+      <p><strong>Assert</strong>: 输出 ArbiterDecision 与 arbitrate() 完全一致（kv_offload_target/weight_offload_target/indexer_device 均指向 GPU）。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-004" data-test-case="TC-HETERO-004">
+      <h3>TC-HETERO-004: Block Indexer 两级筛选精度</h3>
+      <p><strong>Arrange</strong>: 构造 1M position KV cache（DeepSeek V3 参数），含 centroid/softmax_max 信号。</p>
+      <p><strong>Act</strong>: 执行 L1 粗筛 (top-64 blocks) + L2 精筛 (top-2048 positions)。</p>
+      <p><strong>Assert</strong>: top-3 代表粗筛 vs 全量精确注意力漏检率 &lt; 1e-6；L1 选中 blocks 包含全量 top-64 blocks 的比例 &gt; 99.9%。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-005" data-test-case="TC-HETERO-005">
+      <h3>TC-HETERO-005: IndexShare 跨层共享正确性</h3>
+      <p><strong>Arrange</strong>: 配置 MlaConfig.index_share_interval = Some(4)，61 层。</p>
+      <p><strong>Act</strong>: 执行 indexer 16 次（61/4 向上取整），每 4 层共享结果。</p>
+      <p><strong>Assert</strong>: 共享组内各层 position list 一致；IndexShare 模式 vs 逐层独立模式，KL 散度 &lt; 1e-6；PCIe 传输量 = 9.0MB * 16 次 vs 2.25MB * 61 次（减少 ~38%）。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-006" data-test-case="TC-HETERO-006">
+      <h3>TC-HETERO-006: SelectiveSwapIn DMA 传输位级正确性</h3>
+      <p><strong>Arrange</strong>: DDR5 侧准备 latent 数据（f16），构造 SelectiveSwapInRequest (top-2048 positions)。</p>
+      <p><strong>Act</strong>: 执行 SelectiveSwapIn DMA 传输到 GPU HBM。</p>
+      <p><strong>Assert</strong>: GPU HBM 中接收的数据与 DDR5 源数据逐位比对，0 bit error。completion_callback 信号正确触发。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-007" data-test-case="TC-HETERO-007">
+      <h3>TC-HETERO-007: PCIe 带宽预算校验</h3>
+      <p><strong>Arrange</strong>: 配置 HeteroArbiterProfile.pcie_bandwidth_gbs = 64.0，batch_size=100，topk=2048。</p>
+      <p><strong>Act</strong>: 调用 arbitrate_hetero() 计算带宽预算。</p>
+      <p><strong>Assert</strong>: bandwidth_required = 9.0MB * 100 / indexer_interval = 900MB / 4 = 225MB/s。当 bandwidth_required &gt; available 时返回 BandwidthInsufficient 决策。异步双缓冲 preload_next_layer=true 时，有效延迟降低约 50%。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-008" data-test-case="TC-HETERO-008">
+      <h3>TC-HETERO-008: DDR5 KV 页管理复用验证</h3>
+      <p><strong>Arrange</strong>: 构造 ThreeTierSwapCoordinator 实例，KV 页位于 CpuDram。</p>
+      <p><strong>Act</strong>: 执行 GpuHbm→CpuDram 页迁移（复用现有 pipeline）。</p>
+      <p><strong>Assert</strong>: 迁移后 CpuDram 页数据完整；DDR5 带宽感知优先级生效（DDR5-5600 页优先于 DDR4-3200）；latent page 按 d_c 维度连续存储。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-009" data-test-case="TC-HETERO-009">
+      <h3>TC-HETERO-009: Expert Offloading 三级放置正确性</h3>
+      <p><strong>Arrange</strong>: 配置 ExpertWeightPrefetcher + ExpertThermalManager，MoE 模型 256 experts。</p>
+      <p><strong>Act</strong>: 异构仲裁后执行三级放置：hot→GPU HBM, warm→DDR5, cold→NVMe。</p>
+      <p><strong>Assert</strong>: hot expert 在 GPU HBM 中可直接访问；warm expert 预取延迟 &lt; PCIe 带宽预算；cold expert 仅在 LRU 驱逐后加载。DMA 通道无冲突（SelectiveSwapIn 与 Expert 预取分时复用）。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-010" data-test-case="TC-HETERO-010">
+      <h3>TC-HETERO-010: MLA 吸收异构数值对齐</h3>
+      <p><strong>Arrange</strong>: DeepSeek V3 MLA 权重，W_absorb 在 GPU 预计算，K_rope up-projection 在 GPU 执行。</p>
+      <p><strong>Act</strong>: 异构路径 (latent DDR5→GPU + GPU absorbed attention) vs 纯 GPU 基线。</p>
+      <p><strong>Assert</strong>: cos_sim &gt;= 0.999（与 SPEC 33 一致）；QK^T 计算结果位级一致（相同 GPU 代码路径）。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-011" data-test-case="TC-HETERO-011">
+      <h3>TC-HETERO-011: 动态 Tier 迁移压力阈值触发</h3>
+      <p><strong>Arrange</strong>: 配置 memory_pressure threshold = 0.85（由 arbitrate_hetero() 输出），HBM 使用率逐步上升。</p>
+      <p><strong>Act</strong>: memory_pressure 超过 0.85 时触发 GpuHbm→CpuDram 迁移。</p>
+      <p><strong>Assert</strong>: 迁移成功后 memory_pressure 降至阈值以下；SchedulingMode 未被修改；ThreeTierSwapCoordinator pipeline 正确执行。</p>
+    </section>
+    <section data-req-ref="REQ-HETERO-012" data-test-case="TC-HETERO-012">
+      <h3>TC-HETERO-012: 异构端到端验证</h3>
+      <p><strong>Arrange</strong>: DeepSeek V3/R1 模型，1M 上下文，异构配置 (CPU DDR5 + GPU HBM)。</p>
+      <p><strong>Act</strong>: 执行完整异构推理（Indexer + DMA + Attention），对比纯 GPU 基线输出。</p>
+      <p><strong>Assert</strong>: (1) Block Indexer 精度：漏检率 &lt; 1e-6；(2) PCIe DMA 传输：0 bit error；(3) KL 散度 &lt; FP8 量化误差 (~1e-3)；(4) Indexer + DMA + Attention 总延迟 &lt; 20ms (decode step, single sequence)。</p>
+    </section>
+  <div id="test-hetero-001" data-req-ref="REQ-HETERO-001" data-test-categories="unit" data-test="TEST-HETERO-001"><h4>TEST-HETERO-001: REQ-HETERO-001 单元测试</h4><p>TODO: 为 REQ-HETERO-001 编写测试用例</p></div><div id="test-hetero-002" data-req-ref="REQ-HETERO-002" data-test-categories="unit" data-test="TEST-HETERO-002"><h4>TEST-HETERO-002: REQ-HETERO-002 单元测试</h4><p>TODO: 为 REQ-HETERO-002 编写测试用例</p></div><div id="test-hetero-003" data-req-ref="REQ-HETERO-003" data-test-categories="unit" data-test="TEST-HETERO-003"><h4>TEST-HETERO-003: REQ-HETERO-003 单元测试</h4><p>TODO: 为 REQ-HETERO-003 编写测试用例</p></div><div id="test-hetero-004" data-req-ref="REQ-HETERO-004" data-test-categories="unit" data-test="TEST-HETERO-004"><h4>TEST-HETERO-004: REQ-HETERO-004 单元测试</h4><p>TODO: 为 REQ-HETERO-004 编写测试用例</p></div><div id="test-hetero-005" data-req-ref="REQ-HETERO-005" data-test-categories="unit" data-test="TEST-HETERO-005"><h4>TEST-HETERO-005: REQ-HETERO-005 单元测试</h4><p>TODO: 为 REQ-HETERO-005 编写测试用例</p></div><div id="test-hetero-006" data-req-ref="REQ-HETERO-006" data-test-categories="unit" data-test="TEST-HETERO-006"><h4>TEST-HETERO-006: REQ-HETERO-006 单元测试</h4><p>TODO: 为 REQ-HETERO-006 编写测试用例</p></div><div id="test-hetero-007" data-req-ref="REQ-HETERO-007" data-test-categories="unit" data-test="TEST-HETERO-007"><h4>TEST-HETERO-007: REQ-HETERO-007 单元测试</h4><p>TODO: 为 REQ-HETERO-007 编写测试用例</p></div><div id="test-hetero-008" data-req-ref="REQ-HETERO-008" data-test-categories="unit" data-test="TEST-HETERO-008"><h4>TEST-HETERO-008: REQ-HETERO-008 单元测试</h4><p>TODO: 为 REQ-HETERO-008 编写测试用例</p></div><div id="test-hetero-009" data-req-ref="REQ-HETERO-009" data-test-categories="unit" data-test="TEST-HETERO-009"><h4>TEST-HETERO-009: REQ-HETERO-009 单元测试</h4><p>TODO: 为 REQ-HETERO-009 编写测试用例</p></div><div id="test-hetero-010" data-req-ref="REQ-HETERO-010" data-test-categories="unit" data-test="TEST-HETERO-010"><h4>TEST-HETERO-010: REQ-HETERO-010 单元测试</h4><p>TODO: 为 REQ-HETERO-010 编写测试用例</p></div><div id="test-hetero-011" data-req-ref="REQ-HETERO-011" data-test-categories="unit" data-test="TEST-HETERO-011"><h4>TEST-HETERO-011: REQ-HETERO-011 单元测试</h4><p>TODO: 为 REQ-HETERO-011 编写测试用例</p></div><div id="test-hetero-012" data-req-ref="REQ-HETERO-012" data-test-categories="unit" data-test="TEST-HETERO-012"><h4>TEST-HETERO-012: REQ-HETERO-012 单元测试</h4><p>TODO: 为 REQ-HETERO-012 编写测试用例</p></div></section>
+</body></html>
