@@ -4,6 +4,8 @@ use crate::client::{Client, GllmError};
 
 /// Builder for document reranking (per SPEC 04-API-DESIGN §3.3).
 ///
+/// Supports `top_n()` for Top-K truncation via builder pattern.
+///
 /// # Example
 ///
 /// ```no_run
@@ -30,7 +32,6 @@ pub struct RerankBuilder<'a> {
 }
 
 impl<'a> RerankBuilder<'a> {
-    #[allow(dead_code)]
     pub(crate) fn new(
         client: &'a Client,
         query: impl Into<String>,
@@ -1270,5 +1271,75 @@ mod tests {
         assert!((scores[1] - 0.2).abs() < 1e-6);
         // results still usable (Copy, not moved)
         assert_eq!(results[0].index, 0);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  REQ-API-4: Client::rerank_builder() public API tests
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── Client::rerank_builder() returns RerankBuilder ──
+
+    #[test]
+    fn rerank_builder_from_client_api_no_model() {
+        let client = Client::new_empty();
+        let result = client.rerank_builder("query", vec!["doc1", "doc2"])
+            .generate();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GllmError::NoModelLoaded => {}
+            other => panic!("expected NoModelLoaded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rerank_builder_from_client_with_top_n_no_model() {
+        let client = Client::new_empty();
+        let result = client.rerank_builder("query", vec!["a", "b", "c"])
+            .top_n(2)
+            .generate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rerank_builder_from_client_top_n_chains_no_model() {
+        let client = Client::new_empty();
+        let result = client.rerank_builder("query", vec!["doc"])
+            .top_n(10)
+            .top_n(3)
+            .generate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rerank_builder_from_client_empty_docs_no_model() {
+        let client = Client::new_empty();
+        let result = client.rerank_builder("query", Vec::<String>::new())
+            .generate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rerank_builder_from_client_unicode_query_no_model() {
+        let client = Client::new_empty();
+        let result = client.rerank_builder("什么是法国的首都？", vec!["巴黎", "伦敦"])
+            .top_n(1)
+            .generate();
+        assert!(result.is_err());
+    }
+
+    // ── Client::rerank() vs Client::rerank_builder() equivalence ──
+
+    #[test]
+    fn rerank_and_rerank_builder_both_fail_no_model() {
+        let client = Client::new_empty();
+        let direct = client.rerank("q", vec!["d"]);
+        let via_builder = client.rerank_builder("q", vec!["d"]).generate();
+        assert!(direct.is_err());
+        assert!(via_builder.is_err());
+        // Both should return NoModelLoaded
+        match (direct.unwrap_err(), via_builder.unwrap_err()) {
+            (GllmError::NoModelLoaded, GllmError::NoModelLoaded) => {}
+            (a, b) => panic!("expected both NoModelLoaded, got {:?} and {:?}", a, b),
+        }
     }
 }

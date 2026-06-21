@@ -2,7 +2,7 @@
 // AsyncClient — async wrapper with concurrent multi-prompt submission
 // ============================================================================
 
-/// Async wrapper for `Client` with concurrent batch support (SPEC/20 REQ-BCI-008).
+/// Async wrapper for `Client` with concurrent batch support (SPEC/09 REQ-API-5, SPEC/20 REQ-BCI-008).
 ///
 /// Provides an async `generate_batch` method that supports concurrent
 /// multi-prompt submission by offloading sync operations to threads.
@@ -37,24 +37,27 @@
 /// # }
 /// ```
 #[derive(Clone)]
+// @trace REQ-API-5 [entity:AsyncClient] async wrapper with Arc<Client> for concurrent batch
 pub struct AsyncClient {
     inner: Arc<Client>,
 }
 
 impl AsyncClient {
     /// Create a new `AsyncClient` wrapping a `Client`.
+    // @trace REQ-API-5 [entity:AsyncClient] constructor — wraps Client in Arc
     pub fn new(client: Client) -> Self {
         Self {
             inner: Arc::new(client),
         }
     }
 
-    /// Batch generate with concurrent multi-prompt submission (REQ-BCI-008).
+    /// Batch generate with concurrent multi-prompt submission (REQ-API-5, REQ-BCI-008).
     ///
     /// Processes all requests as a single batch, offloaded to a dedicated
     /// thread for non-blocking async execution. Multiple concurrent calls
     /// to this method run in parallel threads via independent spawns,
     /// supporting concurrent multi-prompt submission.
+    // @trace REQ-API-5 [entity:AsyncClient] [api:POST /client/generate_batch] async batch generate — concurrent multi-prompt, continuous batching, KV prefix sharing
     pub async fn generate_batch(
         &self,
         requests: &[crate::engine::batch_executor::GenerateRequest],

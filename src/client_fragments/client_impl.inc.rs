@@ -340,13 +340,27 @@ impl Client {
     }
 
     /// Generate embeddings for texts (per SPEC 04-API-DESIGN §3.2).
+    // @trace REQ-API-3 [api:POST /client/embed] Client::embed() entry point
     pub fn embed<I, S>(&self, inputs: I) -> Result<EmbeddingsResponse, ClientError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         let inputs = inputs.into_iter().map(Into::into).collect();
-        self.execute_embeddings(inputs)
+        self.execute_embeddings(inputs, false, None)
+    }
+
+    /// Generate embeddings for texts with configuration (per REQ-API-3).
+    ///
+    /// Supports L2 normalization and dimension truncation via `EmbedConfig`.
+    // @trace REQ-API-3 [api:POST /client/embed] Client::embed_with() entry point
+    pub fn embed_with<I, S>(&self, inputs: I, config: crate::embeddings::EmbedConfig) -> Result<EmbeddingsResponse, ClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let inputs = inputs.into_iter().map(Into::into).collect();
+        self.execute_embeddings(inputs, config.normalize, config.dimension)
     }
 
     /// Create an embeddings builder with pipeline support (embed + rerank + RAG).
@@ -378,6 +392,7 @@ impl Client {
     }
 
     /// Rerank documents by relevance to query (sync).
+    // @trace REQ-API-4 [api:POST /client/rerank] Client::rerank() — query+documents → RerankResponse
     pub fn rerank<I, S>(
         &self,
         query: impl Into<String>,
@@ -390,6 +405,23 @@ impl Client {
         let documents = documents.into_iter().map(Into::into).collect();
         let query = query.into();
         self.execute_rerank(query, documents, usize::MAX)
+    }
+
+    /// Create a rerank builder for document reranking with configuration.
+    ///
+    /// Supports `top_n()` for Top-K truncation via builder pattern.
+    // @trace REQ-API-4 [api:POST /client/rerank] Client::rerank_builder() — returns RerankBuilder with top_n support
+    pub fn rerank_builder<I, S>(
+        &self,
+        query: impl Into<String>,
+        documents: I,
+    ) -> crate::rerank::RerankBuilder<'_>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let documents = documents.into_iter().map(Into::into).collect();
+        crate::rerank::RerankBuilder::new(self, query, documents)
     }
 
     /// Classify texts into categories (sync).
@@ -1134,9 +1166,12 @@ impl Client {
         })
     }
 
+    // @trace REQ-API-3 [api:POST /client/embed] execute_embeddings — batch embed with normalize + dimension
     pub(crate) fn execute_embeddings(
         &self,
         inputs: Vec<String>,
+        normalize: bool,
+        dimension: Option<usize>,
     ) -> Result<EmbeddingsResponse, ClientError> {
         let state = self.require_state()?;
         let plan = state.execution_plan.clone();
@@ -1144,8 +1179,27 @@ impl Client {
             let mut executor = state.backend.executor_mut();
             let mut embeddings = Vec::with_capacity(inputs.len());
             for input in &inputs {
+                let mut raw = executor.embed(input)?;
+                let norm = if normalize {
+                    let n = crate::jit::epilogue::compute_l2_norm(&raw);
+                    if n > 0.0 {
+                        let inv = 1.0 / n;
+                        for v in raw.iter_mut() {
+                            *v *= inv;
+                        }
+                    }
+                    Some(n)
+                } else {
+                    None
+                };
+                if let Some(dim) = dimension {
+                    if dim < raw.len() {
+                        raw.truncate(dim);
+                    }
+                }
                 embeddings.push(Embedding {
-                    embedding: executor.embed(input)?,
+                    embedding: raw,
+                    norm,
                 });
             }
             Ok(EmbeddingsResponse {
@@ -1156,6 +1210,7 @@ impl Client {
         })
     }
 
+    // @trace REQ-API-4 [api:POST /client/rerank] execute_rerank — score, sort descending, truncate top_n
     pub(crate) fn execute_rerank(
         &self,
         query: String,
@@ -1249,16 +1304,19 @@ impl Client {
     ///
     /// Returns embeddings sorted by descending rerank score, with
     /// `rerank_scores` populated.
+    // @trace REQ-API-3 [api:POST /client/embed] execute_embed_rerank_pipeline — embed+rerank with normalize + dimension
     pub(crate) fn execute_embed_rerank_pipeline(
         &self,
         inputs: Vec<String>,
         query: String,
         top_n: Option<usize>,
+        normalize: bool,
+        dimension: Option<usize>,
     ) -> Result<EmbeddingsResponse, ClientError> {
         let state = self.require_state()?;
 
         // Step 1: embed all inputs using the primary model
-        let embeddings = self.execute_embeddings(inputs.clone())?;
+        let embeddings = self.execute_embeddings(inputs.clone(), normalize, dimension)?;
 
         // Step 2: rerank using the pipeline reranker model
         let reranker = state
@@ -1337,6 +1395,8 @@ impl Client {
         query: String,
         top_n: usize,
         system_prompt: String,
+        _normalize: bool,
+        _dimension: Option<usize>,
     ) -> Result<RagResponse, ClientError> {
         let state = self.require_state()?;
 
@@ -1792,10 +1852,10 @@ impl Client {
     }
 
     // ========================================================================
-    // Batch API (SPEC/20 REQ-BCI-008)
+    // Batch API (SPEC/09 REQ-API-5, SPEC/20 REQ-BCI-008)
     // ========================================================================
 
-    /// Batch generate (SPEC/20 REQ-BCI-008)
+    /// Batch generate (SPEC/09 REQ-API-5, SPEC/20 REQ-BCI-008)
     ///
     /// 输入多个 `GenerateRequest`，返回对应的 `GenerateResult` 列表。
     /// M 维度统一架构：batch_size=1 是 batch_size=N 的特例。
@@ -1823,6 +1883,7 @@ impl Client {
     /// ];
     /// let results = client.generate_batch(&requests).unwrap();
     /// ```
+    // @trace REQ-API-5 [entity:Client] [api:POST /client/generate_batch] sync batch generate — M-dimension unified, continuous batching, KV prefix sharing
     pub fn generate_batch(
         &self,
         requests: &[crate::engine::batch_executor::GenerateRequest],
@@ -1841,11 +1902,12 @@ impl Client {
         })
     }
 
-    /// Async version of `generate_batch` (SPEC/20 REQ-BCI-008)
+    /// Async version of `generate_batch` (SPEC/09 REQ-API-5, SPEC/20 REQ-BCI-008)
     ///
     /// Offloads the sync batch call to a dedicated thread for non-blocking
     /// async execution. Multiple concurrent calls run in parallel threads,
     /// enabling true concurrent multi-prompt submission.
+    // @trace REQ-API-5 [entity:Client] [api:POST /client/generate_batch_async] async batch generate — offloaded to thread, concurrent multi-prompt
     pub async fn generate_batch_async(
         &self,
         requests: &[crate::engine::batch_executor::GenerateRequest],

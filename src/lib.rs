@@ -54,7 +54,7 @@ pub use loader::adapter::{GgufAdapter, KernelTensorView, StorageFormat, PackedBi
 
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
-pub use client::{Client, GllmError, ModelInfo, MtpGenerationResponse, MtpStepInfo};
+pub use client::{Client, AsyncClient, GllmError, ModelInfo, MtpGenerationResponse, MtpStepInfo};
 pub use generation::{
     GenerationChunk, GenerationResponse, GenerationStream,
     GenerationHook, HookDecision, MediaInput, ThresholdHook,
@@ -72,9 +72,9 @@ pub use cot_reasoner::{
     ReasoningStopReason, ReasoningTemplate, StepAction, StepContext, StepKnowledge, StepResult,
     DEFAULT_STOP_PATTERNS,
 };
-pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
+pub use embeddings::{EmbedConfig, Embedding, EmbeddingsBuilder, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};
-pub use rerank::{RerankResponse, RerankResult};
+pub use rerank::{RerankBuilder, RerankResponse, RerankResult};
 pub use semantic_gatekeeper::{
     AstContext, AstSentinel, KnowledgeEntry, KnowledgeProvider, RetrieveContext,
     SemanticGatekeeperCallback, SemanticGatekeeperConfig, SemanticGatekeeperError, SemanticLevel,
@@ -95,4 +95,5 @@ pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
 
 pub use engine::arbiter::{ArbiterHwView, DeviceFamily, GraphArchetype, InferenceMode, StrategyArbiter, StrategyBias};
+pub use engine::batch_executor::{GenerateRequest, GenerateResult};
 pub use graph::profile::{AttentionKind, FfnKind, GraphProfile, GraphProfiler, ResidualKind};

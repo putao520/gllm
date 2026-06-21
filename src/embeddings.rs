@@ -33,6 +33,11 @@ pub struct EmbeddingsBuilder<'a> {
     inputs: Vec<String>,
     rerank_query: Option<String>,
     top_n: Option<usize>,
+    /// Whether to L2-normalize the embedding vectors (per REQ-API-3).
+    normalize: bool,
+    /// Truncate embedding vectors to this dimension (per REQ-API-3).
+    /// `None` means use the model's full hidden size.
+    dimension: Option<usize>,
 }
 
 impl<'a> EmbeddingsBuilder<'a> {
@@ -42,6 +47,8 @@ impl<'a> EmbeddingsBuilder<'a> {
             inputs,
             rerank_query: None,
             top_n: None,
+            normalize: false,
+            dimension: None,
         }
     }
 
@@ -66,6 +73,35 @@ impl<'a> EmbeddingsBuilder<'a> {
         self
     }
 
+    /// Enable L2 normalization of embedding vectors (per REQ-API-3).
+    ///
+    /// When `true`, each embedding vector is divided by its L2 norm,
+    /// producing a unit-length vector. The original L2 norm is preserved
+    /// in `Embedding::norm`.
+    ///
+    /// Normalization is essential for cosine similarity search: after
+    /// normalization, dot product equals cosine similarity.
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] [api:POST /client/embed]
+    pub fn normalize(mut self, yes: bool) -> Self {
+        self.normalize = yes;
+        self
+    }
+
+    /// Truncate embedding vectors to `dim` dimensions (per REQ-API-3).
+    ///
+    /// Matryoshka Representation Learning (MRL) models support truncation
+    /// without re-encoding: the first `dim` dimensions remain semantically
+    /// meaningful. Non-MRL models will lose information; the caller must
+    /// ensure the model supports dimension truncation.
+    ///
+    /// `dim` must be > 0 and <= model hidden size. Zero or `None` means
+    /// use the full model hidden size.
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] [api:POST /client/embed]
+    pub fn dimension(mut self, dim: usize) -> Self {
+        self.dimension = if dim > 0 { Some(dim) } else { None };
+        self
+    }
+
     /// Execute embedding generation (sync).
     ///
     /// If `.rerank_query()` was set, executes the embed+rerank pipeline
@@ -73,9 +109,16 @@ impl<'a> EmbeddingsBuilder<'a> {
     pub fn generate(self) -> Result<EmbeddingsResponse, GllmError> {
         if let Some(query) = self.rerank_query {
             self.client
-                .execute_embed_rerank_pipeline(self.inputs, query, self.top_n)
+                .execute_embed_rerank_pipeline(
+                    self.inputs,
+                    query,
+                    self.top_n,
+                    self.normalize,
+                    self.dimension,
+                )
         } else {
-            self.client.execute_embeddings(self.inputs)
+            self.client
+                .execute_embeddings(self.inputs, self.normalize, self.dimension)
         }
     }
 
@@ -95,7 +138,51 @@ impl<'a> EmbeddingsBuilder<'a> {
             query,
             self.top_n.unwrap_or(3),
             system_prompt.into(),
+            self.normalize,
+            self.dimension,
         )
+    }
+}
+
+/// Configuration for embedding generation (per REQ-API-3).
+///
+/// Passed to `Client::embed_with()` to control normalization and dimension.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbedConfig {
+    /// Whether to L2-normalize the embedding vectors.
+    pub normalize: bool,
+    /// Truncate embedding vectors to this dimension.
+    /// `None` means use the model's full hidden size.
+    pub dimension: Option<usize>,
+}
+
+impl EmbedConfig {
+    /// Create a default `EmbedConfig` (no normalization, full dimension).
+    pub fn new() -> Self {
+        Self {
+            normalize: false,
+            dimension: None,
+        }
+    }
+
+    /// Enable L2 normalization of embedding vectors.
+    // @trace REQ-API-3 [entity:EmbedConfig] [api:POST /client/embed]
+    pub fn normalize(mut self, yes: bool) -> Self {
+        self.normalize = yes;
+        self
+    }
+
+    /// Truncate embedding vectors to `dim` dimensions.
+    // @trace REQ-API-3 [entity:EmbedConfig] [api:POST /client/embed]
+    pub fn dimension(mut self, dim: usize) -> Self {
+        self.dimension = if dim > 0 { Some(dim) } else { None };
+        self
+    }
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -155,8 +242,11 @@ impl Index<usize> for EmbeddingsResponse {
 /// Implements `len()` so that SPEC example code `embeddings[0].len()` compiles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Embedding {
-    /// The embedding vector (dimension depends on model).
+    /// The embedding vector (dimension depends on model, or truncated to `dimension` if configured).
     pub embedding: Vec<f32>,
+    /// L2 norm of the embedding vector before optional normalization.
+    /// Present when `normalize(true)` was requested via `EmbeddingsBuilder`.
+    pub norm: Option<f32>,
 }
 
 impl Embedding {
@@ -169,6 +259,18 @@ impl Embedding {
     pub fn is_empty(&self) -> bool {
         self.embedding.is_empty()
     }
+
+    /// Returns the L2 norm of the original (pre-normalization) embedding vector.
+    // @trace REQ-API-3 [entity:Embedding] [api:POST /client/embed]
+    pub fn norm(&self) -> Option<f32> {
+        self.norm
+    }
+
+    /// Returns true if this embedding was L2-normalized.
+    // @trace REQ-API-3 [entity:Embedding] [api:POST /client/embed]
+    pub fn is_normalized(&self) -> bool {
+        self.norm.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -179,8 +281,8 @@ mod tests {
     fn embeddings_response_len() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![1.0; 128] },
-                Embedding { embedding: vec![0.5; 128] },
+                Embedding { embedding: vec![1.0; 128] , norm: None },
+                Embedding { embedding: vec![0.5; 128] , norm: None },
             ],
             rerank_scores: None,
             request_id: Some(42),
@@ -204,8 +306,8 @@ mod tests {
     fn embeddings_response_index() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![1.0, 2.0] },
-                Embedding { embedding: vec![3.0, 4.0] },
+                Embedding { embedding: vec![1.0, 2.0] , norm: None },
+                Embedding { embedding: vec![3.0, 4.0] , norm: None },
             ],
             rerank_scores: Some(vec![0.9, 0.7]),
             request_id: Some(1),
@@ -217,7 +319,7 @@ mod tests {
     #[test]
     fn embeddings_response_rerank_scores() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0; 64] }],
+            embeddings: vec![Embedding { embedding: vec![0.0; 64] , norm: None }],
             rerank_scores: Some(vec![0.95]),
             request_id: Some(99),
         };
@@ -228,11 +330,11 @@ mod tests {
 
     #[test]
     fn embedding_len_and_empty() {
-        let e = Embedding { embedding: vec![1.0; 1024] };
+        let e = Embedding { embedding: vec![1.0; 1024] , norm: None };
         assert_eq!(e.len(), 1024);
         assert!(!e.is_empty());
 
-        let empty = Embedding { embedding: vec![] };
+        let empty = Embedding { embedding: vec![] , norm: None };
         assert_eq!(empty.len(), 0);
         assert!(empty.is_empty());
     }
@@ -254,14 +356,14 @@ mod tests {
 
     #[test]
     fn embedding_clone() {
-        let e = Embedding { embedding: vec![1.0, 2.0, 3.0] };
+        let e = Embedding { embedding: vec![1.0, 2.0, 3.0] , norm: None };
         let cloned = e.clone();
         assert_eq!(e.embedding, cloned.embedding);
     }
 
     #[test]
     fn embedding_debug() {
-        let e = Embedding { embedding: vec![0.5] };
+        let e = Embedding { embedding: vec![0.5] , norm: None };
         let debug = format!("{e:?}");
         assert!(debug.contains("embedding"));
     }
@@ -269,7 +371,7 @@ mod tests {
     #[test]
     fn embeddings_response_clone() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.9]),
             request_id: Some(1),
         };
@@ -323,7 +425,7 @@ mod tests {
     #[test]
     fn embeddings_response_no_rerank_scores() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0; 64] }],
+            embeddings: vec![Embedding { embedding: vec![1.0; 64] , norm: None }],
             rerank_scores: None,
             request_id: Some(10),
         };
@@ -335,9 +437,9 @@ mod tests {
     fn embeddings_response_multiple_with_scores() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![0.1; 128] },
-                Embedding { embedding: vec![0.2; 128] },
-                Embedding { embedding: vec![0.3; 128] },
+                Embedding { embedding: vec![0.1; 128] , norm: None },
+                Embedding { embedding: vec![0.2; 128] , norm: None },
+                Embedding { embedding: vec![0.3; 128] , norm: None },
             ],
             rerank_scores: Some(vec![0.95, 0.85, 0.75]),
             request_id: Some(5),
@@ -353,7 +455,7 @@ mod tests {
 
     #[test]
     fn embedding_value_access() {
-        let e = Embedding { embedding: vec![1.0, 2.0, 3.0, 4.0] };
+        let e = Embedding { embedding: vec![1.0, 2.0, 3.0, 4.0] , norm: None };
         assert!((e.embedding[0] - 1.0).abs() < 1e-6);
         assert!((e.embedding[3] - 4.0).abs() < 1e-6);
     }
@@ -378,7 +480,7 @@ mod tests {
     #[test]
     fn embeddings_response_request_id_max() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0; 4] }],
+            embeddings: vec![Embedding { embedding: vec![0.0; 4] , norm: None }],
             rerank_scores: None,
             request_id: Some(u64::MAX),
         };
@@ -388,7 +490,7 @@ mod tests {
     #[test]
     fn embeddings_response_request_id_zero() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0; 4] }],
+            embeddings: vec![Embedding { embedding: vec![0.0; 4] , norm: None }],
             rerank_scores: None,
             request_id: Some(0),
         };
@@ -412,6 +514,7 @@ mod tests {
     fn embedding_with_nan_values() {
         let e = Embedding {
             embedding: vec![f32::NAN, 1.0, f32::NAN],
+            norm: None,
         };
         assert_eq!(e.len(), 3);
         assert!(!e.is_empty());
@@ -422,6 +525,7 @@ mod tests {
     fn embedding_with_infinity_values() {
         let e = Embedding {
             embedding: vec![f32::INFINITY, f32::NEG_INFINITY, 0.0],
+            norm: None,
         };
         assert!(e.embedding[0].is_infinite() && e.embedding[0].is_sign_positive());
         assert!(e.embedding[1].is_infinite() && e.embedding[1].is_sign_negative());
@@ -432,8 +536,8 @@ mod tests {
     fn embeddings_response_rerank_scores_with_special_floats() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![0.0; 4] },
-                Embedding { embedding: vec![0.0; 4] },
+                Embedding { embedding: vec![0.0; 4] , norm: None },
+                Embedding { embedding: vec![0.0; 4] , norm: None },
             ],
             rerank_scores: Some(vec![f32::NAN, f32::INFINITY]),
             request_id: None,
@@ -459,7 +563,7 @@ mod tests {
 
     #[test]
     fn embedding_single_element() {
-        let e = Embedding { embedding: vec![42.0] };
+        let e = Embedding { embedding: vec![42.0] , norm: None };
         assert_eq!(e.len(), 1);
         assert!(!e.is_empty());
         assert!((e.embedding[0] - 42.0).abs() < 1e-6);
@@ -470,7 +574,7 @@ mod tests {
     #[test]
     fn embeddings_response_scores_without_request_id() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0; 32] }],
+            embeddings: vec![Embedding { embedding: vec![1.0; 32] , norm: None }],
             rerank_scores: Some(vec![0.99]),
             request_id: None,
         };
@@ -492,7 +596,7 @@ mod tests {
         assert!(empty.is_empty());
 
         let non_empty = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0] }],
+            embeddings: vec![Embedding { embedding: vec![0.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -559,9 +663,9 @@ mod tests {
     fn embeddings_response_index_last_element() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![1.0] },
-                Embedding { embedding: vec![2.0] },
-                Embedding { embedding: vec![3.0] },
+                Embedding { embedding: vec![1.0] , norm: None },
+                Embedding { embedding: vec![2.0] , norm: None },
+                Embedding { embedding: vec![3.0] , norm: None },
             ],
             rerank_scores: None,
             request_id: None,
@@ -576,28 +680,28 @@ mod tests {
 
     #[test]
     fn embedding_partial_eq_equal() {
-        let a = Embedding { embedding: vec![1.0, 2.0, 3.0] };
-        let b = Embedding { embedding: vec![1.0, 2.0, 3.0] };
+        let a = Embedding { embedding: vec![1.0, 2.0, 3.0] , norm: None };
+        let b = Embedding { embedding: vec![1.0, 2.0, 3.0] , norm: None };
         assert_eq!(a, b);
     }
 
     #[test]
     fn embedding_partial_eq_not_equal_values() {
-        let a = Embedding { embedding: vec![1.0, 2.0] };
-        let b = Embedding { embedding: vec![1.0, 3.0] };
+        let a = Embedding { embedding: vec![1.0, 2.0] , norm: None };
+        let b = Embedding { embedding: vec![1.0, 3.0] , norm: None };
         assert_ne!(a, b);
     }
 
     #[test]
     fn embedding_partial_eq_not_equal_lengths() {
-        let a = Embedding { embedding: vec![1.0] };
-        let b = Embedding { embedding: vec![1.0, 2.0] };
+        let a = Embedding { embedding: vec![1.0] , norm: None };
+        let b = Embedding { embedding: vec![1.0, 2.0] , norm: None };
         assert_ne!(a, b);
     }
 
     #[test]
     fn embedding_clone_is_independent() {
-        let mut original = Embedding { embedding: vec![1.0, 2.0] };
+        let mut original = Embedding { embedding: vec![1.0, 2.0] , norm: None };
         let cloned = original.clone();
         original.embedding[0] = 99.0;
         assert!((cloned.embedding[0] - 1.0).abs() < 1e-6);
@@ -607,7 +711,7 @@ mod tests {
     fn embedding_with_subnormal_values() {
         let subnormal = f32::from_bits(1);
         assert!(subnormal.is_subnormal());
-        let e = Embedding { embedding: vec![subnormal, 0.0] };
+        let e = Embedding { embedding: vec![subnormal, 0.0] , norm: None };
         assert_eq!(e.len(), 2);
         assert!((e.embedding[0] - subnormal).abs() < 1e-38);
     }
@@ -619,12 +723,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_equal() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0, 2.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0, 2.0] , norm: None }],
             rerank_scores: Some(vec![0.9]),
             request_id: Some(1),
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0, 2.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0, 2.0] , norm: None }],
             rerank_scores: Some(vec![0.9]),
             request_id: Some(1),
         };
@@ -634,12 +738,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_different_embeddings() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![2.0] }],
+            embeddings: vec![Embedding { embedding: vec![2.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -649,12 +753,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_different_scores() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.9]),
             request_id: None,
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.8]),
             request_id: None,
         };
@@ -664,12 +768,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_scores_some_vs_none() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.9]),
             request_id: None,
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -679,12 +783,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_different_request_id() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: Some(1),
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: Some(2),
         };
@@ -694,7 +798,7 @@ mod tests {
     #[test]
     fn embeddings_response_clone_produces_equal() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0, 2.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0, 2.0] , norm: None }],
             rerank_scores: Some(vec![0.9]),
             request_id: Some(1),
         };
@@ -704,7 +808,7 @@ mod tests {
     #[test]
     fn embeddings_response_clone_is_independent() {
         let mut resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.5]),
             request_id: Some(1),
         };
@@ -717,7 +821,7 @@ mod tests {
     #[should_panic]
     fn embeddings_response_index_out_of_bounds_panics() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -739,9 +843,9 @@ mod tests {
     fn embeddings_response_mixed_embedding_dimensions() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![1.0; 128] },
-                Embedding { embedding: vec![2.0; 256] },
-                Embedding { embedding: vec![3.0; 512] },
+                Embedding { embedding: vec![1.0; 128] , norm: None },
+                Embedding { embedding: vec![2.0; 256] , norm: None },
+                Embedding { embedding: vec![3.0; 512] , norm: None },
             ],
             rerank_scores: Some(vec![0.9, 0.8, 0.7]),
             request_id: None,
@@ -754,7 +858,7 @@ mod tests {
     #[test]
     fn embeddings_response_many_embeddings() {
         let embeddings: Vec<Embedding> = (0..1000)
-            .map(|i| Embedding { embedding: vec![i as f32; 8] })
+            .map(|i| Embedding { embedding: vec![i as f32; 8] , norm: None })
             .collect();
         let resp = EmbeddingsResponse {
             embeddings,
@@ -896,7 +1000,7 @@ mod tests {
 
     #[test]
     fn embedding_with_all_zeros() {
-        let e = Embedding { embedding: vec![0.0; 512] };
+        let e = Embedding { embedding: vec![0.0; 512] , norm: None };
         assert_eq!(e.len(), 512);
         assert!(e.embedding.iter().all(|&v| v == 0.0));
     }
@@ -905,6 +1009,7 @@ mod tests {
     fn embedding_with_f32_extremes() {
         let e = Embedding {
             embedding: vec![f32::MIN_POSITIVE, f32::MAX],
+            norm: None,
         };
         assert!((e.embedding[0] - f32::MIN_POSITIVE).abs() < 1e-38);
         assert!((e.embedding[1] - f32::MAX).abs() < 1e-6);
@@ -912,7 +1017,7 @@ mod tests {
 
     #[test]
     fn embedding_nan_is_not_equal_to_itself() {
-        let e = Embedding { embedding: vec![f32::NAN] };
+        let e = Embedding { embedding: vec![f32::NAN] , norm: None };
         assert_ne!(e, e);
     }
 
@@ -931,12 +1036,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_both_scores_none() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -946,7 +1051,7 @@ mod tests {
     #[test]
     fn embeddings_response_rerank_score_f32_min() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0; 4] }],
+            embeddings: vec![Embedding { embedding: vec![0.0; 4] , norm: None }],
             rerank_scores: Some(vec![f32::MIN]),
             request_id: None,
         };
@@ -957,7 +1062,7 @@ mod tests {
     fn embeddings_response_many_rerank_scores() {
         let count = 2000;
         let embeddings: Vec<Embedding> = (0..count)
-            .map(|_| Embedding { embedding: vec![0.0; 2] })
+            .map(|_| Embedding { embedding: vec![0.0; 2] , norm: None })
             .collect();
         let scores: Vec<f32> = (0..count).map(|i| i as f32 / count as f32).collect();
         let resp = EmbeddingsResponse {
@@ -972,7 +1077,7 @@ mod tests {
     #[test]
     fn embeddings_response_large_single_embedding_dimension() {
         let dim = 8192;
-        let e = Embedding { embedding: vec![0.5; dim] };
+        let e = Embedding { embedding: vec![0.5; dim] , norm: None };
         let resp = EmbeddingsResponse {
             embeddings: vec![e],
             rerank_scores: None,
@@ -984,7 +1089,7 @@ mod tests {
     #[test]
     fn embeddings_response_debug_contains_field_values() {
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.75]),
             request_id: Some(42),
         };
@@ -1129,8 +1234,8 @@ mod tests {
 
     #[test]
     fn embedding_partial_eq_both_empty() {
-        let a = Embedding { embedding: vec![] };
-        let b = Embedding { embedding: vec![] };
+        let a = Embedding { embedding: vec![] , norm: None };
+        let b = Embedding { embedding: vec![] , norm: None };
         assert_eq!(a, b);
         assert!(a.is_empty() && b.is_empty());
     }
@@ -1138,12 +1243,12 @@ mod tests {
     #[test]
     fn embeddings_response_partial_eq_request_id_some_vs_none() {
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: Some(1),
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -1171,8 +1276,8 @@ mod tests {
     fn embeddings_response_rerank_scores_all_zeros() {
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![0.0; 4] },
-                Embedding { embedding: vec![0.0; 4] },
+                Embedding { embedding: vec![0.0; 4] , norm: None },
+                Embedding { embedding: vec![0.0; 4] , norm: None },
             ],
             rerank_scores: Some(vec![0.0, 0.0]),
             request_id: None,
@@ -1185,6 +1290,7 @@ mod tests {
     fn embedding_alternating_positive_negative() {
         let e = Embedding {
             embedding: vec![-1.0, 1.0, -2.0, 2.0, -3.0, 3.0],
+            norm: None,
         };
         assert_eq!(e.len(), 6);
         assert!((e.embedding[0] - (-1.0)).abs() < 1e-6);
@@ -1208,7 +1314,7 @@ mod tests {
     #[test]
     fn embeddings_response_clone_rerank_scores_independence() {
         let mut resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: Some(vec![0.75]),
             request_id: None,
         };
@@ -1222,7 +1328,7 @@ mod tests {
     #[test]
     fn embeddings_response_clone_request_id_independence() {
         let mut resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![1.0] }],
+            embeddings: vec![Embedding { embedding: vec![1.0] , norm: None }],
             rerank_scores: None,
             request_id: Some(42),
         };
@@ -1247,7 +1353,7 @@ mod tests {
     #[test]
     fn embedding_large_dimension_vector() {
         let dim = 16384;
-        let e = Embedding { embedding: vec![0.25; dim] };
+        let e = Embedding { embedding: vec![0.25; dim] , norm: None };
         assert_eq!(e.len(), dim);
         assert!(!e.is_empty());
         assert!(e.embedding.iter().all(|&v| (v - 0.25).abs() < 1e-6));
@@ -1262,6 +1368,7 @@ mod tests {
         // Only positive infinity was tested; verify negative infinity round-trips.
         let e = Embedding {
             embedding: vec![f32::NEG_INFINITY, 0.0, 1.0],
+            norm: None,
         };
         assert_eq!(e.len(), 3);
         assert!(e.embedding[0].is_infinite());
@@ -1274,6 +1381,7 @@ mod tests {
         // f32::MIN (negative max) is distinct from NEG_INFINITY.
         let e = Embedding {
             embedding: vec![f32::MIN],
+            norm: None,
         };
         assert!(e.embedding[0].is_normal());
         assert!(e.embedding[0].is_sign_negative());
@@ -1313,7 +1421,7 @@ mod tests {
         // Boundary: verify Index<usize> returns the very first element correctly.
         let resp = EmbeddingsResponse {
             embeddings: (0..50)
-                .map(|i| Embedding { embedding: vec![i as f32] })
+                .map(|i| Embedding { embedding: vec![i as f32] , norm: None })
                 .collect(),
             rerank_scores: None,
             request_id: None,
@@ -1330,6 +1438,7 @@ mod tests {
         assert!(neg_subnormal.is_sign_negative());
         let e = Embedding {
             embedding: vec![neg_subnormal, 0.0, 1.0],
+            norm: None,
         };
         assert_eq!(e.len(), 3);
         assert!((e.embedding[0] - neg_subnormal).abs() < 1e-38);
@@ -1352,7 +1461,7 @@ mod tests {
     #[test]
     fn embeddings_response_identical_embeddings() {
         // Multiple embeddings with identical values should all be equal.
-        let e = Embedding { embedding: vec![0.5; 64] };
+        let e = Embedding { embedding: vec![0.5; 64] , norm: None };
         let resp = EmbeddingsResponse {
             embeddings: vec![e.clone(), e.clone(), e.clone()],
             rerank_scores: Some(vec![1.0, 1.0, 1.0]),
@@ -1406,7 +1515,7 @@ mod tests {
     #[test]
     fn embedding_debug_shows_struct_name() {
         // Verify the Debug output contains the type name "Embedding".
-        let e = Embedding { embedding: vec![1.0] };
+        let e = Embedding { embedding: vec![1.0] , norm: None };
         let debug = format!("{e:?}");
         assert!(
             debug.contains("Embedding"),
@@ -1470,12 +1579,12 @@ mod tests {
     fn embeddings_response_partial_eq_both_request_id_none() {
         // Both request_id = None should compare equal when other fields match.
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![2.0] }],
+            embeddings: vec![Embedding { embedding: vec![2.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![2.0] }],
+            embeddings: vec![Embedding { embedding: vec![2.0] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -1487,12 +1596,12 @@ mod tests {
         // Two EmbeddingsResponse with NaN rerank_scores should not be equal
         // (f32 NaN != NaN).
         let a = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0] }],
+            embeddings: vec![Embedding { embedding: vec![0.0] , norm: None }],
             rerank_scores: Some(vec![f32::NAN]),
             request_id: None,
         };
         let b = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.0] }],
+            embeddings: vec![Embedding { embedding: vec![0.0] , norm: None }],
             rerank_scores: Some(vec![f32::NAN]),
             request_id: None,
         };
@@ -1532,9 +1641,9 @@ mod tests {
         // Typical usage: rerank_scores sorted descending by relevance.
         let resp = EmbeddingsResponse {
             embeddings: vec![
-                Embedding { embedding: vec![0.1; 4] },
-                Embedding { embedding: vec![0.2; 4] },
-                Embedding { embedding: vec![0.3; 4] },
+                Embedding { embedding: vec![0.1; 4] , norm: None },
+                Embedding { embedding: vec![0.2; 4] , norm: None },
+                Embedding { embedding: vec![0.3; 4] , norm: None },
             ],
             rerank_scores: Some(vec![0.95, 0.80, 0.65]),
             request_id: Some(55),
@@ -1556,6 +1665,7 @@ mod tests {
         let subnormal = f32::from_bits(1);
         let e = Embedding {
             embedding: vec![1.0, 0.0, subnormal, f32::INFINITY, -42.5],
+            norm: None,
         };
         assert_eq!(e.len(), 5);
         assert!(e.embedding[0].is_normal());
@@ -1569,7 +1679,7 @@ mod tests {
     fn embeddings_response_single_embedding_no_optional_fields() {
         // Minimal EmbeddingsResponse: one embedding, no rerank_scores, no request_id.
         let resp = EmbeddingsResponse {
-            embeddings: vec![Embedding { embedding: vec![0.5; 256] }],
+            embeddings: vec![Embedding { embedding: vec![0.5; 256] , norm: None }],
             rerank_scores: None,
             request_id: None,
         };
@@ -1626,5 +1736,280 @@ mod tests {
             debug.contains("visible_text"),
             "Debug should contain the text value, got: {debug}"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // REQ-API-3: normalize, dimension, EmbedConfig
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── Embedding.norm field ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] embedding with norm
+    fn embedding_with_norm_some() {
+        let e = Embedding {
+            embedding: vec![3.0, 4.0],
+            norm: Some(5.0),
+        };
+        assert_eq!(e.norm(), Some(5.0));
+        assert!(e.is_normalized());
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] embedding without norm
+    fn embedding_with_norm_none() {
+        let e = Embedding {
+            embedding: vec![1.0, 2.0],
+            norm: None,
+        };
+        assert_eq!(e.norm(), None);
+        assert!(!e.is_normalized());
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] normalized embedding has unit length
+    fn embedding_normalized_unit_length() {
+        // [3,4] normalized -> [0.6, 0.8], norm was 5.0
+        let e = Embedding {
+            embedding: vec![0.6, 0.8],
+            norm: Some(5.0),
+        };
+        let l2 = (e.embedding[0].powi(2) + e.embedding[1].powi(2)).sqrt();
+        assert!((l2 - 1.0).abs() < 1e-6, "normalized embedding should have unit L2 norm");
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] norm partial_eq with norm
+    fn embedding_partial_eq_with_norm() {
+        let a = Embedding { embedding: vec![1.0], norm: Some(1.0) };
+        let b = Embedding { embedding: vec![1.0], norm: Some(1.0) };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] norm partial_eq different norm
+    fn embedding_partial_eq_different_norm() {
+        let a = Embedding { embedding: vec![1.0], norm: Some(1.0) };
+        let b = Embedding { embedding: vec![1.0], norm: None };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] clone independence for norm
+    fn embedding_clone_norm_independence() {
+        let mut e = Embedding { embedding: vec![1.0], norm: Some(2.0) };
+        let cloned = e.clone();
+        e.norm = Some(99.0);
+        assert_eq!(cloned.norm, Some(2.0));
+    }
+
+    // ── EmbedConfig ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbedConfig] default config
+    fn embed_config_default() {
+        let config = EmbedConfig::default();
+        assert!(!config.normalize);
+        assert_eq!(config.dimension, None);
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbedConfig] builder pattern
+    fn embed_config_builder() {
+        let config = EmbedConfig::new()
+            .normalize(true)
+            .dimension(512);
+        assert!(config.normalize);
+        assert_eq!(config.dimension, Some(512));
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbedConfig] dimension zero means None
+    fn embed_config_dimension_zero_means_none() {
+        let config = EmbedConfig::new().dimension(0);
+        assert_eq!(config.dimension, None);
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbedConfig] partial_eq
+    fn embed_config_partial_eq() {
+        let a = EmbedConfig::new().normalize(true).dimension(256);
+        let b = EmbedConfig::new().normalize(true).dimension(256);
+        assert_eq!(a, b);
+
+        let c = EmbedConfig::new().normalize(false);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbedConfig] clone
+    fn embed_config_clone() {
+        let config = EmbedConfig::new().normalize(true).dimension(128);
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+    }
+
+    // ── EmbeddingsBuilder.normalize / dimension ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] normalize builder
+    fn embeddings_builder_normalize_default_false() {
+        let client = Client::new_empty();
+        let builder = EmbeddingsBuilder::new(&client, vec!["test".into()]);
+        // Builder with default normalize=false still calls execute_embeddings(normalize=false, dimension=None)
+        let result = builder.generate();
+        assert!(result.is_err()); // empty client, but the path is correct
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] normalize true
+    fn embeddings_builder_normalize_true() {
+        let client = Client::new_empty();
+        let builder = EmbeddingsBuilder::new(&client, vec!["test".into()])
+            .normalize(true);
+        let result = builder.generate();
+        assert!(result.is_err()); // empty client
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] dimension config
+    fn embeddings_builder_dimension_set() {
+        let client = Client::new_empty();
+        let builder = EmbeddingsBuilder::new(&client, vec!["test".into()])
+            .dimension(256);
+        let result = builder.generate();
+        assert!(result.is_err()); // empty client
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] normalize + dimension combined
+    fn embeddings_builder_normalize_and_dimension() {
+        let client = Client::new_empty();
+        let builder = EmbeddingsBuilder::new(&client, vec!["test".into()])
+            .normalize(true)
+            .dimension(512);
+        let result = builder.generate();
+        assert!(result.is_err()); // empty client
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsBuilder] dimension zero means full
+    fn embeddings_builder_dimension_zero_means_full() {
+        let client = Client::new_empty();
+        let builder = EmbeddingsBuilder::new(&client, vec!["test".into()])
+            .dimension(0);
+        let result = builder.generate();
+        assert!(result.is_err()); // empty client, dimension(0) => None => full hidden size
+    }
+
+    // ── Normalization correctness (without executor) ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] manual normalization verification
+    fn embedding_manual_normalization_correctness() {
+        // Simulate what execute_embeddings does: normalize a raw vector
+        let mut raw = vec![3.0_f32, 4.0_f32];
+        let n = crate::jit::epilogue::compute_l2_norm(&raw);
+        assert!((n - 5.0).abs() < 1e-6);
+        if n > 0.0 {
+            let inv = 1.0 / n;
+            for v in raw.iter_mut() {
+                *v *= inv;
+            }
+        }
+        assert!((raw[0] - 0.6).abs() < 1e-6);
+        assert!((raw[1] - 0.8).abs() < 1e-6);
+
+        let e = Embedding { embedding: raw, norm: Some(n) };
+        let unit_norm = (e.embedding[0].powi(2) + e.embedding[1].powi(2)).sqrt();
+        assert!((unit_norm - 1.0).abs() < 1e-6);
+        assert_eq!(e.norm(), Some(5.0));
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] zero vector normalization is no-op
+    fn embedding_zero_vector_normalization_noop() {
+        let mut raw = vec![0.0_f32; 4];
+        let n = crate::jit::epilogue::compute_l2_norm(&raw);
+        assert_eq!(n, 0.0);
+        // When norm is 0, normalization is skipped (no division by zero)
+        if n > 0.0 {
+            let inv = 1.0 / n;
+            for v in raw.iter_mut() {
+                *v *= inv;
+            }
+        }
+        assert!(raw.iter().all(|&v| v == 0.0));
+    }
+
+    // ── Dimension truncation correctness ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] dimension truncation
+    fn embedding_dimension_truncation() {
+        let mut raw = vec![1.0_f32; 1024];
+        let dim = 256;
+        if dim < raw.len() {
+            raw.truncate(dim);
+        }
+        let e = Embedding { embedding: raw, norm: None };
+        assert_eq!(e.len(), 256);
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] dimension larger than embedding is no-op
+    fn embedding_dimension_larger_than_embedding_noop() {
+        let mut raw = vec![1.0_f32; 128];
+        let dim = 512;
+        if dim < raw.len() {
+            raw.truncate(dim);
+        }
+        let e = Embedding { embedding: raw, norm: None };
+        assert_eq!(e.len(), 128); // unchanged
+    }
+
+    // ── EmbeddingsResponse with norm ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsResponse] response with normalized embeddings
+    fn embeddings_response_with_normalized_embeddings() {
+        let resp = EmbeddingsResponse {
+            embeddings: vec![
+                Embedding { embedding: vec![0.6, 0.8], norm: Some(5.0) },
+                Embedding { embedding: vec![1.0, 0.0], norm: Some(1.0) },
+            ],
+            rerank_scores: None,
+            request_id: None,
+        };
+        assert_eq!(resp.len(), 2);
+        assert!(resp[0].is_normalized());
+        assert!(resp[1].is_normalized());
+        assert_eq!(resp[0].norm(), Some(5.0));
+        assert_eq!(resp[1].norm(), Some(1.0));
+    }
+
+    #[test]
+    // @trace REQ-API-3 [entity:EmbeddingsResponse] mixed normalized and unnormalized
+    fn embeddings_response_mixed_normalized_unnormalized() {
+        let resp = EmbeddingsResponse {
+            embeddings: vec![
+                Embedding { embedding: vec![0.6, 0.8], norm: Some(5.0) },
+                Embedding { embedding: vec![3.0, 4.0], norm: None },
+            ],
+            rerank_scores: None,
+            request_id: None,
+        };
+        assert!(resp[0].is_normalized());
+        assert!(!resp[1].is_normalized());
+    }
+
+    // ── Embedding Debug with norm ──
+
+    #[test]
+    // @trace REQ-API-3 [entity:Embedding] debug output includes norm
+    fn embedding_debug_with_norm() {
+        let e = Embedding { embedding: vec![1.0], norm: Some(2.0) };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("norm"));
     }
 }

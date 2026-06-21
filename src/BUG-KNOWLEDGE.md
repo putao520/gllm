@@ -77,3 +77,39 @@
 - 三仓约定：gllm-kernels 有 @trace 不等于 gllm 有 @trace，各自独立扫描
 - 新增 REQ 实现（尤其是跨仓库的）必须在 gllm/src 对应代码点注入 @trace
 - SPEC REQ-FATOP-022 已定义 @trace 完备性要求，后续开发以此为基准
+
+---
+
+## BCE-20260622-001: @trace 注解缺失类（REQ-AIS-002~007） — oracle_gate @trace 检查 fail
+
+**模式签名**: SPEC 中 REQ-AIS-002~007 已标记"已实现"，但 gllm-kernels/src 和 gllm/src 中实现函数/枚举变体/测试缺少 `@trace REQ-AIS-XXX` 注解，oracle_gate step 1 扫描 traced=[] 导致 fail
+
+**缺陷分层**: 设计缺陷
+
+**根因**: 开发者在实现 REQ-AIS-002~007 的功能代码（TraceOp 扩展、ComputePattern 分发、Category D 消除、ConditionalBranch VmInstr、全覆盖验证）时，只在部分入口函数添加了 REQ-AIS-001 的 @trace，遗漏了 REQ-AIS-002~007 的注解。REQ-AIS-001 有 9 处 @trace，但 002~007 完全空白。
+
+**受影响 task**: TASK-3 (REQ-AIS-003), TASK-4 (REQ-AIS-004), TASK-5 (REQ-AIS-005), TASK-6 (REQ-AIS-006), TASK-7 (REQ-AIS-007), 另发现 REQ-AIS-002 同类缺失
+
+**根治修复（6 REQ × N 处注解 = 28 处注入，残留=0）**:
+1. `gllm-kernels/src/compiler/trace.rs`: @trace REQ-AIS-002 (ComputePattern enum), REQ-AIS-003 (Compare/Cast variants), REQ-AIS-004 (HReduce variant), REQ-AIS-006 (ConditionalBranch variant), REQ-AIS-007 (classify_pattern fn)
+2. `gllm-kernels/src/compiler/codegen/vm/auto_select.rs`: @trace REQ-AIS-002 (elementwise/reduction/structural entry fns), REQ-AIS-003 (Compare/Cast match arms + emit_cmp fn + 3 test fns), REQ-AIS-004 (HReduce match arms + 2 test fns), REQ-AIS-006 (ConditionalBranch match arms + test fn), REQ-AIS-007 (auto_lower_trace_raw + 2 test fns)
+3. `gllm-kernels/src/compiler/codegen/vm/plan_lower/compile.inc.rs`: @trace REQ-AIS-005 (emit_standalone_op fn)
+4. `gllm-kernels/src/compiler/codegen/vm/plan_lower/lower_op.inc.rs`: @trace REQ-AIS-005 (lower_op fn)
+5. `gllm-kernels/src/compiler/registry_fragments/core.inc.rs`: @trace REQ-AIS-007 (ScalarOpRegistry struct)
+6. `gllm-kernels/src/compiler/registry_fragments/defaults.inc.rs`: @trace REQ-AIS-007 (with_defaults fn)
+7. `gllm/src/engine/executor_compile.rs`: @trace REQ-AIS-002/007 (compute_pattern test fn)
+
+**归因时间**: 2026-06-22
+
+**确认证据**:
+- 重扫 @trace REQ-AIS in both repos: REQ-AIS-001=9, REQ-AIS-002=5, REQ-AIS-003=10, REQ-AIS-004=5, REQ-AIS-005=2, REQ-AIS-006=4, REQ-AIS-007=7
+- All 7 REQ-AIS IDs: @trace count > 0
+- cargo check --lib (both repos): PASS
+- auto_select tests (94/94): PASS
+- compute_pattern test (1/1): PASS
+
+**防复发要点**:
+- 每个 REQ 实现完成后，必须在所有实现点（枚举变体、函数、match arm、测试）添加 @trace 注解
+- @trace 注解应与代码编写同步完成，不允许"功能先上，@trace 后补"
+- 三仓约定：gllm-kernels 侧 REQ 也需要 @trace，不仅限于 gllm 侧
+- oracle_gate 验收门是强制检查，@trace 缺失 = 阻断提交

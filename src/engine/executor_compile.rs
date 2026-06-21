@@ -6225,12 +6225,14 @@ mod tests {
     // variants. Verify they all exist in the enum.
     // ======================================================================
 
+    // @trace REQ-AIS-007 [entity:ENT-AUTO-INSTR-SELECT] [api:POST /compile/verify-coverage]
     #[test]
     fn compute_pattern_seven_variants_exist() {
         use gllm_kernels::compiler::trace::ComputePattern;
         use gllm_kernels::compiler::trace::TraceOp;
 
         // REQ-AIS-002: 7 ComputePattern variants for automatic dispatch.
+        // @trace REQ-AIS-002 [req:REQ-AIS-002] [level:unit]
         // Each variant has fields, so we construct minimal instances.
 
         // 1. Elementwise { body: Vec<TraceOp> }
