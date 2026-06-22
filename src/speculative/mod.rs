@@ -37,3 +37,10 @@ pub use verify::{
     VerifyResult, SequenceVerifyResult, EqSpecInvariant, EqSpecCheckResult,
     KvCommitInstruction, generate_kv_commit_instructions,
 };
+
+// SAGUARO 分布式推测解码 (REQ-DIST-017) — feature-gated
+#[cfg(feature = "nccl")]
+pub use saguaro::saguaro::{
+    SaguaroPhase, SaguaroConfig, SaguaroResult, SaguaroAcceptanceTracker,
+    SaguaroDistSpec, SaguaroPipelineStage,
+};

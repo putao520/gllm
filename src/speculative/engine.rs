@@ -86,6 +86,12 @@ pub struct SpecDecodingState {
     draft_gpu_index: Option<usize>,
     /// §17.10 SAGUARO: Target GPU indices
     target_gpu_indices: Vec<usize>,
+    /// §17.10 SAGUARO: 分布式配置 (REQ-DIST-017, ENT-DIST-SAGUARO)
+    #[cfg(feature = "nccl")]
+    saguaro_config: Option<super::saguaro::saguaro::SaguaroConfig>,
+    /// §17.10 SAGUARO: 接受率累积跟踪器 (REQ-DIST-017)
+    #[cfg(feature = "nccl")]
+    saguaro_acceptance_tracker: super::saguaro::saguaro::SaguaroAcceptanceTracker,
     /// EAGLE draft head (§17, EAGLE 模式)
     eagle_head: Option<EagleHead>,
     /// EAGLE config
@@ -150,6 +156,10 @@ impl SpecDecodingState {
             current_prompt_tokens: Vec::new(),
             draft_gpu_index: None,
             target_gpu_indices: Vec::new(),
+            #[cfg(feature = "nccl")]
+            saguaro_config: None,
+            #[cfg(feature = "nccl")]
+            saguaro_acceptance_tracker: super::saguaro::saguaro::SaguaroAcceptanceTracker::new(),
             eagle_head: None,
             eagle_config: None,
             mtp_head: None,
@@ -162,6 +172,7 @@ impl SpecDecodingState {
     /// 创建 SAGUARO 模式的推测解码状态
     ///
     /// §17.10: ≥2 GPU 时使用, 独立 draft GPU + target GPU pool
+    // @trace REQ-DIST-017 [entity:ENT-DIST-SAGUARO] [lifecycle:init]
     pub fn new_saguaro(
         total_layers: usize,
         adapter: DraftAdapter,
@@ -169,10 +180,19 @@ impl SpecDecodingState {
         draft_gpu_index: usize,
         target_gpu_indices: Vec<usize>,
     ) -> Self {
+        let _verify_rank = target_gpu_indices.first().copied().unwrap_or(1) as u32;
         let mut state = Self::new_eesd(total_layers, adapter, tree_config);
         state.mode = SpecDecodingMode::Saguaro;
         state.draft_gpu_index = Some(draft_gpu_index);
         state.target_gpu_indices = target_gpu_indices;
+        #[cfg(feature = "nccl")]
+        {
+            state.saguaro_config = Some(super::saguaro::saguaro::SaguaroConfig {
+                draft_rank: draft_gpu_index as u32,
+                verify_rank: _verify_rank,
+                draft_length: 5,
+            });
+        }
         state
     }
 
@@ -196,6 +216,10 @@ impl SpecDecodingState {
             current_prompt_tokens: Vec::new(),
             draft_gpu_index: None,
             target_gpu_indices: Vec::new(),
+            #[cfg(feature = "nccl")]
+            saguaro_config: None,
+            #[cfg(feature = "nccl")]
+            saguaro_acceptance_tracker: super::saguaro::saguaro::SaguaroAcceptanceTracker::new(),
             eagle_head: None,
             eagle_config: None,
             mtp_head: None,
@@ -244,6 +268,7 @@ impl SpecDecodingState {
     /// §17.9: 自适应调度决策
     ///
     /// 基于当前接受率和 decode 请求数，决定是否启用推测解码
+    // @trace REQ-DIST-017 [entity:ENT-DIST-SAGUARO] [controlflow:CF-DIST-005]
     pub fn should_speculate(&self, decode_request_count: usize) -> SpecScheduleAdvice {
         if self.mode == SpecDecodingMode::Standard {
             return SpecScheduleAdvice::StandardDecode;
@@ -351,6 +376,7 @@ impl SpecDecodingState {
     ///
     /// # Arguments
     /// * `verify_result` - Verify phase 产生的验证结果
+    // @trace REQ-DIST-017 [entity:ENT-DIST-SAGUARO] [controlflow:CF-DIST-005]
     pub fn verify_phase(&mut self, verify_result: &VerifyResult) {
         let batch_acceptance = verify_result.avg_acceptance_rate;
 
@@ -375,9 +401,16 @@ impl SpecDecodingState {
         self.total_draft_tokens += verify_result.total_draft_tokens;
         self.total_accepted_tokens += verify_result.total_accepted_tokens;
 
-        // §17.10.3: SAGUARO 模式更新 cache
+        // §17.10.3: SAGUARO 模式更新 cache + acceptance tracker (REQ-DIST-017)
         if self.mode == SpecDecodingMode::Saguaro {
             self.cache.adapt_scale_factor();
+            #[cfg(feature = "nccl")]
+            {
+                self.saguaro_acceptance_tracker.record(
+                    verify_result.total_draft_tokens as u32,
+                    verify_result.total_accepted_tokens as u32,
+                );
+            }
         }
     }
 
@@ -439,14 +472,40 @@ impl SpecDecodingState {
         self.spec_step_count
     }
 
-    /// §17.10: 获取 SAGUARO draft GPU index
+    /// §17.10: 获取 SAGUARO draft GPU index (REQ-DIST-017)
+    // @trace REQ-DIST-017 [entity:ENT-DIST-SAGUARO]
     pub fn draft_gpu_index(&self) -> Option<usize> {
         self.draft_gpu_index
     }
 
-    /// §17.10: 获取 SAGUARO target GPU indices
+    /// §17.10: 获取 SAGUARO target GPU indices (REQ-DIST-017)
+    // @trace REQ-DIST-017 [entity:ENT-DIST-SAGUARO]
     pub fn target_gpu_indices(&self) -> &[usize] {
         &self.target_gpu_indices
+    }
+
+    /// §17.10: 获取 SAGUARO 配置 (REQ-DIST-017, ENT-DIST-SAGUARO)
+    #[cfg(feature = "nccl")]
+    pub fn saguaro_config(&self) -> Option<&super::saguaro::saguaro::SaguaroConfig> {
+        self.saguaro_config.as_ref()
+    }
+
+    /// §17.10: 获取 SAGUARO 配置可变引用 (REQ-DIST-017)
+    #[cfg(feature = "nccl")]
+    pub fn saguaro_config_mut(&mut self) -> Option<&mut super::saguaro::saguaro::SaguaroConfig> {
+        self.saguaro_config.as_mut()
+    }
+
+    /// §17.10: 获取 SAGUARO 接受率跟踪器 (REQ-DIST-017)
+    #[cfg(feature = "nccl")]
+    pub fn saguaro_acceptance_tracker(&self) -> &super::saguaro::saguaro::SaguaroAcceptanceTracker {
+        &self.saguaro_acceptance_tracker
+    }
+
+    /// §17.10: 获取 SAGUARO 接受率跟踪器可变引用 (REQ-DIST-017)
+    #[cfg(feature = "nccl")]
+    pub fn saguaro_acceptance_tracker_mut(&mut self) -> &mut super::saguaro::saguaro::SaguaroAcceptanceTracker {
+        &mut self.saguaro_acceptance_tracker
     }
 
     /// 重置低接受率连续计数 (手动恢复推测解码时使用)
