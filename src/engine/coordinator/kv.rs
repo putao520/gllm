@@ -570,6 +570,7 @@ pub mod kv_transfer {
                 rank: 0,
                 world_size: 2,
                 unique_id: String::new(),
+                stage_id: 0,
             }).unwrap()
         }
 
@@ -1100,6 +1101,7 @@ pub mod kv_distribution {
                 rank: 0,
                 world_size: 2,
                 unique_id: String::new(),
+                stage_id: 0,
             }).unwrap()
         }
 

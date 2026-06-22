@@ -1659,14 +1659,16 @@ mod tests {
         use crate::loader::{QuantizedTensor, RawFloatTensor, WeightsHandle};
 
         fn make_config(tp_size: u32, rank: u32) -> ParallelConfig {
+            let cp_size: u32 = 1;
             ParallelConfig {
                 tp_size,
                 pp_size: 1,
                 ep_size: 1,
-                cp_size: 1,
+                cp_size,
                 rank,
                 world_size: tp_size,
                 unique_id: String::new(),
+                stage_id: rank / (tp_size * cp_size),
             }
         }
 
@@ -1766,6 +1768,7 @@ mod tests {
                 rank: 0,
                 world_size: 0,
                 unique_id: String::new(),
+                stage_id: 0,
             };
 
             let result = handle.shard_for_tp(&config);

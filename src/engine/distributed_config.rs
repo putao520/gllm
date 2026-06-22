@@ -130,6 +130,11 @@ pub struct ParallelConfig {
     pub world_size: u32,
     /// NCCL unique_id 字符串，默认 ""
     pub unique_id: String,
+    /// 当前 PP stage ID，默认 0，范围 [0, pp_size) (REQ-DIST-018)
+    ///
+    /// 推导公式：`stage_id = rank / (tp_size * cp_size)`。
+    /// pp_size == 1 时 stage_id 恒为 0（单设备模式）。
+    pub stage_id: u32,
 }
 
 // @trace REQ-IB-007 [entity:ENT-DISTRIBUTED-CONFIG] [api:POST /internal/distributed/config]
@@ -144,6 +149,7 @@ impl Default for ParallelConfig {
             rank: 0,
             world_size: 1,
             unique_id: String::new(),
+            stage_id: 0,
         }
     }
 }
@@ -157,6 +163,7 @@ impl ParallelConfig {
     /// - tp_size ≥ 1, pp_size ≥ 1, ep_size ≥ 1
     /// - rank < world_size
     /// - tp_size * pp_size * ep_size == world_size
+    /// - stage_id < pp_size (REQ-DIST-018)
     pub fn validate(&self) -> bool {
         self.tp_size >= 1
             && self.pp_size >= 1
@@ -164,6 +171,7 @@ impl ParallelConfig {
             && self.cp_size >= 1
             && self.rank < self.world_size
             && self.tp_size * self.pp_size * self.ep_size == self.world_size
+            && self.stage_id < self.pp_size
     }
 }
 
@@ -1055,6 +1063,7 @@ mod tests {
                 rank: 0,
                 world_size: 8,
                 unique_id: String::new(),
+                stage_id: 0,
             };
             assert!(cfg.validate());
         }
@@ -1069,6 +1078,7 @@ mod tests {
                 rank: 0,
                 world_size: 5, // 2*2*1=4 != 5
                 unique_id: String::new(),
+                stage_id: 0,
             };
             assert!(!cfg.validate());
         }
@@ -1083,6 +1093,7 @@ mod tests {
                 rank: 1, // rank >= world_size
                 world_size: 1,
                 unique_id: String::new(),
+                stage_id: 1,
             };
             assert!(!cfg.validate());
         }
@@ -1097,6 +1108,7 @@ mod tests {
                 rank: 0,
                 world_size: 0,
                 unique_id: String::new(),
+                stage_id: 0,
             };
             assert!(!cfg.validate());
         }
@@ -1128,6 +1140,7 @@ mod tests {
                 rank: 3,
                 world_size: 8,
                 unique_id: "abc".to_string(),
+                stage_id: 3 / (4 * 1),
             };
             let cloned = cfg.clone();
             cfg.tp_size = 1;
@@ -1347,6 +1360,7 @@ mod tests {
                 rank: 1,
                 world_size: 2,
                 unique_id: String::new(),
+                stage_id: 1 / (2 * 1),
             };
             let handle = CommHandleWrapper::from_config(&config).unwrap();
             assert_eq!(handle.rank(), 1);
@@ -1364,6 +1378,7 @@ mod tests {
                 rank: 0,
                 world_size: 5, // 2*1*1=2 != 5
                 unique_id: String::new(),
+                stage_id: 0,
             };
             let result = CommHandleWrapper::from_config(&config);
             assert!(result.is_err());
@@ -1380,6 +1395,7 @@ mod tests {
                 rank: 5, // rank >= world_size
                 world_size: 1,
                 unique_id: String::new(),
+                stage_id: 5,
             };
             let result = CommHandleWrapper::from_config(&config);
             assert!(result.is_err());
@@ -1403,6 +1419,7 @@ mod tests {
                 rank: 0,
                 world_size: 2,
                 unique_id: String::new(),
+                stage_id: 0,
             };
             let handle = CommHandleWrapper::from_config(&config).unwrap();
             assert!(handle.is_distributed());
@@ -1461,6 +1478,7 @@ mod tests {
                 rank: 0,
                 world_size: 2,
                 unique_id: String::new(),
+                stage_id: 0,
             };
             let mut handle = CommHandleWrapper::from_config(&config).unwrap();
             // inner is None (lazy init — NCCL not actually initialized in test)
@@ -1574,6 +1592,7 @@ mod tests {
                 rank: 3,
                 world_size: 8,
                 unique_id: String::new(),
+                stage_id: 3 / (4 * 1),
             };
             let handle = CommHandleWrapper::from_config(&config).unwrap();
             assert_eq!(handle.rank(), 3);
@@ -1594,6 +1613,7 @@ mod tests {
                 rank: 0,
                 world_size: 5, // 2*2*1=4 != 5
                 unique_id: String::new(),
+                stage_id: 0,
             };
             let result = CommHandleWrapper::from_config(&config);
             assert!(result.is_err());
@@ -1611,6 +1631,7 @@ mod tests {
                 rank: 2, // rank >= world_size=1
                 world_size: 1,
                 unique_id: String::new(),
+                stage_id: 2,
             };
             let result = CommHandleWrapper::from_config(&config);
             assert!(result.is_err());

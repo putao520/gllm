@@ -104,5 +104,13 @@ pub use engine::distributed_config::{
     CommConfig, CommHandleWrapper, DistributedConfig, DistributedConfigError,
     KvDistributionConfig, MoeDistributedConfig, ParallelConfig, PdDisaggConfig,
 };
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::config::{PipelineConfig, PipelineConfigError};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::topology::{Topology2D, Topology2DError};
+#[cfg(feature = "nccl")]
+pub use loader::weight_shard::{
+    is_shared_weight, extract_layer_index, should_load_weight_for_stage, filter_weights_by_stage,
+};
 pub use engine::batch_executor::{GenerateRequest, GenerateResult};
 pub use graph::profile::{AttentionKind, FfnKind, GraphProfile, GraphProfiler, ResidualKind};

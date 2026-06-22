@@ -4068,6 +4068,7 @@ mod tests {
                     rank: 1,
                     world_size: 2,
                     unique_id: String::new(),
+                    stage_id: 1 / (2 * 1),
                 },
                 pd_disagg: crate::engine::distributed_config::PdDisaggConfig {
                     mode: crate::engine::distributed_config::PdDisaggMode::Collocated,
@@ -4331,6 +4332,7 @@ mod tests {
                     tp_size: 2, pp_size: 1, ep_size: 1,
                 cp_size: 1,
                     rank: 0, world_size: 2, unique_id: String::new(),
+                    stage_id: 0,
                 }
             ).unwrap();
 

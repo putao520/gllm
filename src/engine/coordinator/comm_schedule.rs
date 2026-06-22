@@ -499,6 +499,7 @@ pub mod comm_schedule {
                 rank: 0,
                 world_size: 4,
                 unique_id: String::new(),
+                stage_id: 0,
             }).unwrap()
         }
 

@@ -251,14 +251,16 @@ pub mod eplb {
         }
 
         fn multi_node_handle(rank: u32, world_size: u32) -> CommHandleWrapper {
+            let cp_size: u32 = 1;
             CommHandleWrapper::from_config(&ParallelConfig {
                 tp_size: world_size,
                 pp_size: 1,
                 ep_size: 1,
-                cp_size: 1,
+                cp_size,
                 rank,
                 world_size,
                 unique_id: String::new(),
+                stage_id: rank / (world_size * cp_size),
             })
             .unwrap()
         }

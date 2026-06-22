@@ -21,6 +21,8 @@ pub mod mtp_executor;
 pub mod callbacks;
 pub mod intent_bias;
 pub mod distributed_config;
+#[cfg(feature = "nccl")]
+pub mod pipeline;
 
 /// 引擎上下文。提供给各类 runtime hook 的引擎访问接口。
 ///

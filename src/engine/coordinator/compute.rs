@@ -1695,14 +1695,16 @@ mod tests {
         use crate::engine::distributed_config::{CommHandleWrapper, ParallelConfig};
 
         fn make_distributed_config(rank: u32, world_size: u32) -> ParallelConfig {
+            let cp_size: u32 = 1;
             ParallelConfig {
                 tp_size: world_size,
                 pp_size: 1,
                 ep_size: 1,
-                cp_size: 1,
+                cp_size,
                 rank,
                 world_size,
                 unique_id: String::new(),
+                stage_id: rank / (world_size * cp_size),
             }
         }
 
@@ -1889,6 +1891,7 @@ mod tests {
                 rank: 0,
                 world_size: 5, // 2*1*1=2 != 5
                 unique_id: String::new(),
+                stage_id: 0,
             };
             let result = CommHandleWrapper::from_config(&config);
             assert!(result.is_err());

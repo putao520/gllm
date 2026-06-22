@@ -1,7 +1,11 @@
 //! TP Weight Sharding — Tensor Parallelism 权重分片 (REQ-DIST-004)
+//! PP Weight Filtering — Pipeline Parallelism 权重分区过滤 (REQ-DIST-019)
 //!
-//! 在权重加载时根据 `ParallelConfig.rank` 和 `ParallelConfig.tp_size` 执行
+//! TP 分片：在权重加载时根据 `ParallelConfig.rank` 和 `ParallelConfig.tp_size` 执行
 //! 张量并行分片。列切分 (Column Parallel) 和行切分 (Row Parallel) 两种策略。
+//!
+//! PP 分区：根据 `stage_id` 和 `pp_size` 过滤权重，仅加载本 stage 负责的层权重。
+//! 共享层（Embedding/LayerNorm）被所有 stage 加载。
 //!
 //! nccl feature-gated: 非 nccl 构建零影响。
 
@@ -163,6 +167,143 @@ pub fn infer_shard_strategy(weight_name: &str) -> Option<ShardStrategy> {
     }
 }
 
+// ── PP Weight Filtering (REQ-DIST-019) ─────────────────────────────────────
+
+/// 判断权重名称是否属于共享层（所有 PP stage 都需加载）(REQ-DIST-019)
+///
+/// 共享层包括：
+/// - Embedding 层（`embed_tokens`/`wte`/`word_embeddings`）
+/// - 最终 LayerNorm（`final_norm`/`norm`/`ln_f`）
+/// - 输出头（`lm_head`/`output`/`score`/`classifier`）
+///
+/// 注意：`lm_head` 虽然会被 TP 切分，但在 PP 维度上所有 stage 都需要它
+/// （stage 0 需要它做 token embedding，最后一个 stage 需要它做输出）。
+/// 实际上 `lm_head` 通常只在最后一个 stage 使用，但 SPEC 明确要求共享层
+/// 被所有 stage 加载，这里按最保守策略处理。
+// @trace REQ-DIST-019 [entity:ENT-DIST-PP-SHARD]
+pub fn is_shared_weight(weight_name: &str) -> bool {
+    let suffix = weight_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(weight_name);
+
+    match suffix {
+        // ── Embedding layers (shared by all stages) ──
+        "embed_tokens" | "wte" | "word_embeddings" | "embed" | "embedding" => true,
+
+        // ── Final normalization (shared by all stages) ──
+        "final_norm" | "norm" | "ln_f" | "layer_norm" => {
+            // "norm" is ambiguous — could be a final norm or a per-layer norm.
+            // Heuristic: if there's no "L" prefix, it's likely a final/shared norm.
+            // Per-layer norms like "L0.input_layernorm" have a layer prefix,
+            // which means the suffix would be "input_layernorm", not "norm".
+            !weight_name.contains("L") || weight_name.starts_with("norm")
+        }
+
+        // ── Output head (shared — TP-sharded but PP-replicated) ──
+        "lm_head" | "output" | "score" | "classifier" => true,
+
+        // ── Position embedding (shared by all stages) ──
+        "wpe" | "position_embedding" | "position_embeddings" => true,
+
+        _ => false,
+    }
+}
+
+/// 从权重名称中提取层索引 (REQ-DIST-019)
+///
+/// 权重命名约定：`"L{layer_idx}.{suffix}"`，如 `"L0.q_proj"`、`"L15.gate_proj"`。
+/// 返回 `None` 表示非层相关权重（如 embedding、final_norm、lm_head）。
+///
+/// 识别模式：
+/// - `L{N}.xxx` — 标准层权重
+/// - `mtp_proj.{N}.xxx` — MTP 投影层权重
+// @trace REQ-DIST-019 [entity:ENT-DIST-PP-SHARD]
+pub fn extract_layer_index(weight_name: &str) -> Option<u32> {
+    // Standard pattern: "L{N}.suffix"
+    if weight_name.starts_with('L') {
+        let after_l = &weight_name[1..];
+        if let Some(dot_pos) = after_l.find('.') {
+            if let Ok(idx) = after_l[..dot_pos].parse::<u32>() {
+                return Some(idx);
+            }
+        }
+    }
+
+    // MTP pattern: "mtp_proj.{N}.suffix"
+    if weight_name.starts_with("mtp_proj.") {
+        let after_prefix = &weight_name["mtp_proj.".len()..];
+        if let Some(dot_pos) = after_prefix.find('.') {
+            if let Ok(idx) = after_prefix[..dot_pos].parse::<u32>() {
+                return Some(idx);
+            }
+        }
+    }
+
+    None
+}
+
+/// 判断权重是否应被当前 PP stage 加载 (REQ-DIST-019)
+///
+/// 根据 `stage_id` 和 `pp_size` 计算层范围 `[stage_id * L/pp, (stage_id+1) * L/pp)`，
+/// 仅加载该范围内层的权重。共享层（embedding/final_norm/lm_head）被所有 stage 加载。
+///
+/// 当 `pp_size <= 1` 时返回 `true`（单机模式，所有权重都加载）。
+///
+/// # Arguments
+/// * `weight_name` - 权重名称，如 `"L0.q_proj"`、`"lm_head"`
+/// * `stage_id` - 当前 stage ID，范围 [0, pp_size)
+/// * `pp_size` - Pipeline Parallel 维度
+/// * `num_layers` - 模型总层数
+// @trace REQ-DIST-019 [entity:ENT-DIST-PP-SHARD] [dataflow:DF-DIST-004]
+pub fn should_load_weight_for_stage(
+    weight_name: &str,
+    stage_id: u32,
+    pp_size: u32,
+    num_layers: u32,
+) -> bool {
+    // pp_size <= 1: single-device mode, load everything
+    if pp_size <= 1 {
+        return true;
+    }
+
+    // Shared layers are loaded by all stages (REQ-DIST-019 验收标准 4)
+    if is_shared_weight(weight_name) {
+        return true;
+    }
+
+    // Extract layer index; non-layer weights (no "L" prefix) are treated as shared
+    let Some(layer_idx) = extract_layer_index(weight_name) else {
+        // Weights without a layer prefix (e.g., global bias, learned scaling)
+        // are shared by all stages
+        return true;
+    };
+
+    // Compute this stage's layer range: [stage_id * L/pp, (stage_id+1) * L/pp)
+    let layers_per_stage = (num_layers + pp_size - 1) / pp_size; // ceil division
+    let start = stage_id * layers_per_stage;
+    let end = ((stage_id + 1) * layers_per_stage).min(num_layers);
+
+    layer_idx >= start && layer_idx < end
+}
+
+/// 过滤权重名称列表，仅保留当前 PP stage 应加载的权重 (REQ-DIST-019)
+///
+/// 便利函数，对一组权重名称调用 `should_load_weight_for_stage` 并返回
+/// 过滤后的列表。未分配到本 stage 的层权重不占用内存（零加载）。
+// @trace REQ-DIST-019 [entity:ENT-DIST-PP-SHARD] [dataflow:DF-DIST-004]
+pub fn filter_weights_by_stage<'a>(
+    weight_names: &'a [String],
+    stage_id: u32,
+    pp_size: u32,
+    num_layers: u32,
+) -> Vec<&'a String> {
+    weight_names
+        .iter()
+        .filter(|name| should_load_weight_for_stage(name, stage_id, pp_size, num_layers))
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -170,14 +311,16 @@ mod tests {
     use super::*;
 
     fn make_config(tp_size: u32, rank: u32) -> ParallelConfig {
+        let cp_size: u32 = 1;
         ParallelConfig {
             tp_size,
             pp_size: 1,
             ep_size: 1,
-            cp_size: 1,
+            cp_size,
             rank,
             world_size: tp_size,
             unique_id: String::new(),
+            stage_id: rank / (tp_size * cp_size),
         }
     }
 
@@ -285,6 +428,7 @@ mod tests {
             rank: 0,
             world_size: 0,
             unique_id: String::new(),
+            stage_id: 0,
         };
 
         shard_weight(&mut data, 2, 2, &config, ShardStrategy::ColumnParallel).unwrap();
@@ -556,5 +700,262 @@ mod tests {
         assert_eq!(data.len(), 4 * 4);
         // Row 4: [16,17,18,19]
         assert_eq!(data[0..4], [16.0, 17.0, 18.0, 19.0]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PP Weight Filtering tests (REQ-DIST-019)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── is_shared_weight ──
+
+    #[test]
+    fn shared_weight_embed_tokens() {
+        assert!(is_shared_weight("embed_tokens"));
+    }
+
+    #[test]
+    fn shared_weight_wte() {
+        assert!(is_shared_weight("wte"));
+    }
+
+    #[test]
+    fn shared_weight_word_embeddings() {
+        assert!(is_shared_weight("word_embeddings"));
+    }
+
+    #[test]
+    fn shared_weight_final_norm() {
+        assert!(is_shared_weight("final_norm"));
+    }
+
+    #[test]
+    fn shared_weight_ln_f() {
+        assert!(is_shared_weight("ln_f"));
+    }
+
+    #[test]
+    fn shared_weight_lm_head() {
+        assert!(is_shared_weight("lm_head"));
+    }
+
+    #[test]
+    fn shared_weight_output() {
+        assert!(is_shared_weight("output"));
+    }
+
+    #[test]
+    fn shared_weight_wpe() {
+        assert!(is_shared_weight("wpe"));
+    }
+
+    #[test]
+    fn not_shared_layer_weight() {
+        assert!(!is_shared_weight("L0.q_proj"));
+        assert!(!is_shared_weight("L3.gate_proj"));
+        assert!(!is_shared_weight("L15.down_proj"));
+    }
+
+    #[test]
+    fn not_shared_moe_gate() {
+        assert!(!is_shared_weight("L0.moe_gate"));
+    }
+
+    // ── extract_layer_index ──
+
+    #[test]
+    fn extract_layer_index_standard() {
+        assert_eq!(extract_layer_index("L0.q_proj"), Some(0));
+        assert_eq!(extract_layer_index("L3.gate_proj"), Some(3));
+        assert_eq!(extract_layer_index("L15.down_proj"), Some(15));
+        assert_eq!(extract_layer_index("L31.o_proj"), Some(31));
+    }
+
+    #[test]
+    fn extract_layer_index_mtp() {
+        assert_eq!(extract_layer_index("mtp_proj.0.q_proj"), Some(0));
+        assert_eq!(extract_layer_index("mtp_proj.1.q_proj"), Some(1));
+    }
+
+    #[test]
+    fn extract_layer_index_non_layer() {
+        assert_eq!(extract_layer_index("embed_tokens"), None);
+        assert_eq!(extract_layer_index("lm_head"), None);
+        assert_eq!(extract_layer_index("final_norm"), None);
+    }
+
+    #[test]
+    fn extract_layer_index_invalid_format() {
+        assert_eq!(extract_layer_index("Lx.q_proj"), None);
+        assert_eq!(extract_layer_index("L.q_proj"), None);
+    }
+
+    // ── should_load_weight_for_stage ──
+
+    #[test]
+    fn pp1_loads_everything() {
+        // pp_size=1: single-device mode, all weights loaded
+        assert!(should_load_weight_for_stage("L0.q_proj", 0, 1, 32));
+        assert!(should_load_weight_for_stage("L15.gate_proj", 0, 1, 32));
+        assert!(should_load_weight_for_stage("L31.o_proj", 0, 1, 32));
+        assert!(should_load_weight_for_stage("lm_head", 0, 1, 32));
+    }
+
+    #[test]
+    fn pp2_stage0_loads_first_half() {
+        // pp=2, 32 layers: stage 0 = [0, 16), stage 1 = [16, 32)
+        assert!(should_load_weight_for_stage("L0.q_proj", 0, 2, 32));
+        assert!(should_load_weight_for_stage("L15.gate_proj", 0, 2, 32));
+        assert!(!should_load_weight_for_stage("L16.q_proj", 0, 2, 32));
+        assert!(!should_load_weight_for_stage("L31.o_proj", 0, 2, 32));
+    }
+
+    #[test]
+    fn pp2_stage1_loads_second_half() {
+        // pp=2, 32 layers: stage 1 = [16, 32)
+        assert!(!should_load_weight_for_stage("L0.q_proj", 1, 2, 32));
+        assert!(!should_load_weight_for_stage("L15.gate_proj", 1, 2, 32));
+        assert!(should_load_weight_for_stage("L16.q_proj", 1, 2, 32));
+        assert!(should_load_weight_for_stage("L31.o_proj", 1, 2, 32));
+    }
+
+    #[test]
+    fn pp4_stage_distribution() {
+        // pp=4, 32 layers: 8 layers per stage
+        // stage 0 = [0,8), stage 1 = [8,16), stage 2 = [16,24), stage 3 = [24,32)
+        for stage in 0..4u32 {
+            for layer in 0..32u32 {
+                let name = format!("L{}.q_proj", layer);
+                let should_load = should_load_weight_for_stage(&name, stage, 4, 32);
+                let expected = layer >= stage * 8 && layer < (stage + 1) * 8;
+                assert_eq!(should_load, expected, "stage={}, layer={}", stage, layer);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_weights_loaded_by_all_stages() {
+        // Shared weights are loaded regardless of stage_id
+        for stage in 0..4u32 {
+            assert!(should_load_weight_for_stage("embed_tokens", stage, 4, 32));
+            assert!(should_load_weight_for_stage("final_norm", stage, 4, 32));
+            assert!(should_load_weight_for_stage("lm_head", stage, 4, 32));
+            assert!(should_load_weight_for_stage("wpe", stage, 4, 32));
+        }
+    }
+
+    #[test]
+    fn non_layer_weights_treated_as_shared() {
+        // Weights without layer prefix are treated as shared
+        assert!(should_load_weight_for_stage("some_global_weight", 0, 2, 32));
+        assert!(should_load_weight_for_stage("some_global_weight", 1, 2, 32));
+    }
+
+    #[test]
+    fn no_overlap_full_coverage_pp2() {
+        // Verify: no layer weight loaded by both stages, all layer weights covered
+        let num_layers = 32u32;
+        let pp_size = 2u32;
+        let mut covered = vec![false; num_layers as usize];
+
+        for layer in 0..num_layers {
+            let name = format!("L{}.q_proj", layer);
+            let load_by_0 = should_load_weight_for_stage(&name, 0, pp_size, num_layers);
+            let load_by_1 = should_load_weight_for_stage(&name, 1, pp_size, num_layers);
+
+            // No overlap: a layer weight is loaded by at most one stage
+            assert!(!(load_by_0 && load_by_1), "layer {} loaded by both stages", layer);
+
+            // Full coverage: a layer weight is loaded by at least one stage
+            assert!(load_by_0 || load_by_1, "layer {} not loaded by any stage", layer);
+
+            covered[layer as usize] = true;
+        }
+
+        assert!(covered.iter().all(|&c| c));
+    }
+
+    #[test]
+    fn no_overlap_full_coverage_pp4() {
+        let num_layers = 32u32;
+        let pp_size = 4u32;
+
+        for layer in 0..num_layers {
+            let name = format!("L{}.q_proj", layer);
+            let mut loaded_by = vec![];
+            for stage in 0..pp_size {
+                if should_load_weight_for_stage(&name, stage, pp_size, num_layers) {
+                    loaded_by.push(stage);
+                }
+            }
+            // Exactly one stage loads this layer weight
+            assert_eq!(loaded_by.len(), 1, "layer {} loaded by {:?} stages", layer, loaded_by);
+        }
+    }
+
+    #[test]
+    fn non_divisible_layers_pp4_33layers() {
+        // 33 layers, pp=4: layers_per_stage = ceil(33/4) = 9
+        // stage 0: [0,9), stage 1: [9,18), stage 2: [18,27), stage 3: [27,33)
+        assert!(should_load_weight_for_stage("L8.q_proj", 0, 4, 33));
+        assert!(!should_load_weight_for_stage("L9.q_proj", 0, 4, 33));
+        assert!(should_load_weight_for_stage("L9.q_proj", 1, 4, 33));
+        assert!(should_load_weight_for_stage("L26.q_proj", 2, 4, 33));
+        assert!(!should_load_weight_for_stage("L27.q_proj", 2, 4, 33));
+        assert!(should_load_weight_for_stage("L27.q_proj", 3, 4, 33));
+        assert!(should_load_weight_for_stage("L32.q_proj", 3, 4, 33));
+    }
+
+    // ── filter_weights_by_stage ──
+
+    #[test]
+    fn filter_weights_pp2_stage0() {
+        let names: Vec<String> = vec![
+            "embed_tokens".into(),
+            "L0.q_proj".into(),
+            "L0.k_proj".into(),
+            "L15.o_proj".into(),
+            "L16.q_proj".into(),
+            "L31.down_proj".into(),
+            "final_norm".into(),
+            "lm_head".into(),
+        ];
+        let filtered = filter_weights_by_stage(&names, 0, 2, 32);
+        let filtered_names: Vec<&str> = filtered.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            filtered_names,
+            vec!["embed_tokens", "L0.q_proj", "L0.k_proj", "L15.o_proj", "final_norm", "lm_head"]
+        );
+    }
+
+    #[test]
+    fn filter_weights_pp2_stage1() {
+        let names: Vec<String> = vec![
+            "embed_tokens".into(),
+            "L0.q_proj".into(),
+            "L0.k_proj".into(),
+            "L15.o_proj".into(),
+            "L16.q_proj".into(),
+            "L31.down_proj".into(),
+            "final_norm".into(),
+            "lm_head".into(),
+        ];
+        let filtered = filter_weights_by_stage(&names, 1, 2, 32);
+        let filtered_names: Vec<&str> = filtered.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            filtered_names,
+            vec!["embed_tokens", "L16.q_proj", "L31.down_proj", "final_norm", "lm_head"]
+        );
+    }
+
+    #[test]
+    fn filter_weights_pp1_loads_all() {
+        let names: Vec<String> = vec![
+            "embed_tokens".into(),
+            "L0.q_proj".into(),
+            "L31.down_proj".into(),
+            "lm_head".into(),
+        ];
+        let filtered = filter_weights_by_stage(&names, 0, 1, 32);
+        assert_eq!(filtered.len(), 4);
     }
 }
