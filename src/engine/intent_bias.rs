@@ -140,6 +140,26 @@ impl OverlapHint {
             Self::PreferIsolated | Self::PreferOverlap => "Serial",
         }
     }
+
+    /// SM60-69 映射的 MkVariant 名 (REQ-IB-003)
+    pub fn mk_variant_sm60_69(&self) -> &'static str {
+        match self {
+            Self::PreferOverlap | Self::PreferIsolated => "GridSync",
+            Self::Auto | Self::ForceDoubleBuffer | Self::ForceFlux => "select_mk_variant()",
+        }
+    }
+
+    /// 解析通信重叠偏好，处理单 GPU 降级 (REQ-IB-003)
+    ///
+    /// ForceFlux 在单 GPU 环境下无意义，自动降级为 Auto 并发出警告。
+    pub fn resolve_overlap(&self, is_single_gpu: bool) -> OverlapHint {
+        if *self == Self::ForceFlux && is_single_gpu {
+            log::warn!("ForceFlux requires multi-GPU; falling back to Auto on single GPU");
+            Self::Auto
+        } else {
+            *self
+        }
+    }
 }
 
 // ── IntentBias (REQ-IB-001) ────────────────────────────────────────────────
@@ -422,5 +442,42 @@ mod tests {
     fn overlap_hint_debug_trait() {
         let debug = format!("{:?}", OverlapHint::ForceFlux);
         assert!(debug.contains("ForceFlux"));
+    }
+
+    #[test]
+    fn overlap_hint_mk_variant_sm60_69() {
+        assert_eq!(OverlapHint::PreferOverlap.mk_variant_sm60_69(), "GridSync");
+        assert_eq!(OverlapHint::PreferIsolated.mk_variant_sm60_69(), "GridSync");
+        assert_eq!(OverlapHint::Auto.mk_variant_sm60_69(), "select_mk_variant()");
+        assert_eq!(
+            OverlapHint::ForceDoubleBuffer.mk_variant_sm60_69(),
+            "select_mk_variant()"
+        );
+        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm60_69(), "select_mk_variant()");
+    }
+
+    #[test]
+    fn resolve_overlap_force_flux_single_gpu_downgrades() {
+        let result = OverlapHint::ForceFlux.resolve_overlap(true);
+        assert_eq!(result, OverlapHint::Auto);
+    }
+
+    #[test]
+    fn resolve_overlap_force_flux_multi_gpu_unchanged() {
+        let result = OverlapHint::ForceFlux.resolve_overlap(false);
+        assert_eq!(result, OverlapHint::ForceFlux);
+    }
+
+    #[test]
+    fn resolve_overlap_other_variants_unchanged() {
+        for hint in [
+            OverlapHint::Auto,
+            OverlapHint::PreferOverlap,
+            OverlapHint::PreferIsolated,
+            OverlapHint::ForceDoubleBuffer,
+        ] {
+            assert_eq!(hint.resolve_overlap(true), hint, "single GPU should not affect {:?}", hint);
+            assert_eq!(hint.resolve_overlap(false), hint, "multi GPU should not affect {:?}", hint);
+        }
     }
 }

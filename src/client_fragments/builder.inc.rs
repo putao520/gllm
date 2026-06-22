@@ -33,6 +33,14 @@ pub struct ClientBuilder {
     weight_paging_enabled: bool,
     /// Intent Tracker for signal-aware intent classification (SPEC/INTENT-TRACKER.md).
     intent_tracker: Option<crate::intent_tracker::IntentTracker>,
+    /// User intent bias for strategy resolution (REQ-IB-005).
+    /// When set, `build_state()` uses `StrategyBiasResolver::resolve()` instead
+    /// of `StrategyArbiter::arbitrate()`, merging user preferences with
+    /// auto-derived hardware/model baseline.
+    intent_bias: crate::engine::intent_bias::IntentBias,
+    /// Distributed inference configuration (REQ-IB-012), nccl feature-gated.
+    #[cfg(feature = "nccl")]
+    distributed: crate::engine::distributed_config::DistributedConfig,
 }
 
 fn make_dummy_manifest(model_id: &str, arch: impl Into<String>, kind: ModelKind) -> ModelManifest {
@@ -71,6 +79,9 @@ impl ClientBuilder {
             debug_jit: false,
             weight_paging_enabled: false,
             intent_tracker: None,
+            intent_bias: crate::engine::intent_bias::IntentBias::default(),
+            #[cfg(feature = "nccl")]
+            distributed: crate::engine::distributed_config::DistributedConfig::default(),
         }
     }
 
@@ -89,8 +100,50 @@ impl ClientBuilder {
         self
     }
 
+    #[deprecated(
+        note = "use .intent(IntentBias{ scenario: ScenarioHint::..., ..Default::default() })"
+    )]
     pub fn inference_mode(mut self, mode: InferenceMode) -> Self {
         self.inference_mode = mode;
+        self
+    }
+
+    /// Set the intent bias for strategy resolution (REQ-IB-005).
+    ///
+    /// When set, `build_state()` uses `StrategyBiasResolver::resolve()` which
+    /// merges user-specified intent preferences (scenario hint, overlap hint,
+    /// numeric knobs) with the auto-derived hardware/model baseline, instead
+    /// of the plain `StrategyArbiter::arbitrate()` path.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use gllm::{Client, ModelKind, ScenarioHint, IntentBias};
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::builder()
+    ///     .model("Qwen/Qwen3-7B-Instruct")
+    ///     .intent(IntentBias {
+    ///         scenario: ScenarioHint::LatencyCritical,
+    ///         ..Default::default()
+    ///     })
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn intent(mut self, bias: crate::engine::intent_bias::IntentBias) -> Self {
+        self.intent_bias = bias;
+        self
+    }
+
+    /// Set the distributed inference configuration (REQ-IB-012).
+    ///
+    /// Only available when the `nccl` feature is enabled. Controls tensor
+    /// parallelism, pipeline parallelism, KV distribution, communication
+    /// overlap, and MoE expert placement for multi-GPU/multi-node inference.
+    #[cfg(feature = "nccl")]
+    pub fn distributed(mut self, config: crate::engine::distributed_config::DistributedConfig) -> Self {
+        self.distributed = config;
         self
     }
 
@@ -182,7 +235,7 @@ impl ClientBuilder {
         let kind = self.kind.unwrap_or(ModelKind::Chat);
         let mut state = Self::build_state(
             &model_id, kind, self.inference_mode, self.compute_dtype, self.gguf_file_filter.as_deref(),
-            self.weight_paging_enabled,
+            self.weight_paging_enabled, &self.intent_bias,
         )?;
 
         if let Some(ref reranker_id) = self.reranker_model_id {
@@ -275,6 +328,7 @@ impl ClientBuilder {
         compute_dtype: Option<gllm_kernels::types::DType>,
         gguf_file_filter: Option<&str>,
         weight_paging_enabled: bool,
+        intent_bias: &crate::engine::intent_bias::IntentBias,
     ) -> Result<ClientState, ClientError> {
         let mut config = LoaderConfig::from_env();
         if let Some(filter) = gguf_file_filter {
@@ -339,10 +393,13 @@ impl ClientBuilder {
 
         // ARCH-PER-CLIENT-PLAN (REQ-ARB-008/009): per-Client ExecutionPlan
         // 隔离 (Arc<ExecutionPlan> 存 ClientState + with_execution_plan TLS push)。
-        // REQ-ARB-001~007 完整调用 StrategyArbiter::arbitrate(mode, archetype, hw):
+        // REQ-IB-005: 当 IntentBias 非 default 时走 StrategyBiasResolver::resolve()
+        // 三阶段管线 (auto-bias → scenario override → clamp),否则走
+        // StrategyArbiter::arbitrate() 纯自动推导路径。
         //   InferenceMode (Latency/Throughput baseline) ×
         //   GraphArchetype (fusion_profitable / pipeline_valuable 等模型图特征) ×
         //   ArbiterHwView (cache / SIMD regs / GPU)
+        //   × IntentBias (scenario / overlap / numeric knobs)
         // → StrategyBias → compute_execution_plan_with_bias → 每 Client 独立 plan。
         let arbiter_bias = if let Some(cfg) = &model_config_for_arbiter {
             let hw_profile = gllm_kernels::dispatch::device_profile();
@@ -351,10 +408,11 @@ impl ClientBuilder {
                 crate::engine::arbiter::GraphArchetype::derive(&graph_profile)
             };
             let hw_view = crate::engine::arbiter::ArbiterHwView::from(hw_profile);
-            crate::engine::arbiter::StrategyArbiter::arbitrate(
+            crate::engine::arbiter::StrategyArbiter::arbitrate_with_bias(
                 inference_mode,
                 &archetype,
                 &hw_view,
+                intent_bias,
             )
         } else {
             // model_config 缺失时退回 mode baseline (无 archetype/hw modulation)
@@ -418,7 +476,7 @@ impl ClientBuilder {
         model_id: &str,
         kind: ModelKind,
     ) -> Result<PipelineModelState, ClientError> {
-        let state = Self::build_state(model_id, kind, InferenceMode::Latency, None, None, false)?;
+        let state = Self::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default())?;
         Ok(PipelineModelState {
             model_id: state.model_id,
             manifest: state.manifest,
