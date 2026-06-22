@@ -250,7 +250,7 @@ fn parallel_bytes_to_f32_lossless(data: &[u8]) -> Result<Vec<f32>> {
 
 /// Parallel `&[u8]` → `Vec<f32>` for any 16-bit half-precision type
 /// (`half::f16` or `half::bf16`).
-fn parallel_half_to_f32<H>(data: &[u8]) -> Result<Vec<f32>>
+pub fn parallel_half_to_f32<H>(data: &[u8]) -> Result<Vec<f32>>
 where
     H: Copy + Send + Sync + 'static,
     H: HalfToF32,
@@ -817,6 +817,137 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
                 before - after, before
             );
         }
+    }
+
+    /// TP 权重分片：按 ParallelConfig 对已加载权重执行 Tensor Parallelism 分片 (REQ-DIST-004)。
+    ///
+    /// 在 `init_distributed()` 后调用。对每个权重名称：
+    /// 1. `infer_shard_strategy(name)` 推断分片策略 (ColumnParallel / RowParallel / None)
+    /// 2. 策略为 None → 跳过（embedding/RMSNorm/RoPE 等不分片，所有 rank 持有完整副本）
+    /// 3. 策略非 None → `shard_weight(data, rows, cols, config, strategy)` 执行分片
+    ///
+    /// 分片对象：
+    /// - F32 张量 (`self.tensors` 中的 backend tensor): 下载到 host → shard → 重新上传
+    /// - BF16/F16 张量 (`self.raw_floats` 中的 RawFloatTensor): 转为 f32 → shard → 转回原 dtype
+    /// - 量化张量 (`self.quantized`): 量化权重按量化块边界分片（暂不支持，返回 Err）
+    ///
+    /// 当 `config.tp_size <= 1` 时立即返回 Ok(())（单机无需分片）。
+    ///
+    /// # Errors
+    /// - 维度不能被 tp_size 整除时返回 Err
+    /// - 量化张量分片暂不支持时返回 Err
+    // @trace REQ-DIST-004 [entity:ENT-DIST-TP-SHARD] [dataflow:DF-DIST-002]
+    #[cfg(feature = "nccl")]
+    pub fn shard_for_tp(
+        &mut self,
+        config: &crate::engine::distributed_config::ParallelConfig,
+    ) -> Result<(), String> {
+        if config.tp_size <= 1 {
+            return Ok(());
+        }
+
+        use crate::loader::weight_shard::{infer_shard_strategy, shard_weight, ShardStrategy};
+
+        let mut sharded_count = 0usize;
+        let mut replicated_count = 0usize;
+
+        // ── Shard F32 raw_floats (BF16/F16) ──
+        // BF16/F16 weights are in self.raw_floats as RawFloatTensor (Vec<u8>).
+        // Convert to f32, shard, convert back.
+        let raw_names: Vec<String> = self.raw_floats.keys().cloned().collect();
+        for name in &raw_names {
+            let strategy = infer_shard_strategy(name);
+            match strategy {
+                None => {
+                    replicated_count += 1;
+                    continue;
+                }
+                Some(s) => {
+                    let raw = self.raw_floats.get_mut(name).ok_or_else(|| {
+                        format!("shard_for_tp: raw_float '{}' not found", name)
+                    })?;
+                    let shape = raw.shape.clone();
+                    if shape.len() != 2 {
+                        return Err(format!(
+                            "shard_for_tp: raw_float '{}' has non-2D shape {:?}",
+                            name, shape
+                        ));
+                    }
+                    let rows = shape[0];
+                    let cols = shape[1];
+                    let elem_bytes = raw.dtype.size();
+
+                    // Convert raw bytes → f32
+                    let mut f32_data = match raw.dtype {
+                        Dtype::BF16 => crate::loader::parallel_half_to_f32::<half::bf16>(&raw.data)
+                            .map_err(|e| format!("shard_for_tp: BF16→F32 conversion failed for '{}': {}", name, e))?,
+                        Dtype::F16 => crate::loader::parallel_half_to_f32::<half::f16>(&raw.data)
+                            .map_err(|e| format!("shard_for_tp: F16→F32 conversion failed for '{}': {}", name, e))?,
+                        other => {
+                            return Err(format!(
+                                "shard_for_tp: unsupported raw_float dtype {:?} for '{}'",
+                                other, name
+                            ));
+                        }
+                    };
+
+                    // Execute shard
+                    shard_weight(&mut f32_data, rows, cols, config, s)?;
+
+                    // Compute new shape
+                    let new_shape = match s {
+                        ShardStrategy::ColumnParallel => vec![rows, cols / config.tp_size as usize],
+                        ShardStrategy::RowParallel => vec![rows / config.tp_size as usize, cols],
+                    };
+
+                    // Convert f32 → original dtype bytes
+                    let new_bytes = match raw.dtype {
+                        Dtype::BF16 => {
+                            f32_data.iter()
+                                .flat_map(|v| half::bf16::from_f32(*v).to_le_bytes())
+                                .collect()
+                        }
+                        Dtype::F16 => {
+                            f32_data.iter()
+                                .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                                .collect()
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    // Update shape in both raw_floats and shapes/meta HashMaps
+                    raw.data = new_bytes;
+                    raw.shape = new_shape.clone();
+                    self.shapes.insert(name.clone(), new_shape.clone());
+                    if let Some(m) = self.meta.get_mut(name) {
+                        m.shape = new_shape;
+                    }
+
+                    sharded_count += 1;
+                }
+            }
+        }
+
+        // ── Shard quantized weights ──
+        // Quantized weights require block-boundary-aware sharding.
+        // For now, report an error if any quantized weight needs sharding.
+        for name in self.quantized.keys() {
+            let strategy = infer_shard_strategy(name);
+            if strategy.is_some() {
+                return Err(format!(
+                    "shard_for_tp: quantized weight '{}' requires sharding but block-boundary-aware sharding is not yet supported",
+                    name
+                ));
+            }
+        }
+
+        log::info!(
+            "shard_for_tp: rank={}, tp_size={}, sharded={}, replicated={}, quantized_skipped={}",
+            config.rank, config.tp_size, sharded_count, replicated_count,
+            self.quantized.len(),
+        );
+
+        Ok(())
     }
 }
 

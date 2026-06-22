@@ -111,6 +111,7 @@ impl ComputeCoordinator {
     ///
     /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())（单机无需 AllReduce）。
     /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    // @trace REQ-DIST-005 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-002]
     #[cfg(feature = "nccl")]
     pub fn tp_all_reduce(
         &mut self,
@@ -181,6 +182,60 @@ impl ComputeCoordinator {
         // sendcount = buffer.len() / world_size (each rank contributes an equal segment)
         let sendcount = buffer.len() / comm_handle.world_size() as usize;
         comm_handle.all_gather_inplace(buffer, sendcount)
+    }
+
+    /// TP AllReduce with CommScheduleDecision (REQ-DIST-005)
+    ///
+    /// 根据 `CommScheduleDecision` 选择通信策略：
+    /// - `StandardAllReduce`: 直接调用 `comm_handle.all_reduce_inplace(Sum)`
+    /// - `DoubleBuffer`: 通信-计算重叠（当前退化为 StandardAllReduce + 日志标记）
+    /// - `FluxDecompose`: ReduceScatter + LocalCompute + AllGather（当前退化为 StandardAllReduce + 日志标记）
+    ///
+    /// JIT AllReduce VmInstr call stub:
+    /// CompilerGraph 包含 `AllReduceChunk` VmInstr (gllm-kernels `instr_fragments/vminstr.inc.rs`)。
+    /// GPU kernel 内 AllReduceChunk VmInstr 在编译时生成 NCCL AllReduce 调用点，
+    /// Host 端通过 `comm_handle.all_reduce_inplace()` 执行同步。
+    /// 通信点由 `GraphTopologyAnalysis` 从图拓扑自动推导，不前置 bool flag。
+    ///
+    /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())（单机无需 AllReduce）。
+    /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    // @trace REQ-DIST-005 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-002] [controlflow:CF-DIST-001]
+    #[cfg(feature = "nccl")]
+    pub fn tp_all_reduce_scheduled(
+        &mut self,
+        buffer: &mut [f32],
+        comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+        schedule: &super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision,
+    ) -> Result<(), String> {
+        if !comm_handle.is_distributed() {
+            return Ok(());
+        }
+
+        match schedule {
+            super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision::StandardAllReduce => {
+                self.tp_all_reduce(buffer, comm_handle)
+            }
+            super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision::DoubleBuffer { comm_sm_ratio } => {
+                // DoubleBuffer: 通信-计算重叠模式。
+                // 当前实现退化为 StandardAllReduce + 日志标记，
+                // 未来将实现通信/计算流水线交替执行。
+                log::trace!(
+                    "[compute] tp_all_reduce_scheduled: DoubleBuffer mode (comm_sm_ratio={:.2}), falling back to StandardAllReduce",
+                    comm_sm_ratio,
+                );
+                self.tp_all_reduce(buffer, comm_handle)
+            }
+            super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision::FluxDecompose { ring_size } => {
+                // FluxDecompose: AllReduce 分解为 ReduceScatter + LocalCompute + AllGather。
+                // 当前实现退化为 StandardAllReduce + 日志标记，
+                // 未来将实现 FLUX 流水线分解。
+                log::trace!(
+                    "[compute] tp_all_reduce_scheduled: FluxDecompose mode (ring_size={}), falling back to StandardAllReduce",
+                    ring_size,
+                );
+                self.tp_all_reduce(buffer, comm_handle)
+            }
+        }
     }
 }
 

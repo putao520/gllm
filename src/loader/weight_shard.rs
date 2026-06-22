@@ -10,6 +10,7 @@ use crate::engine::distributed_config::ParallelConfig;
 // ── ShardStrategy (REQ-DIST-004) ──────────────────────────────────────────
 
 /// 权重分片策略
+// @trace REQ-DIST-004 [entity:ENT-DIST-TP-SHARD]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShardStrategy {
     /// 列切分：按输出维度/列维度切分。
@@ -39,6 +40,7 @@ pub enum ShardStrategy {
 ///
 /// 当 `tp_size <= 1` 时立即返回 Ok(())（单机无需分片）。
 /// 当维度不能被 tp_size 整除时返回 Err。
+// @trace REQ-DIST-004 [entity:ENT-DIST-TP-SHARD] [dataflow:DF-DIST-002]
 pub fn shard_weight(
     data: &mut Vec<f32>,
     rows: usize,
@@ -123,6 +125,7 @@ pub fn shard_weight(
 /// - MoE shared_expert gate/up → ColumnParallel
 /// - MoE shared_expert down → RowParallel
 /// - MoE gate/router → None（路由表不切分，每个 rank 持有完整路由权重）
+// @trace REQ-DIST-004 [entity:ENT-DIST-TP-SHARD] [dataflow:DF-DIST-002]
 pub fn infer_shard_strategy(weight_name: &str) -> Option<ShardStrategy> {
     // Strip any layer prefix like "L0.", "L12.", "mtp_proj.1."
     // to get the core projection suffix.

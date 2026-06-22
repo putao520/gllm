@@ -32,7 +32,7 @@ pub struct ModelContextHolder<B: Backend<E> + 'static, E: Element = f32> {
     pub weight_page_table: HashMap<usize, Vec<PhysicalId>>,
     pub weight_pages_registered: bool,
     pub three_tier_swap: Option<Arc<Mutex<crate::scheduler::ThreeTierSwapCoordinator>>>,
-    /// Distributed page routing table for cross-node KV cache lookup (REQ-DP-014).
+    /// Distributed page routing table for cross-node KV cache lookup (REQ-DP-014, REQ-DIST-003).
     #[cfg(feature = "nccl")]
     pub distributed_routing_table: Option<gllm_kernels::PageRoutingTable>,
     /// NCCL communication handle wrapper (REQ-DIST-001).
@@ -42,6 +42,19 @@ pub struct ModelContextHolder<B: Backend<E> + 'static, E: Element = f32> {
     /// Parallel config snapshot from init_distributed() (REQ-DIST-001).
     #[cfg(feature = "nccl")]
     pub parallel_config: Option<crate::engine::distributed_config::ParallelConfig>,
+    /// KV distribution config from DistributedConfig (REQ-DIST-002).
+    /// Stored so KvCoordinator can access it at runtime for KvDistDecision resolution.
+    #[cfg(feature = "nccl")]
+    pub kv_distribution_config: Option<crate::engine::distributed_config::KvDistributionConfig>,
+    /// Prefill/Decode disaggregation config from DistributedConfig (REQ-DIST-002).
+    #[cfg(feature = "nccl")]
+    pub pd_disagg_config: Option<crate::engine::distributed_config::PdDisaggConfig>,
+    /// Communication config from DistributedConfig (REQ-DIST-002).
+    #[cfg(feature = "nccl")]
+    pub comm_config: Option<crate::engine::distributed_config::CommConfig>,
+    /// MoE distributed config from DistributedConfig (REQ-DIST-002).
+    #[cfg(feature = "nccl")]
+    pub moe_distributed_config: Option<crate::engine::distributed_config::MoeDistributedConfig>,
 }
 
 #[cfg(test)]

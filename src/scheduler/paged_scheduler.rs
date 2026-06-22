@@ -97,6 +97,11 @@ pub struct PagedScheduler {
     pub(crate) prefix_index: KvPrefixIndex,
     /// OS-style three-tier KV memory manager (L1 GPU / L2 CPU / L3 NVMe).
     pub(crate) memory_manager: GlobalMemoryManager,
+    /// Distributed page routing table for cross-node KV cache lookup (REQ-DIST-003).
+    /// When present, page allocation respects rank mapping and kv_coordinator
+    /// cross-node queries use this table for location resolution.
+    #[cfg(feature = "nccl")]
+    routing_table: Option<gllm_kernels::PageRoutingTable>,
 }
 
 impl PagedScheduler {
@@ -113,6 +118,8 @@ impl PagedScheduler {
             vllm_state: None,
             prefix_index: KvPrefixIndex::new(),
             memory_manager,
+            #[cfg(feature = "nccl")]
+            routing_table: None,
         }
     }
 
@@ -139,6 +146,8 @@ impl PagedScheduler {
             vllm_state: None,
             prefix_index: KvPrefixIndex::new(),
             memory_manager,
+            #[cfg(feature = "nccl")]
+            routing_table: None,
         }
     }
 
@@ -712,6 +721,94 @@ impl PagedScheduler {
     // ─────────────────────────────────────────────────────────────────────────
     // Tier 流转 — SPEC 22-PAGE-COMPRESSION §7.5.4 REQ-COMP-016
     // ─────────────────────────────────────────────────────────────────────────
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Distributed page routing (REQ-DIST-003)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Inject a PageRoutingTable from distributed init (REQ-DIST-003).
+    ///
+    /// Called by ExecutorBuilder after build_distributed_routing_table() completes.
+    /// The routing table is used by allocate_next_token() to register pages in the
+    /// distributed view and by resolve_page_rank() for cross-node KV queries.
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING] [lifecycle:init]
+    #[cfg(feature = "nccl")]
+    pub fn set_routing_table(&mut self, table: gllm_kernels::PageRoutingTable) {
+        log::info!(
+            "[scheduler] REQ-DIST-003: routing table injected (local_node_id={}, local_device_count={}, entries={})",
+            table.local_node_id,
+            table.local_device_count,
+            table.entries.len(),
+        );
+        self.routing_table = Some(table);
+    }
+
+    /// Read-only access to the distributed routing table (REQ-DIST-003).
+    #[cfg(feature = "nccl")]
+    pub fn routing_table(&self) -> Option<&gllm_kernels::PageRoutingTable> {
+        self.routing_table.as_ref()
+    }
+
+    /// Mutable access to the distributed routing table (REQ-DIST-003).
+    ///
+    /// Used by the kv_coordinator to upsert page entries as blocks are allocated
+    /// and by cross-node query resolution to update page locations.
+    #[cfg(feature = "nccl")]
+    pub fn routing_table_mut(&mut self) -> Option<&mut gllm_kernels::PageRoutingTable> {
+        self.routing_table.as_mut()
+    }
+
+    /// Resolve which rank owns a given page (REQ-DIST-003).
+    ///
+    /// Returns the rank of the device that holds the page, or None if:
+    /// - No routing table is set (single-node mode)
+    /// - The page is not found in the routing table
+    /// - The page is NotPresent (swapped out)
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING]
+    #[cfg(feature = "nccl")]
+    pub fn resolve_page_rank(
+        &self,
+        page_id: &gllm_kernels::DistributedPageId,
+    ) -> Option<u32> {
+        let table = self.routing_table.as_ref()?;
+        let entry = table.lookup(page_id)?;
+        match &entry.location {
+            gllm_kernels::PageLocation::Local { .. } => Some(table.local_node_id),
+            gllm_kernels::PageLocation::IntraNode { device_index, .. } => Some(*device_index),
+            gllm_kernels::PageLocation::InterNode { node_id, .. } => Some(*node_id),
+            gllm_kernels::PageLocation::NotPresent => None,
+        }
+    }
+
+    /// Register a newly allocated page in the distributed routing table (REQ-DIST-003).
+    ///
+    /// When a page is allocated by the local scheduler, we register it in the
+    /// routing table as Local with the given frame_id. Other ranks will discover
+    /// this page via the eventual-consistency merge protocol.
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING]
+    #[cfg(feature = "nccl")]
+    pub fn register_page_in_routing_table(
+        &mut self,
+        sequence_id: u64,
+        page_index: u32,
+        frame_id: u32,
+    ) {
+        if let Some(ref mut table) = self.routing_table {
+            let page_id = gllm_kernels::DistributedPageId {
+                sequence_id,
+                page_index,
+            };
+            let entry = gllm_kernels::PageTableEntry {
+                page_id,
+                location: gllm_kernels::PageLocation::Local { frame_id },
+                state: gllm_kernels::PageState::Ready,
+                last_access_seq: 0,
+                migrating: false,
+                version: 1,
+            };
+            table.upsert(entry);
+        }
+    }
 
 }
 

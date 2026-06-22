@@ -81,7 +81,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.model_ctx.manifest.as_ref()
     }
 
-    /// Resolve page location for mega-kernel dispatch (REQ-DP-014, §11.2).
+    /// Resolve page location for mega-kernel dispatch (REQ-DP-014, REQ-DIST-003).
     ///
     /// This is the **single nccl feature integration point** in gllm.
     /// - If distributed_routing_table is None (not yet initialized): returns Local,
@@ -89,6 +89,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// - If routing table exists and page found: returns the entry's location.
     /// - If routing table exists but page not found: returns NotPresent,
     ///   which triggers swap-in from storage tier (SPEC/22).
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING]
     #[cfg(feature = "nccl")]
     pub fn resolve_page_for_kernel(
         &self,
@@ -112,6 +113,26 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
     pub fn weights(&self) -> &WeightsHandle<B, E> {
         &self.model_ctx.weights
+    }
+
+    /// Returns a reference to the CommHandleWrapper if distributed mode is initialized
+    /// (REQ-DIST-002). Returns None if single-node or not yet initialized.
+    ///
+    /// Used by executor_step to access distributed collective operations
+    /// (tp_all_reduce, kv_transfer, etc.) during inference.
+    // @trace REQ-DIST-002 [entity:ENT-DIST-COMMHANDLE] [lifecycle:access]
+    #[cfg(feature = "nccl")]
+    pub fn comm_handle(&self) -> Option<&crate::engine::distributed_config::CommHandleWrapper> {
+        self.model_ctx.comm_handle.as_ref()
+    }
+
+    /// Returns true if this executor is in distributed mode with NCCL initialized
+    /// (REQ-DIST-002). Convenience accessor for executor_step branching.
+    #[cfg(feature = "nccl")]
+    pub fn is_distributed(&self) -> bool {
+        self.model_ctx.comm_handle
+            .as_ref()
+            .map_or(false, |h| h.is_distributed())
     }
 
     pub fn model_config(&self) -> &ModelConfig {

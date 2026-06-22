@@ -11,6 +11,11 @@ pub struct KvCoordinator {
     pub paged_kv_pool: Option<crate::compat::cpu_backend::PagedKvPool>,
     pub kv_optimizer: KvOptimizer,
     pub majority_kv_tier: Option<String>,
+    /// KV distribution config from DistributedConfig (REQ-DIST-002).
+    /// Stored so KvCoordinator can access it at runtime for KvDistDecision resolution
+    /// without needing a reference to ModelContextHolder.
+    #[cfg(feature = "nccl")]
+    pub kv_distribution_config: Option<crate::engine::distributed_config::KvDistributionConfig>,
 }
 
 // ── L3-2: 跨节点 KV 传输 (REQ-DIST-012) ───────────────────────────────────
@@ -413,6 +418,344 @@ pub mod kv_distribution {
                 assert!(v.needs_cross_node_transfer(), "Expected transfer needed for {:?}", v);
             }
             assert!(!KvDistDecision::Local.needs_cross_node_transfer());
+        }
+    }
+}
+
+// ── L3-4: 跨节点 KV 路由查询 (REQ-DIST-003) ────────────────────────────────
+
+#[cfg(feature = "nccl")]
+pub mod kv_routing {
+    /// Cross-node KV page routing query result (REQ-DIST-003).
+    ///
+    /// Returned by resolve_page_for_rank() when the kv_coordinator
+    /// queries the distributed routing table to determine where a
+    /// KV page physically resides.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct KvRouteResult {
+        /// The rank/node that holds the page.
+        pub owner_rank: u32,
+        /// Physical location of the page.
+        pub location: gllm_kernels::PageLocation,
+        /// Whether the page is ready for access (not InTransit/Invalid).
+        pub is_ready: bool,
+    }
+
+    /// Resolve the physical location of a KV page via the distributed routing table (REQ-DIST-003).
+    ///
+    /// This is the kv_coordinator's primary cross-node query function.
+    /// It looks up the PageRoutingTable to find which rank owns a given page,
+    /// and determines whether a cross-node transfer is needed.
+    ///
+    /// Returns:
+    /// - `Ok(KvRouteResult)` when the page is found in the routing table
+    /// - `Err("page not found")` when the page_id is not in the routing table
+    /// - `Err("page .. NotPresent")` when the page exists but is NotPresent
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING]
+    pub fn resolve_page_for_rank(
+        page_id: &gllm_kernels::DistributedPageId,
+        routing_table: &gllm_kernels::PageRoutingTable,
+    ) -> Result<KvRouteResult, String> {
+        match routing_table.lookup(page_id) {
+            Some(entry) => {
+                let owner_rank = match &entry.location {
+                    gllm_kernels::PageLocation::Local { .. } => routing_table.local_node_id,
+                    gllm_kernels::PageLocation::IntraNode { device_index, .. } => *device_index,
+                    gllm_kernels::PageLocation::InterNode { node_id, .. } => *node_id,
+                    gllm_kernels::PageLocation::NotPresent => {
+                        return Err(format!(
+                            "page seq={} idx={} is NotPresent",
+                            page_id.sequence_id, page_id.page_index
+                        ))
+                    }
+                };
+                let is_ready = entry.state == gllm_kernels::PageState::Ready;
+                Ok(KvRouteResult {
+                    owner_rank,
+                    location: entry.location.clone(),
+                    is_ready,
+                })
+            }
+            None => Err(format!(
+                "page not found: seq={} idx={}",
+                page_id.sequence_id, page_id.page_index
+            )),
+        }
+    }
+
+    /// Batch resolve page locations for all pages of a sequence (REQ-DIST-003).
+    ///
+    /// Returns only Ready pages. Pages that are not found, NotPresent, or
+    /// InTransit/Invalid are skipped.
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING]
+    pub fn resolve_sequence_pages(
+        sequence_id: u64,
+        routing_table: &gllm_kernels::PageRoutingTable,
+    ) -> Vec<KvRouteResult> {
+        routing_table
+            .sequence_pages(sequence_id)
+            .iter()
+            .filter_map(|entry| {
+                if entry.state != gllm_kernels::PageState::Ready {
+                    return None;
+                }
+                let owner_rank = match &entry.location {
+                    gllm_kernels::PageLocation::Local { .. } => routing_table.local_node_id,
+                    gllm_kernels::PageLocation::IntraNode { device_index, .. } => *device_index,
+                    gllm_kernels::PageLocation::InterNode { node_id, .. } => *node_id,
+                    gllm_kernels::PageLocation::NotPresent => return None,
+                };
+                Some(KvRouteResult {
+                    owner_rank,
+                    location: entry.location.clone(),
+                    is_ready: true,
+                })
+            })
+            .collect()
+    }
+
+    /// Determine whether a cross-node transfer is needed for a page (REQ-DIST-003).
+    ///
+    /// Returns true when the page resides on a different rank than the requesting rank.
+    // @trace REQ-DIST-003 [entity:ENT-DIST-ROUTING]
+    pub fn needs_cross_node_transfer(
+        page_id: &gllm_kernels::DistributedPageId,
+        routing_table: &gllm_kernels::PageRoutingTable,
+        requesting_rank: u32,
+    ) -> bool {
+        match resolve_page_for_rank(page_id, routing_table) {
+            Ok(result) => result.owner_rank != requesting_rank,
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn make_routing_table(
+            local_node_id: u32,
+            local_device_count: u32,
+        ) -> gllm_kernels::PageRoutingTable {
+            gllm_kernels::PageRoutingTable::new(local_node_id, local_device_count)
+        }
+
+        fn make_page_id(sequence_id: u64, page_index: u32) -> gllm_kernels::DistributedPageId {
+            gllm_kernels::DistributedPageId {
+                sequence_id,
+                page_index,
+            }
+        }
+
+        fn make_local_entry(
+            page_id: gllm_kernels::DistributedPageId,
+            frame_id: u32,
+        ) -> gllm_kernels::PageTableEntry {
+            gllm_kernels::PageTableEntry {
+                page_id,
+                location: gllm_kernels::PageLocation::Local { frame_id },
+                state: gllm_kernels::PageState::Ready,
+                last_access_seq: 0,
+                migrating: false,
+                version: 1,
+            }
+        }
+
+        fn make_internode_entry(
+            page_id: gllm_kernels::DistributedPageId,
+            node_id: u32,
+            device_index: u32,
+            frame_id: u32,
+        ) -> gllm_kernels::PageTableEntry {
+            gllm_kernels::PageTableEntry {
+                page_id,
+                location: gllm_kernels::PageLocation::InterNode {
+                    node_id,
+                    device_index,
+                    frame_id,
+                },
+                state: gllm_kernels::PageState::Ready,
+                last_access_seq: 0,
+                migrating: false,
+                version: 1,
+            }
+        }
+
+        fn make_not_present_entry(
+            page_id: gllm_kernels::DistributedPageId,
+        ) -> gllm_kernels::PageTableEntry {
+            gllm_kernels::PageTableEntry {
+                page_id,
+                location: gllm_kernels::PageLocation::NotPresent,
+                state: gllm_kernels::PageState::Invalid,
+                last_access_seq: 0,
+                migrating: false,
+                version: 1,
+            }
+        }
+
+        // ── resolve_page_for_rank: local page ─────────────────────────────────
+
+        #[test]
+        fn resolve_local_page_returns_local_node_id() {
+            let mut table = make_routing_table(0, 2);
+            let page_id = make_page_id(100, 0);
+            table.upsert(make_local_entry(page_id, 42));
+
+            let result = resolve_page_for_rank(&page_id, &table).expect("resolve ok");
+            assert_eq!(result.owner_rank, 0);
+            assert!(result.is_ready);
+            assert!(result.location.is_local());
+        }
+
+        // ── resolve_page_for_rank: inter-node page ─────────────────────────────
+
+        #[test]
+        fn resolve_internode_page_returns_remote_node_id() {
+            let mut table = make_routing_table(0, 1);
+            let page_id = make_page_id(200, 3);
+            table.upsert(make_internode_entry(page_id, 2, 0, 10));
+
+            let result = resolve_page_for_rank(&page_id, &table).expect("resolve ok");
+            assert_eq!(result.owner_rank, 2);
+            assert!(result.is_ready);
+            assert!(result.location.is_inter_node());
+        }
+
+        // ── resolve_page_for_rank: not present ──────────────────────────────────
+
+        #[test]
+        fn resolve_not_present_page_returns_error() {
+            let mut table = make_routing_table(0, 1);
+            let page_id = make_page_id(300, 0);
+            table.upsert(make_not_present_entry(page_id));
+
+            let result = resolve_page_for_rank(&page_id, &table);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("NotPresent"));
+        }
+
+        // ── resolve_page_for_rank: missing page ─────────────────────────────────
+
+        #[test]
+        fn resolve_missing_page_returns_error() {
+            let table = make_routing_table(0, 1);
+            let page_id = make_page_id(999, 0);
+
+            let result = resolve_page_for_rank(&page_id, &table);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("not found"));
+        }
+
+        // ── resolve_sequence_pages ─────────────────────────────────────────────
+
+        #[test]
+        fn resolve_sequence_pages_returns_ready_pages() {
+            let mut table = make_routing_table(0, 2);
+            // 3 pages for sequence 100: 2 local, 1 remote
+            table.upsert(make_local_entry(make_page_id(100, 0), 1));
+            table.upsert(make_local_entry(make_page_id(100, 1), 2));
+            table.upsert(make_internode_entry(make_page_id(100, 2), 1, 0, 3));
+
+            let results = resolve_sequence_pages(100, &table);
+            assert_eq!(results.len(), 3);
+            // 2 local (rank 0), 1 remote (rank 1)
+            let local_count = results.iter().filter(|r| r.owner_rank == 0).count();
+            let remote_count = results.iter().filter(|r| r.owner_rank == 1).count();
+            assert_eq!(local_count, 2);
+            assert_eq!(remote_count, 1);
+        }
+
+        #[test]
+        fn resolve_sequence_pages_skips_not_ready() {
+            let mut table = make_routing_table(0, 1);
+            table.upsert(make_local_entry(make_page_id(100, 0), 1));
+            // Add an InTransit page
+            let transit_entry = gllm_kernels::PageTableEntry {
+                page_id: make_page_id(100, 1),
+                location: gllm_kernels::PageLocation::Local { frame_id: 2 },
+                state: gllm_kernels::PageState::InTransit,
+                last_access_seq: 0,
+                migrating: false,
+                version: 1,
+            };
+            table.upsert(transit_entry);
+
+            let results = resolve_sequence_pages(100, &table);
+            assert_eq!(results.len(), 1); // Only the Ready page
+            assert!(results[0].is_ready);
+        }
+
+        #[test]
+        fn resolve_sequence_pages_empty_for_unknown_sequence() {
+            let table = make_routing_table(0, 1);
+            let results = resolve_sequence_pages(999, &table);
+            assert!(results.is_empty());
+        }
+
+        // ── needs_cross_node_transfer ──────────────────────────────────────────
+
+        #[test]
+        fn needs_transfer_when_owner_differs() {
+            let mut table = make_routing_table(0, 1);
+            let page_id = make_page_id(100, 0);
+            table.upsert(make_internode_entry(page_id, 2, 0, 5));
+
+            assert!(needs_cross_node_transfer(&page_id, &table, 0));
+            assert!(!needs_cross_node_transfer(&page_id, &table, 2));
+        }
+
+        #[test]
+        fn no_transfer_when_local() {
+            let mut table = make_routing_table(0, 1);
+            let page_id = make_page_id(100, 0);
+            table.upsert(make_local_entry(page_id, 5));
+
+            assert!(!needs_cross_node_transfer(&page_id, &table, 0));
+        }
+
+        #[test]
+        fn no_transfer_for_missing_page() {
+            let table = make_routing_table(0, 1);
+            let page_id = make_page_id(999, 0);
+
+            assert!(!needs_cross_node_transfer(&page_id, &table, 0));
+        }
+
+        // ── KvRouteResult equality ─────────────────────────────────────────────
+
+        #[test]
+        fn kv_route_result_equality() {
+            let a = KvRouteResult {
+                owner_rank: 0,
+                location: gllm_kernels::PageLocation::Local { frame_id: 1 },
+                is_ready: true,
+            };
+            let b = KvRouteResult {
+                owner_rank: 0,
+                location: gllm_kernels::PageLocation::Local { frame_id: 1 },
+                is_ready: true,
+            };
+            assert_eq!(a, b);
+        }
+
+        #[test]
+        fn kv_route_result_inequality_different_rank() {
+            let a = KvRouteResult {
+                owner_rank: 0,
+                location: gllm_kernels::PageLocation::Local { frame_id: 1 },
+                is_ready: true,
+            };
+            let b = KvRouteResult {
+                owner_rank: 1,
+                location: gllm_kernels::PageLocation::InterNode {
+                    node_id: 1,
+                    device_index: 0,
+                    frame_id: 1,
+                },
+                is_ready: true,
+            };
+            assert_ne!(a, b);
         }
     }
 }

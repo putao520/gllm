@@ -234,7 +234,8 @@ impl ClientBuilder {
             .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
         let kind = self.kind.unwrap_or(ModelKind::Chat);
 
-        // REQ-DIST-001: pass distributed config to build_state
+        // REQ-DIST-002: pass distributed config to build_state (full propagation chain)
+        // @trace REQ-DIST-002 [entity:ENT-DISTRIBUTED-CONFIG] [lifecycle:propagate]
         #[cfg(feature = "nccl")]
         let distributed_config = self.distributed.clone();
         #[cfg(not(feature = "nccl"))]
@@ -506,12 +507,17 @@ impl ClientBuilder {
             executor.set_weight_page_jit_config(wp_config);
         }
 
-        // ── Distributed Infrastructure (REQ-DIST-001) ──
+        // ── Distributed Infrastructure (REQ-DIST-001, REQ-DIST-002) ──
         // Initialize NCCL communicator if a non-default DistributedConfig is
         // provided. Single-node (world_size==1) skips NCCL init but still
         // records the ParallelConfig. Multi-node creates CommHandleWrapper,
         // stores ParallelConfig, and builds PageRoutingTable.
+        //
+        // REQ-DIST-002: The full DistributedConfig (parallel, kv_distribution,
+        // pd_disagg, comm, moe) is passed to init_distributed() which persists
+        // all sub-configs on ModelContextHolder with zero information loss.
         // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE] [lifecycle:init]
+        // @trace REQ-DIST-002 [entity:ENT-DISTRIBUTED-CONFIG] [lifecycle:propagate]
         #[cfg(feature = "nccl")]
         {
             if let Some(dist_cfg) = distributed_config {
