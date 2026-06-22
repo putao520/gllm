@@ -33,8 +33,8 @@
       <div data-criteria="">
         <h5>REQ-UMK-008 MegaKernelFn pack 阶段约定 — 完整模型编译时额外提供 pack 格式</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>grep -rn "MegaKernelWeightLayout" src/compiler/codegen/</code> 无结果（仅 pack/observe 层使用）</li>
-          <li id="id-2" data-criterion="2">编译器只读 <code>named_offsets</code></li>
+          <li id="1" data-criterion="1"><code>grep -rn "MegaKernelWeightLayout" src/compiler/codegen/</code> 无结果（仅 pack/observe 层使用）</li>
+          <li id="2" data-criterion="2">编译器只读 <code>named_offsets</code></li>
         </ol>
       </div>
     
@@ -82,9 +82,9 @@ pub enum GroupMarker {
       <div data-criteria="">
         <h5>REQ-UMK-012 GroupMarker 机制 — 从图同构子结构推导层循环标记替代硬编码</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>grep -rn "LayerLoopBegin|LayerLoopEnd|GroupMarker" src/compiler/codegen/vm/</code> 有结果</li>
-          <li id="id-2" data-criterion="2">Phase 2 融合引擎根据图同构子结构插入标记</li>
-          <li id="id-3" data-criterion="3">不同图类型（encoder/decoder/SG 小图/MoE）标记序列正确</li>
+          <li id="1" data-criterion="1"><code>grep -rn "LayerLoopBegin|LayerLoopEnd|GroupMarker" src/compiler/codegen/vm/</code> 有结果</li>
+          <li id="2" data-criterion="2">Phase 2 融合引擎根据图同构子结构插入标记</li>
+          <li id="3" data-criterion="3">不同图类型（encoder/decoder/SG 小图/MoE）标记序列正确</li>
         </ol>
       </div>
     
@@ -126,15 +126,15 @@ single_pass_path:
       <div data-criteria="">
         <h5>REQ-UMK-013 ForwardPhaseDispatch — 仅当图含 Argmax 算子时插入，从图拓扑推导</h5>
         <ol>
-          <li id="id-1" data-criterion="1">CompileConfig 结构体定义中无 <code>is_encoder</code>/<code>inference_mode</code>/<code>vocab_size</code>/<code>num_layers</code>/<code>hidden</code> 字段</li>
-          <li id="id-2" data-criterion="2"><code>vocab_size</code> 从 <code>OpKind::Argmax { vocab_size }</code> 推导，不作为 CompileConfig 字段</li>
-          <li id="id-3" data-criterion="3"><code>num_layers</code> 从图拓扑推导，不作为 CompileConfig 字段</li>
-          <li id="id-4" data-criterion="4"><code>num_eos_tokens</code> 从 <code>OpKind::CheckStopCondition</code> 推导，不作为 CompileConfig 字段</li>
-          <li id="id-5" data-criterion="5">无 <code>lm_head_offset</code>/<code>lm_head_bytes</code> 字段——权重偏移通过 <code>named_offsets</code> 映射表统一寻址</li>
-          <li id="id-6" data-criterion="6">结构体命名为 <code>CompileConfig</code>（非 <code>MegaKernelConfig</code>）</li>
-          <li id="id-7" data-criterion="7"><code>grep -rn "MegaKernelConfig" src/</code> 无结果</li>
-          <li id="id-8" data-criterion="8">CompileConfig 结构体中无 <code>business_config</code> 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</li>
-          <li id="id-9" data-criterion="9"><code>debug_jit</code> 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</li>
+          <li id="1" data-criterion="1">CompileConfig 结构体定义中无 <code>is_encoder</code>/<code>inference_mode</code>/<code>vocab_size</code>/<code>num_layers</code>/<code>hidden</code> 字段</li>
+          <li id="2" data-criterion="2"><code>vocab_size</code> 从 <code>OpKind::Argmax { vocab_size }</code> 推导，不作为 CompileConfig 字段</li>
+          <li id="3" data-criterion="3"><code>num_layers</code> 从图拓扑推导，不作为 CompileConfig 字段</li>
+          <li id="4" data-criterion="4"><code>num_eos_tokens</code> 从 <code>OpKind::CheckStopCondition</code> 推导，不作为 CompileConfig 字段</li>
+          <li id="5" data-criterion="5">无 <code>lm_head_offset</code>/<code>lm_head_bytes</code> 字段——权重偏移通过 <code>named_offsets</code> 映射表统一寻址</li>
+          <li id="6" data-criterion="6">结构体命名为 <code>CompileConfig</code>（非 <code>MegaKernelConfig</code>）</li>
+          <li id="7" data-criterion="7"><code>grep -rn "MegaKernelConfig" src/</code> 无结果</li>
+          <li id="8" data-criterion="8">CompileConfig 结构体中无 <code>business_config</code> 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</li>
+          <li id="9" data-criterion="9"><code>debug_jit</code> 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</li>
         </ol>
       </div>
     
@@ -144,7 +144,7 @@ single_pass_path:
       
       
       </div>
-    <div id="forwardphasedispatch-仅当图含-argmax-算子时存在" data-criterion="ForwardPhaseDispatch 仅当图含 Argmax 算子时存在">ForwardPhaseDispatch 仅当图含 Argmax 算子时存在</div><div id="图无-argmax-storetoken-checkstopcondition-无-forwardphasedispatch-分支" data-criterion="图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支">图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支</div><div id="无-argmax-的图-含-meanpool-classify-但无-argmax-无-forwardphasedispatch" data-criterion="无 Argmax 的图（含 MeanPool/Classify 但无 Argmax）无 ForwardPhaseDispatch">
+    <div id="forwardphasedispatch-仅当图含-argmax-算子时存在" data-criterion="ForwardPhaseDispatch 仅当图含 Argmax 算子时存在">ForwardPhaseDispatch 仅当图含 Argmax 算子时存在</div><div id="图无-argmax/storetoken/checkstopcondition-→-无-forwardphasedispatch-分支" data-criterion="图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支">图无 Argmax/StoreToken/CheckStopCondition → 无 ForwardPhaseDispatch 分支</div><div id="无-argmax-的图（含-meanpool/classify-但无-argmax）无-forwardphasedispatch" data-criterion="无 Argmax 的图（含 MeanPool/Classify 但无 Argmax）无 ForwardPhaseDispatch">
 无 Argmax 的图（含 MeanPool/Classify 但无 Argmax）无 ForwardPhaseDispatch</div></section>
 
 <section data-entity-ref="ENT-LOWERING-CONTEXT" data-req-api="POST /compile" data-req-entity="ENT-MEGA-KERNEL-FN" data-req-category="business" data-req-domain="umk" data-req-status="implemented" data-req="REQ-UMK-015" id="req-umk-015">REQ-UMK-015 LoweringContext 编译会话共享状态<p>LoweringContext 持有编译会话的不可变共享状态（SimdWidth、SymDimSlotMap、IsaHook、ResourceBudget 等），替代 emit_fusion_groups 的 16 个参数膨胀。LoweringContext 一旦构造不可变，所有 emit 函数签名简化为 ctx: &amp;LoweringContext + 必要局部参数。这是三层并行编译的基础设施前提。</p><div data-criteria=""><strong>验收标准：</strong><ol><li>

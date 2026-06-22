@@ -43,12 +43,12 @@
       <div data-criteria="">
         <h5>REQ-UMK-001 compile() 唯一编译入口 — 所有图走同一管线产出 MegaKernelFn</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>compile()</code> 是 <code>InferenceCompiler</code> 的唯一公开编译方法</li>
-          <li id="id-2" data-criterion="2"><code>grep -rn "compile_graph|compile_forward|compile_mega_kernel_from_graph" src/compiler/</code> 无结果（除 <code>compile()</code> 实现内部）</li>
-          <li id="id-3" data-criterion="3">任意 CompilerGraph（1-op 小图 / encoder / decoder）均通过 <code>compile()</code> 编译成功</li>
+          <li id="1" data-criterion="1"><code>compile()</code> 是 <code>InferenceCompiler</code> 的唯一公开编译方法</li>
+          <li id="2" data-criterion="2"><code>grep -rn "compile_graph|compile_forward|compile_mega_kernel_from_graph" src/compiler/</code> 无结果（除 <code>compile()</code> 实现内部）</li>
+          <li id="3" data-criterion="3">任意 CompilerGraph（1-op 小图 / encoder / decoder）均通过 <code>compile()</code> 编译成功</li>
         
-          <li id="id-4" data-criterion="4">无 <code>is_simple</code> 双路径分攧——1-op 小图和 35 层 decoder 图走完全相同的 emit 逻辑</li>
-          <li id="id-5" data-criterion="5"><code>compile_simple_graph_internal</code> 函数不存在</li>
+          <li id="4" data-criterion="4">无 <code>is_simple</code> 双路径分攧——1-op 小图和 35 层 decoder 图走完全相同的 emit 逻辑</li>
+          <li id="5" data-criterion="5"><code>compile_simple_graph_internal</code> 函数不存在</li>
         </ol>
       </div>
     
@@ -89,9 +89,9 @@
       <div data-criteria="">
         <h5>REQ-UMK-002 MegaKernelFn 统一 ABI — 所有编译产物使用 22 参数签名</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>entry_fn()</code> 类型统一为 <code>MegaKernelFn</code></li>
-          <li id="id-2" data-criterion="2">不存在 <code>CompiledLayerFn</code> 引用</li>
-          <li id="id-3" data-criterion="3">所有编译产物使用 22-param ABI</li>
+          <li id="1" data-criterion="1"><code>entry_fn()</code> 类型统一为 <code>MegaKernelFn</code></li>
+          <li id="2" data-criterion="2">不存在 <code>CompiledLayerFn</code> 引用</li>
+          <li id="3" data-criterion="3">所有编译产物使用 22-param ABI</li>
         </ol>
       </div>
     
@@ -123,12 +123,12 @@ Phase N: epilogue + ret</code></pre>
       <div data-criteria="">
         <h5>REQ-UMK-003 GraphTopologyAnalysis 从图拓扑推导一切 — 替代 bool 参数和前置假设</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>compile_mega_kernel_vm</code> 无硬编码 Phase 编号注释——Phase 编号替换为描述性名称（如"ABI prologue"/"outer loop setup"/"采样管线"等）</li>
-          <li id="id-2" data-criterion="2">无 <code>is_encoder</code> 参数——所有图结构属性从 <code>GraphTopologyAnalysis</code> 推导</li>
-          <li id="id-3" data-criterion="3">无 <code>lm_head</code> label 搜索逻辑——<code>grep -rn 'lm_head' src/compiler/codegen/vm/mega_kernel_emit.rs</code> 无结果（注释除外）</li>
-          <li id="id-4" data-criterion="4">无 embed→layers→lm_head 权重布局假设——权重通过 <code>named_offsets</code> 映射表寻址</li>
-          <li id="id-5" data-criterion="5">无 <code>vocab_size</code> 作为 <code>compile_mega_kernel_vm</code> 参数——从 <code>topology.vocab_size</code> 获取</li>
-          <li id="id-6" data-criterion="6">logits 重定向通过 <code>topology.logits_producer_op_idx</code> 驱动，非 label 约定</li>
+          <li id="1" data-criterion="1"><code>compile_mega_kernel_vm</code> 无硬编码 Phase 编号注释——Phase 编号替换为描述性名称（如"ABI prologue"/"outer loop setup"/"采样管线"等）</li>
+          <li id="2" data-criterion="2">无 <code>is_encoder</code> 参数——所有图结构属性从 <code>GraphTopologyAnalysis</code> 推导</li>
+          <li id="3" data-criterion="3">无 <code>lm_head</code> label 搜索逻辑——<code>grep -rn 'lm_head' src/compiler/codegen/vm/mega_kernel_emit.rs</code> 无结果（注释除外）</li>
+          <li id="4" data-criterion="4">无 embed→layers→lm_head 权重布局假设——权重通过 <code>named_offsets</code> 映射表寻址</li>
+          <li id="5" data-criterion="5">无 <code>vocab_size</code> 作为 <code>compile_mega_kernel_vm</code> 参数——从 <code>topology.vocab_size</code> 获取</li>
+          <li id="6" data-criterion="6">logits 重定向通过 <code>topology.logits_producer_op_idx</code> 驱动，非 label 约定</li>
         </ol>
       </div>
     
@@ -154,9 +154,9 @@ Phase N: epilogue + ret</code></pre>
       <div data-criteria="">
         <h5>REQ-UMK-004 SG 辅助图统一编译 — Gather/RmsNorm+Gemm 小图走同一 compile() 入口</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>grep -rn "compile_graph|InferenceCompiler::new.*compile_graph" src/semantic_gatekeeper/ src/compat/</code> 无结果</li>
-          <li id="id-2" data-criterion="2">SG 小图与完整模型走同一 <code>compile()</code> 入口</li>
-          <li id="id-3" data-criterion="3">小图编译产物使用 MegaKernelFn ABI</li>
+          <li id="1" data-criterion="1"><code>grep -rn "compile_graph|InferenceCompiler::new.*compile_graph" src/semantic_gatekeeper/ src/compat/</code> 无结果</li>
+          <li id="2" data-criterion="2">SG 小图与完整模型走同一 <code>compile()</code> 入口</li>
+          <li id="3" data-criterion="3">小图编译产物使用 MegaKernelFn ABI</li>
         </ol>
       </div>
     
@@ -178,8 +178,8 @@ Phase N: epilogue + ret</code></pre>
       <div data-criteria="">
         <h5>REQ-UMK-006 Logits 重定向至 scratchpad — 调用方从编译输出区读取结果</h5>
         <ol>
-          <li id="id-1" data-criterion="1"><code>grep -rn "logits_scratch_offset|output_tensor" src/engine/mega_kernel/</code> 有结果</li>
-          <li id="id-2" data-criterion="2">encoder 调用后从 <code>scratchpad + logits_scratch_offset</code> 读取结果</li>
+          <li id="1" data-criterion="1"><code>grep -rn "logits_scratch_offset|output_tensor" src/engine/mega_kernel/</code> 有结果</li>
+          <li id="2" data-criterion="2">encoder 调用后从 <code>scratchpad + logits_scratch_offset</code> 读取结果</li>
         </ol>
       </div>
     
@@ -263,10 +263,10 @@ pub struct CompileConfig {
       
       
       </div>
-    <div id="compileconfig-结构体定义中无-is-encoder-inference-mode-vocab-size-num-layers-hidden-字段" data-criterion="CompileConfig 结构体定义中无 is_encoder/inference_mode/vocab_size/num_layers/hidden 字段">CompileConfig 结构体定义中无 is_encoder/inference_mode/vocab_size/num_layers/hidden 字段</div><div id="vocab-size-从-opkind-argmax-vocab-size-推导-不作为-compileconfig-字段" data-criterion="vocab_size 从 OpKind::Argmax { vocab_size } 推导，不作为 CompileConfig 字段">
-vocab_size 从 OpKind::Argmax { vocab_size } 推导，不作为 CompileConfig 字段</div><div id="num-layers-从图拓扑推导-不作为-compileconfig-字段" data-criterion="num_layers 从图拓扑推导，不作为 CompileConfig 字段">num_layers 从图拓扑推导，不作为 CompileConfig 字段</div><div id="num-eos-tokens-从-opkind-checkstopcondition-推导-不作为-compileconfig-字段" data-criterion="num_eos_tokens 从 OpKind::CheckStopCondition 推导，不作为 CompileConfig 字段">num_eos_tokens 从 OpKind::CheckStopCondition 推导，不作为 CompileConfig 字段</div>
-<div id="无-lm-head-offset-lm-head-bytes-字段-权重偏移通过-named-offsets-映射表统一寻址" data-criterion="无 lm_head_offset/lm_head_bytes 字段——权重偏移通过 named_offsets 映射表统一寻址">无 lm_head_offset/lm_head_bytes 字段——权重偏移通过 named_offsets 映射表统一寻址</div><div id="结构体命名为-compileconfig-非-megakernelconfig" data-criterion="结构体命名为 CompileConfig（非 MegaKernelConfig）">结构体命名为 CompileConfig（非 MegaKernelConfig）</div><div id="grep-rn-megakernelconfig-src-无结果" data-criterion="grep -rn &quot;MegaKernelConfig&quot; src/ 无结果">
-grep -rn "MegaKernelConfig" src/ 无结果</div><div id="compileconfig-结构体中无-business-config-字段-businessconfig-已彻底分离-仅-build-阶段使用" data-criterion="CompileConfig 结构体中无 business_config 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用">CompileConfig 结构体中无 business_config 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</div><div id="debug-jit-为-compileconfig-顶层字段-从-businessconfig-提升-编译器唯一直接读取的非图推导参数" data-criterion="debug_jit 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数">
+    <div id="compileconfig-结构体定义中无-is-encoder/inference-mode/vocab-size/num-layers/hidden-字段" data-criterion="CompileConfig 结构体定义中无 is_encoder/inference_mode/vocab_size/num_layers/hidden 字段">CompileConfig 结构体定义中无 is_encoder/inference_mode/vocab_size/num_layers/hidden 字段</div><div id="vocab-size-从-opkind::argmax-{-vocab-size-}-推导，不作为-compileconfig-字段" data-criterion="vocab_size 从 OpKind::Argmax { vocab_size } 推导，不作为 CompileConfig 字段">
+vocab_size 从 OpKind::Argmax { vocab_size } 推导，不作为 CompileConfig 字段</div><div id="num-layers-从图拓扑推导，不作为-compileconfig-字段" data-criterion="num_layers 从图拓扑推导，不作为 CompileConfig 字段">num_layers 从图拓扑推导，不作为 CompileConfig 字段</div><div id="num-eos-tokens-从-opkind::checkstopcondition-推导，不作为-compileconfig-字段" data-criterion="num_eos_tokens 从 OpKind::CheckStopCondition 推导，不作为 CompileConfig 字段">num_eos_tokens 从 OpKind::CheckStopCondition 推导，不作为 CompileConfig 字段</div>
+<div id="无-lm-head-offset/lm-head-bytes-字段——权重偏移通过-named-offsets-映射表统一寻址" data-criterion="无 lm_head_offset/lm_head_bytes 字段——权重偏移通过 named_offsets 映射表统一寻址">无 lm_head_offset/lm_head_bytes 字段——权重偏移通过 named_offsets 映射表统一寻址</div><div id="结构体命名为-compileconfig（非-megakernelconfig）" data-criterion="结构体命名为 CompileConfig（非 MegaKernelConfig）">结构体命名为 CompileConfig（非 MegaKernelConfig）</div><div id="grep--rn-&quot;megakernelconfig&quot;-src/-无结果" data-criterion="grep -rn &quot;MegaKernelConfig&quot; src/ 无结果">
+grep -rn "MegaKernelConfig" src/ 无结果</div><div id="compileconfig-结构体中无-business-config-字段——businessconfig-已彻底分离，仅-build-阶段使用" data-criterion="CompileConfig 结构体中无 business_config 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用">CompileConfig 结构体中无 business_config 字段——BusinessConfig 已彻底分离，仅 BUILD 阶段使用</div><div id="debug-jit-为-compileconfig-顶层字段（从-businessconfig-提升），编译器唯一直接读取的非图推导参数" data-criterion="debug_jit 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数">
 debug_jit 为 CompileConfig 顶层字段（从 BusinessConfig 提升），编译器唯一直接读取的非图推导参数</div></section>
 
     </section><section id="ent-inference-compiler" data-entity="ENT-INFERENCE-COMPILER" data-req-ref="REQ-UMK-008 REQ-UMK-012 REQ-UMK-013 REQ-ORPHAN-448 REQ-ORPHAN-463" data-entity-model-type="relational" data-xref="REQ-UMK-008 REQ-UMK-012 REQ-UMK-013 REQ-ORPHAN-448 REQ-ORPHAN-463"><h3>InferenceCompiler </h3><table data-entity-table="InferenceCompiler"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="compile_entry" data-type="string" data-constraints="唯一编译入口，禁止 compile_graph/compile_layer/compile_encoder 等独立路径" data-required="true"><td>compile_entry</td><td>string</td><td>是</td><td>唯一编译入口，禁止 compile_graph/compile_layer/compile_encoder 等独立路径</td><td></td></tr><tr data-field="mega_kernel_fn_output" data-type="string" data-constraints="22 参数 ABI + callback slots，单次 CALL 调用" data-required="true"><td>mega_kernel_fn_output</td><td>string</td><td>是</td><td>22 参数 ABI + callback slots，单次 CALL 调用</td><td></td></tr><tr data-field="topology_analysis" data-type="string" data-constraints="从图 ops 推导一切，替代 bool 参数" data-required="true"><td>topology_analysis</td><td>string</td><td>是</td><td>从图 ops 推导一切，替代 bool 参数</td><td></td></tr><tr data-field="compiler_graph_input" data-type="string" data-constraints="编译输入，非产出" data-required="true"><td>compiler_graph_input</td><td>string</td><td>是</td><td>编译输入，非产出</td><td></td></tr><tr data-field="jit_cache_granularity" data-type="string" data-constraints="JIT 缓存粒度 = MegaKernelFn" data-required="true"><td>jit_cache_granularity</td><td>string</td><td>是</td><td>JIT 缓存粒度 = MegaKernelFn</td><td></td></tr></table></section><section id="ent-compile-config" data-entity="ENT-COMPILE-CONFIG" data-req-ref="REQ-ORPHAN-438" data-entity-model-type="relational" data-xref="REQ-ORPHAN-438"><h3>CompileConfig </h3><table data-entity-table="CompileConfig"><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="device_profile" data-type="string" data-constraints="硬件 ISA 特性 + SIMD 宽度 + 缓存拓扑，驱动指令选择" data-required="true"><td>device_profile</td><td>string</td><td>是</td><td>硬件 ISA 特性 + SIMD 宽度 + 缓存拓扑，驱动指令选择</td><td></td></tr><tr data-field="compute_profile" data-type="string" data-constraints="计算策略选择（量化/GEMV/GEMM 策略）" data-required="true"><td>compute_profile</td><td>string</td><td>是</td><td>计算策略选择（量化/GEMV/GEMM 策略）</td><td></td></tr><tr data-field="max_seq_len" data-type="integer" data-constraints="max_seq_len 等 SymDim 上界，仅用于 buffer 分配" data-required="true"><td>max_seq_len</td><td>integer</td><td>是</td><td>max_seq_len 等 SymDim 上界，仅用于 buffer 分配</td><td></td></tr><tr data-field="hook_config" data-type="string" data-constraints="SG/hook 配置等编译参数" data-required="false"><td>hook_config</td><td>string</td><td>否</td><td>SG/hook 配置等编译参数</td><td></td></tr><tr data-field="output_mode" data-type="string" data-constraints="BUILD 阶段参数，禁止传入 COMPILE" data-required="false"><td>output_mode</td><td>string</td><td>否</td><td>BUILD 阶段参数，禁止传入 COMPILE</td><td></td></tr></table></section><section id="req-lower-totality-001" data-req="REQ-LOWER-TOTALITY-001" data-req-status="approved" data-req-domain="lower-totality" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-LOWER-TOTALITY-001 Lowering Totality 编译时门控</h3><p>Lowering Totality 编译时门控标准：

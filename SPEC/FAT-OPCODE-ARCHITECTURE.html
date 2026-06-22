@@ -560,7 +560,7 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 <section id="artifact-dataflow" data-artifact-type="dataflow" data-section="13">
 <h2>13. Dataflow 定义（编译数据流）</h2>
 
-<section id="df-fatop-001" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-FATOP-001" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-001: Op 直接构造 → CompilerOp.op（OpKind 已删除）</h3>
+<section id="df-fatop-001" data-flow-from="API-LOADER-LOAD" data-flow-to="API-UMK-COMPILE" data-dataflow="DF-FATOP-001" data-dataflow-dimension="technical" data-dataflow-direction="sync"><h3>DF-FATOP-001: Op 直接构造 → CompilerOp.op（OpKind 已删除）</h3>
 <p>BUILD 阶段直接构造 Op，add_op(op: Op) 存储 CompilerOp.op。不再经过 OpKind → from_op_kind 翻译。KvSource 由 features.family 策略选择。</p>
 <div data-dataflow-contract="">
 <h4>契约</h4>
@@ -575,7 +575,7 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "@context": "https://spec.example.com/dataflow",
   "@type": "Dataflow",
   "id": "DF-FATOP-001",
-  "from": "API-WEIGHT-LOADER",
+  "from": "API-LOADER-LOAD",
   "to": "API-UMK-COMPILE"
 }</script></section>
 
@@ -616,12 +616,12 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "id": "DF-FATOP-003",
   "from": "API-VMINSTR",
   "to": "API-EXECUTOR-FORWARD"
-}</script><section id="df-tech-004" data-flow-from="API-WEIGHT-LOADER" data-flow-to="API-CLIENT-BUILD" data-dataflow="DF-TECH-004" data-dataflow-dimension="technical"><script type="application/ld+json">{
+}</script><section id="df-tech-004" data-flow-from="API-LOADER-LOAD" data-flow-to="API-CLIENT-BUILD" data-dataflow="DF-TECH-004" data-dataflow-dimension="technical"><script type="application/ld+json">{
   "@type": "Dataflow",
   "id": "DF-TECH-004",
   "title": "Weight Loading → Client Build (Technical)",
   "dimension": "technical",
-  "from": "API-WEIGHT-LOADER",
+  "from": "API-LOADER-LOAD",
   "to": "API-CLIENT-BUILD"
 }</script></section><section id="df-tech-005" data-flow-from="API-CLIENT-GENERATE" data-flow-to="API-EXECUTOR-FORWARD" data-dataflow="DF-TECH-005" data-dataflow-dimension="technical"><script type="application/ld+json">{
   "@type": "Dataflow",
@@ -738,12 +738,12 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
   "id": "DEC-FATOP-002",
   "context": "FAT-OPCODE Phase 1-8 建立了双 IR (OpKind + Op)，from_op_kind 作为翻译桥。Phase 9 将 Op 物理删除 OpKind，收敛到单一 IR。",
   "rationale": "1. from_op_kind 翻译层是临时基础设施，完成使命后应删除\n2. 双 IR 增加维护成本，每次新增 Op 需同步维护 OpKind + from_op_kind\n3. 兼容层违反用户 \"不需要向后兼容\" 的明确决策\n4. add_op_with_op 双参数 API 比单参数更复杂，迁移后简化"
-}</script></section><section id="cf-fatop-001" data-controlflow="CF-FATOP-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="API-WEIGHT-LOADER" data-controlflow-target="API-UMK-COMPILE"><script type="application/ld+json">{
+}</script></section><section id="cf-fatop-001" data-controlflow="CF-FATOP-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="API-LOADER-LOAD" data-controlflow-target="API-UMK-COMPILE"><script type="application/ld+json">{
   "@type": "Controlflow",
   "id": "CF-FATOP-001",
   "title": "Load → Op Construction Control",
   "dimension": "technical",
-  "from": "API-WEIGHT-LOADER",
+  "from": "API-LOADER-LOAD",
   "to": "API-UMK-COMPILE"
 }</script></section><section id="cf-fatop-002" data-controlflow="CF-FATOP-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="API-UMK-COMPILE" data-controlflow-target="API-VMINSTR"><script type="application/ld+json">{
   "@type": "Controlflow",

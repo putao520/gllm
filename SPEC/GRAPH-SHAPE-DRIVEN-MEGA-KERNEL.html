@@ -466,18 +466,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">LoweringContext.dtype 字段存在且类型为 QuantPrecision，从 graph_dtype(graph) 自动推断（context.inc.rs:101 graph_dtype 函数）</li>
-<li id="id-2" data-criterion="2">dtype 传播链完整：graph.tensors[0].dtype.to_quant_precision() → graph_dtype() → ctx.dtype → emit_*(ctx) → VmInstr{dtype: ctx.dtype}</li>
-<li id="id-3" data-criterion="3">所有 emit_* 函数通过 ctx.dtype 读取 dtype，dispatch_emit.rs 中无 QuantPrecision::F32 硬编码（仅 .unwrap_or(F32) 用于零输入 tensor 安全回退）</li>
-<li id="id-4" data-criterion="4">graph_dtype() 推断方向严格单向：从 graph.tensors.first().dtype 推导，禁止反向推断</li>
-<li id="id-5" data-criterion="5">x86_lower/lower_instr.inc.rs 使用 dtype.x86_elem_strategy() 选择指令，非身份匹配 match dtype</li></ol>
+        <ol><li id="1" data-criterion="1">LoweringContext.dtype 字段存在且类型为 QuantPrecision，从 graph_dtype(graph) 自动推断（context.inc.rs:101 graph_dtype 函数）</li>
+<li id="2" data-criterion="2">dtype 传播链完整：graph.tensors[0].dtype.to_quant_precision() → graph_dtype() → ctx.dtype → emit_*(ctx) → VmInstr{dtype: ctx.dtype}</li>
+<li id="3" data-criterion="3">所有 emit_* 函数通过 ctx.dtype 读取 dtype，dispatch_emit.rs 中无 QuantPrecision::F32 硬编码（仅 .unwrap_or(F32) 用于零输入 tensor 安全回退）</li>
+<li id="4" data-criterion="4">graph_dtype() 推断方向严格单向：从 graph.tensors.first().dtype 推导，禁止反向推断</li>
+<li id="5" data-criterion="5">x86_lower/lower_instr.inc.rs 使用 dtype.x86_elem_strategy() 选择指令，非身份匹配 match dtype</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -486,8 +486,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -515,18 +515,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">plan_lower/context.inc.rs 中所有 emit_* 函数签名使用 ctx: &amp;LoweringContext 参数，内部通过 ctx.dtype 读取 dtype</li>
-<li id="id-2" data-criterion="2">emit_gemm_naive_inline 等函数签名已从 (prog, m, n, k, width, a, b, c, sym_map, seq_bound) 变更为 (prog, m, n, k, ctx, a, b, c, seq_bound)，内部用 ctx.dtype 替代硬编码 QuantPrecision::F32</li>
-<li id="id-3" data-criterion="3">dispatch_emit.rs 中 ctx.dtype 出现 30+ 处透传，包括 emit_rmsnorm/emit_softmax/emit_rope/emit_gemm 等，无内部硬编码路径</li>
-<li id="id-4" data-criterion="4">ctx.dtype.elem_bytes() 用于 vocab_bytes、kv_row_stride 等大小计算，替代硬编码 4 (F32 bytes)</li>
-<li id="id-5" data-criterion="5">VmInstr 构造时 dtype 字段统一从 ctx.dtype 读取（如 VecNarrow{dst_dtype: dtype, src_dtype: acc_dtype}）</li></ol>
+        <ol><li id="1" data-criterion="1">plan_lower/context.inc.rs 中所有 emit_* 函数签名使用 ctx: &amp;LoweringContext 参数，内部通过 ctx.dtype 读取 dtype</li>
+<li id="2" data-criterion="2">emit_gemm_naive_inline 等函数签名已从 (prog, m, n, k, width, a, b, c, sym_map, seq_bound) 变更为 (prog, m, n, k, ctx, a, b, c, seq_bound)，内部用 ctx.dtype 替代硬编码 QuantPrecision::F32</li>
+<li id="3" data-criterion="3">dispatch_emit.rs 中 ctx.dtype 出现 30+ 处透传，包括 emit_rmsnorm/emit_softmax/emit_rope/emit_gemm 等，无内部硬编码路径</li>
+<li id="4" data-criterion="4">ctx.dtype.elem_bytes() 用于 vocab_bytes、kv_row_stride 等大小计算，替代硬编码 4 (F32 bytes)</li>
+<li id="5" data-criterion="5">VmInstr 构造时 dtype 字段统一从 ctx.dtype 读取（如 VecNarrow{dst_dtype: dtype, src_dtype: acc_dtype}）</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -535,8 +535,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -562,18 +562,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">fusion_group_emit.rs 中融合组内相邻算子 dtype 相同时零变换直传，group_dep.rs 中 FusionGroup.dominant_dtype 字段追踪融合组 dtype</li>
-<li id="id-2" data-criterion="2">widening 边界（BF16→F32）：在 GEMM 内部 load 时完成（VDPBF16PS/BF16→F32 widen），无额外 pack/transform</li>
-<li id="id-3" data-criterion="3">narrowing 边界（F32→BF16）：仅在 Epilogue 最后一步完成（gemm_emit.rs:204 needs_narrowing_from + VecNarrow），无中间变换</li>
-<li id="id-4" data-criterion="4">量化边界（F32/BF16→INT8/INT4）：仅在量化算子入口发生，算子间中间值保持原生 dtype</li>
-<li id="id-5" data-criterion="5">融合组内禁止 widen→compute→narrow→widen 链，group_dep.rs 中融合决策检查此约束</li></ol>
+        <ol><li id="1" data-criterion="1">fusion_group_emit.rs 中融合组内相邻算子 dtype 相同时零变换直传，group_dep.rs 中 FusionGroup.dominant_dtype 字段追踪融合组 dtype</li>
+<li id="2" data-criterion="2">widening 边界（BF16→F32）：在 GEMM 内部 load 时完成（VDPBF16PS/BF16→F32 widen），无额外 pack/transform</li>
+<li id="3" data-criterion="3">narrowing 边界（F32→BF16）：仅在 Epilogue 最后一步完成（gemm_emit.rs:204 needs_narrowing_from + VecNarrow），无中间变换</li>
+<li id="4" data-criterion="4">量化边界（F32/BF16→INT8/INT4）：仅在量化算子入口发生，算子间中间值保持原生 dtype</li>
+<li id="5" data-criterion="5">融合组内禁止 widen→compute→narrow→widen 链，group_dep.rs 中融合决策检查此约束</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -582,8 +582,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -607,18 +607,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">LayoutNegotiator（layout_negotiator.rs）收集每个加速指令的 (dtype, layout_preference) 对，OpLayoutAssignment 结构包含 dtype 信息</li>
-<li id="id-2" data-criterion="2">LayoutAssignment 结构（layout_negotiator.rs:84）按融合组分配 GroupLayoutAssignment，其中 op_layouts: HashMap&lt;OpId, OpLayoutAssignment&gt; 包含 dtype</li>
-<li id="id-3" data-criterion="3">相同 dtype + 相同布局 → 零变换（buffer_alloc.rs:339 布局感知对齐跳过相同布局）</li>
-<li id="id-4" data-criterion="4">相同 dtype + 不同布局 → PackMap 虚拟索引（virtual_tensor.rs:146 消费 LayoutAssignment，无物理 pack）</li>
-<li id="id-5" data-criterion="5">不同 dtype → 在自然搬运点零成本切换（GEMM 累加器写回时顺便窄化），协商器不引入仅因 dtype 不同的额外 pack 操作</li></ol>
+        <ol><li id="1" data-criterion="1">LayoutNegotiator（layout_negotiator.rs）收集每个加速指令的 (dtype, layout_preference) 对，OpLayoutAssignment 结构包含 dtype 信息</li>
+<li id="2" data-criterion="2">LayoutAssignment 结构（layout_negotiator.rs:84）按融合组分配 GroupLayoutAssignment，其中 op_layouts: HashMap&lt;OpId, OpLayoutAssignment&gt; 包含 dtype</li>
+<li id="3" data-criterion="3">相同 dtype + 相同布局 → 零变换（buffer_alloc.rs:339 布局感知对齐跳过相同布局）</li>
+<li id="4" data-criterion="4">相同 dtype + 不同布局 → PackMap 虚拟索引（virtual_tensor.rs:146 消费 LayoutAssignment，无物理 pack）</li>
+<li id="5" data-criterion="5">不同 dtype → 在自然搬运点零成本切换（GEMM 累加器写回时顺便窄化），协商器不引入仅因 dtype 不同的额外 pack 操作</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -627,8 +627,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -648,18 +648,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">GEMM 累加器 dtype 由 (输入 dtype × 硬件能力) 联合决定：BF16+AVX512→F32累加（VDPBF16PS）、BF16+AVX2→F32 widen、BF16+GPU tensor core→F32累加（wgmma）、F32→F32 直通</li>
-<li id="id-2" data-criterion="2">累加 dtype 通过 dtype.x86_elem_strategy() / dtype.gpu_elem_strategy() 属性方法决定（trace.rs:1089/1138），禁止 match dtype { BF16 =&gt; ..., F32 =&gt; ... } 身份匹配</li>
-<li id="id-3" data-criterion="3">X86ElemStrategy 枚举包含 Native/WidenCompute/Unsupported 三种策略，BF16→WidenCompute、F32→Native（trace.rs:1089-1113）</li>
-<li id="id-4" data-criterion="4">累加器 dtype 传播到 Epilogue：gemm_emit.rs 中 acc_dtype 通过 dtype.x86_elem_strategy() 推导，Epilogue 链在累加 dtype 下执行</li>
-<li id="id-5" data-criterion="5">量化路径（INT8/INT4）走 Dequant→F32 累加，由 lower_qtap_stg() 内部处理</li></ol>
+        <ol><li id="1" data-criterion="1">GEMM 累加器 dtype 由 (输入 dtype × 硬件能力) 联合决定：BF16+AVX512→F32累加（VDPBF16PS）、BF16+AVX2→F32 widen、BF16+GPU tensor core→F32累加（wgmma）、F32→F32 直通</li>
+<li id="2" data-criterion="2">累加 dtype 通过 dtype.x86_elem_strategy() / dtype.gpu_elem_strategy() 属性方法决定（trace.rs:1089/1138），禁止 match dtype { BF16 =&gt; ..., F32 =&gt; ... } 身份匹配</li>
+<li id="3" data-criterion="3">X86ElemStrategy 枚举包含 Native/WidenCompute/Unsupported 三种策略，BF16→WidenCompute、F32→Native（trace.rs:1089-1113）</li>
+<li id="4" data-criterion="4">累加器 dtype 传播到 Epilogue：gemm_emit.rs 中 acc_dtype 通过 dtype.x86_elem_strategy() 推导，Epilogue 链在累加 dtype 下执行</li>
+<li id="5" data-criterion="5">量化路径（INT8/INT4）走 Dequant→F32 累加，由 lower_qtap_stg() 内部处理</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -668,8 +668,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -797,18 +797,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">gemm_emit.rs 中 Epilogue 写回阶段使用 VecNarrow 指令将累加器 dtype 窄化为存储 dtype（行 204: needs_narrowing_from + 行 281: VecNarrow{dst_dtype, src_dtype}）</li>
-<li id="id-2" data-criterion="2">窄化仅发生在 Epilogue 链最末端：needs_narrowing_from(dtype, acc_dtype) 判定后，在最终 VecStore 前插入 VecNarrow</li>
-<li id="id-3" data-criterion="3">Epilogue 内部所有算子在累加 dtype 下执行，零中间变换（gemm_emit.rs:279-282 仅在 store 前一步 narrow）</li>
-<li id="id-4" data-criterion="4">needs_narrowing_from() 属性方法（trace.rs:1082）替代手写 match，BF16 存储从 F32 累加需窄化、F32 存储从 F32 不需窄化</li>
-<li id="id-5" data-criterion="5">gemm_emit.rs:878 对 AMX 路径同样使用 needs_narrow 判定 + VecNarrow，保持与 VNNI 路径一致的窄化策略</li></ol>
+        <ol><li id="1" data-criterion="1">gemm_emit.rs 中 Epilogue 写回阶段使用 VecNarrow 指令将累加器 dtype 窄化为存储 dtype（行 204: needs_narrowing_from + 行 281: VecNarrow{dst_dtype, src_dtype}）</li>
+<li id="2" data-criterion="2">窄化仅发生在 Epilogue 链最末端：needs_narrowing_from(dtype, acc_dtype) 判定后，在最终 VecStore 前插入 VecNarrow</li>
+<li id="3" data-criterion="3">Epilogue 内部所有算子在累加 dtype 下执行，零中间变换（gemm_emit.rs:279-282 仅在 store 前一步 narrow）</li>
+<li id="4" data-criterion="4">needs_narrowing_from() 属性方法（trace.rs:1082）替代手写 match，BF16 存储从 F32 累加需窄化、F32 存储从 F32 不需窄化</li>
+<li id="5" data-criterion="5">gemm_emit.rs:878 对 AMX 路径同样使用 needs_narrow 判定 + VecNarrow，保持与 VNNI 路径一致的窄化策略</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -817,8 +817,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -933,18 +933,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">safetensors.rs 中 ggml_dtype() 方法（行 633）保留量化 tensor 的 GgmlDType 元数据（MXFP4/AWQ4/GPTQ4/NVFP4），不转换为 F32</li>
-<li id="id-2" data-criterion="2">Loader fragments/types.inc.rs 中 LoadedWeights.ggml_dtype 字段（行 14）保留每个 tensor 的原始 GgmlDType</li>
-<li id="id-3" data-criterion="3">浮点 tensor（BF16/F16/F32）保留 raw bytes 不转换，量化 tensor 保留 raw bytes + GgmlDType 元数据</li>
-<li id="id-4" data-criterion="4">仅以下 3 种场景允许 dtype 转换：GGUF 量化→JIT 时 dequant（GEMM load 微内核内）、BF16 权重→F32 累加（VDPBF16PS 指令内）、累加结果→存储写回（Epilogue 最后一步）</li>
-<li id="id-5" data-criterion="5">grep -rn "convert_to_f32|convert_tensor_to_f32" src/loader/ 在非测试代码中无结果，证明禁止加载时无条件转换到 F32</li></ol>
+        <ol><li id="1" data-criterion="1">safetensors.rs 中 ggml_dtype() 方法（行 633）保留量化 tensor 的 GgmlDType 元数据（MXFP4/AWQ4/GPTQ4/NVFP4），不转换为 F32</li>
+<li id="2" data-criterion="2">Loader fragments/types.inc.rs 中 LoadedWeights.ggml_dtype 字段（行 14）保留每个 tensor 的原始 GgmlDType</li>
+<li id="3" data-criterion="3">浮点 tensor（BF16/F16/F32）保留 raw bytes 不转换，量化 tensor 保留 raw bytes + GgmlDType 元数据</li>
+<li id="4" data-criterion="4">仅以下 3 种场景允许 dtype 转换：GGUF 量化→JIT 时 dequant（GEMM load 微内核内）、BF16 权重→F32 累加（VDPBF16PS 指令内）、累加结果→存储写回（Epilogue 最后一步）</li>
+<li id="5" data-criterion="5">grep -rn "convert_to_f32|convert_tensor_to_f32" src/loader/ 在非测试代码中无结果，证明禁止加载时无条件转换到 F32</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -953,8 +953,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -967,18 +967,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">CompilerGraph 中每个 tensor 的 dtype 来自 Loader 的 TensorMeta.dtype，graph_dtype() 函数（context.inc.rs:101）从 graph.tensors.first().dtype.to_quant_precision() 推导</li>
-<li id="id-2" data-criterion="2">auto_graph::build_compiler_graph() 不使用全局 config.dtype 覆盖 per-tensor dtype，gllm/src/arch/auto_graph.rs 通过 DType 传入</li>
-<li id="id-3" data-criterion="3">每个 add_tensor_*() 调用使用该 tensor 在 Loader 中的实际 dtype，图构建时不做 dtype 转换</li>
-<li id="id-4" data-criterion="4">graph_dtype() 在 graph.tensors 为空时使用 .unwrap_or(QuantPrecision::F32) 安全回退，这是唯一合法的 F32 默认值</li>
-<li id="id-5" data-criterion="5">CompilerGraph.tensor(op.inputs[0]).dtype 传播链完整：Loader→TensorMeta.dtype→CompilerGraph tensor→graph_dtype()→LoweringContext.dtype</li></ol>
+        <ol><li id="1" data-criterion="1">CompilerGraph 中每个 tensor 的 dtype 来自 Loader 的 TensorMeta.dtype，graph_dtype() 函数（context.inc.rs:101）从 graph.tensors.first().dtype.to_quant_precision() 推导</li>
+<li id="2" data-criterion="2">auto_graph::build_compiler_graph() 不使用全局 config.dtype 覆盖 per-tensor dtype，gllm/src/arch/auto_graph.rs 通过 DType 传入</li>
+<li id="3" data-criterion="3">每个 add_tensor_*() 调用使用该 tensor 在 Loader 中的实际 dtype，图构建时不做 dtype 转换</li>
+<li id="4" data-criterion="4">graph_dtype() 在 graph.tensors 为空时使用 .unwrap_or(QuantPrecision::F32) 安全回退，这是唯一合法的 F32 默认值</li>
+<li id="5" data-criterion="5">CompilerGraph.tensor(op.inputs[0]).dtype 传播链完整：Loader→TensorMeta.dtype→CompilerGraph tensor→graph_dtype()→LoweringContext.dtype</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -987,8 +987,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -1003,18 +1003,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">MegaKernelWeightLayout 通过 graph.weight_layout() 获取每个 tensor 的精确偏移（mega_kernel_abi.rs 测试用例验证：weight_layout_build_symmetric_qkv 等）</li>
-<li id="id-2" data-criterion="2">graph.weight_layout() 内部按 per-tensor dtype.size_bytes() 计算偏移，不同 dtype tensor（Norm F32 vs GEMM BF16）各自 size_bytes() 正确排列</li>
-<li id="id-3" data-criterion="3">GraphDerivedGeometry 不承担权重 dtype 责任，权重偏移从 graph.weight_layout() 直接派生（compiler/mod.rs:659）</li>
-<li id="id-4" data-criterion="4">权重 blob 中不同 dtype tensor 按各自 size_bytes() 排列，Norm 权重（通常 F32）与 GEMM 权重（可能 BF16）偏移各自正确</li>
-<li id="id-5" data-criterion="5">mega_kernel_abi.rs 测试覆盖：weight_layout_gqa_smaller_kv / weight_layout_layer_base_offset / weight_layout_total_bytes_consistent 验证 per-tensor dtype 偏移</li></ol>
+        <ol><li id="1" data-criterion="1">MegaKernelWeightLayout 通过 graph.weight_layout() 获取每个 tensor 的精确偏移（mega_kernel_abi.rs 测试用例验证：weight_layout_build_symmetric_qkv 等）</li>
+<li id="2" data-criterion="2">graph.weight_layout() 内部按 per-tensor dtype.size_bytes() 计算偏移，不同 dtype tensor（Norm F32 vs GEMM BF16）各自 size_bytes() 正确排列</li>
+<li id="3" data-criterion="3">GraphDerivedGeometry 不承担权重 dtype 责任，权重偏移从 graph.weight_layout() 直接派生（compiler/mod.rs:659）</li>
+<li id="4" data-criterion="4">权重 blob 中不同 dtype tensor 按各自 size_bytes() 排列，Norm 权重（通常 F32）与 GEMM 权重（可能 BF16）偏移各自正确</li>
+<li id="5" data-criterion="5">mega_kernel_abi.rs 测试覆盖：weight_layout_gqa_smaller_kv / weight_layout_layer_base_offset / weight_layout_total_bytes_consistent 验证 per-tensor dtype 偏移</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -1023,8 +1023,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -1043,18 +1043,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">MegaKernelBufferLayout 使用 compute_dtype 计算 activation / logits / sampling 大小（mega_kernel_abi.rs:from_graph_geometry）</li>
-<li id="id-2" data-criterion="2">compute_dtype 由 (TensorMeta.dtype, DeviceProfile) 推导非硬编码：BF16+AVX512→F32、BF16+GPU tensor core→F32、BF16+AMX→F32、F32+任意→F32、量化→F32</li>
-<li id="id-3" data-criterion="3">GraphDerivedGeometry.compute_dtype 字段（graph_geometry.rs:26）从 storage_dtype 推导，graph_geometry.rs:127 compute_dtype = storage_dtype</li>
-<li id="id-4" data-criterion="4">compute_dtype 是编译时确定的常量，SPEC 不硬编码为 F32——F32 是当前所有硬件路径的实际结果，但推导逻辑允许未来演进</li>
-<li id="id-5" data-criterion="5">mega_kernel_abi.rs 测试覆盖：buffer_layout_activation_ping_pong / buffer_layout_logits_after_activations / buffer_layout_sampling_after_logits / buffer_layout_total_scratchpad 验证 compute_dtype 驱动的 buffer 大小</li></ol>
+        <ol><li id="1" data-criterion="1">MegaKernelBufferLayout 使用 compute_dtype 计算 activation / logits / sampling 大小（mega_kernel_abi.rs:from_graph_geometry）</li>
+<li id="2" data-criterion="2">compute_dtype 由 (TensorMeta.dtype, DeviceProfile) 推导非硬编码：BF16+AVX512→F32、BF16+GPU tensor core→F32、BF16+AMX→F32、F32+任意→F32、量化→F32</li>
+<li id="3" data-criterion="3">GraphDerivedGeometry.compute_dtype 字段（graph_geometry.rs:26）从 storage_dtype 推导，graph_geometry.rs:127 compute_dtype = storage_dtype</li>
+<li id="4" data-criterion="4">compute_dtype 是编译时确定的常量，SPEC 不硬编码为 F32——F32 是当前所有硬件路径的实际结果，但推导逻辑允许未来演进</li>
+<li id="5" data-criterion="5">mega_kernel_abi.rs 测试覆盖：buffer_layout_activation_ping_pong / buffer_layout_logits_after_activations / buffer_layout_sampling_after_logits / buffer_layout_total_scratchpad 验证 compute_dtype 驱动的 buffer 大小</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -1063,8 +1063,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -1077,18 +1077,18 @@
     
       <div data-criteria="">
         <h5>验收标准</h5>
-        <ol><li id="id-1" data-criterion="1">GraphDerivedGeometry.compute_dtype 语义演化为 compute_dtype（graph_geometry.rs:26），来自 graph 输入 tensor 的 dtype 但经过 DeviceProfile 提升</li>
-<li id="id-2" data-criterion="2">compute_dtype 仅用于 buffer sizing 和 scratchpad 计算（mega_kernel_abi.rs from_graph_geometry 使用 geo.compute_dtype 计算 buffer 大小）</li>
-<li id="id-3" data-criterion="3">权重偏移计算不依赖此字段，改用 graph.weight_layout() 直接派生（compiler/mod.rs:659 graph.weight_layout()）</li>
-<li id="id-4" data-criterion="4">实现权重布局与 activation 布局的 dtype 职责分离：weight_layout 按 per-tensor dtype.size_bytes()、buffer_layout 按 compute_dtype</li>
-<li id="id-5" data-criterion="5">graph_geometry.rs 测试验证：from_graph 测试中 geo.compute_dtype 正确推导（BF16 graph→F32 compute_dtype），且不影响权重偏移计算</li></ol>
+        <ol><li id="1" data-criterion="1">GraphDerivedGeometry.compute_dtype 语义演化为 compute_dtype（graph_geometry.rs:26），来自 graph 输入 tensor 的 dtype 但经过 DeviceProfile 提升</li>
+<li id="2" data-criterion="2">compute_dtype 仅用于 buffer sizing 和 scratchpad 计算（mega_kernel_abi.rs from_graph_geometry 使用 geo.compute_dtype 计算 buffer 大小）</li>
+<li id="3" data-criterion="3">权重偏移计算不依赖此字段，改用 graph.weight_layout() 直接派生（compiler/mod.rs:659 graph.weight_layout()）</li>
+<li id="4" data-criterion="4">实现权重布局与 activation 布局的 dtype 职责分离：weight_layout 按 per-tensor dtype.size_bytes()、buffer_layout 按 compute_dtype</li>
+<li id="5" data-criterion="5">graph_geometry.rs 测试验证：from_graph 测试中 geo.compute_dtype 正确推导（BF16 graph→F32 compute_dtype），且不影响权重偏移计算</li></ol>
       </div>
     
       <div data-entity-api-xrefs="">
       
       
-      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
-      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="../GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
+      <a data-xref-type="entity" data-xref-id="ent-trace-op" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-trace-op">ENT-TRACE-OP
+      <a data-xref-type="entity" data-xref-id="ent-vm-instr" href="./GRAPH-SHAPE-DRIVEN-MEGA-KERNEL#ent-vm-instr">ENT-VM-INSTR
       
       
       </a></a></div>
@@ -1097,8 +1097,8 @@
       <div id="dtype-从-tensormeta-自动推断" data-criterion="dtype 从 TensorMeta 自动推断">dtype 从 TensorMeta 自动推断</div>
       <div id="jit-编译时根据-dtype-生成特化机器码" data-criterion="JIT 编译时根据 dtype 生成特化机器码">JIT 编译时根据 dtype 生成特化机器码</div>
       <div id="运行时零-dtype-分支" data-criterion="运行时零 dtype 分支">运行时零 dtype 分支</div>
-      <div id="dtype-传播链完整-tensormeta-traceop-vminstr-isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
-      <div id="编译通过-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
+      <div id="dtype-传播链完整:-tensormeta→traceop→vminstr→isa-lowering" data-criterion="dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering">dtype 传播链完整: TensorMeta→TraceOp→VmInstr→ISA lowering</div>
+      <div id="编译通过:-cargo-check" data-criterion="编译通过: cargo check">编译通过: cargo check</div>
       
     </section>
 
@@ -4867,7 +4867,7 @@ fma_third_operand<td>number</td><td>否</td><td>ValueId, FMA 加数</td><td>Fma(
       <h3>接口契约</h3>
       
     </section>
-<section id="api-dtype" data-api="POST /internal/dtype/compile" data-req-ref="REQ-BC-DTYPE-001 REQ-BC-DTYPE-002 REQ-DTYPE-CHAIN-006 REQ-DTYPE-CHAIN-007 REQ-KERNELS-GPU-001" data-api-name="API-DTYPE" data-api-type="internal" data-xref="REQ-BC-DTYPE-001 REQ-BC-DTYPE-002 REQ-DTYPE-CHAIN-006 REQ-DTYPE-CHAIN-007 REQ-KERNELS-GPU-001"><h4>POST /internal/dtype/compile — dtype-aware JIT compile</h4><p>编译时 dtype 感知接口，dtype 从模型 TensorMeta 自动推断，JIT 编译时生成特化机器码，运行时零分支。传播链：TensorMeta.dtype → QuantPrecision → VmInstr.dtype → ISA lowering。禁止硬编码 F32。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="DtypeCompileResult"><td>200</td><td>成功</td><td>DtypeCompileResult</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section></main>
+<section id="API-DTYPE-COMPILE" data-api="POST /internal/dtype/compile" data-req-ref="REQ-BC-DTYPE-001 REQ-BC-DTYPE-002 REQ-DTYPE-CHAIN-006 REQ-DTYPE-CHAIN-007 REQ-KERNELS-GPU-001" data-api-name="API-DTYPE-COMPILE" data-api-type="internal" data-xref="REQ-BC-DTYPE-001 REQ-BC-DTYPE-002 REQ-DTYPE-CHAIN-006 REQ-DTYPE-CHAIN-007 REQ-KERNELS-GPU-001"><h4>POST /internal/dtype/compile — dtype-aware JIT compile</h4><p>编译时 dtype 感知接口，dtype 从模型 TensorMeta 自动推断，JIT 编译时生成特化机器码，运行时零分支。传播链：TensorMeta.dtype → QuantPrecision → VmInstr.dtype → ISA lowering。禁止硬编码 F32。</p><table data-api-params=""><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></table><table data-api-response=""><tr><th>状态码</th><th>说明</th><th>Schema</th></tr><tr data-status="200" data-schema="DtypeCompileResult"><td>200</td><td>成功</td><td>DtypeCompileResult</td></tr></table><table data-api-request-body=""><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></table><script type="application/ld+json">{"@type":"ApiResponse","schema":"Result"}</script></section></main>
   <footer data-spec-footer="">
     <address data-spec-ssot="">SSOT 定义者：GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.html</address>
   </footer>
