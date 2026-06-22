@@ -266,6 +266,420 @@ impl Default for MoeDistributedConfig {
     }
 }
 
+// ── CommHandleWrapper (REQ-DIST-001) ────────────────────────────────────────
+
+/// CommHandleWrapper — NCCL 通信句柄封装 (REQ-DIST-001)
+///
+/// Layer 0 基础设施：封装 gllm-nccl `CommHandle`，提供 AllReduce/ReduceScatter/AllGather
+/// 的类型安全调用接口。
+///
+/// - 单机模式 (world_size == 1): `inner` 为 None，所有集合操作立即返回 Ok(())。
+/// - 分布式模式 (world_size > 1): 需调用 `init_nccl()` 初始化实际 NCCL 通信句柄，
+///   之后集合操作通过 `CommHandle` 执行。
+#[cfg(feature = "nccl")]
+pub struct CommHandleWrapper {
+    rank: u32,
+    world_size: u32,
+    /// 实际 NCCL 通信句柄（lazy init，分布式模式下通过 `init_nccl()` 注入）
+    inner: Option<gllm_nccl::CommHandle>,
+}
+
+#[cfg(feature = "nccl")]
+impl std::fmt::Debug for CommHandleWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommHandleWrapper")
+            .field("rank", &self.rank)
+            .field("world_size", &self.world_size)
+            .field("inner", &self.inner.as_ref().map(|_| "CommHandle(..)"))
+            .finish()
+    }
+}
+
+#[cfg(feature = "nccl")]
+impl CommHandleWrapper {
+    /// Create a CommHandleWrapper from a validated ParallelConfig.
+    ///
+    /// Single-node mode (world_size == 1): no NCCL init needed, only record config.
+    /// Multi-node mode (world_size > 1): marked as distributed for later AllReduce routing.
+    /// Call `init_nccl()` to initialize the actual NCCL communicator.
+    pub fn from_config(config: &ParallelConfig) -> Result<Self, DistributedConfigError> {
+        if !config.validate() {
+            return Err(DistributedConfigError::InvalidParallelConfig);
+        }
+        Ok(Self {
+            rank: config.rank,
+            world_size: config.world_size,
+            inner: None,
+        })
+    }
+
+    /// Initialize the NCCL communicator from the unique_id in ParallelConfig.
+    ///
+    /// Must be called on all ranks simultaneously. After this, `inner` holds a real
+    /// `gllm_nccl::CommHandle` and collective operations will use it.
+    ///
+    /// If `unique_id` is empty, generates a new one (only valid for single-process testing).
+    pub fn init_nccl(&mut self) -> Result<(), DistributedConfigError> {
+        if self.inner.is_some() {
+            return Ok(());
+        }
+        let unique_id = gllm_nccl::get_unique_id()
+            .map_err(|e| DistributedConfigError::CommInitFailed(format!("{:?}", e)))?;
+        let handle = gllm_nccl::comm_init_rank(&unique_id, self.rank as usize, self.world_size as usize)
+            .map_err(|e| DistributedConfigError::CommInitFailed(format!("{:?}", e)))?;
+        self.inner = Some(handle);
+        Ok(())
+    }
+
+    /// Initialize the NCCL communicator from a pre-distributed UniqueId.
+    ///
+    /// Use this when the unique_id was generated on rank 0 and broadcast
+    /// to all other ranks out-of-band.
+    pub fn init_nccl_with_unique_id(
+        &mut self,
+        unique_id: &gllm_nccl::UniqueId,
+    ) -> Result<(), DistributedConfigError> {
+        if self.inner.is_some() {
+            return Ok(());
+        }
+        let handle = gllm_nccl::comm_init_rank(unique_id, self.rank as usize, self.world_size as usize)
+            .map_err(|e| DistributedConfigError::CommInitFailed(format!("{:?}", e)))?;
+        self.inner = Some(handle);
+        Ok(())
+    }
+
+    /// Inject an already-initialized CommHandle (e.g., from gllm-kernels GPU init).
+    pub fn set_comm_handle(&mut self, handle: gllm_nccl::CommHandle) {
+        self.inner = Some(handle);
+    }
+
+    /// Whether the NCCL communicator has been initialized.
+    pub fn is_nccl_initialized(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Current node rank in the distributed group.
+    pub fn rank(&self) -> u32 {
+        self.rank
+    }
+
+    /// Total number of nodes in the distributed group.
+    pub fn world_size(&self) -> u32 {
+        self.world_size
+    }
+
+    /// Whether this is a multi-node distributed setup.
+    pub fn is_distributed(&self) -> bool {
+        self.world_size > 1
+    }
+
+    /// Test-only constructor (REQ-DIST-008)
+    #[cfg(test)]
+    pub fn new_for_test(rank: u32, world_size: u32) -> Self {
+        Self { rank, world_size, inner: None }
+    }
+
+    // ── Collective operations (REQ-DIST-005, REQ-DIST-006) ────────────────
+
+    /// Inplace AllReduce (Sum) on f32 buffer (REQ-DIST-005).
+    ///
+    /// - Single-node mode: returns Ok(()) immediately (no communication needed).
+    /// - Distributed mode with NCCL initialized: calls `CommHandle::all_reduce` + `wait()`.
+    /// - Distributed mode without NCCL init: returns Err.
+    pub fn all_reduce_inplace(&self, buffer: &mut [f32]) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Ok(());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "tp_all_reduce: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let count = buffer.len();
+        let future = handle
+            .all_reduce(
+                buffer.as_ptr() as *const u8,
+                buffer.as_mut_ptr() as *mut u8,
+                count,
+                gllm_nccl::DType::Fp32,
+                gllm_nccl::ReduceOp::Sum,
+            )
+            .map_err(|e| format!("tp_all_reduce NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("tp_all_reduce wait error: {:?}", e))
+    }
+
+    /// Inplace ReduceScatter (Sum) on f32 buffer (REQ-DIST-006).
+    ///
+    /// After this call, `buffer` contains only this rank's segment of the reduced result.
+    /// Buffer length must be a multiple of world_size.
+    pub fn reduce_scatter_inplace(&self, buffer: &mut [f32]) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Ok(());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "tp_reduce_scatter: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let recvcount = buffer.len() / self.world_size as usize;
+        let future = handle
+            .reduce_scatter(
+                buffer.as_ptr() as *const u8,
+                buffer.as_mut_ptr() as *mut u8,
+                recvcount,
+                gllm_nccl::DType::Fp32,
+                gllm_nccl::ReduceOp::Sum,
+            )
+            .map_err(|e| format!("tp_reduce_scatter NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("tp_reduce_scatter wait error: {:?}", e))
+    }
+
+    /// Inplace AllGather on f32 buffer (REQ-DIST-006).
+    ///
+    /// `buffer` must have capacity for `world_size * sendcount` elements.
+    /// The first `sendcount` elements are this rank's contribution; after the call
+    /// the entire buffer contains the gathered result from all ranks.
+    pub fn all_gather_inplace(&self, buffer: &mut [f32], sendcount: usize) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Ok(());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "tp_all_gather: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let future = handle
+            .all_gather(
+                buffer.as_ptr() as *const u8,
+                sendcount,
+                buffer.as_mut_ptr() as *mut u8,
+                gllm_nccl::DType::Fp32,
+            )
+            .map_err(|e| format!("tp_all_gather NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("tp_all_gather wait error: {:?}", e))
+    }
+
+    // ── KV page point-to-point operations (REQ-DIST-012) ────────────────────
+
+    /// Send KV page data to a peer rank (REQ-DIST-012).
+    ///
+    /// `buf` is a raw pointer to GPU-resident KV page data.
+    /// `count` is the number of elements to send.
+    /// `peer` is the destination rank.
+    /// `dtype` is the data type of the buffer.
+    pub fn send_kv_pages(
+        &self,
+        buf: *const u8,
+        count: usize,
+        peer: u32,
+        dtype: gllm_nccl::DType,
+    ) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Err("send_kv_pages: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "send_kv_pages: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let future = handle
+            .send(buf, count, peer as usize, dtype)
+            .map_err(|e| format!("send_kv_pages NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("send_kv_pages wait error: {:?}", e))
+    }
+
+    /// Receive KV page data from a peer rank (REQ-DIST-012).
+    ///
+    /// `buf` is a raw pointer to GPU-resident KV page data.
+    /// `count` is the number of elements to receive.
+    /// `peer` is the source rank.
+    /// `dtype` is the data type of the buffer.
+    pub fn recv_kv_pages(
+        &self,
+        buf: *mut u8,
+        count: usize,
+        peer: u32,
+        dtype: gllm_nccl::DType,
+    ) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Err("recv_kv_pages: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "recv_kv_pages: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let future = handle
+            .recv(buf, count, peer as usize, dtype)
+            .map_err(|e| format!("recv_kv_pages NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("recv_kv_pages wait error: {:?}", e))
+    }
+
+    // ── EPLB cross-GPU statistics aggregation (REQ-DIST-015) ────────────────
+
+    /// AllReduce (Sum) on u64 slice — for EPLB expert invocation count aggregation.
+    ///
+    /// Converts u64 → f32 for NCCL AllReduce, then converts back.
+    /// Single-node or no NCCL handle: no-op (data is already local).
+    pub fn all_reduce_u64_sum(&self, data: &mut [u64]) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Ok(());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "all_reduce_u64_sum: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+
+        // u64 不直接支持 CommElement，转为 f32 做归约
+        let send_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let mut recv_f32 = vec![0.0f32; send_f32.len()];
+
+        let future = handle
+            .all_reduce(
+                send_f32.as_ptr() as *const u8,
+                recv_f32.as_mut_ptr() as *mut u8,
+                send_f32.len(),
+                gllm_nccl::DType::Fp32,
+                gllm_nccl::ReduceOp::Sum,
+            )
+            .map_err(|e| format!("all_reduce_u64_sum NCCL error: {:?}", e))?;
+
+        future
+            .wait()
+            .map_err(|e| format!("all_reduce_u64_sum wait error: {:?}", e))?;
+
+        for (i, &v) in recv_f32.iter().enumerate() {
+            data[i] = v as u64;
+        }
+        Ok(())
+    }
+
+    // ── Ring Attention KV block transfer (REQ-DIST-016) ─────────────────────
+
+    /// Send f32 slice to a peer rank (for Ring Attention KV block transfer).
+    pub fn send_f32(&self, peer: u32, data: &[f32]) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Err("send_f32: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "send_f32: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let future = handle
+            .send(
+                data.as_ptr() as *const u8,
+                data.len(),
+                peer as usize,
+                gllm_nccl::DType::Fp32,
+            )
+            .map_err(|e| format!("send_f32 NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("send_f32 wait error: {:?}", e))
+    }
+
+    /// Receive f32 slice from a peer rank (for Ring Attention KV block transfer).
+    ///
+    /// Allocates and returns a Vec<f32> of the specified count.
+    pub fn recv_f32(&self, peer: u32, count: usize) -> Result<Vec<f32>, String> {
+        if !self.is_distributed() {
+            return Err("recv_f32: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "recv_f32: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let mut buf = vec![0.0f32; count];
+        let future = handle
+            .recv(
+                buf.as_mut_ptr() as *mut u8,
+                count,
+                peer as usize,
+                gllm_nccl::DType::Fp32,
+            )
+            .map_err(|e| format!("recv_f32 NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("recv_f32 wait error: {:?}", e))?;
+        Ok(buf)
+    }
+
+    // ── SAGUARO draft/verify token transfer (REQ-DIST-017) ──────────────────
+
+    /// Send raw bytes to a peer rank (for SAGUARO draft token / verify result transfer).
+    pub fn send_bytes(&self, peer: u32, data: &[u8]) -> Result<(), String> {
+        if !self.is_distributed() {
+            return Err("send_bytes: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "send_bytes: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let future = handle
+            .send(data.as_ptr(), data.len(), peer as usize, gllm_nccl::DType::Int8)
+            .map_err(|e| format!("send_bytes NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("send_bytes wait error: {:?}", e))
+    }
+
+    /// Receive raw bytes from a peer rank (for SAGUARO verify result / draft token transfer).
+    pub fn recv_bytes(&self, peer: u32, count: usize) -> Result<Vec<u8>, String> {
+        if !self.is_distributed() {
+            return Err("recv_bytes: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "recv_bytes: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let mut buf = vec![0u8; count];
+        let future = handle
+            .recv(buf.as_mut_ptr(), count, peer as usize, gllm_nccl::DType::Int8)
+            .map_err(|e| format!("recv_bytes NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("recv_bytes wait error: {:?}", e))?;
+        Ok(buf)
+    }
+
+    // ── MoE AllToAll dispatch (REQ-DIST-014) ────────────────────────────────
+
+    /// AllGather f32 slices from all ranks (for MoE AllToAll dispatch).
+    ///
+    /// Returns a vector of length `world_size * send_data.len()`.
+    /// Single-node: returns `send_data` as-is.
+    pub fn all_gather_f32(&self, send_data: &[f32]) -> Result<Vec<f32>, String> {
+        if !self.is_distributed() {
+            return Ok(send_data.to_vec());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "all_gather_f32: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        let send_count = send_data.len();
+        let recv_count = self.world_size as usize * send_count;
+        let mut recv_buf = vec![0.0f32; recv_count];
+        let future = handle
+            .all_gather(
+                send_data.as_ptr() as *const u8,
+                send_count,
+                recv_buf.as_mut_ptr() as *mut u8,
+                gllm_nccl::DType::Fp32,
+            )
+            .map_err(|e| format!("all_gather_f32 NCCL error: {:?}", e))?;
+        future
+            .wait()
+            .map_err(|e| format!("all_gather_f32 wait error: {:?}", e))?;
+        Ok(recv_buf)
+    }
+}
+
+// ── DistributedConfigError (REQ-DIST-001) ────────────────────────────────────
+
+/// Errors that can occur during distributed configuration initialization.
+#[cfg(feature = "nccl")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DistributedConfigError {
+    /// ParallelConfig validation failed (rank/world_size/tp*pp*ep mismatch).
+    InvalidParallelConfig,
+    /// NCCL communicator initialization failed.
+    CommInitFailed(String),
+}
+
 // ── DistributedConfig (REQ-IB-006) ─────────────────────────────────────────
 
 /// DistributedConfig — 分布式推理配置聚合体 (REQ-IB-006)
@@ -798,6 +1212,106 @@ mod tests {
             let cloned = cfg.clone();
             cfg.parallel.tp_size = 4;
             assert_eq!(cloned.parallel.tp_size, 1);
+        }
+
+        // ── CommHandleWrapper (REQ-DIST-001) ────────────────────────────────
+
+        #[test]
+        fn comm_handle_wrapper_from_default_config() {
+            let config = ParallelConfig::default();
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert_eq!(handle.rank(), 0);
+            assert_eq!(handle.world_size(), 1);
+            assert!(!handle.is_distributed());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_from_multi_node_config() {
+            let config = ParallelConfig {
+                tp_size: 2,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 1,
+                world_size: 2,
+                unique_id: String::new(),
+            };
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert_eq!(handle.rank(), 1);
+            assert_eq!(handle.world_size(), 2);
+            assert!(handle.is_distributed());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_invalid_config_rejected() {
+            let config = ParallelConfig {
+                tp_size: 2,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 0,
+                world_size: 5, // 2*1*1=2 != 5
+                unique_id: String::new(),
+            };
+            let result = CommHandleWrapper::from_config(&config);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), DistributedConfigError::InvalidParallelConfig);
+        }
+
+        #[test]
+        fn comm_handle_wrapper_rank_out_of_range_rejected() {
+            let config = ParallelConfig {
+                tp_size: 1,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 5, // rank >= world_size
+                world_size: 1,
+                unique_id: String::new(),
+            };
+            let result = CommHandleWrapper::from_config(&config);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), DistributedConfigError::InvalidParallelConfig);
+        }
+
+        #[test]
+        fn comm_handle_wrapper_nccl_not_initialized_by_default() {
+            let config = ParallelConfig::default();
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(!handle.is_nccl_initialized());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_distributed_nccl_not_initialized_by_default() {
+            let config = ParallelConfig {
+                tp_size: 2,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 0,
+                world_size: 2,
+                unique_id: String::new(),
+            };
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+        }
+
+        // ── DistributedConfigError (REQ-DIST-001) ───────────────────────────
+
+        #[test]
+        fn distributed_config_error_variants_distinct() {
+            let a = DistributedConfigError::InvalidParallelConfig;
+            let b = DistributedConfigError::CommInitFailed("timeout".to_string());
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn distributed_config_error_equality() {
+            assert_eq!(
+                DistributedConfigError::InvalidParallelConfig,
+                DistributedConfigError::InvalidParallelConfig,
+            );
+            assert_eq!(
+                DistributedConfigError::CommInitFailed("err".to_string()),
+                DistributedConfigError::CommInitFailed("err".to_string()),
+            );
         }
     }
 }

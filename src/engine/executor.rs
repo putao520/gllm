@@ -84,9 +84,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// Resolve page location for mega-kernel dispatch (REQ-DP-014, §11.2).
     ///
     /// This is the **single nccl feature integration point** in gllm.
-    /// - Local pages: resolved from distributed routing table (Local variant)
-    /// - Remote pages: resolved from distributed routing table (IntraNode/InterNode)
-    /// - Not present: triggers swap-in from storage tier (SPEC/22)
+    /// - If distributed_routing_table is None (not yet initialized): returns Local,
+    ///   because a non-distributed executor always has pages locally.
+    /// - If routing table exists and page found: returns the entry's location.
+    /// - If routing table exists but page not found: returns NotPresent,
+    ///   which triggers swap-in from storage tier (SPEC/22).
     #[cfg(feature = "nccl")]
     pub fn resolve_page_for_kernel(
         &self,
@@ -96,8 +98,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             if let Some(entry) = routing_table.lookup(page_id) {
                 return entry.location.clone();
             }
+            // Page not in routing table — may need swap-in
+            gllm_kernels::PageLocation::NotPresent
+        } else {
+            // No routing table = single-node mode, pages are always local
+            gllm_kernels::PageLocation::Local { frame_id: 0 }
         }
-        gllm_kernels::PageLocation::NotPresent
     }
 
     // register_weight_pages, init_three_tier_swap, sync_hgal_pages_to_coordinator,

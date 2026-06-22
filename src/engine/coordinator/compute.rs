@@ -96,6 +96,92 @@ impl ComputeCoordinator {
         let (_, golden_size) = self.golden_buckets.collapse(seq_len);
         golden_size.seq_len
     }
+
+    // ── Tensor Parallelism Communication (REQ-DIST-005, REQ-DIST-006) ─────
+
+    /// TP AllReduce 同步 (REQ-DIST-005)
+    ///
+    /// 在列并行层后调用，将各 GPU 的部分结果求和聚合。
+    /// 通信路径: GPU kernel 内 AllReduceChunk VmInstr (已存在)
+    ///          或 Host 端 comm_handle.all_reduce(Sum)
+    ///
+    /// Host 端职责:
+    /// 1. 根据 `CommHandleWrapper.is_distributed()` 决定是否注入 AllReduce VmInstr
+    /// 2. 在编译图 (`CompilerGraph`) 中自动插入 AllReduce 节点
+    ///
+    /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())（单机无需 AllReduce）。
+    /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    #[cfg(feature = "nccl")]
+    pub fn tp_all_reduce(
+        &mut self,
+        buffer: &mut [f32],
+        comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+    ) -> Result<(), String> {
+        if !comm_handle.is_distributed() {
+            return Ok(());
+        }
+        log::trace!(
+            "[compute] tp_all_reduce: rank={}, world_size={}, buf_len={}, nccl_init={}",
+            comm_handle.rank(),
+            comm_handle.world_size(),
+            buffer.len(),
+            comm_handle.is_nccl_initialized(),
+        );
+        comm_handle.all_reduce_inplace(buffer)
+    }
+
+    /// TP ReduceScatter (REQ-DIST-006)
+    ///
+    /// 替代 AllReduce 用于列切分层：先 ReduceScatter 将完整梯度按 rank 分片，
+    /// 本地计算后 AllGather 聚合结果。支持通信-计算重叠。
+    ///
+    /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())。
+    /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    #[cfg(feature = "nccl")]
+    pub fn tp_reduce_scatter(
+        &mut self,
+        buffer: &mut [f32],
+        comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+    ) -> Result<(), String> {
+        if !comm_handle.is_distributed() {
+            return Ok(());
+        }
+        log::trace!(
+            "[compute] tp_reduce_scatter: rank={}, world_size={}, buf_len={}, nccl_init={}",
+            comm_handle.rank(),
+            comm_handle.world_size(),
+            buffer.len(),
+            comm_handle.is_nccl_initialized(),
+        );
+        comm_handle.reduce_scatter_inplace(buffer)
+    }
+
+    /// TP AllGather (REQ-DIST-006)
+    ///
+    /// 与 ReduceScatter 配对使用：ReduceScatter 后本地计算，AllGather 聚合结果。
+    ///
+    /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())。
+    /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    #[cfg(feature = "nccl")]
+    pub fn tp_all_gather(
+        &mut self,
+        buffer: &mut [f32],
+        comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+    ) -> Result<(), String> {
+        if !comm_handle.is_distributed() {
+            return Ok(());
+        }
+        log::trace!(
+            "[compute] tp_all_gather: rank={}, world_size={}, buf_len={}, nccl_init={}",
+            comm_handle.rank(),
+            comm_handle.world_size(),
+            buffer.len(),
+            comm_handle.is_nccl_initialized(),
+        );
+        // sendcount = buffer.len() / world_size (each rank contributes an equal segment)
+        let sendcount = buffer.len() / comm_handle.world_size() as usize;
+        comm_handle.all_gather_inplace(buffer, sendcount)
+    }
 }
 
 #[cfg(test)]
@@ -1368,5 +1454,282 @@ mod tests {
         assert_eq!(format!("{}", CompactPlatform::GpuCuda { warp_size: 32 }), "cuda_w32");
         assert_eq!(format!("{}", CompactPlatform::GpuHip { wavefront_size: 64 }), "hip_wf64");
         assert_eq!(format!("{}", CompactPlatform::GpuMetal), "metal");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TP Communication tests (REQ-DIST-005, REQ-DIST-006) — nccl-gated
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[cfg(feature = "nccl")]
+    mod tp_comm_tests {
+        use super::*;
+        use crate::engine::distributed_config::{CommHandleWrapper, ParallelConfig};
+
+        fn make_distributed_config(rank: u32, world_size: u32) -> ParallelConfig {
+            ParallelConfig {
+                tp_size: world_size,
+                pp_size: 1,
+                ep_size: 1,
+                rank,
+                world_size,
+                unique_id: String::new(),
+            }
+        }
+
+        // ── tp_all_reduce (REQ-DIST-005) ──
+
+        #[test]
+        fn tp_all_reduce_single_node_is_noop() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_reduce(&mut buffer, &handle);
+            assert!(result.is_ok());
+            // Buffer unchanged (single-node, no AllReduce needed)
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_all_reduce_distributed_without_nccl_init_returns_err() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+
+            // Without NCCL init, the call should return an error (not silently succeed)
+            let result = coord.tp_all_reduce(&mut buffer, &handle);
+            assert!(result.is_err());
+            assert!(
+                result.unwrap_err().contains("init_nccl"),
+                "error should mention init_nccl"
+            );
+        }
+
+        #[test]
+        fn tp_all_reduce_distributed_rank1_without_nccl_init_returns_err() {
+            let mut coord = make_compute();
+            let mut buffer = vec![4.0f32, 5.0, 6.0];
+            let config = make_distributed_config(1, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+
+            let result = coord.tp_all_reduce(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_reduce_empty_buffer_single_node() {
+            let mut coord = make_compute();
+            let mut buffer: Vec<f32> = vec![];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_reduce(&mut buffer, &handle);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn tp_all_reduce_large_buffer_single_node() {
+            let mut coord = make_compute();
+            let mut buffer = vec![0.0f32; 1024 * 1024];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_reduce(&mut buffer, &handle);
+            assert!(result.is_ok());
+        }
+
+        // ── tp_reduce_scatter (REQ-DIST-006) ──
+
+        #[test]
+        fn tp_reduce_scatter_single_node_is_noop() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_reduce_scatter(&mut buffer, &handle);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_reduce_scatter_distributed_without_nccl_init_returns_err() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0, 4.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_reduce_scatter(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_reduce_scatter_distributed_rank1_without_nccl_init() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0, 4.0];
+            let config = make_distributed_config(1, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_reduce_scatter(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        // ── tp_all_gather (REQ-DIST-006) ──
+
+        #[test]
+        fn tp_all_gather_single_node_is_noop() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_gather(&mut buffer, &handle);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_all_gather_distributed_without_nccl_init_returns_err() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_gather(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_gather_distributed_rank1_without_nccl_init() {
+            let mut coord = make_compute();
+            let mut buffer = vec![3.0f32, 4.0];
+            let config = make_distributed_config(1, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_gather(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_gather_empty_buffer_single_node() {
+            let mut coord = make_compute();
+            let mut buffer: Vec<f32> = vec![];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_all_gather(&mut buffer, &handle);
+            assert!(result.is_ok());
+        }
+
+        // ── CommHandleWrapper properties in TP context ──
+
+        #[test]
+        fn comm_handle_distributed_config_tp4() {
+            let config = make_distributed_config(2, 4);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert_eq!(handle.rank(), 2);
+            assert_eq!(handle.world_size(), 4);
+            assert!(handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+        }
+
+        #[test]
+        fn comm_handle_single_node_config_tp1() {
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert_eq!(handle.rank(), 0);
+            assert_eq!(handle.world_size(), 1);
+            assert!(!handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+        }
+
+        #[test]
+        fn comm_handle_invalid_config_rejected() {
+            let config = ParallelConfig {
+                tp_size: 2,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 0,
+                world_size: 5, // 2*1*1=2 != 5
+                unique_id: String::new(),
+            };
+            let result = CommHandleWrapper::from_config(&config);
+            assert!(result.is_err());
+        }
+
+        // ── CommHandleWrapper NCCL init state ──
+
+        #[test]
+        fn comm_handle_nccl_not_initialized_by_default() {
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(!handle.is_nccl_initialized());
+        }
+
+        #[test]
+        fn comm_handle_all_reduce_inplace_single_node_noop() {
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let result = handle.all_reduce_inplace(&mut buffer);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn comm_handle_all_reduce_inplace_distributed_without_init_err() {
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let result = handle.all_reduce_inplace(&mut buffer);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("init_nccl"));
+        }
+
+        #[test]
+        fn comm_handle_reduce_scatter_inplace_single_node_noop() {
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let result = handle.reduce_scatter_inplace(&mut buffer);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn comm_handle_reduce_scatter_inplace_distributed_without_init_err() {
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let mut buffer = vec![1.0f32, 2.0, 3.0, 4.0];
+            let result = handle.reduce_scatter_inplace(&mut buffer);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("init_nccl"));
+        }
+
+        #[test]
+        fn comm_handle_all_gather_inplace_single_node_noop() {
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let result = handle.all_gather_inplace(&mut buffer, 3);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn comm_handle_all_gather_inplace_distributed_without_init_err() {
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let mut buffer = vec![1.0f32, 2.0];
+            let result = handle.all_gather_inplace(&mut buffer, 1);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("init_nccl"));
+        }
     }
 }

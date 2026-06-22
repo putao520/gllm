@@ -1,0 +1,1539 @@
+<!DOCTYPE html>
+<html data-spec-root="" lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta content="43-DISTRIBUTED-IMPLEMENTATION" name="spec-file">
+  <meta content="other" name="spec-category">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"43-DISTRIBUTED-IMPLEMENTATION", "dependencies":["08-DISTRIBUTED-PAGING","31-EXECUTOR-DECOMPOSITION","32-MEGA-KERNEL-ENHANCEMENT"], "children":[] }
+  </script>
+</head>
+<body>
+  <header data-spec-header="">
+    <h1>43-DISTRIBUTED-IMPLEMENTATION — 分布式推理功能实现规范</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>43-DISTRIBUTED-IMPLEMENTATION</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s43" data-section="43">
+      <h2>43-DISTRIBUTED-IMPLEMENTATION — 分布式推理功能实现规范</h2>
+      <p>&gt; <strong>SSOT</strong>: 本文档是 gllm 分布式推理功能实现的唯一真源。涵盖 Tensor Parallelism、通信-计算重叠、PD 分离、KV 分布、MoE 分布式、Context Parallelism、分布式推测解码的完整实现规范。</p>
+      <p>&gt; <strong>关联 SPEC</strong>:</p>
+      <p>&gt; - <code>gllm-nccl/SPEC/08-DISTRIBUTED-PAGING</code> — 分布式 KV Cache 多层分页 (REQ-DP-001~014)</p>
+      <p>&gt; - <code>SPEC/31-EXECUTOR-DECOMPOSITION</code> — Executor 分解架构 (6 Coordinator)</p>
+      <p>&gt; - <code>SPEC/32-MEGA-KERNEL-ENHANCEMENT</code> — Mega-Kernel 性能增强</p>
+      <p>&gt; - <code>SPEC/20-BATCH-CONCURRENT-INFERENCE</code> — 批量并发推理 M 维度统一架构</p>
+      <p>&gt; - <code>SPEC/12-STRATEGY-ARBITER</code> — 策略仲裁器</p>
+      <p>&gt; <strong>REQ 覆盖</strong>: REQ-DIST-001~017</p>
+      <p>&gt; <strong>Entity 覆盖</strong>: ENT-DIST-COMMHANDLE ~ ENT-DIST-SAGUARO (14 个)</p>
+      <p>&gt; <strong>Dataflow 覆盖</strong>: DF-DIST-001~006</p>
+      <p>&gt; <strong>Controlflow 覆盖</strong>: CF-DIST-001~005</p>
+    </section>
+
+    <section id="s0" data-section="0">
+      <h3>§0 动机与约束</h3>
+    </section>
+    <section id="s0.1" data-section="0.1">
+      <h4>§0.1 问题</h4>
+      <p>gllm 当前仅支持单 GPU 推理。大模型（70B+）和 MoE 模型（A22B+）需要多 GPU 协同推理。gllm-nccl 已提供底层通信原语（AllReduce/AllGather/ReduceScatter/AllToAll/RDMA），但 gllm 侧缺少完整的分布式集成层：通信句柄生命周期、TP 权重分片、通信-计算重叠调度、PD 分离路由、KV 跨节点传输、MoE 分布式 dispatch、Context Parallelism、分布式推测解码。</p>
+    </section>
+    <section id="s0.2" data-section="0.2">
+      <h4>§0.2 约束</h4>
+      <li><strong>三仓约定</strong>: gllm → gllm-kernels → gllm-nccl 单向依赖。gllm 通过 gllm-kernels VmInstr call stub 间接使用 gllm-nccl，不直接依赖。</li>
+      <li><strong>ARCH-RUST-IS-CODEGEN</strong>: 分布式通信必须 JIT 编译为 VmInstr call stub，禁止 Rust 运行时编排通信。</li>
+      <li><strong>ARCH-UNIFIED-COMPILER</strong>: 分布式图构建走统一 CompilerGraph，编译器通过 GraphTopologyAnalysis 推导通信点，不前置 bool flag。</li>
+      <li><strong>NO-SILENT-FALLBACK</strong>: 通信失败必须返回 Err，禁止静默降级到单 GPU。</li>
+      <li><strong>ARCH-JIT-YIELDS</strong>: 通信策略顺从硬件拓扑（NVLink vs PCIe vs RDMA），不要求硬件适配代码。</li>
+    </section>
+    <section id="s0.3" data-section="0.3">
+      <h4>§0.3 分层架构</h4>
+      <table>
+        <tr><th>Layer</th><th>职责</th><th>REQ</th></tr>
+        <tr><td>Layer 0: 基础设施接线</td><td>CommHandle 生命周期、配置传递、页路由表</td><td>REQ-DIST-001~003</td></tr>
+        <tr><td>Layer 1: Tensor Parallelism</td><td>TP 权重分片、AllReduce 通信、列并行</td><td>REQ-DIST-004~006</td></tr>
+        <tr><td>Layer 2: 通信-计算重叠</td><td>双缓冲、FLUX 分解、量化通信、算法覆盖</td><td>REQ-DIST-007~010</td></tr>
+        <tr><td>Layer 3: PD 分离 + KV 分布</td><td>PD 角色路由、跨节点 KV 传输、5 种 KV 分布模式</td><td>REQ-DIST-011~013</td></tr>
+        <tr><td>Layer 4: MoE 分布式</td><td>分布式 MoE dispatch、EPLB 负载均衡</td><td>REQ-DIST-014~015</td></tr>
+        <tr><td>Layer 5: 高级功能</td><td>Ring Attention CP、SAGUARO 分布式推测</td><td>REQ-DIST-016~017</td></tr>
+      </table>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Layer 0: 基础设施接线 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s1" data-section="1">
+      <h3>§1 Layer 0: 基础设施接线</h3>
+    </section>
+
+    <section id="s1.1" data-section="1.1">
+      <h4>§1.1 REQ-DIST-001: CommHandle 生命周期管理</h4>
+      <div class="req" data-req="REQ-DIST-001">
+        <p><span class="req-id">REQ-DIST-001</span> | <span class="layer-tag layer-0">Layer 0</span> | 状态: draft</p>
+        <p><strong>描述</strong>: Executor 构建时根据 ParallelConfig 初始化 NCCL 通信句柄。CommHandle 封装 gllm-nccl CommHandle，提供 rank()/world_size()/is_distributed()/destroy() 方法。Drop trait 实现安全释放（先 barrier 再 destroy）。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>ParallelConfig 已配置（tp_size &gt;= 1, rank 有效）</li>
+          <li>gllm-nccl feature 已启用（<code>cfg(feature = "nccl")</code>）</li>
+          <li>CUDA/RoCm runtime 已初始化</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>CommHandle 持有有效的 NCCL communicator</li>
+          <li>rank() 返回当前进程在通信组中的 rank</li>
+          <li>world_size() 返回通信组总大小</li>
+          <li>is_distributed() 在 world_size &gt; 1 时返回 true</li>
+          <li>Drop 时所有 rank 同步 barrier 后 destroy</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>单 GPU: is_distributed() == false, rank() == 0, world_size() == 1</li>
+          <li>多 GPU: is_distributed() == true, rank 值域 [0, world_size)</li>
+          <li>Drop 无资源泄漏（ncclCommDestroy 被调用）</li>
+          <li>重复 Drop 安全（幂等）</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-COMMHANDLE</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-001</p>
+      </div>
+    </section>
+
+    <section id="s1.2" data-section="1.2">
+      <h4>§1.2 REQ-DIST-002: DistributedConfig 传递数据流</h4>
+      <div class="req" data-req="REQ-DIST-002">
+        <p><span class="req-id">REQ-DIST-002</span> | <span class="layer-tag layer-0">Layer 0</span> | 状态: draft</p>
+        <p><strong>描述</strong>: ClientConfig.distributed 字段携带 DistributedConfig，通过 ExecutorBuilder 传递到 Executor.init_distributed()。配置传递链路完整：Client → ClientConfig → ExecutorBuilder → Executor → CommHandle + ModelContextHolder。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>ClientConfig 包含 distributed 字段</li>
+          <li>DistributedConfig 包含: ParallelConfig(tp_size, rank), PdDisaggConfig, KvDistributionConfig</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>Executor 持有从 DistributedConfig 初始化的 CommHandle</li>
+          <li>ModelContextHolder 持有分布式路由表</li>
+          <li>配置传递链路中无信息丢失</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>ClientConfig.distributed.tp_size == Executor.comm_handle.world_size()</li>
+          <li>ClientConfig.distributed.rank == Executor.comm_handle.rank()</li>
+          <li>未配置 distributed 时默认 tp_size=1, rank=0（单 GPU 模式）</li>
+        </ul>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-001</p>
+      </div>
+    </section>
+
+    <section id="s1.3" data-section="1.3">
+      <h4>§1.3 REQ-DIST-003: 分布式页路由表构建</h4>
+      <div class="req" data-req="REQ-DIST-003">
+        <p><span class="req-id">REQ-DIST-003</span> | <span class="layer-tag layer-0">Layer 0</span> | 状态: draft</p>
+        <p><strong>描述</strong>: 根据 ParallelConfig(tp_size/rank) 和 KvDistributionConfig 构建 PageRoutingTable，填充 ModelContextHolder.distributed_routing_table。路由表定义逻辑 KV 页到物理 GPU 位置的映射，支持本地/远端/跨节点三级路由。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>CommHandle 已初始化（REQ-DIST-001）</li>
+          <li>KvDistributionConfig 已配置</li>
+          <li>PagedScheduler 页分配器可用</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>PageRoutingTable 包含完整的逻辑页→物理位置映射</li>
+          <li>本地页直接映射到本 GPU 物理页</li>
+          <li>远端页映射到 (remote_rank, remote_physical_page_id)</li>
+          <li>跨节点页映射到 (remote_node_id, remote_rank, remote_physical_page_id)</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>单 GPU: 所有页映射到本地</li>
+          <li>TP 模式: 每个秩持有自己分片的 KV 页</li>
+          <li>KV 分布模式切换时路由表正确重建</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-ROUTING-TABLE</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Layer 1: Tensor Parallelism -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s2" data-section="2">
+      <h3>§2 Layer 1: Tensor Parallelism</h3>
+    </section>
+
+    <section id="s2.1" data-section="2.1">
+      <h4>§2.1 REQ-DIST-004: TP 权重分片</h4>
+      <div class="req" data-req="REQ-DIST-004">
+        <p><span class="req-id">REQ-DIST-004</span> | <span class="layer-tag layer-1">Layer 1</span> | 状态: draft</p>
+        <p><strong>描述</strong>: 按 rank 对权重张量执行分片，权重加载时执行。分片策略：</p>
+        <ul>
+          <li><strong>列切分</strong>: QKVProj/OProj — 按 num_heads/tp_size 切分列维度，每个 rank 持有 1/tp_size 的 head</li>
+          <li><strong>行切分</strong>: GateUpProj/DownProj — GateUpProj 按行切分（每个 rank 持有 1/tp_size 行），DownProj 按列切分</li>
+          <li><strong>列切分</strong>: lm_head — 按 vocab_size/tp_size 切分列维度</li>
+          <li><strong>不分片</strong>: embedding/RMSNorm/RoPE — 所有 rank 持有完整副本</li>
+        </ul>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>CommHandle 已初始化（REQ-DIST-001）</li>
+          <li>权重文件已加载到内存</li>
+          <li>ModelConfig 包含 num_heads/num_kv_heads/head_dim 信息</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>每个 rank 持有对应分片的权重子张量</li>
+          <li>分片后权重 shape 正确（QKVProj: [hidden, num_heads_per_rank * head_dim]）</li>
+          <li>不分片的权重在所有 rank 上完全一致</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>tp_size=2 时 QKVProj 列数减半</li>
+          <li>tp_size=4 时 GateUpProj 行数减为 1/4</li>
+          <li>所有 rank 的 embedding 权重 bit-wise 一致</li>
+          <li>分片后模型 forward 数值与单 GPU 等价（在 AllReduce 聚合后）</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-TP-SHARD</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-002</p>
+      </div>
+    </section>
+
+    <section id="s2.2" data-section="2.2">
+      <h4>§2.2 REQ-DIST-005: TP AllReduce 通信</h4>
+      <div class="req" data-req="REQ-DIST-005">
+        <p><span class="req-id">REQ-DIST-005</span> | <span class="layer-tag layer-1">Layer 1</span> | 状态: draft</p>
+        <p><strong>描述</strong>: 每个 Transformer 层 forward 后调 comm_handle.all_reduce(Sum) 聚合部分结果。行切分层（GateUpProj→DownProj）的输出需要 AllReduce 聚合；列切分层（QKVProj→OProj）的输出在 OProj 后需要 AllReduce。通信点由 CompilerGraph 的 GraphTopologyAnalysis 自动推导，不前置 bool flag。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>TP 权重分片完成（REQ-DIST-004）</li>
+          <li>CommHandle 可用</li>
+          <li>CompilerGraph 包含 AllReduce VmInstr call stub</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>AllReduce(Sum) 后每个 rank 持有完整的聚合结果</li>
+          <li>聚合结果与单 GPU forward 数值等价（在浮点舍入误差内）</li>
+          <li>通信延迟不阻塞后续独立计算</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>2-GPU TP: AllReduce 后 logits 与单 GPU 差异 &lt; 1e-5</li>
+          <li>4-GPU TP: AllReduce 后 logits 与单 GPU 差异 &lt; 1e-4</li>
+          <li>通信点数量 = num_layers * 2（attention + FFN 各一次）</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-TP-COMM</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-002</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-001</p>
+      </div>
+    </section>
+
+    <section id="s2.3" data-section="2.3">
+      <h4>§2.3 REQ-DIST-006: TP 列并行通信</h4>
+      <div class="req" data-req="REQ-DIST-006">
+        <p><span class="req-id">REQ-DIST-006</span> | <span class="layer-tag layer-1">Layer 1</span> | 状态: draft</p>
+        <p><strong>描述</strong>: ReduceScatter+AllGather 替代 AllReduce 用于列切分层，支持通信-计算重叠。列并行模式：QKVProj 列切分后各 rank 独立计算 attention → ReduceScatter 聚合 → 本地 OProj → AllGather 广播。相比 AllReduce 减少通信量 50%（每个 rank 只发送 1/tp_size 数据）。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>TP 权重分片完成（REQ-DIST-004）</li>
+          <li>CommHandle 支持 ReduceScatter/AllGather</li>
+          <li>通信-计算重叠调度器可用（REQ-DIST-007/008）</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>ReduceScatter 后每个 rank 持有 1/tp_size 的聚合结果</li>
+          <li>AllGather 后每个 rank 持有完整结果</li>
+          <li>通信量相比 AllReduce 减半</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>列并行数值结果与 AllReduce 等价</li>
+          <li>通信量 = 2 * batch_size * hidden_size / tp_size（vs AllReduce = 2 * batch_size * hidden_size）</li>
+          <li>与重叠调度器配合时通信延迟部分隐藏</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-TP-COMM</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-003</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-001</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Layer 2: 通信-计算重叠 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s3" data-section="3">
+      <h3>§3 Layer 2: 通信-计算重叠</h3>
+    </section>
+
+    <section id="s3.1" data-section="3.1">
+      <h4>§3.1 REQ-DIST-007: 双缓冲重叠调度</h4>
+      <div class="req" data-req="REQ-DIST-007">
+        <p><span class="req-id">REQ-DIST-007</span> | <span class="layer-tag layer-2">Layer 2</span> | 状态: draft</p>
+        <p><strong>描述</strong>: ForceDoubleBuffer mk_variant 返回 DoubleBufferCluster，交替调度通信/计算 SM 分区。双缓冲策略：Layer N 的通信与 Layer N+1 的计算重叠执行。通信使用专用 SM 分区，计算使用剩余 SM 分区。两个 buffer 交替使用，消除通信等待时间。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>TP 通信已实现（REQ-DIST-005/006）</li>
+          <li>GPU 支持 SM 分区（ComputeCapability &gt;= 7.0）</li>
+          <li>Mega-Kernel 支持多 stream 调度</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>DoubleBufferCluster 包含两个交替 buffer</li>
+          <li>通信和计算在时间轴上重叠</li>
+          <li>每个 step 的有效通信延迟趋近于 0（完全隐藏时）</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>双缓冲模式下 step 延迟 &lt; 串行模式延迟 * (1 + 通信/计算重叠率)</li>
+          <li>重叠率 &gt;= 70% 时有效通信延迟 &lt; 30% 原始通信延迟</li>
+          <li>数值结果与串行模式完全一致</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-DOUBLE-BUFFER</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-003</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-002</p>
+      </div>
+    </section>
+
+    <section id="s3.2" data-section="3.2">
+      <h4>§3.2 REQ-DIST-008: FLUX 分解调度</h4>
+      <div class="req" data-req="REQ-DIST-008">
+        <p><span class="req-id">REQ-DIST-008</span> | <span class="layer-tag layer-2">Layer 2</span> | 状态: draft</p>
+        <p><strong>描述</strong>: ForceFlux mk_variant 返回 FluxDecompose，将 AllReduce 分解为 ReduceScatter + LocalCompute + AllGather 三阶段，实现更细粒度的通信-计算重叠。FLUX 策略连接 gllm-nccl flux_decompose()：ReduceScatter 完成部分数据后立即启动本地计算，不等全部数据到齐。AllGather 在本地计算完成后立即启动，不等所有 rank 完成。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>列并行通信已实现（REQ-DIST-006）</li>
+          <li>gllm-nccl flux_decompose() 可用</li>
+          <li>GPU 支持 concurrent kernel execution</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>FluxDecompose 将 AllReduce 分解为三阶段流水线</li>
+          <li>ReduceScatter→LocalCompute→AllGather 流水线化</li>
+          <li>通信延迟进一步降低（相比双缓冲）</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>FLUX 模式 step 延迟 &lt; 双缓冲模式 step 延迟</li>
+          <li>数值结果与串行 AllReduce 完全一致</li>
+          <li>ReduceScatter 完成部分数据后本地计算立即启动</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-FLUX</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-003</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-002</p>
+      </div>
+    </section>
+
+    <section id="s3.3" data-section="3.3">
+      <h4>§3.3 REQ-DIST-009: 量化通信</h4>
+      <div class="req" data-req="REQ-DIST-009">
+        <p><span class="req-id">REQ-DIST-009</span> | <span class="layer-tag layer-2">Layer 2</span> | 状态: draft</p>
+        <p><strong>描述</strong>: CommCompressHint.AlwaysCompress/ForceQuant 驱动 QuantizedComm 策略。发送前量化（pre_send_quantize）：FP32/FP16 → INT8/FP8，减少通信量 2-4x。接收后反量化（post_recv_dequantize）：INT8/FP8 → FP32/FP16，恢复计算精度。量化格式由 DeviceProfile 和 CommCompressHint 共同决定。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>TP 通信已实现（REQ-DIST-005/006）</li>
+          <li>量化算子已注册到 ScalarOpRegistry</li>
+          <li>DeviceProfile 支持目标量化格式</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>AlwaysCompress: 所有通信自动量化/反量化</li>
+          <li>ForceQuant: 强制使用指定量化格式（如 FP8）</li>
+          <li>通信量减少 2x（FP16→INT8）或 4x（FP32→INT8）</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>量化通信后数值误差 &lt; 1e-3（INT8）或 &lt; 1e-2（FP8）</li>
+          <li>通信带宽占用减少 50%+（INT8 量化）</li>
+          <li>量化/反量化延迟 &lt; 通信延迟的 10%</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-QUANT-COMM</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-002</p>
+      </div>
+    </section>
+
+    <section id="s3.4" data-section="3.4">
+      <h4>§3.4 REQ-DIST-010: 算法选择覆盖</h4>
+      <div class="req" data-req="REQ-DIST-010">
+        <p><span class="req-id">REQ-DIST-010</span> | <span class="layer-tag layer-2">Layer 2</span> | 状态: draft</p>
+        <p><strong>描述</strong>: algorithm_override 字段传入 select_algorithm() 覆盖默认算法选择。用户可通过 DistributedConfig.algorithm_override 强制指定通信算法（如 ForceDoubleBuffer/ForceFlux/ForceAllReduce），绕过策略仲裁器的自动选择。覆盖仅在用户显式配置时生效，默认走策略仲裁器自动选择。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>策略仲裁器已实现（SPEC/12-STRATEGY-ARBITER）</li>
+          <li>至少一种通信算法已实现</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>algorithm_override = None 时走策略仲裁器自动选择</li>
+          <li>algorithm_override = Some(ForceDoubleBuffer) 时强制双缓冲</li>
+          <li>algorithm_override = Some(ForceFlux) 时强制 FLUX 分解</li>
+          <li>覆盖的算法不可用时返回 Err</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>默认模式: select_algorithm() 根据硬件拓扑自动选择最优算法</li>
+          <li>覆盖模式: 强制使用指定算法，忽略硬件建议</li>
+          <li>不可用算法覆盖返回 Err，不静默降级</li>
+        </ul>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-002</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Layer 3: PD 分离 + KV 分布 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s4" data-section="4">
+      <h3>§4 Layer 3: PD 分离 + KV 分布</h3>
+    </section>
+
+    <section id="s4.1" data-section="4.1">
+      <h4>§4.1 REQ-DIST-011: PD 分离角色路由</h4>
+      <div class="req" data-req="REQ-DIST-011">
+        <p><span class="req-id">REQ-DIST-011</span> | <span class="layer-tag layer-3">Layer 3</span> | 状态: draft</p>
+        <p><strong>描述</strong>: PdDisaggMode.Disaggregated 时，Executor 按角色路由：PrefillOnly 角色只编译 prefill 路径（无 Argmax、无采样），DecodeOnly 角色只编译 decode 路径（无长序列 prefill）。角色路由省略无关编译路径，减少 JIT 编译时间和内存占用。角色由 PdDisaggConfig.role 决定，编译时通过 GraphTopologyAnalysis 推导裁剪图。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>PdDisaggConfig 已配置（mode=Disaggregated, role=PrefillOnly/DecodeOnly）</li>
+          <li>CommHandle 已初始化</li>
+          <li>CompilerGraph 支持按角色裁剪</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>PrefillOnly: 编译产物不含 Argmax/采样/stop condition VmInstr</li>
+          <li>DecodeOnly: 编译产物不含长序列 prefill 路径</li>
+          <li>角色路由不影响数值正确性</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>PrefillOnly 编译产物 VmInstr 数量 &lt; 完整编译产物</li>
+          <li>DecodeOnly 编译产物 VmInstr 数量 &lt; 完整编译产物</li>
+          <li>PD 分离端到端推理结果与联合模式一致</li>
+          <li>PdDisaggMode.Joint 时行为与单 GPU 完全一致</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-PD-ROLE</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-003</p>
+      </div>
+    </section>
+
+    <section id="s4.2" data-section="4.2">
+      <h4>§4.2 REQ-DIST-012: 跨节点 KV 传输</h4>
+      <div class="req" data-req="REQ-DIST-012">
+        <p><span class="req-id">REQ-DIST-012</span> | <span class="layer-tag layer-3">Layer 3</span> | 状态: draft</p>
+        <p><strong>描述</strong>: KV pages 通过 comm_handle.send()/recv() 跨节点传输。Prefill 节点完成 prefill 后将 KV pages 传输到 Decode 节点。传输支持：同步传输（阻塞等待完成）、异步传输（返回 Future，与计算重叠）、RDMA 零拷贝传输（跨节点时）。传输粒度为 KvPage，支持批量传输多个 pages。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>PD 分离角色路由已实现（REQ-DIST-011）</li>
+          <li>CommHandle 支持 send/recv</li>
+          <li>KV pages 已分配并填充数据</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>发送端 KV pages 数据完整传输到接收端</li>
+          <li>接收端 KV pages 数据与发送端 bit-wise 一致</li>
+          <li>异步传输完成后 Future 返回 Ok</li>
+          <li>RDMA 传输零拷贝（数据不经过 CPU）</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>同步传输: 接收端 KV 数据与发送端完全一致</li>
+          <li>异步传输: Future 完成后数据一致</li>
+          <li>批量传输: N 个 pages 一次性传输，延迟 &lt; N * 单 page 传输延迟</li>
+          <li>RDMA 传输: CPU 利用率 &lt; 5%（零拷贝验证）</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-KV-XFER</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
+      </div>
+    </section>
+
+    <section id="s4.3" data-section="4.3">
+      <h4>§4.3 REQ-DIST-013: KV 分布 5 模式</h4>
+      <div class="req" data-req="REQ-DIST-013">
+        <p><span class="req-id">REQ-DIST-013</span> | <span class="layer-tag layer-3">Layer 3</span> | 状态: draft</p>
+        <p><strong>描述</strong>: KV 分布支持 5 种模式，由 KvDistributionConfig.mode 选择：</p>
+        <ul>
+          <li><strong>Local</strong>: 所有 KV pages 存储在本地 GPU，无跨 GPU 通信（默认模式）</li>
+          <li><strong>OnDemand</strong>: KV pages 按需从远端 GPU 读取，读后释放远端资源</li>
+          <li><strong>Mirror</strong>: KV pages 在所有 GPU 完整镜像，内存开销最大但零通信</li>
+          <li><strong>PartialHeadMirror</strong>: 按 head 维度部分镜像，每个 GPU 镜像 1/tp_size 的 head（TP 模式默认）</li>
+          <li><strong>TieredCache</strong>: 三级缓存（GPU HBM → CPU DRAM → 远端 GPU），按热度自动迁移</li>
+        </ul>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>分布式页路由表已构建（REQ-DIST-003）</li>
+          <li>CommHandle 可用</li>
+          <li>PagedScheduler 支持分布式页分配</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>每种模式的 KV pages 存储位置符合模式定义</li>
+          <li>模式切换时路由表正确重建</li>
+          <li>所有模式的 forward 数值结果一致</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>Local: 零跨 GPU 通信，内存 = 单 GPU * 1</li>
+          <li>OnDemand: 按需通信，内存 &lt; Mirror</li>
+          <li>Mirror: 零通信，内存 = 单 GPU * tp_size</li>
+          <li>PartialHeadMirror: 通信量 = attention 输入大小，内存 = 单 GPU * 1</li>
+          <li>TieredCache: 热页在 HBM，冷页在 DRAM/远端，自动迁移</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-KV-MODE</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Layer 4: MoE 分布式 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s5" data-section="5">
+      <h3>§5 Layer 4: MoE 分布式</h3>
+    </section>
+
+    <section id="s5.1" data-section="5.1">
+      <h4>§5.1 REQ-DIST-014: 分布式 MoE</h4>
+      <div class="req" data-req="REQ-DIST-014">
+        <p><span class="req-id">REQ-DIST-014</span> | <span class="layer-tag layer-4">Layer 4</span> | 状态: draft</p>
+        <p><strong>描述</strong>: ExpertPlacement 定义权重分片策略，AllToAll 实现跨 GPU expert dispatch。分布式 MoE 流程：token 经 router 计算 top-k expert → AllToAll dispatch（token 发送到 expert 所在 GPU）→ expert 计算 → AllToAll merge（结果返回原 GPU）。ExpertPlacement 策略：</p>
+        <ul>
+          <li><strong>RoundRobin</strong>: expert 均匀分配到各 GPU</li>
+          <li><strong>HotCold</strong>: 热 expert 镜像到多 GPU，冷 expert 独占单 GPU</li>
+          <li><strong>Custom</strong>: 用户自定义 placement 映射</li>
+        </ul>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>MoE 子系统已实现（MoeSubsystem）</li>
+          <li>CommHandle 支持 AllToAll</li>
+          <li>ExpertRouteConfig 已配置</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>AllToAll dispatch 后 token 到达正确的 expert GPU</li>
+          <li>expert 计算完成后 AllToAll merge 返回结果</li>
+          <li>分布式 MoE 数值结果与单 GPU 等价</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>RoundRobin: 每个 GPU 持有 num_experts/tp_size 个 expert</li>
+          <li>HotCold: 热 expert 在多 GPU 镜像，冷 expert 独占</li>
+          <li>AllToAll 通信量 = batch_size * top_k * hidden_size</li>
+          <li>分布式 MoE forward 数值与单 GPU 差异 &lt; 1e-4</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-MOE-DIST</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-005</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-004</p>
+      </div>
+    </section>
+
+    <section id="s5.2" data-section="5.2">
+      <h4>§5.2 REQ-DIST-015: EPLB 专家负载均衡</h4>
+      <div class="req" data-req="REQ-DIST-015">
+        <p><span class="req-id">REQ-DIST-015</span> | <span class="layer-tag layer-4">Layer 4</span> | 状态: draft</p>
+        <p><strong>描述</strong>: 统计专家热度，动态重分配 placement。EPLB（Expert Parallel Load Balancer）周期性统计每个 expert 的激活频率，检测负载不均衡（某 GPU expert 过热/过冷），动态迁移 expert 权重到负载较低的 GPU。迁移粒度为单个 expert，迁移期间该 expert 暂时不可用（请求排队等待）。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>分布式 MoE 已实现（REQ-DIST-014）</li>
+          <li>ExpertThermalManager 已实现</li>
+          <li>expert 权重可跨 GPU 传输</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>EPLB 周期性输出负载报告</li>
+          <li>负载不均衡时触发 expert 迁移</li>
+          <li>迁移后各 GPU expert 负载方差降低</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>负载报告包含每个 expert 的激活频率</li>
+          <li>迁移后负载方差 &lt; 迁移前负载方差</li>
+          <li>迁移期间无 token 丢失（排队等待）</li>
+          <li>迁移完成后 forward 数值与迁移前一致</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-EPLB</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-004</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Layer 5: 高级功能 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s6" data-section="6">
+      <h3>§6 Layer 5: 高级功能</h3>
+    </section>
+
+    <section id="s6.1" data-section="6.1">
+      <h4>§6.1 REQ-DIST-016: Ring Attention Context Parallelism</h4>
+      <div class="req" data-req="REQ-DIST-016">
+        <p><span class="req-id">REQ-DIST-016</span> | <span class="layer-tag layer-5">Layer 5</span> | 状态: draft</p>
+        <p><strong>描述</strong>: Q/K/V 按 seq_len/cp_size 切分，Ring 通信传递 KV 块。Context Parallelism (CP) 将长序列的 attention 计算分布到多个 GPU：每个 GPU 持有 seq_len/cp_size 的 Q 和完整 KV 的 1/cp_size，通过 Ring 通信逐轮传递 KV 块，每轮计算局部 attention，cp_size 轮后完成完整 attention。支持 Sliding Window Attention 的 Ring 变体。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>CommHandle 支持 send/recv（点对点通信）</li>
+          <li>FlashAttention 已实现</li>
+          <li>序列长度 &gt; 单 GPU 可容纳的 max_seq_len</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>每个 GPU 持有 seq_len/cp_size 的 Q</li>
+          <li>Ring 通信 cp_size 轮后每个 GPU 计算完整 attention</li>
+          <li>CP attention 数值与单 GPU attention 等价</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>cp_size=2: 序列长度翻倍，attention 数值差异 &lt; 1e-5</li>
+          <li>cp_size=4: 序列长度 4 倍，attention 数值差异 &lt; 1e-4</li>
+          <li>Ring 通信轮数 = cp_size</li>
+          <li>每轮通信量 = batch_size * num_kv_heads * head_dim * seq_len/cp_size</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-CP</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-006</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-005</p>
+      </div>
+    </section>
+
+    <section id="s6.2" data-section="6.2">
+      <h4>§6.2 REQ-DIST-017: SAGUARO 分布式推测解码</h4>
+      <div class="req" data-req="REQ-DIST-017">
+        <p><span class="req-id">REQ-DIST-017</span> | <span class="layer-tag layer-5">Layer 5</span> | 状态: draft</p>
+        <p><strong>描述</strong>: SAGUARO 分布式推测解码将 draft 模型和 verify 模型分布到不同 GPU。三阶段通信：(1) Draft GPU 生成候选 token 序列 → send 到 Verify GPU；(2) Verify GPU 并行验证所有候选 token → send 验证结果回 Draft GPU；(3) Draft GPU 根据验证结果更新状态，继续生成。通信与计算重叠：Draft GPU 生成下一批候选时，Verify GPU 验证上一批候选。</p>
+        <p><strong>前置条件</strong>:</p>
+        <ul>
+          <li>推测解码已实现（speculative/）</li>
+          <li>CommHandle 支持 send/recv</li>
+          <li>Draft 模型和 Verify 模型已加载到不同 GPU</li>
+        </ul>
+        <p><strong>后置条件</strong>:</p>
+        <ul>
+          <li>Draft GPU 生成候选 token 并发送到 Verify GPU</li>
+          <li>Verify GPU 验证候选并返回结果</li>
+          <li>三阶段通信流水线化</li>
+          <li>分布式推测解码接受率与单 GPU 推测解码一致</li>
+        </ul>
+        <p><strong>验收标准</strong>:</p>
+        <ul>
+          <li>分布式推测解码接受率 &gt;= 单 GPU 推测解码接受率 * 0.95</li>
+          <li>通信延迟隐藏率 &gt;= 50%（生成与验证重叠）</li>
+          <li>端到端吞吐 &gt; 单 GPU 推理吞吐 * 1.3（推测加速比）</li>
+          <li>验证结果与单 GPU 逐 token 验证完全一致</li>
+        </ul>
+        <p><strong>关联 Entity</strong>: ENT-DIST-SAGUARO</p>
+        <p><strong>关联 Dataflow</strong>: DF-DIST-006</p>
+        <p><strong>关联 Controlflow</strong>: CF-DIST-005</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Entity 定义 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s7" data-section="7">
+      <h3>§7 Entity 定义</h3>
+    </section>
+
+    <section id="s7.1" data-section="7.1">
+      <h4>§7.1 ENT-DIST-COMMHANDLE: NCCL 通信句柄封装</h4>
+      <div class="entity" data-entity="ENT-DIST-COMMHANDLE">
+        <p><strong>ID</strong>: ENT-DIST-COMMHANDLE</p>
+        <p><strong>名称</strong>: CommHandle</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>inner</td><td>gllm_nccl::CommHandle</td><td>底层 NCCL 通信句柄</td></tr>
+          <tr><td>rank</td><td>usize</td><td>当前进程在通信组中的 rank</td></tr>
+          <tr><td>world_size</td><td>usize</td><td>通信组总大小</td></tr>
+          <tr><td>stream</td><td>CudaStream</td><td>专用通信 stream</td></tr>
+        </table>
+        <p><strong>方法</strong>:</p>
+        <table>
+          <tr><th>方法</th><th>描述</th></tr>
+          <tr><td>rank() -&gt; usize</td><td>返回当前 rank</td></tr>
+          <tr><td>world_size() -&gt; usize</td><td>返回通信组大小</td></tr>
+          <tr><td>is_distributed() -&gt; bool</td><td>world_size &gt; 1 时返回 true</td></tr>
+          <tr><td>all_reduce(buf, op) -&gt; Result&lt;()&gt;</td><td>AllReduce 通信</td></tr>
+          <tr><td>reduce_scatter(buf) -&gt; Result&lt;()&gt;</td><td>ReduceScatter 通信</td></tr>
+          <tr><td>all_gather(buf) -&gt; Result&lt;()&gt;</td><td>AllGather 通信</td></tr>
+          <tr><td>all_to_all(send, recv) -&gt; Result&lt;()&gt;</td><td>AllToAll 通信</td></tr>
+          <tr><td>send(buf, peer) -&gt; Result&lt;()&gt;</td><td>点对点发送</td></tr>
+          <tr><td>recv(buf, peer) -&gt; Result&lt;()&gt;</td><td>点对点接收</td></tr>
+          <tr><td>destroy() -&gt; Result&lt;()&gt;</td><td>安全释放通信句柄</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-001, REQ-DIST-005, REQ-DIST-006, REQ-DIST-012, REQ-DIST-014, REQ-DIST-016, REQ-DIST-017</p>
+      </div>
+    </section>
+
+    <section id="s7.2" data-section="7.2">
+      <h4>§7.2 ENT-DIST-ROUTING-TABLE: 分布式页路由表</h4>
+      <div class="entity" data-entity="ENT-DIST-ROUTING-TABLE">
+        <p><strong>ID</strong>: ENT-DIST-ROUTING-TABLE</p>
+        <p><strong>名称</strong>: PageRoutingTable</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>entries</td><td>Vec&lt;RoutingEntry&gt;</td><td>逻辑页→物理位置映射表</td></tr>
+          <tr><td>tp_size</td><td>usize</td><td>Tensor Parallelism 大小</td></tr>
+          <tr><td>kv_mode</td><td>KvDistributionMode</td><td>KV 分布模式</td></tr>
+        </table>
+        <p><strong>RoutingEntry</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>logical_page_id</td><td>u32</td><td>逻辑 KV 页 ID</td></tr>
+          <tr><td>location</td><td>PageLocation</td><td>物理位置（Local/Remote/CrossNode）</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-003, REQ-DIST-013</p>
+      </div>
+    </section>
+
+    <section id="s7.3" data-section="7.3">
+      <h4>§7.3 ENT-DIST-TP-SHARD: TP 权重分片策略</h4>
+      <div class="entity" data-entity="ENT-DIST-TP-SHARD">
+        <p><strong>ID</strong>: ENT-DIST-TP-SHARD</p>
+        <p><strong>名称</strong>: TpShardStrategy</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>tp_size</td><td>usize</td><td>TP 并行度</td></tr>
+          <tr><td>rank</td><td>usize</td><td>当前 rank</td></tr>
+          <tr><td>shard_rules</td><td>HashMap&lt;WeightName, ShardRule&gt;</td><td>权重名→分片规则映射</td></tr>
+        </table>
+        <p><strong>ShardRule</strong>:</p>
+        <table>
+          <tr><th>变体</th><th>描述</th><th>适用权重</th></tr>
+          <tr><td>ColumnShard</td><td>按列切分 dim=1</td><td>QKVProj, OProj, lm_head</td></tr>
+          <tr><td>RowShard</td><td>按行切分 dim=0</td><td>GateUpProj</td></tr>
+          <tr><td>Replicate</td><td>完整复制，不分片</td><td>embedding, RMSNorm, RoPE</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-004</p>
+      </div>
+    </section>
+
+    <section id="s7.4" data-section="7.4">
+      <h4>§7.4 ENT-DIST-TP-COMM: TP 通信调度器</h4>
+      <div class="entity" data-entity="ENT-DIST-TP-COMM">
+        <p><strong>ID</strong>: ENT-DIST-TP-COMM</p>
+        <p><strong>名称</strong>: TpCommScheduler</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>comm_handle</td><td>CommHandle</td><td>通信句柄引用</td></tr>
+          <tr><td>comm_pattern</td><td>TpCommPattern</td><td>通信模式（AllReduce/ColumnParallel）</td></tr>
+          <tr><td>overlap_strategy</td><td>OverlapStrategy</td><td>重叠策略（None/DoubleBuffer/Flux）</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-005, REQ-DIST-006</p>
+      </div>
+    </section>
+
+    <section id="s7.5" data-section="7.5">
+      <h4>§7.5 ENT-DIST-DOUBLE-BUFFER: 双缓冲重叠策略</h4>
+      <div class="entity" data-entity="ENT-DIST-DOUBLE-BUFFER">
+        <p><strong>ID</strong>: ENT-DIST-DOUBLE-BUFFER</p>
+        <p><strong>名称</strong>: DoubleBufferCluster</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>buffer_a</td><td>CommBuffer</td><td>缓冲区 A</td></tr>
+          <tr><td>buffer_b</td><td>CommBuffer</td><td>缓冲区 B</td></tr>
+          <tr><td>active_buffer</td><td>BufferSlot</td><td>当前活跃缓冲区</td></tr>
+          <tr><td>sm_partition</td><td>SmPartitionConfig</td><td>SM 分区配置</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-007</p>
+      </div>
+    </section>
+
+    <section id="s7.6" data-section="7.6">
+      <h4>§7.6 ENT-DIST-FLUX: FLUX 分解策略</h4>
+      <div class="entity" data-entity="ENT-DIST-FLUX">
+        <p><strong>ID</strong>: ENT-DIST-FLUX</p>
+        <p><strong>名称</strong>: FluxDecompose</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>scatter_phase</td><td>CommPhase</td><td>ReduceScatter 阶段</td></tr>
+          <tr><td>compute_phase</td><td>ComputePhase</td><td>本地计算阶段</td></tr>
+          <tr><td>gather_phase</td><td>CommPhase</td><td>AllGather 阶段</td></tr>
+          <tr><td>pipeline_depth</td><td>usize</td><td>流水线深度</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-008</p>
+      </div>
+    </section>
+
+    <section id="s7.7" data-section="7.7">
+      <h4>§7.7 ENT-DIST-QUANT-COMM: 量化通信策略</h4>
+      <div class="entity" data-entity="ENT-DIST-QUANT-COMM">
+        <p><strong>ID</strong>: ENT-DIST-QUANT-COMM</p>
+        <p><strong>名称</strong>: QuantizedComm</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>compress_hint</td><td>CommCompressHint</td><td>压缩提示（AlwaysCompress/ForceQuant）</td></tr>
+          <tr><td>quant_format</td><td>QuantFormat</td><td>量化格式（INT8/FP8）</td></tr>
+          <tr><td>scale_buffer</td><td>Tensor</td><td>量化 scale 缓冲区</td></tr>
+        </table>
+        <p><strong>方法</strong>:</p>
+        <table>
+          <tr><th>方法</th><th>描述</th></tr>
+          <tr><td>pre_send_quantize(buf) -&gt; QuantizedBuf</td><td>发送前量化</td></tr>
+          <tr><td>post_recv_dequantize(quant_buf) -&gt; Tensor</td><td>接收后反量化</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-009</p>
+      </div>
+    </section>
+
+    <section id="s7.8" data-section="7.8">
+      <h4>§7.8 ENT-DIST-PD-ROLE: PD 分离角色路由器</h4>
+      <div class="entity" data-entity="ENT-DIST-PD-ROLE">
+        <p><strong>ID</strong>: ENT-DIST-PD-ROLE</p>
+        <p><strong>名称</strong>: PdRoleRouter</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>mode</td><td>PdDisaggMode</td><td>分离模式（Joint/Disaggregated）</td></tr>
+          <tr><td>role</td><td>PdRole</td><td>当前角色（PrefillOnly/DecodeOnly）</td></tr>
+          <tr><td>peer_addr</td><td>Option&lt;SocketAddr&gt;</td><td>对端地址（Disaggregated 模式）</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-011</p>
+      </div>
+    </section>
+
+    <section id="s7.9" data-section="7.9">
+      <h4>§7.9 ENT-DIST-KV-XFER: 跨节点 KV 传输器</h4>
+      <div class="entity" data-entity="ENT-DIST-KV-XFER">
+        <p><strong>ID</strong>: ENT-DIST-KV-XFER</p>
+        <p><strong>名称</strong>: KvTransfer</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>comm_handle</td><td>CommHandle</td><td>通信句柄引用</td></tr>
+          <tr><td>transfer_mode</td><td>KvTransferMode</td><td>传输模式（Sync/Async/Rdma）</td></tr>
+          <tr><td>pending_transfers</td><td>Vec&lt;TransferFuture&gt;</td><td>待完成的异步传输</td></tr>
+        </table>
+        <p><strong>方法</strong>:</p>
+        <table>
+          <tr><th>方法</th><th>描述</th></tr>
+          <tr><td>send_pages(pages, peer) -&gt; Result&lt;()&gt;</td><td>同步发送 KV pages</td></tr>
+          <tr><td>recv_pages(pages, peer) -&gt; Result&lt;()&gt;</td><td>同步接收 KV pages</td></tr>
+          <tr><td>send_pages_async(pages, peer) -&gt; TransferFuture</td><td>异步发送</td></tr>
+          <tr><td>recv_pages_async(pages, peer) -&gt; TransferFuture</td><td>异步接收</td></tr>
+          <tr><td>poll_transfers() -&gt; Vec&lt;TransferResult&gt;</td><td>轮询异步传输完成状态</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-012</p>
+      </div>
+    </section>
+
+    <section id="s7.10" data-section="7.10">
+      <h4>§7.10 ENT-DIST-KV-MODE: KV 分布模式策略</h4>
+      <div class="entity" data-entity="ENT-DIST-KV-MODE">
+        <p><strong>ID</strong>: ENT-DIST-KV-MODE</p>
+        <p><strong>名称</strong>: KvDistributionMode</p>
+        <p><strong>枚举变体</strong>:</p>
+        <table>
+          <tr><th>变体</th><th>描述</th><th>内存开销</th><th>通信开销</th></tr>
+          <tr><td>Local</td><td>所有 KV 在本地 GPU</td><td>1x</td><td>零</td></tr>
+          <tr><td>OnDemand</td><td>按需从远端读取</td><td>1x</td><td>按需</td></tr>
+          <tr><td>Mirror</td><td>所有 GPU 完整镜像</td><td>tp_size x</td><td>零</td></tr>
+          <tr><td>PartialHeadMirror</td><td>按 head 部分镜像</td><td>1x</td><td>attention 输入大小</td></tr>
+          <tr><td>TieredCache</td><td>三级缓存自动迁移</td><td>1x + 缓存层</td><td>按热度</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-013</p>
+      </div>
+    </section>
+
+    <section id="s7.11" data-section="7.11">
+      <h4>§7.11 ENT-DIST-MOE-DIST: MoE 分布式调度器</h4>
+      <div class="entity" data-entity="ENT-DIST-MOE-DIST">
+        <p><strong>ID</strong>: ENT-DIST-MOE-DIST</p>
+        <p><strong>名称</strong>: DistributedMoeDispatcher</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>placement</td><td>ExpertPlacement</td><td>Expert 放置策略</td></tr>
+          <tr><td>comm_handle</td><td>CommHandle</td><td>通信句柄引用</td></tr>
+          <tr><td>dispatch_buffer</td><td>DispatchBuffer</td><td>AllToAll dispatch 缓冲区</td></tr>
+          <tr><td>merge_buffer</td><td>MergeBuffer</td><td>AllToAll merge 缓冲区</td></tr>
+        </table>
+        <p><strong>ExpertPlacement</strong>:</p>
+        <table>
+          <tr><th>变体</th><th>描述</th></tr>
+          <tr><td>RoundRobin</td><td>均匀分配 expert 到各 GPU</td></tr>
+          <tr><td>HotCold { hot_replica_count: usize }</td><td>热 expert 镜像多 GPU，冷 expert 独占</td></tr>
+          <tr><td>Custom { mapping: HashMap&lt;ExpertId, GpuId&gt; }</td><td>用户自定义映射</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-014</p>
+      </div>
+    </section>
+
+    <section id="s7.12" data-section="7.12">
+      <h4>§7.12 ENT-DIST-EPLB: 专家负载均衡器</h4>
+      <div class="entity" data-entity="ENT-DIST-EPLB">
+        <p><strong>ID</strong>: ENT-DIST-EPLB</p>
+        <p><strong>名称</strong>: ExpertLoadBalancer</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>activation_counts</td><td>Vec&lt;AtomicU64&gt;</td><td>每个 expert 的激活计数</td></tr>
+          <tr><td>balance_interval</td><td>Duration</td><td>负载均衡检查间隔</td></tr>
+          <tr><td>imbalance_threshold</td><td>f64</td><td>不均衡阈值（方差/均值）</td></tr>
+          <tr><td>migration_queue</td><td>VecDeque&lt;MigrationTask&gt;</td><td>待执行迁移任务</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-015</p>
+      </div>
+    </section>
+
+    <section id="s7.13" data-section="7.13">
+      <h4>§7.13 ENT-DIST-CP: Context Parallelism 环通信</h4>
+      <div class="entity" data-entity="ENT-DIST-CP">
+        <p><strong>ID</strong>: ENT-DIST-CP</p>
+        <p><strong>名称</strong>: RingAttentionCp</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>cp_size</td><td>usize</td><td>Context Parallelism 大小</td></tr>
+          <tr><td>cp_rank</td><td>usize</td><td>当前 CP rank</td></tr>
+          <tr><td>kv_send_buf</td><td>Tensor</td><td>KV 发送缓冲区</td></tr>
+          <tr><td>kv_recv_buf</td><td>Tensor</td><td>KV 接收缓冲区</td></tr>
+          <tr><td>partial_attn</td><td>Tensor</td><td>部分 attention 累积缓冲区</td></tr>
+        </table>
+        <p><strong>关联 REQ</strong>: REQ-DIST-016</p>
+      </div>
+    </section>
+
+    <section id="s7.14" data-section="7.14">
+      <h4>§7.14 ENT-DIST-SAGUARO: SAGUARO 分布式推测</h4>
+      <div class="entity" data-entity="ENT-DIST-SAGUARO">
+        <p><strong>ID</strong>: ENT-DIST-SAGUARO</p>
+        <p><strong>名称</strong>: SaguaroDistSpec</p>
+        <p><strong>字段</strong>:</p>
+        <table>
+          <tr><th>字段</th><th>类型</th><th>描述</th></tr>
+          <tr><td>draft_gpu</td><td>GpuId</td><td>Draft 模型所在 GPU</td></tr>
+          <tr><td>verify_gpu</td><td>GpuId</td><td>Verify 模型所在 GPU</td></tr>
+          <tr><td>candidate_buf</td><td>TokenBuffer</td><td>候选 token 缓冲区</td></tr>
+          <tr><td>verify_result_buf</td><td>VerifyResultBuffer</td><td>验证结果缓冲区</td></tr>
+          <tr><td>pipeline_stage</td><td>SaguaroStage</td><td>当前流水线阶段</td></tr>
+        </table>
+        <p><strong>SaguaroStage</strong>: DraftGenerate | SendCandidates | VerifyAccept | SendResults | UpdateState</p>
+        <p><strong>关联 REQ</strong>: REQ-DIST-017</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Dataflow 定义 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s8" data-section="8">
+      <h3>§8 Dataflow 定义</h3>
+    </section>
+
+    <section id="s8.1" data-section="8.1">
+      <h4>§8.1 DF-DIST-001: 配置传递流</h4>
+      <div class="dataflow" data-dataflow="DF-DIST-001">
+        <p><strong>ID</strong>: DF-DIST-001</p>
+        <p><strong>描述</strong>: ClientConfig.distributed → Executor.init_distributed() 配置传递完整链路</p>
+        <p><strong>source → target</strong>:</p>
+        <ul>
+          <li>ClientConfig.distributed → ExecutorBuilder.distributed_config</li>
+          <li>ExecutorBuilder.distributed_config → Executor.init_distributed()</li>
+          <li>Executor.init_distributed() → CommHandle (ParallelConfig)</li>
+          <li>Executor.init_distributed() → ModelContextHolder.distributed_routing_table (KvDistributionConfig)</li>
+          <li>Executor.init_distributed() → PdRoleRouter (PdDisaggConfig)</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-001, REQ-DIST-002, REQ-DIST-003</p>
+      </div>
+    </section>
+
+    <section id="s8.2" data-section="8.2">
+      <h4>§8.2 DF-DIST-002: TP 数据流</h4>
+      <div class="dataflow" data-dataflow="DF-DIST-002">
+        <p><strong>ID</strong>: DF-DIST-002</p>
+        <p><strong>描述</strong>: 权重分片 → forward → AllReduce → 聚合完整 TP 数据流</p>
+        <p><strong>source → target</strong>:</p>
+        <ul>
+          <li>WeightLoader → TpShardStrategy.shard(weights, rank, tp_size) → 分片权重</li>
+          <li>分片权重 → CompilerGraph (列切分/行切分 op) → 部分结果</li>
+          <li>部分结果 → CommHandle.all_reduce(Sum) → 聚合结果</li>
+          <li>聚合结果 → 下一层输入</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-004, REQ-DIST-005</p>
+      </div>
+    </section>
+
+    <section id="s8.3" data-section="8.3">
+      <h4>§8.3 DF-DIST-003: 重叠数据流</h4>
+      <div class="dataflow" data-dataflow="DF-DIST-003">
+        <p><strong>ID</strong>: DF-DIST-003</p>
+        <p><strong>描述</strong>: ReduceScatter → LocalCompute → AllGather 异步重叠数据流</p>
+        <p><strong>source → target</strong>:</p>
+        <ul>
+          <li>部分结果 → CommHandle.reduce_scatter() → 分片聚合结果</li>
+          <li>分片聚合结果 → LocalCompute (与通信重叠) → 本地计算结果</li>
+          <li>本地计算结果 → CommHandle.all_gather() → 完整结果</li>
+        </ul>
+        <p><strong>重叠模式</strong>:</p>
+        <ul>
+          <li>DoubleBuffer: Layer N 通信 ‖ Layer N+1 计算</li>
+          <li>Flux: ReduceScatter 部分完成 → 立即启动 LocalCompute → AllGather</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-006, REQ-DIST-007, REQ-DIST-008</p>
+      </div>
+    </section>
+
+    <section id="s8.4" data-section="8.4">
+      <h4>§8.4 DF-DIST-004: KV 分布流</h4>
+      <div class="dataflow" data-dataflow="DF-DIST-004">
+        <p><strong>ID</strong>: DF-DIST-004</p>
+        <p><strong>描述</strong>: Prefill → KvTransferOut → Network → KvTransferIn → Decode 完整 KV 分布流</p>
+        <p><strong>source → target</strong>:</p>
+        <ul>
+          <li>PrefillOnly GPU → KV pages 填充完成</li>
+          <li>KV pages → KvTransfer.send_pages() → 网络传输</li>
+          <li>网络传输 → KvTransfer.recv_pages() → DecodeOnly GPU</li>
+          <li>DecodeOnly GPU → KV pages 就绪 → Decode forward</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-011, REQ-DIST-012, REQ-DIST-013</p>
+      </div>
+    </section>
+
+    <section id="s8.5" data-section="8.5">
+      <h4>§8.5 DF-DIST-005: MoE 分布流</h4>
+      <div class="dataflow" data-dataflow="DF-DIST-005">
+        <p><strong>ID</strong>: DF-DIST-005</p>
+        <p><strong>描述</strong>: Token → AllToAll → Expert → AllToAll → Merge 完整 MoE 分布流</p>
+        <p><strong>source → target</strong>:</p>
+        <ul>
+          <li>Token 输入 → Router 计算 top-k expert</li>
+          <li>top-k token → AllToAll dispatch → Expert GPU</li>
+          <li>Expert GPU → Expert forward → Expert 输出</li>
+          <li>Expert 输出 → AllToAll merge → 原 GPU</li>
+          <li>原 GPU → 合并 expert 输出 → 下层输入</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-014, REQ-DIST-015</p>
+      </div>
+    </section>
+
+    <section id="s8.6" data-section="8.6">
+      <h4>§8.6 DF-DIST-006: CP/SAGUARO 流</h4>
+      <div class="dataflow" data-dataflow="DF-DIST-006">
+        <p><strong>ID</strong>: DF-DIST-006</p>
+        <p><strong>描述</strong>: Ring KV 传递 / Draft→Verify 通信流</p>
+        <p><strong>Ring Attention CP</strong>:</p>
+        <ul>
+          <li>GPU_i 持有 Q[seq_len/cp_size] + KV[seq_len/cp_size]</li>
+          <li>Round 0: 本地 Q × 本地 KV → partial_attn_0</li>
+          <li>Round k: send KV → recv KV from neighbor → Q × new KV → partial_attn_k</li>
+          <li>cp_size 轮后: sum(partial_attn_0..cp_size-1) = 完整 attention</li>
+        </ul>
+        <p><strong>SAGUARO</strong>:</p>
+        <ul>
+          <li>Draft GPU → 生成候选 token → send → Verify GPU</li>
+          <li>Verify GPU → 并行验证 → send 验证结果 → Draft GPU</li>
+          <li>Draft GPU → 更新状态 → 继续生成</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-016, REQ-DIST-017</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- Controlflow 定义 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s9" data-section="9">
+      <h3>§9 Controlflow 定义</h3>
+    </section>
+
+    <section id="s9.1" data-section="9.1">
+      <h4>§9.1 CF-DIST-001: TP 通信控制</h4>
+      <div class="controlflow" data-controlflow="CF-DIST-001">
+        <p><strong>ID</strong>: CF-DIST-001</p>
+        <p><strong>描述</strong>: AllReduce/ReduceScatter 触发条件与通信模式选择</p>
+        <p><strong>触发条件</strong>:</p>
+        <ul>
+          <li>is_distributed() == true → 每个 Transformer 层 forward 后触发通信</li>
+          <li>行切分层输出 → AllReduce(Sum)</li>
+          <li>列切分层输出 → ReduceScatter + AllGather（列并行模式）</li>
+          <li>is_distributed() == false → 零通信开销</li>
+        </ul>
+        <p><strong>模式选择</strong>:</p>
+        <ul>
+          <li>tp_size == 1 → 无通信</li>
+          <li>tp_size &gt; 1 + 无重叠 → AllReduce</li>
+          <li>tp_size &gt; 1 + 列并行 → ReduceScatter + AllGather</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-005, REQ-DIST-006</p>
+      </div>
+    </section>
+
+    <section id="s9.2" data-section="9.2">
+      <h4>§9.2 CF-DIST-002: 重叠调度控制</h4>
+      <div class="controlflow" data-controlflow="CF-DIST-002">
+        <p><strong>ID</strong>: CF-DIST-002</p>
+        <p><strong>描述</strong>: DoubleBuffer/FLUX 模式选择与算法覆盖控制</p>
+        <p><strong>选择逻辑</strong>:</p>
+        <ul>
+          <li>algorithm_override = Some(ForceDoubleBuffer) → 强制双缓冲</li>
+          <li>algorithm_override = Some(ForceFlux) → 强制 FLUX</li>
+          <li>algorithm_override = None → 策略仲裁器自动选择</li>
+          <li>自动选择: SM 分区支持 + 通信/计算比 &gt; 0.3 → DoubleBuffer; 流水线深度 &gt; 2 → Flux</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-007, REQ-DIST-008, REQ-DIST-010</p>
+      </div>
+    </section>
+
+    <section id="s9.3" data-section="9.3">
+      <h4>§9.3 CF-DIST-003: PD 路由控制</h4>
+      <div class="controlflow" data-controlflow="CF-DIST-003">
+        <p><strong>ID</strong>: CF-DIST-003</p>
+        <p><strong>描述</strong>: PrefillOnly/DecodeOnly 请求过滤与角色路由</p>
+        <p><strong>路由逻辑</strong>:</p>
+        <ul>
+          <li>PdDisaggMode.Joint → 所有请求在本地处理</li>
+          <li>PdDisaggMode.Disaggregated + role=PrefillOnly → 仅处理 prefill 请求，完成后 KV 传输到 Decode 节点</li>
+          <li>PdDisaggMode.Disaggregated + role=DecodeOnly → 仅处理 decode 请求，从 Prefill 节点接收 KV</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-011</p>
+      </div>
+    </section>
+
+    <section id="s9.4" data-section="9.4">
+      <h4>§9.4 CF-DIST-004: Expert 调度控制</h4>
+      <div class="controlflow" data-controlflow="CF-DIST-004">
+        <p><strong>ID</strong>: CF-DIST-004</p>
+        <p><strong>描述</strong>: RoundRobin/HotCold/Custom 放置策略与 EPLB 迁移控制</p>
+        <p><strong>放置策略</strong>:</p>
+        <ul>
+          <li>RoundRobin: expert_id % tp_size → GPU 分配</li>
+          <li>HotCold: 热 expert（激活频率 &gt; 阈值）镜像到多 GPU；冷 expert 独占</li>
+          <li>Custom: 按 mapping 字段分配</li>
+        </ul>
+        <p><strong>EPLB 迁移触发</strong>:</p>
+        <ul>
+          <li>负载方差/均值 &gt; imbalance_threshold → 触发迁移</li>
+          <li>迁移粒度: 单个 expert</li>
+          <li>迁移期间: 该 expert 请求排队</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-014, REQ-DIST-015</p>
+      </div>
+    </section>
+
+    <section id="s9.5" data-section="9.5">
+      <h4>§9.5 CF-DIST-005: 环/推测控制</h4>
+      <div class="controlflow" data-controlflow="CF-DIST-005">
+        <p><strong>ID</strong>: CF-DIST-005</p>
+        <p><strong>描述</strong>: Ring 通信阶段控制 / SAGUARO 三阶段通信控制</p>
+        <p><strong>Ring Attention CP 阶段</strong>:</p>
+        <ul>
+          <li>for round in 0..cp_size: compute_local_attn() → send_kv_to_next() → recv_kv_from_prev()</li>
+          <li>每轮: 本地 Q × 当前 KV 块 → 累积 partial attention</li>
+          <li>cp_size 轮后: 归一化 partial attention = 完整 attention</li>
+        </ul>
+        <p><strong>SAGUARO 三阶段</strong>:</p>
+        <ul>
+          <li>Stage 1: Draft GPU 生成 N 个候选 token</li>
+          <li>Stage 2: send(candidates) → Verify GPU 并行验证 → send(verify_results)</li>
+          <li>Stage 3: Draft GPU 接收验证结果 → 更新状态 → 继续生成</li>
+          <li>流水线: Stage 1(N+1) ‖ Stage 2(N) 重叠</li>
+        </ul>
+        <p><strong>关联 REQ</strong>: REQ-DIST-016, REQ-DIST-017</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- 测试用例 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s10" data-section="10">
+      <h3>§10 测试用例</h3>
+    </section>
+
+    <section id="s10.1" data-section="10.1">
+      <h4>§10.1 TEST-DIST-001: CommHandle 生命周期测试</h4>
+      <div class="test" data-test="TEST-DIST-001" data-req-ref="REQ-DIST-001" data-test-categories="unit">
+        <p><strong>ID</strong>: TEST-DIST-001</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-001</p>
+        <p><strong>描述</strong>: 验证 CommHandle 初始化、rank/world_size 查询、is_distributed 判定、Drop 安全释放。单 GPU 模式下 is_distributed() == false；多 GPU 模式下 rank 值域正确；Drop 后无资源泄漏。</p>
+        <p><strong>前置</strong>: NCCL runtime 可用</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>构造 ParallelConfig { tp_size: 1, rank: 0 }</li>
+          <li>初始化 CommHandle</li>
+          <li>断言 is_distributed() == false, rank() == 0, world_size() == 1</li>
+          <li>Drop CommHandle</li>
+          <li>验证无资源泄漏</li>
+        </ol>
+        <p><strong>预期</strong>: 所有断言通过</p>
+      </div>
+    </section>
+
+    <section id="s10.2" data-section="10.2">
+      <h4>§10.2 TEST-DIST-002: DistributedConfig 传递测试</h4>
+      <div class="test" data-test="TEST-DIST-002" data-req-ref="REQ-DIST-002" data-test-categories="unit">
+        <p><strong>ID</strong>: TEST-DIST-002</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-002</p>
+        <p><strong>描述</strong>: 验证 ClientConfig.distributed → Executor 配置传递链路完整性。配置值在传递过程中无信息丢失。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>构造 ClientConfig { distributed: DistributedConfig { tp_size: 2, rank: 1, ... } }</li>
+          <li>通过 ExecutorBuilder 构建 Executor</li>
+          <li>断言 Executor.comm_handle.world_size() == 2</li>
+          <li>断言 Executor.comm_handle.rank() == 1</li>
+        </ol>
+        <p><strong>预期</strong>: 配置值完整传递</p>
+      </div>
+    </section>
+
+    <section id="s10.3" data-section="10.3">
+      <h4>§10.3 TEST-DIST-003: 分布式页路由表测试</h4>
+      <div class="test" data-test="TEST-DIST-003" data-req-ref="REQ-DIST-003" data-test-categories="unit">
+        <p><strong>ID</strong>: TEST-DIST-003</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-003</p>
+        <p><strong>描述</strong>: 验证 PageRoutingTable 构建正确性。单 GPU 所有页映射到本地；TP 模式每个 rank 持有自己分片的 KV 页。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>构造 KvDistributionConfig { mode: Local }</li>
+          <li>构建 PageRoutingTable</li>
+          <li>断言所有页 location == Local</li>
+          <li>切换 mode 为 PartialHeadMirror</li>
+          <li>重建路由表</li>
+          <li>断言路由表按 head 分片</li>
+        </ol>
+        <p><strong>预期</strong>: 路由表映射正确</p>
+      </div>
+    </section>
+
+    <section id="s10.4" data-section="10.4">
+      <h4>§10.4 TEST-DIST-004: TP 权重分片测试</h4>
+      <div class="test" data-test="TEST-DIST-004" data-req-ref="REQ-DIST-004" data-test-categories="unit">
+        <p><strong>ID</strong>: TEST-DIST-004</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-004</p>
+        <p><strong>描述</strong>: 验证 TP 权重分片正确性。列切分/行切分/复制策略按规则执行，分片后 shape 正确。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>加载模型权重</li>
+          <li>tp_size=2, rank=0: 对 QKVProj 执行列切分</li>
+          <li>断言分片后 QKVProj shape == [hidden, num_heads/2 * head_dim]</li>
+          <li>对 GateUpProj 执行行切分</li>
+          <li>断言分片后 GateUpProj shape == [hidden/2, intermediate_size]</li>
+          <li>断言 embedding 权重与原始一致（复制不分片）</li>
+        </ol>
+        <p><strong>预期</strong>: 分片 shape 正确，复制权重一致</p>
+      </div>
+    </section>
+
+    <section id="s10.5" data-section="10.5">
+      <h4>§10.5 TEST-DIST-005: TP AllReduce 通信测试</h4>
+      <div class="test" data-test="TEST-DIST-005" data-req-ref="REQ-DIST-005" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-005</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-005</p>
+        <p><strong>描述</strong>: 验证 TP AllReduce 通信数值正确性。2-GPU TP forward 后 logits 与单 GPU 差异在浮点误差内。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>单 GPU 加载模型，forward 得到 logits_single</li>
+          <li>2-GPU TP 加载同一模型，forward 得到 logits_tp</li>
+          <li>断言 |logits_single - logits_tp| &lt; 1e-5</li>
+          <li>验证通信点数量 == num_layers * 2</li>
+        </ol>
+        <p><strong>预期</strong>: 数值差异 &lt; 1e-5</p>
+      </div>
+    </section>
+
+    <section id="s10.6" data-section="10.6">
+      <h4>§10.6 TEST-DIST-006: TP 列并行通信测试</h4>
+      <div class="test" data-test="TEST-DIST-006" data-req-ref="REQ-DIST-006" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-006</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-006</p>
+        <p><strong>描述</strong>: 验证列并行 ReduceScatter+AllGather 数值等价性和通信量减半。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>2-GPU TP 列并行 forward</li>
+          <li>断言数值结果与 AllReduce 模式等价</li>
+          <li>测量通信量，断言 == AllReduce 通信量 / 2</li>
+        </ol>
+        <p><strong>预期</strong>: 数值等价，通信量减半</p>
+      </div>
+    </section>
+
+    <section id="s10.7" data-section="10.7">
+      <h4>§10.7 TEST-DIST-007: 双缓冲重叠测试</h4>
+      <div class="test" data-test="TEST-DIST-007" data-req-ref="REQ-DIST-007" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-007</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-007</p>
+        <p><strong>描述</strong>: 验证双缓冲重叠调度正确性。数值结果与串行模式一致，通信延迟部分隐藏。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>2-GPU TP + DoubleBuffer 模式 forward</li>
+          <li>断言数值结果与串行 AllReduce 完全一致</li>
+          <li>测量 step 延迟，断言 &lt; 串行模式 * (1 + 0.3)</li>
+        </ol>
+        <p><strong>预期</strong>: 数值一致，延迟降低</p>
+      </div>
+    </section>
+
+    <section id="s10.8" data-section="10.8">
+      <h4>§10.8 TEST-DIST-008: FLUX 分解测试</h4>
+      <div class="test" data-test="TEST-DIST-008" data-req-ref="REQ-DIST-008" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-008</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-008</p>
+        <p><strong>描述</strong>: 验证 FLUX 分解调度正确性。AllReduce 分解为 ReduceScatter+LocalCompute+AllGather 三阶段，数值一致。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>2-GPU TP + Flux 模式 forward</li>
+          <li>断言数值结果与串行 AllReduce 完全一致</li>
+          <li>验证 ReduceScatter 部分完成后本地计算立即启动</li>
+        </ol>
+        <p><strong>预期</strong>: 数值一致，流水线化执行</p>
+      </div>
+    </section>
+
+    <section id="s10.9" data-section="10.9">
+      <h4>§10.9 TEST-DIST-009: 量化通信测试</h4>
+      <div class="test" data-test="TEST-DIST-009" data-req-ref="REQ-DIST-009" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-009</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-009</p>
+        <p><strong>描述</strong>: 验证量化通信数值精度和带宽节省。INT8 量化后误差 &lt; 1e-3，带宽减少 50%+。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>2-GPU TP + AlwaysCompress(INT8) 模式 forward</li>
+          <li>断言数值误差 &lt; 1e-3</li>
+          <li>测量通信带宽，断言减少 50%+</li>
+        </ol>
+        <p><strong>预期</strong>: 误差可控，带宽节省</p>
+      </div>
+    </section>
+
+    <section id="s10.10" data-section="10.10">
+      <h4>§10.10 TEST-DIST-010: 算法选择覆盖测试</h4>
+      <div class="test" data-test="TEST-DIST-010" data-req-ref="REQ-DIST-010" data-test-categories="unit">
+        <p><strong>ID</strong>: TEST-DIST-010</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-010</p>
+        <p><strong>描述</strong>: 验证 algorithm_override 强制指定通信算法。覆盖时使用指定算法，不可用时返回 Err。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>设置 algorithm_override = Some(ForceDoubleBuffer)</li>
+          <li>验证 select_algorithm() 返回 DoubleBuffer</li>
+          <li>设置 algorithm_override = Some(ForceFlux)</li>
+          <li>验证 select_algorithm() 返回 Flux</li>
+          <li>设置不可用算法，验证返回 Err</li>
+        </ol>
+        <p><strong>预期</strong>: 覆盖生效，不可用返回 Err</p>
+      </div>
+    </section>
+
+    <section id="s10.11" data-section="10.11">
+      <h4>§10.11 TEST-DIST-011: PD 分离角色路由测试</h4>
+      <div class="test" data-test="TEST-DIST-011" data-req-ref="REQ-DIST-011" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-011</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-011</p>
+        <p><strong>描述</strong>: 验证 PD 分离角色路由正确性。PrefillOnly 编译产物不含 Argmax/采样；DecodeOnly 不含长序列 prefill。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>配置 PdDisaggMode.Disaggregated, role=PrefillOnly</li>
+          <li>编译 Mega-Kernel</li>
+          <li>断言编译产物不含 Argmax VmInstr</li>
+          <li>切换 role=DecodeOnly</li>
+          <li>断言编译产物不含长序列 prefill 路径</li>
+        </ol>
+        <p><strong>预期</strong>: 角色路由裁剪正确</p>
+      </div>
+    </section>
+
+    <section id="s10.12" data-section="10.12">
+      <h4>§10.12 TEST-DIST-012: 跨节点 KV 传输测试</h4>
+      <div class="test" data-test="TEST-DIST-012" data-req-ref="REQ-DIST-012" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-012</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-012</p>
+        <p><strong>描述</strong>: 验证跨节点 KV 传输正确性。同步/异步传输数据一致，批量传输延迟优于逐页传输。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>PrefillOnly GPU 完成 prefill，填充 KV pages</li>
+          <li>同步传输 KV pages 到 DecodeOnly GPU</li>
+          <li>断言接收端 KV 数据与发送端 bit-wise 一致</li>
+          <li>异步传输测试：验证 Future 完成后数据一致</li>
+          <li>批量传输测试：N pages 一次性传输</li>
+        </ol>
+        <p><strong>预期</strong>: 数据一致，批量传输高效</p>
+      </div>
+    </section>
+
+    <section id="s10.13" data-section="10.13">
+      <h4>§10.13 TEST-DIST-013: KV 分布 5 模式测试</h4>
+      <div class="test" data-test="TEST-DIST-013" data-req-ref="REQ-DIST-013" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-013</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-013</p>
+        <p><strong>描述</strong>: 验证 5 种 KV 分布模式正确性。所有模式 forward 数值一致，内存/通信开销符合预期。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>Local 模式: 验证零跨 GPU 通信</li>
+          <li>OnDemand 模式: 验证按需通信</li>
+          <li>Mirror 模式: 验证零通信 + 内存 = 单 GPU * tp_size</li>
+          <li>PartialHeadMirror 模式: 验证按 head 分片</li>
+          <li>TieredCache 模式: 验证热页在 HBM，冷页迁移到 DRAM</li>
+          <li>所有模式 forward 数值一致</li>
+        </ol>
+        <p><strong>预期</strong>: 5 种模式均正确</p>
+      </div>
+    </section>
+
+    <section id="s10.14" data-section="10.14">
+      <h4>§10.14 TEST-DIST-014: 分布式 MoE 测试</h4>
+      <div class="test" data-test="TEST-DIST-014" data-req-ref="REQ-DIST-014" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-014</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-014</p>
+        <p><strong>描述</strong>: 验证分布式 MoE dispatch/merge 正确性。AllToAll 通信后 token 到达正确 expert，数值与单 GPU 等价。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>加载 MoE 模型，RoundRobin placement</li>
+          <li>2-GPU 分布式 MoE forward</li>
+          <li>验证 AllToAll dispatch 后 token 到达正确 expert GPU</li>
+          <li>验证 AllToAll merge 后结果返回原 GPU</li>
+          <li>断言数值与单 GPU 差异 &lt; 1e-4</li>
+        </ol>
+        <p><strong>预期</strong>: 分布式 MoE 数值等价</p>
+      </div>
+    </section>
+
+    <section id="s10.15" data-section="10.15">
+      <h4>§10.15 TEST-DIST-015: EPLB 负载均衡测试</h4>
+      <div class="test" data-test="TEST-DIST-015" data-req-ref="REQ-DIST-015" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-015</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-015</p>
+        <p><strong>描述</strong>: 验证 EPLB 负载均衡正确性。负载不均衡时触发 expert 迁移，迁移后负载方差降低。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>运行 MoE 推理，统计 expert 激活频率</li>
+          <li>人为制造负载不均衡（某 expert 过热）</li>
+          <li>等待 EPLB 检测并触发迁移</li>
+          <li>断言迁移后负载方差 &lt; 迁移前</li>
+          <li>断言迁移期间无 token 丢失</li>
+        </ol>
+        <p><strong>预期</strong>: 负载均衡生效</p>
+      </div>
+    </section>
+
+    <section id="s10.16" data-section="10.16">
+      <h4>§10.16 TEST-DIST-016: Ring Attention CP 测试</h4>
+      <div class="test" data-test="TEST-DIST-016" data-req-ref="REQ-DIST-016" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-016</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-016</p>
+        <p><strong>描述</strong>: 验证 Ring Attention Context Parallelism 正确性。cp_size=2 时序列长度翻倍，attention 数值差异 &lt; 1e-5。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>单 GPU attention 计算（短序列）</li>
+          <li>2-GPU CP attention 计算（序列长度翻倍）</li>
+          <li>断言 attention 数值差异 &lt; 1e-5</li>
+          <li>验证 Ring 通信轮数 == cp_size</li>
+        </ol>
+        <p><strong>预期</strong>: CP attention 数值等价</p>
+      </div>
+    </section>
+
+    <section id="s10.17" data-section="10.17">
+      <h4>§10.17 TEST-DIST-017: SAGUARO 分布式推测测试</h4>
+      <div class="test" data-test="TEST-DIST-017" data-req-ref="REQ-DIST-017" data-test-categories="integration">
+        <p><strong>ID</strong>: TEST-DIST-017</p>
+        <p><strong>验证 REQ</strong>: REQ-DIST-017</p>
+        <p><strong>描述</strong>: 验证 SAGUARO 分布式推测解码正确性。三阶段通信流水线化，接受率与单 GPU 推测解码一致。</p>
+        <p><strong>步骤</strong>:</p>
+        <ol>
+          <li>Draft GPU 加载小模型，Verify GPU 加载大模型</li>
+          <li>运行 SAGUARO 分布式推测解码</li>
+          <li>验证三阶段通信正确：Draft→Verify→Draft</li>
+          <li>断言接受率 &gt;= 单 GPU 推测解码 * 0.95</li>
+          <li>断言端到端吞吐 &gt; 单 GPU * 1.3</li>
+        </ol>
+        <p><strong>预期</strong>: 分布式推测解码加速有效</p>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- 依赖关系 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s11" data-section="11">
+      <h3>§11 REQ 依赖关系</h3>
+      <table>
+        <tr><th>REQ</th><th>依赖</th></tr>
+        <tr><td>REQ-DIST-001</td><td>—</td></tr>
+        <tr><td>REQ-DIST-002</td><td>REQ-DIST-001</td></tr>
+        <tr><td>REQ-DIST-003</td><td>REQ-DIST-001</td></tr>
+        <tr><td>REQ-DIST-004</td><td>REQ-DIST-001</td></tr>
+        <tr><td>REQ-DIST-005</td><td>REQ-DIST-004</td></tr>
+        <tr><td>REQ-DIST-006</td><td>REQ-DIST-004, REQ-DIST-005</td></tr>
+        <tr><td>REQ-DIST-007</td><td>REQ-DIST-005, REQ-DIST-006</td></tr>
+        <tr><td>REQ-DIST-008</td><td>REQ-DIST-006</td></tr>
+        <tr><td>REQ-DIST-009</td><td>REQ-DIST-005</td></tr>
+        <tr><td>REQ-DIST-010</td><td>REQ-DIST-007, REQ-DIST-008</td></tr>
+        <tr><td>REQ-DIST-011</td><td>REQ-DIST-001</td></tr>
+        <tr><td>REQ-DIST-012</td><td>REQ-DIST-011</td></tr>
+        <tr><td>REQ-DIST-013</td><td>REQ-DIST-003</td></tr>
+        <tr><td>REQ-DIST-014</td><td>REQ-DIST-001</td></tr>
+        <tr><td>REQ-DIST-015</td><td>REQ-DIST-014</td></tr>
+        <tr><td>REQ-DIST-016</td><td>REQ-DIST-001</td></tr>
+        <tr><td>REQ-DIST-017</td><td>REQ-DIST-001</td></tr>
+      </table>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- 配置结构 -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <section id="s12" data-section="12">
+      <h3>§12 配置结构</h3>
+    </section>
+
+    <section id="s12.1" data-section="12.1">
+      <h4>§12.1 DistributedConfig</h4>
+      <p>```rust</p>
+      <p>pub struct DistributedConfig {</p>
+      <p>    pub parallel: ParallelConfig,</p>
+      <p>    pub pd_disagg: PdDisaggConfig,</p>
+      <p>    pub kv_distribution: KvDistributionConfig,</p>
+      <p>    pub comm_compress_hint: CommCompressHint,</p>
+      <p>    pub algorithm_override: Option&lt;CommAlgorithm&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+
+    <section id="s12.2" data-section="12.2">
+      <h4>§12.2 ParallelConfig</h4>
+      <p>```rust</p>
+      <p>pub struct ParallelConfig {</p>
+      <p>    pub tp_size: usize,       // Tensor Parallelism 大小</p>
+      <p>    pub rank: usize,          // 当前进程 rank</p>
+      <p>    pub cp_size: usize,       // Context Parallelism 大小 (默认 1)</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+
+    <section id="s12.3" data-section="12.3">
+      <h4>§12.3 PdDisaggConfig</h4>
+      <p>```rust</p>
+      <p>pub struct PdDisaggConfig {</p>
+      <p>    pub mode: PdDisaggMode,   // Joint / Disaggregated</p>
+      <p>    pub role: PdRole,         // PrefillOnly / DecodeOnly</p>
+      <p>    pub peer_addr: Option&lt;String&gt;,  // 对端地址</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+
+    <section id="s12.4" data-section="12.4">
+      <h4>§12.4 KvDistributionConfig</h4>
+      <p>```rust</p>
+      <p>pub struct KvDistributionConfig {</p>
+      <p>    pub mode: KvDistributionMode,  // Local/OnDemand/Mirror/PartialHeadMirror/TieredCache</p>
+      <p>    pub tiered_cache_config: Option&lt;TieredCacheConfig&gt;,</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+
+    <section id="s12.5" data-section="12.5">
+      <h4>§12.5 CommCompressHint</h4>
+      <p>```rust</p>
+      <p>pub enum CommCompressHint {</p>
+      <p>    None,               // 不压缩</p>
+      <p>    AlwaysCompress,     // 自动选择量化格式</p>
+      <p>    ForceQuant(QuantFormat),  // 强制指定量化格式</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+
+    <section id="s12.6" data-section="12.6">
+      <h4>§12.6 CommAlgorithm</h4>
+      <p>```rust</p>
+      <p>pub enum CommAlgorithm {</p>
+      <p>    AllReduce,          // 标准 AllReduce</p>
+      <p>    ColumnParallel,     // ReduceScatter + AllGather</p>
+      <p>    ForceDoubleBuffer,  // 双缓冲重叠</p>
+      <p>    ForceFlux,          // FLUX 分解</p>
+      <p>}</p>
+      <p>```</p>
+    </section>
+
+  </main>
+</body>
+</html>

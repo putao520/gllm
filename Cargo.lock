@@ -810,6 +810,7 @@ dependencies = [
  "dirs 5.0.1",
  "env_logger",
  "gllm-kernels",
+ "gllm-nccl",
  "half",
  "hf-hub",
  "libc",

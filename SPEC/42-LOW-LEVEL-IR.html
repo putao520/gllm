@@ -1,0 +1,1815 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root="">
+<head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="42-LOW-LEVEL-IR">
+  <meta name="spec-category" content="other">
+
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"42-LOW-LEVEL-IR", "dependencies":["01-JIT-PIPELINE","03-GRAPH-IR","04-OPERATORS","05-OPTIMIZATIONS","GRAPH-SHAPE-DRIVEN-MEGA-KERNEL","26-VMINSTR-RATIONALIZATION","08-DISTRIBUTED-PAGING"], "children":[] }
+  </script>
+</head>
+<body>
+  <header data-spec-header="">
+    <h1>Low-Level IR (LIR) — TraceOp 与 VmInstr 之间的计算语义桥</h1>
+    <nav data-spec-breadcrumb="">
+      <a href="./00-INDEX.html">SPEC</a> &gt; <span>42-LOW-LEVEL-IR</span>
+    </nav>
+  </header>
+  <main data-spec-content="">
+    <section id="s-overview" data-section="0">
+      <h2>概述</h2>
+      <p>&gt; <strong>SSOT</strong>: 本文档定义 gllm-kernels JIT 编译器的 LIR 层架构。在 TraceOp(源级 SSA) 与 VmInstr(状态追踪) 之间插入结构化计算描述层。</p>
+      <p>&gt; 交叉引用: <code>SPEC/01-JIT-PIPELINE.html</code> 定义四阶段管线; <code>SPEC/03-GRAPH-IR.html</code> 定义 CompilerGraph IR; <code>SPEC/26-VMINSTR-RATIONALIZATION.html</code> 定义 VmInstr 去类型化合并; <code>SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.html</code> 定义统一编译器架构。</p>
+    </section>
+
+    <section id="s-motivation" data-section="1">
+      <h3>1. 动机</h3>
+      <p>当前 TraceOp-VmInstr 语义鸿沟确凿存在。80+ TraceOp 变体 vs 131+ VmInstr 变体，VmInstr 混杂计算表达与状态追踪。ISA 优化 pass 在 VmInstr 层执行模式匹配时缺乏计算语义上下文，导致手写 emit 函数和 ad-hoc lowering。</p>
+      <p>LIR 填补语义鸿沟，使计算语义显式化，支持结构化 pass pipeline，收窄 VmInstr 职责为纯状态追踪。</p>
+    </section>
+
+    <section id="s-requirements" data-section="2">
+      <h2>2. 需求定义</h2>
+
+      <section data-entity-ref="ENT-LIR-OP ENT-LIR-REGION ENT-LIR-TILE ENT-LIR-DOMAIN ENT-ALGORITHM-PROFILE" data-req-entity="ENT-LIR-OP,ENT-LIR-REGION,ENT-LIR-TILE,ENT-LIR-DOMAIN,ENT-ALGORITHM-PROFILE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-001" id="req-lir-001">
+        <h3>REQ-LIR-001: LIR 定位为 Compute Pattern Expression Layer</h3>
+        <p>LIR 是 TraceOp(源级SSA) 与 VmInstr(状态追踪) 之间的计算语义桥。LIR 不替代 TraceOp 或 VmInstr，而是在两者之间插入结构化计算描述层。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>LIR 类型定义在 compiler/llir/ 模块</li>
+            <li>LIR 位于 TraceOp lowering 和 VmInstr 构造之间</li>
+            <li>所有通过 LIR 的计算路径保留完整语义信息</li>
+            <li>现有 TraceOp 和 VmInstr 接口不变</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP ENT-LIR-REGION ENT-LIR-TILE" data-req-entity="ENT-LIR-OP,ENT-LIR-REGION,ENT-LIR-TILE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-002" id="req-lir-002">
+        <h3>REQ-LIR-002: LIR 采用 Typed SSA + Region + Tile 抽象</h3>
+        <p>LIR 不是枚举式胖操作码，而是结构化计算描述。LirOp 携带完整类型信息，LirRegion 支持嵌套结构，LirTile 携带分块维度和步长信息。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>LirOp 携带完整类型信息</li>
+            <li>LirRegion 支持嵌套结构</li>
+            <li>LirTile 携带分块维度和步长信息</li>
+            <li>三个示范算子(RMS Norm/GEMM/Attention)通过 LIR 完整表达</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-ALGORITHM-PROFILE" data-req-entity="ENT-ALGORITHM-PROFILE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-003" id="req-lir-003">
+        <h3>REQ-LIR-003: AlgorithmProfile 闭源库算法模式声明式表达</h3>
+        <p>闭源库算法模式不是手写 emit 函数，而是声明式参数化描述。AlgorithmProfile 类型定义完整，至少覆盖 GEMM 和 Attention 两个闭源库模式，声明式描述可被 pass pipeline 自动匹配。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>AlgorithmProfile 类型定义完整</li>
+            <li>至少覆盖 GEMM 和 Attention 两个闭源库模式</li>
+            <li>声明式描述可被 pass pipeline 自动匹配</li>
+            <li>无手写 emit 函数依赖</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP ENT-LIR-DOMAIN" data-req-entity="ENT-LIR-OP,ENT-LIR-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-004" id="req-lir-004">
+        <h3>REQ-LIR-004: LIR 四域划分 Compute/Memory/Layout/Communication</h3>
+        <p>LIR 操作按计算语义划分为四个域：Compute(计算)、Memory(内存)、Layout(布局)、Communication(通信)。各域独立 pass pipeline，域间依赖通过显式接口表达。Communication 域为 nccl feature-gated，非分布式场景下不激活。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>四个域类型定义完整（Compute/Memory/Layout/Communication）</li>
+            <li>每个 LirOp 明确属于唯一域</li>
+            <li>各域有独立 pass pipeline</li>
+            <li>域间依赖通过显式接口表达</li>
+            <li>三个示范算子正确归域</li>
+            <li>Communication 域在 nccl feature 启用时激活，非分布式场景下零开销</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP" data-req-entity="ENT-LIR-OP" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-005" id="req-lir-005">
+        <h3>REQ-LIR-005: VmInstr 职责收窄为 State Tracking Only</h3>
+        <p>计算语义上移到 LIR，VmInstr 只记录寄存器/内存/控制流状态。迁移后 VmInstr 变体不再承载计算语义，计算语义通过 LIR→VmInstr 映射保持完整。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>VmInstr 变体不再承载计算语义</li>
+            <li>计算语义通过 LIR→VmInstr 映射保持完整</li>
+            <li>现有 VmInstr 接口向后兼容</li>
+            <li>迁移后 VmInstr 变体数量减少</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP ENT-LIR-DOMAIN" data-req-entity="ENT-LIR-OP,ENT-LIR-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-006" id="req-lir-006">
+        <h3>REQ-LIR-006: ISA 优化 pass 在 LIR 层执行</h3>
+        <p>模式匹配和重写发生在有计算语义的层。融合 pass 在 LIR Compute 域执行，常量折叠和死代码消除在 LIR 层执行，VmInstr 层不再执行任何计算语义优化。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>融合 pass 在 LIR Compute 域执行</li>
+            <li>常量折叠在 LIR 层执行</li>
+            <li>死代码消除在 LIR 层执行</li>
+            <li>VmInstr 层不再执行任何计算语义优化</li>
+            <li>优化结果通过 LIR→VmInstr 映射保持正确</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP ENT-LIR-REGION ENT-LIR-TILE ENT-LIR-DOMAIN" data-req-entity="ENT-LIR-OP,ENT-LIR-REGION,ENT-LIR-TILE,ENT-LIR-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-007" id="req-lir-007">
+        <h3>REQ-LIR-007: Phase 1 — 定义 LIR 类型 + 三个示范算子</h3>
+        <p>Phase 1 创建 compiler/llir/ 模块，定义核心类型(LirOp/LirRegion/LirTile/LirDomain)，三个示范算子(RMS Norm/GEMM/Attention)通过 LIR 完整表达，LIR 可 lowering 到 VmInstr。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>compiler/llir/ 模块创建</li>
+            <li>核心类型定义完整</li>
+            <li>三个示范算子通过 LIR 完整表达</li>
+            <li>LIR 可 lowering 到 VmInstr</li>
+            <li>cargo check 通过</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP" data-req-entity="ENT-LIR-OP" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-008" id="req-lir-008">
+        <h3>REQ-LIR-008: Phase 2 — VmInstr 职责收窄</h3>
+        <p>Phase 2 识别并列出承载计算语义的 VmInstr 变体，每个变体迁移后 VmInstr 只保留状态字段，所有迁移后的路径通过数值对齐测试。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>识别并列出承载计算语义的 VmInstr 变体</li>
+            <li>每个变体迁移后 VmInstr 只保留状态字段</li>
+            <li>所有迁移后的路径通过数值对齐测试</li>
+            <li>VmInstr 变体数量净减少</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP ENT-LIR-DOMAIN" data-req-entity="ENT-LIR-OP,ENT-LIR-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-009" id="req-lir-009">
+        <h3>REQ-LIR-009: Phase 3 — pass pipeline 迁移</h3>
+        <p>Phase 3 将融合 pass 迁移到 LIR Compute 域，内存布局优化 pass 迁移到 LIR Memory 域，常量折叠和死代码消除迁移到 LIR 层，四域 pass pipeline 独立调度。Communication 域 pass（通信融合、chunk 级重叠调度、量化压缩）在 nccl feature 启用时参与 pipeline。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>融合 pass 迁移到 LIR Compute 域</li>
+            <li>内存布局优化 pass 迁移到 LIR Memory 域</li>
+            <li>常量折叠和死代码消除迁移到 LIR 层</li>
+            <li>四域 pass pipeline 独立调度</li>
+            <li>Communication 域 pass 在 nccl feature 启用时参与 pipeline</li>
+            <li>优化结果与迁移前数值一致</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-ALGORITHM-PROFILE" data-req-entity="ENT-ALGORITHM-PROFILE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-010" id="req-lir-010">
+        <h3>REQ-LIR-010: Phase 4 — 闭源库对齐</h3>
+        <p>Phase 4 用 AlgorithmProfile 描述闭源库 GEMM 和 Attention 算法模式，AlgorithmProfile 可被 pass pipeline 自动匹配，所有手写 emit_xxx 函数替换为声明式描述。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>闭源库 GEMM 用 AlgorithmProfile 描述</li>
+            <li>闭源库 Attention 用 AlgorithmProfile 描述</li>
+            <li>AlgorithmProfile 可被 pass pipeline 自动匹配</li>
+            <li>所有手写 emit_xxx 函数替换为声明式描述</li>
+            <li>闭源库路径与非闭源库路径数值一致</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-OP" data-req-entity="ENT-LIR-OP" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-011" id="req-lir-011">
+        <h3>REQ-LIR-011: LIR 模块位置 compiler/llir/</h3>
+        <p>LIR 在编译管线中的位置：TraceOp → (auto_lower_trace) → LIR → (lir_to_vminstr) → VmInstr → ISA Lowering。LIR 不修改现有 TraceOp 定义和 VmInstr 定义，通过新增 lowering pass 接入管线。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>compiler/llir/ 模块创建</li>
+            <li>LIR 不修改现有 TraceOp 定义</li>
+            <li>LIR 不修改现有 VmInstr 定义</li>
+            <li>LIR 通过新增 lowering pass 接入管线</li>
+            <li>现有编译路径可通过 feature flag 切换</li>
+          </ol>
+        </div>
+      </section>
+    </section>
+
+    <section id="s-entities" data-section="3">
+      <h2>3. Entity 定义</h2>
+
+      <section id="ent-lir-op" data-entity="ENT-LIR-OP" data-req-ref="REQ-LIR-001 REQ-LIR-002 REQ-LIR-004 REQ-LIR-005 REQ-LIR-007 REQ-LIR-011" data-entity-model-type="relational" data-entity-ref="ENT-LIR-REGION ENT-LIR-TILE ENT-LIR-DOMAIN ENT-ALGORITHM-PROFILE" data-xref="REQ-LIR-001 REQ-LIR-002 REQ-LIR-004 REQ-LIR-005 REQ-LIR-007 REQ-LIR-011">
+        <h4>ENT-LIR-OP</h4>
+        <p>LirOp — LIR 操作节点</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="id" data-type="integer" data-required="true"><td>id</td><td>integer</td><td>是</td><td>unique</td><td>操作节点唯一标识</td></tr>
+          <tr data-field="op_kind" data-type="enum" data-required="true"><td>op_kind</td><td>enum</td><td>是</td><td>struct variant: Elementwise{op,width}|Reduction{axis,op}|NormLike{eps,variant}|Gemm{m,n,k,trans_a,trans_b}</td><td>操作类型（结构化变体）</td></tr>
+          <tr data-field="domain" data-type="enum" data-required="true"><td>domain</td><td>enum</td><td>是</td><td>Compute|Memory|Layout</td><td>所属域</td></tr>
+          <tr data-field="input_count" data-type="integer" data-required="true"><td>input_count</td><td>integer</td><td>是</td><td>≥0</td><td>输入数量</td></tr>
+          <tr data-field="output_count" data-type="integer" data-required="true"><td>output_count</td><td>integer</td><td>是</td><td>≥1</td><td>输出数量</td></tr>
+          <tr data-field="dtype" data-type="enum" data-required="true"><td>dtype</td><td>enum</td><td>是</td><td>计算精度类型</td><td>数据类型</td></tr>
+          <tr data-field="has_tile" data-type="boolean" data-required="true"><td>has_tile</td><td>boolean</td><td>是</td><td>—</td><td>是否携带分块信息</td></tr>
+          <tr data-field="has_region" data-type="boolean" data-required="true"><td>has_region</td><td>boolean</td><td>是</td><td>—</td><td>是否包含嵌套区域</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-region" data-entity="ENT-LIR-REGION" data-req-ref="REQ-LIR-002 REQ-LIR-007" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP" data-xref="REQ-LIR-002 REQ-LIR-007">
+        <h4>ENT-LIR-REGION</h4>
+        <p>LirRegion — LIR 计算嵌套结构</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="id" data-type="integer" data-required="true"><td>id</td><td>integer</td><td>是</td><td>unique</td><td>区域唯一标识</td></tr>
+          <tr data-field="kind" data-type="enum" data-required="true"><td>kind</td><td>enum</td><td>是</td><td>Loop|Conditional|Block</td><td>区域类型</td></tr>
+          <tr data-field="op_count" data-type="integer" data-required="true"><td>op_count</td><td>integer</td><td>是</td><td>≥0</td><td>区域内操作数量</td></tr>
+          <tr data-field="sub_region_count" data-type="integer" data-required="true"><td>sub_region_count</td><td>integer</td><td>是</td><td>≥0</td><td>子区域数量</td></tr>
+          <tr data-field="param_count" data-type="integer" data-required="true"><td>param_count</td><td>integer</td><td>是</td><td>≥0</td><td>参数数量</td></tr>
+          <tr data-field="result_count" data-type="integer" data-required="true"><td>result_count</td><td>integer</td><td>是</td><td>≥0</td><td>结果数量</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-tile" data-entity="ENT-LIR-TILE" data-req-ref="REQ-LIR-002 REQ-LIR-007" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP" data-xref="REQ-LIR-002 REQ-LIR-007">
+        <h4>ENT-LIR-TILE</h4>
+        <p>LirTile — LIR 数据分块语义</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="dim_count" data-type="integer" data-required="true"><td>dim_count</td><td>integer</td><td>是</td><td>≥1</td><td>分块维度数量</td></tr>
+          <tr data-field="strategy" data-type="enum" data-required="true"><td>strategy</td><td>enum</td><td>是</td><td>Sequential|Vectorized|Parallel</td><td>分块策略</td></tr>
+          <tr data-field="innermost_dim" data-type="integer" data-required="true"><td>innermost_dim</td><td>integer</td><td>是</td><td>≥0</td><td>最内层维度索引</td></tr>
+          <tr data-field="unroll_threshold" data-type="integer" data-required="true"><td>unroll_threshold</td><td>integer</td><td>是</td><td>≥0</td><td>展开阈值</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-domain" data-entity="ENT-LIR-DOMAIN" data-req-ref="REQ-LIR-004 REQ-LIR-006 REQ-LIR-009 REQ-LIR-012" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-004 REQ-LIR-006 REQ-LIR-009 REQ-LIR-012">
+        <h4>ENT-LIR-DOMAIN</h4>
+        <p>LirDomain — LIR 四域划分（Compute/Memory/Layout/Communication）</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="name" data-type="enum" data-required="true"><td>name</td><td>enum</td><td>是</td><td>Compute|Memory|Layout|Communication</td><td>域名称</td></tr>
+          <tr data-field="pass_count" data-type="integer" data-required="true"><td>pass_count</td><td>integer</td><td>是</td><td>≥0</td><td>域内 pass 数量</td></tr>
+          <tr data-field="dependency_count" data-type="integer" data-required="true"><td>dependency_count</td><td>integer</td><td>是</td><td>≥0</td><td>域间依赖数量</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-algorithm-profile" data-entity="ENT-ALGORITHM-PROFILE" data-req-ref="REQ-LIR-003 REQ-LIR-010" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-DEVICE-PROFILE" data-xref="REQ-LIR-003 REQ-LIR-010">
+        <h4>ENT-ALGORITHM-PROFILE</h4>
+        <p>AlgorithmProfile — 闭源库算法模式声明式表达</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="id" data-type="integer" data-required="true"><td>id</td><td>integer</td><td>是</td><td>unique</td><td>算法模式唯一标识</td></tr>
+          <tr data-field="name" data-type="string" data-required="true"><td>name</td><td>string</td><td>是</td><td>—</td><td>算法模式名称</td></tr>
+          <tr data-field="library" data-type="enum" data-required="true"><td>library</td><td>enum</td><td>是</td><td>cuDNN|MKL|OneDNN|Custom</td><td>目标闭源库</td></tr>
+          <tr data-field="input_constraint_count" data-type="integer" data-required="true"><td>input_constraint_count</td><td>integer</td><td>是</td><td>≥0</td><td>输入约束数量</td></tr>
+          <tr data-field="dispatch_param_count" data-type="integer" data-required="true"><td>dispatch_param_count</td><td>integer</td><td>是</td><td>≥0</td><td>分派参数数量</td></tr>
+          <tr data-field="has_fallback" data-type="boolean" data-required="true"><td>has_fallback</td><td>boolean</td><td>是</td><td>—</td><td>是否有 fallback 路径</td></tr>
+        </table>
+      </section>
+    </section>
+
+    <section id="s-module" data-section="4">
+      <h2>4. Module 定义</h2>
+
+      <section id="mod-lir-001" data-module="MOD-LIR-001" data-module-kind="module">
+        <h3>MOD-LIR-001: llir 模块 — LIR 核心定义和 pass pipeline</h3>
+        <p>LIR 核心模块，位于 gllm-kernels/src/compiler/llir/。包含 LIR 类型定义、lowering pass、四域 pass pipeline、AlgorithmProfile 匹配。Communication 域 pass 在 nccl feature 启用时可用。</p>
+        <div data-module-contains="">
+          <h4>包含</h4>
+          <ul>
+            <li>op.rs — LirOp 类型定义</li>
+            <li>region.rs — LirRegion 类型定义</li>
+            <li>tile.rs — LirTile 类型定义</li>
+            <li>domain.rs — LirDomain 四域定义</li>
+            <li>algorithm_profile.rs — AlgorithmProfile 声明式表达</li>
+            <li>lower.rs — TraceOp → LIR lowering</li>
+            <li>to_vminstr.rs — LIR → VmInstr 映射</li>
+            <li>passes/ — 四域 pass pipeline</li>
+            <li>passes/comm/ — Communication 域 pass (nccl feature-gated)</li>
+          </ul>
+        </div>
+        <div data-module-exposes="">
+          <h4>对外暴露</h4>
+          <ul>
+            <li>LirOp / LirRegion / LirTile / LirDomain 类型</li>
+            <li>lir_lower(TraceOp) → LirProgram</li>
+            <li>lir_to_vminstr(LirProgram) → Vec&lt;VmInstr&gt;</li>
+            <li>LirPassPipeline 四域 pass 调度</li>
+            <li>AlgorithmProfile 匹配接口</li>
+            <li>CommDomainPass 通信域 pass (nccl feature-gated)</li>
+          </ul>
+        </div>
+        <div data-module-depends="">
+          <h4>依赖</h4>
+          <ul>
+            <li>compiler/trace.rs — TraceOp 定义</li>
+            <li>compiler/instr.rs — VmInstr 定义</li>
+            <li>compiler/auto_select.rs — auto_lower_trace 入口</li>
+            <li>compiler/hw_constraints.rs — DeviceProfile 约束</li>
+            <li>compiler/fusion.rs — 融合决策</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/module",
+          "@type": "Module",
+          "name": "MOD-LIR-001",
+          "reqRefs": ["REQ-LIR-001", "REQ-LIR-002", "REQ-LIR-007", "REQ-LIR-011"]
+        }
+        </script>
+      </section>
+    </section>
+
+    <section id="s-interface" data-section="5">
+      <h2>5. Interface 定义</h2>
+
+      <section id="if-lir-001" data-interface="IF-LIR-001" data-interface-kind="contract">
+        <h3>IF-LIR-001: LirPassPipeline 契约</h3>
+        <p>四域独立 pass pipeline 接口。域间通过显式依赖排序：Layout→Compute→Memory→Communication。每个域有独立的 pass 注册和执行调度。Communication 域 nccl feature-gated。</p>
+        <div data-interface-input="">
+          <h4>输入</h4>
+          <ul>
+            <li>LirProgram — LIR 程序（包含四域 LirOp 集合）</li>
+            <li>DeviceProfile — 硬件能力约束</li>
+            <li>pass_config: PassConfig — pass 配置参数</li>
+          </ul>
+        </div>
+        <div data-interface-output="">
+          <h4>输出</h4>
+          <ul>
+            <li>LirProgram — 优化后的 LIR 程序</li>
+            <li>pass_log: Vec&lt;PassLogEntry&gt; — pass 执行日志</li>
+          </ul>
+        </div>
+        <div data-interface-errors="">
+          <h4>错误类型</h4>
+          <ul>
+            <li>LirError::DomainDependencyCycle — 域间依赖循环</li>
+            <li>LirError::PassExecutionFailed — pass 执行失败</li>
+            <li>LirError::InvalidDomainAssignment — 操作域归属无效</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/interface",
+          "@type": "Interface",
+          "name": "IF-LIR-001",
+          "reqRefs": ["REQ-LIR-004", "REQ-LIR-006", "REQ-LIR-009"]
+        }
+        </script>
+      </section>
+    </section>
+
+    <section id="s-api" data-section="6">
+      <h2>6. API 定义</h2>
+
+      <section id="api-lir-compile" data-api="POST /internal/compiler/lir/compile" data-api-type="internal" data-api-name="API-LIR-COMPILE" data-req-ref="REQ-LIR-001 REQ-LIR-007 REQ-LIR-011" data-xref="REQ-LIR-001 REQ-LIR-007 REQ-LIR-011">
+        <h4>POST /internal/compiler/lir/compile — LIR 编译接口</h4>
+        <p>LIR 编译内部接口，接受 TraceOp 序列和 DeviceProfile，产出优化后的 LirProgram 并 lowering 到 VmInstr 序列。</p>
+        <table data-api-params="">
+          <tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr>
+          <tr data-type="array<TraceOp>" data-required="true" data-param="trace_ops"><td>trace_ops</td><td>array&lt;TraceOp&gt;</td><td>是</td><td>TraceOp SSA 序列</td></tr>
+          <tr data-type="DeviceProfile" data-required="true" data-param="device_profile"><td>device_profile</td><td>DeviceProfile</td><td>是</td><td>硬件能力约束</td></tr>
+          <tr data-type="PassConfig" data-required="false" data-param="pass_config"><td>pass_config</td><td>PassConfig</td><td>否</td><td>pass 配置参数</td></tr>
+        </table>
+        <table data-api-response="">
+          <tr><th>状态码</th><th>说明</th><th>Schema</th></tr>
+          <tr data-status="200" data-schema="LirCompileResult"><td>200</td><td>成功</td><td>LirCompileResult</td></tr>
+        </table>
+        <table data-api-request-body="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr>
+        </table>
+        <script type="application/ld+json">
+        {"@type":"ApiResponse","schema":"LirCompileResult"}
+        </script>
+      </section>
+    </section>
+
+    <section id="s-decisions" data-section="7">
+      <h2>7. Decision 定义</h2>
+
+      <section id="dec-lir-001" data-decision="DEC-LIR-001" data-decision-dimension="technical">
+        <h3>DEC-LIR-001: LIR 定位为 Compute Pattern Expression Layer（新增层而非替换）</h3>
+        <p>LIR 作为新增层插入 TraceOp 与 VmInstr 之间，不替代现有 TraceOp 或 VmInstr。现有接口不变，LIR 通过新增 lowering pass 接入管线。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 扩展 TraceOp 语义（破坏现有 SSA 纯净性）</li>
+            <li>Option B: 扩展 VmInstr 语义（加剧计算/状态混杂）</li>
+            <li>Option C: 新增 LIR 层（chosen — 保持现有层不变，填补语义鸿沟）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option C：新增 LIR 层，保持 TraceOp 和 VmInstr 接口不变</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>新增层最小化迁移风险，保持现有编译路径兼容。LIR 填补语义鸿沟而不破坏已有架构。符合 OCP（开放封闭原则）。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-001"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-002" data-decision="DEC-LIR-002" data-decision-dimension="technical">
+        <h3>DEC-LIR-002: LIR 采用 Typed SSA + Region + Tile 抽象（非枚举式胖操作码）</h3>
+        <p>LIR 操作不是枚举式胖操作码（类似 VmInstr 的 131+ 变体），而是结构化计算描述。LirOp 携带类型信息，LirRegion 表达嵌套，LirTile 表达分块。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 枚举式胖操作码（类似 VmInstr 扩展，变体爆炸）</li>
+            <li>Option B: Typed SSA + Region + Tile 结构化抽象（chosen — 可组合、可扩展）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：Typed SSA + Region + Tile 结构化抽象</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>结构化抽象避免变体爆炸，支持组合式扩展。Region 表达循环/条件嵌套，Tile 表达分块语义，两者正交组合覆盖所有计算模式。与 MLIR Region/Tile 设计理念一致。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-002"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-003" data-decision="DEC-LIR-003" data-decision-dimension="technical">
+        <h3>DEC-LIR-003: AlgorithmProfile 声明式表达闭源库算法模式（替代手写 emit）</h3>
+        <p>闭源库算法模式用 AlgorithmProfile 声明式描述，替代手写 emit_xxx 函数。声明式描述可被 pass pipeline 自动匹配和调度。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 保留手写 emit 函数（维护成本高，不可组合）</li>
+            <li>Option B: AlgorithmProfile 声明式表达（chosen — 可匹配、可组合、可测试）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：AlgorithmProfile 声明式表达</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>声明式表达将闭源库调用从命令式代码提升为数据，pass pipeline 可自动匹配和调度。消除手写 emit 函数的维护负担，支持多闭源库统一表达。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-003"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-004" data-decision="DEC-LIR-004" data-decision-dimension="technical">
+        <h3>DEC-LIR-004: LIR 四域划分 Compute/Memory/Layout/Communication（各域独立 pass pipeline）</h3>
+        <p>LIR 操作按计算语义划分为 Compute(计算)、Memory(内存)、Layout(布局)、Communication(通信) 四个域。各域有独立 pass pipeline，域间通过显式依赖排序。Communication 域为 nccl feature-gated。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 单一 pass pipeline（所有优化混在一起，依赖隐式）</li>
+            <li>Option B: 两域划分 Compute/Memory（Layout 归入 Memory，语义不清晰）</li>
+            <li>Option C: 三域划分 Compute/Memory/Layout（语义清晰，但通信语义无归属）</li>
+            <li>Option D: 四域划分 Compute/Memory/Layout/Communication（chosen — 通信语义独立，nccl feature-gated 零开销）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option D：四域划分 Compute/Memory/Layout/Communication</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>Layout 变换（转置/重排）与 Memory 操作（加载/存储）语义不同，独立域使 pass 更聚焦。Communication（AllReduce/AllToAll/P2P）与 Compute/Memory 语义正交，独立域使通信优化 pass（融合/重叠/压缩）更聚焦。域间依赖显式化：Layout→Compute→Memory→Communication，避免隐式依赖导致的 pass 执行顺序 bug。Communication 域 nccl feature-gated，非分布式场景下不激活、零开销。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-004"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-005" data-decision="DEC-LIR-005" data-decision-dimension="technical">
+        <h3>DEC-LIR-005: VmInstr 职责收窄为 State Tracking Only</h3>
+        <p>计算语义上移到 LIR，VmInstr 只记录寄存器/内存/控制流状态。迁移后 VmInstr 变体数量减少，职责单一化。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 保持 VmInstr 现状（计算/状态混杂持续）</li>
+            <li>Option B: VmInstr 职责收窄为 State Tracking Only（chosen — 职责单一化）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：VmInstr 职责收窄为 State Tracking Only</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>VmInstr 混杂计算表达与状态追踪导致 ISA 优化 pass 缺乏语义上下文。职责收窄后 VmInstr 变体减少，ISA lowering 更简单，优化 pass 在 LIR 层有完整语义信息。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-005"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-006" data-decision="DEC-LIR-006" data-decision-dimension="technical">
+        <h3>DEC-LIR-006: ISA 优化 pass 在 LIR 层执行</h3>
+        <p>模式匹配和重写发生在有计算语义的 LIR 层，而非缺乏语义的 VmInstr 层。VmInstr 层只做 ISA 指令选择，不做计算语义优化。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 优化 pass 继续在 VmInstr 层执行（缺乏语义上下文）</li>
+            <li>Option B: 优化 pass 迁移到 LIR 层执行（chosen — 有完整语义上下文）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：优化 pass 迁移到 LIR 层执行</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>LIR 层有完整计算语义，模式匹配更精确。VmInstr 层缺乏语义上下文，优化 pass 只能做局部模式匹配，容易遗漏跨指令优化机会。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-006"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-007" data-decision="DEC-LIR-007" data-decision-dimension="technical">
+        <h3>DEC-LIR-007: 四阶段渐进迁移策略</h3>
+        <p>LIR 采用四阶段渐进迁移：Phase 1 定义类型+示范算子 → Phase 2 VmInstr 职责收窄 → Phase 3 pass pipeline 迁移 → Phase 4 闭源库对齐。每阶段独立可验证。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 一次性全量迁移（风险高，回退困难）</li>
+            <li>Option B: 四阶段渐进迁移（chosen — 每阶段独立可验证，风险可控）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：四阶段渐进迁移</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>渐进迁移每阶段有明确验收标准，失败可回退到上一阶段。Phase 1 建立类型基础，Phase 2 收窄 VmInstr，Phase 3 迁移优化，Phase 4 对齐闭源库。依赖关系清晰，并行度可控。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-007"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-008" data-decision="DEC-LIR-008" data-decision-dimension="technical">
+        <h3>DEC-LIR-008: LIR 新增层而非替换现有层</h3>
+        <p>LIR 作为新增层插入编译管线，不替换 TraceOp 或 VmInstr。现有编译路径可通过 feature flag 切换，渐进迁移。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 替换 TraceOp 或 VmInstr（破坏现有接口，迁移风险高）</li>
+            <li>Option B: 新增层 + feature flag 切换（chosen — 兼容现有路径，渐进迁移）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：新增层 + feature flag 切换</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>新增层保持现有编译路径完全兼容，feature flag 允许渐进启用 LIR。迁移过程中两条路径并存，数值对齐测试可验证 LIR 路径正确性。完全迁移后 feature flag 可移除。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-008"
+        }
+        </script>
+      </section>
+    </section>
+
+    <section id="s-dataflow" data-section="8">
+      <h2>8. Dataflow 定义</h2>
+
+      <section id="df-lir-001" data-flow-from="ENT-TRACE-OP" data-flow-to="ENT-LIR-OP" data-dataflow="DF-LIR-001" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-001: TraceOp → LIR lowering</h3>
+        <p>TraceOp SSA 序列通过 lir_lower 变换为 LirOp 序列。ComputePattern 自动映射到 LirOp.op_kind 结构化变体。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: TraceOp SSA 序列 (auto_lower_trace 输出)</li>
+            <li>to: LirProgram (LirOp 集合 + LirRegion + LirTile)</li>
+            <li>transform: lir_lower(TraceOp) → LirOp</li>
+            <li>direction: sync（编译时一次性）</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-001",
+          "from": "ENT-TRACE-OP",
+          "to": "ENT-LIR-OP"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-002" data-flow-from="ENT-LIR-DOMAIN" data-flow-to="ENT-LIR-DOMAIN" data-dataflow="DF-LIR-002" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-002: LIR 四域 pass pipeline</h3>
+        <p>LIR 四域 pass pipeline 按依赖顺序执行：Layout→Compute→Memory→Communication。各域独立 pass pipeline，域间通过显式依赖排序。Communication 域在 nccl feature 启用时参与 pipeline。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: LirProgram (原始)</li>
+            <li>to: LirProgram (优化后)</li>
+            <li>transform: layout_passes → compute_passes → memory_passes → comm_passes (nccl)</li>
+            <li>direction: sync（编译时一次性）</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-002",
+          "from": "ENT-LIR-DOMAIN",
+          "to": "ENT-LIR-DOMAIN"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-003" data-flow-from="ENT-LIR-OP" data-flow-to="ENT-VM-INSTR" data-dataflow="DF-LIR-003" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-003: LIR → VmInstr 映射</h3>
+        <p>优化后的 LirProgram 通过 lir_to_vminstr 映射为 VmInstr 序列。VmInstr 只记录寄存器/内存/控制流状态，计算语义已在 LIR 层处理。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: LirProgram (优化后)</li>
+            <li>to: Vec&lt;VmInstr&gt;</li>
+            <li>transform: lir_to_vminstr(LirProgram) → Vec&lt;VmInstr&gt;</li>
+            <li>direction: sync（编译时一次性）</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-003",
+          "from": "ENT-LIR-OP",
+          "to": "ENT-VM-INSTR"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-004" data-flow-from="ENT-LIR-OP" data-flow-to="ENT-ALGORITHM-PROFILE" data-dataflow="DF-LIR-004" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-004: AlgorithmProfile 匹配数据流</h3>
+        <p>LirOp 与 AlgorithmProfile 匹配，选择闭源库算法模式。匹配成功则使用闭源库路径，匹配失败则使用默认 JIT 路径。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: LirOp + AlgorithmProfile 库</li>
+            <li>to: AlgorithmProfile | Default</li>
+            <li>transform: match_profile(LirOp, profiles) → AlgorithmProfile | Default</li>
+            <li>direction: sync（编译时一次性）</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-004",
+          "from": "ENT-LIR-OP",
+          "to": "ENT-ALGORITHM-PROFILE"
+        }
+        </script>
+      </section>
+    </section>
+
+    <section id="s-controlflow" data-section="9">
+      <h2>9. Controlflow 定义</h2>
+
+      <section id="cf-lir-001" data-controlflow="CF-LIR-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-DOMAIN" data-controlflow-target="ENT-LIR-DOMAIN">
+        <h3>CF-LIR-001: LIR pass pipeline 域间执行顺序</h3>
+        <p>四域 pass pipeline 按固定顺序执行：Layout→Compute→Memory→Communication。Layout 变换先执行（影响后续计算和内存布局），Compute 优化次之（依赖 Layout 结果），Memory 优化再次（依赖 Compute 结果确定访问模式），Communication 优化最后（依赖 Compute/Memory 结果确定通信模式和缓冲区布局）。Communication 域 nccl feature-gated，非分布式场景下跳过。</p>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/controlflow",
+          "@type": "Controlflow",
+          "id": "CF-LIR-001",
+          "relation": "precedes",
+          "source": "ENT-LIR-DOMAIN(Layout)",
+          "target": "ENT-LIR-DOMAIN(Compute→Memory)"
+        }
+        </script>
+      </section>
+
+      <section id="cf-lir-002" data-controlflow="CF-LIR-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="REQ-LIR-007" data-controlflow-target="REQ-LIR-010">
+        <h3>CF-LIR-002: 四阶段渐进迁移控制流</h3>
+        <p>四阶段按序执行：Phase 1(类型定义+示范算子) → Phase 2(VmInstr 职责收窄) → Phase 3(pass pipeline 迁移) → Phase 4(闭源库对齐)。每阶段有独立验收标准，前阶段通过后才进入下一阶段。</p>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/controlflow",
+          "@type": "Controlflow",
+          "id": "CF-LIR-002",
+          "relation": "sequence",
+          "source": "REQ-LIR-007",
+          "target": "REQ-LIR-008→REQ-LIR-009→REQ-LIR-010"
+        }
+        </script>
+      </section>
+    </section>
+
+    <section id="s-pipeline-position" data-section="10">
+      <h2>10. 编译管线位置</h2>
+      <p>LIR 在编译管线中的位置：</p>
+      <pre>
+TraceOp (源级 SSA)
+    │
+    ▼ auto_lower_trace
+LirOp (计算语义桥)
+    │
+    ├─ Layout Domain passes
+    ├─ Compute Domain passes
+    ├─ Memory Domain passes
+    └─ Communication Domain passes (nccl)
+    │
+    ▼ lir_to_vminstr
+VmInstr (状态追踪)
+    │
+    ▼ ISA Lowering
+Machine Code
+      </pre>
+      <p>关键约束：</p>
+      <ul>
+        <li>LIR 不修改现有 TraceOp 定义</li>
+        <li>LIR 不修改现有 VmInstr 定义</li>
+        <li>LIR 通过新增 lowering pass 接入管线</li>
+        <li>现有编译路径可通过 feature flag 切换</li>
+      </ul>
+    </section>
+
+    <section id="s-tests" data-section="11">
+      <h2>11. Test 定义</h2>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-001" data-test="TEST-LIR-001" id="test-lir-001">
+        <h4>TEST-LIR-001: LIR 层定位测试</h4>
+        <p>验证 LIR 位于 TraceOp lowering 和 VmInstr 构造之间，所有计算路径保留完整语义信息。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-002" data-test="TEST-LIR-002" id="test-lir-002">
+        <h4>TEST-LIR-002: Typed SSA + Region + Tile 抽象测试</h4>
+        <p>验证 LirOp 携带完整类型信息，LirRegion 支持嵌套结构，LirTile 携带分块维度和步长信息，三个示范算子通过 LIR 完整表达。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-003" data-test="TEST-LIR-003" id="test-lir-003">
+        <h4>TEST-LIR-003: AlgorithmProfile 声明式表达测试</h4>
+        <p>验证 AlgorithmProfile 类型定义完整，至少覆盖 GEMM 和 Attention 两个闭源库模式，声明式描述可被 pass pipeline 自动匹配。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-004" data-test="TEST-LIR-004" id="test-lir-004">
+        <h4>TEST-LIR-004: 四域划分测试</h4>
+        <p>验证四个域类型定义完整（Compute/Memory/Layout/Communication），每个 LirOp 明确属于唯一域，各域有独立 pass pipeline，域间依赖通过显式接口表达。Communication 域 nccl feature-gated 验证。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-005" data-test="TEST-LIR-005" id="test-lir-005">
+        <h4>TEST-LIR-005: VmInstr 职责收窄测试</h4>
+        <p>验证 VmInstr 变体不再承载计算语义，计算语义通过 LIR→VmInstr 映射保持完整。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-006" data-test="TEST-LIR-006" id="test-lir-006">
+        <h4>TEST-LIR-006: ISA 优化 pass 迁移测试</h4>
+        <p>验证融合 pass 在 LIR Compute 域执行，常量折叠和死代码消除在 LIR 层执行，VmInstr 层不再执行任何计算语义优化。</p>
+      </section>
+
+      <section data-level="integration" data-test-categories="integration" data-req-ref="REQ-LIR-007" data-test="TEST-LIR-007" id="test-lir-007">
+        <h4>TEST-LIR-007: Phase 1 集成测试</h4>
+        <p>验证 compiler/llir/ 模块创建，核心类型定义完整，三个示范算子通过 LIR 完整表达，LIR 可 lowering 到 VmInstr，cargo check 通过。</p>
+      </section>
+
+      <section data-level="integration" data-test-categories="integration" data-req-ref="REQ-LIR-008" data-test="TEST-LIR-008" id="test-lir-008">
+        <h4>TEST-LIR-008: Phase 2 集成测试</h4>
+        <p>验证承载计算语义的 VmInstr 变体已识别和迁移，所有迁移后的路径通过数值对齐测试。</p>
+      </section>
+
+      <section data-level="integration" data-test-categories="integration" data-req-ref="REQ-LIR-009" data-test="TEST-LIR-009" id="test-lir-009">
+        <h4>TEST-LIR-009: Phase 3 集成测试</h4>
+        <p>验证融合 pass 迁移到 LIR Compute 域，内存布局优化 pass 迁移到 LIR Memory 域，Communication 域 pass 在 nccl feature 启用时参与 pipeline，优化结果与迁移前数值一致。</p>
+      </section>
+
+      <section data-level="integration" data-test-categories="integration" data-req-ref="REQ-LIR-010" data-test="TEST-LIR-010" id="test-lir-010">
+        <h4>TEST-LIR-010: Phase 4 集成测试</h4>
+        <p>验证闭源库 GEMM 和 Attention 用 AlgorithmProfile 描述，所有手写 emit_xxx 函数替换为声明式描述，闭源库路径与非闭源库路径数值一致。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-011" data-test="TEST-LIR-011" id="test-lir-011">
+        <h4>TEST-LIR-011: LIR 模块位置测试</h4>
+        <p>验证 compiler/llir/ 模块创建，LIR 不修改现有 TraceOp 和 VmInstr 定义，LIR 通过新增 lowering pass 接入管线，现有编译路径可通过 feature flag 切换。</p>
+      </section>
+    </section>
+  
+    <!-- ========== Communication Domain Extension (REQ-LIR-012~016) ========== -->
+
+    <section id="s-comm-domain" data-section="12">
+      <h2>12. Communication Domain — 分布式通信 IR 表达</h2>
+
+      <p>LIR Communication Domain 表达分布式通信语义，与现有 Compute/Memory/Layout 三域并列为第四域。Communication 域为 <code>nccl</code> feature-gated：非分布式场景下不激活，零开销。</p>
+
+      <p>交叉引用：<code>SPEC/08-DISTRIBUTED-PAGING.html</code> 定义分布式 KV Cache 多层分页；<code>gllm/src/engine/distributed_config.rs</code> 定义 DistributedConfig/ParallelConfig/CommConfig/AllToAllStrategy；<code>gllm/src/engine/intent_bias.rs</code> 定义 OverlapHint 五变体；<code>gllm-nccl</code> 提供 P2pPageFetch/RdmaPageFetch 传输指令模板。</p>
+
+      <section data-entity-ref="ENT-LIR-COMM-DOMAIN" data-req-entity="ENT-LIR-COMM-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-012" id="req-lir-012">
+        <h3>REQ-LIR-012: LIR Communication Domain</h3>
+        <p>Communication Domain 作为 LIR 第四域，处理分布式通信语义（AllReduce/AllToAll/P2P 通信、通信-计算重叠调度）。Communication 域有独立 pass pipeline，在 Layout→Compute→Memory 之后执行。域内 pass 三类：通信融合（相邻 AllReduce 合并）、通信调度（chunk 级重叠）、通信优化（量化压缩）。</p>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>Communication 域类型定义完整，属于 LirDomain::Communication</li>
+            <li>Communication 域有独立 pass pipeline，包含三类 pass</li>
+            <li>Communication 域在 nccl feature 启用时激活，非分布式场景下不参与 pipeline</li>
+            <li>Communication 域 pass pipeline 在 Memory 域之后执行</li>
+            <li>Communication 域 LirOp 可 lowering 到 AllReduceChunk/P2pPageFetch/RdmaPageFetch 等 VmInstr</li>
+            <li>Communication 域与 Compute/Memory 域的交互通过显式依赖接口表达</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-PIPELINE-STAGE" data-req-entity="ENT-LIR-PIPELINE-STAGE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-013" id="req-lir-013">
+        <h3>REQ-LIR-013: Pipeline Parallel (PP2) IR 表达</h3>
+        <p>LIR 表达 2-stage 流水线并行（PP2）的通信语义。PP2 将模型按层切分为两个 stage，1F1B 调度实现通信-计算重叠：stage 0 计算 micro-batch N+1 时，stage 1 通信 micro-batch N 的激活。</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>PipelineStage{stage_id, micro_batch_count, forward_ops, backward_ops}</code> — 流水线阶段定义</li>
+          <li><code>StageSend{dst_stage, buffer}</code> — 阶段间激活发送（对应 P2pPageFetch send 端）</li>
+          <li><code>StageRecv{src_stage, buffer}</code> — 阶段间激活接收（对应 P2pPageFetch recv 端）</li>
+          <li><code>StageBoundary{stage_id, sync_kind}</code> — 阶段边界同步点（Barrier/Signal）</li>
+          <li><code>ActivationBuffer{stage, micro_batch, dtype, shape}</code> — 阶段间激活缓冲区</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>PipelineStage/StageSend/StageRecv/StageBoundary/ActivationBuffer 定义为 Communication 域 LirOp 变体</li>
+            <li>PP2 1F1B 调度控制流可通过 StageBoundary 序列表达</li>
+            <li>StageSend/StageRecv lowering 到 P2pPageFetch/RdmaPageFetch VmInstr</li>
+            <li>ActivationBuffer 缓冲区布局由 Memory 域 pass 决定，Communication 域只引用</li>
+            <li>单机场景（无分布式配置）下 PP2 IR 不生成，零开销</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-COMM-OVERLAP" data-req-entity="ENT-LIR-COMM-OVERLAP" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-014" id="req-lir-014">
+        <h3>REQ-LIR-014: Communication-Compute Overlap (MC2) IR 表达</h3>
+        <p>LIR 表达通信-计算双流并发（MC2）的 IR 语义。MC2 核心是 AllReduceChunk 的 chunk 级重叠：通信流处理 chunk N 的 AllReduce 时，计算流处理 chunk N-1 的后续计算。</p>
+        <p>对应 gllm 的 OverlapHint 五变体：Auto/PreferOverlap/PreferIsolated/ForceDoubleBuffer/ForceFlux。</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>CommComputeOverlap{comm_ops, compute_ops, chunk_partition, sync_point}</code> — 通信-计算重叠区域</li>
+          <li><code>ChunkPartition{total_chunks, chunk_id, chunk_size}</code> — chunk 分割描述</li>
+          <li><code>DualStreamBarrier{kind}</code> — 双流同步屏障（CommDone/ComputeDone/BothDone）</li>
+          <li><code>OverlapRegion{comm_instrs, compute_instrs, overlap_hint}</code> — 重叠调度单元</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>CommComputeOverlap/ChunkPartition/DualStreamBarrier/OverlapRegion 定义为 Communication 域 LirOp 变体</li>
+            <li>OverlapHint 五变体映射到 OverlapRegion 重叠策略</li>
+            <li>CommComputeOverlap lowering 到 AllReduceChunk + DualStreamBarrier VmInstr 组合</li>
+            <li>ChunkPartition 参数从 DistributedConfig.CommConfig 推导</li>
+            <li>PreferIsolated 模式下通信与计算不重叠，生成顺序执行的 VmInstr 序列</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-EXPERT-SHARD" data-req-entity="ENT-LIR-EXPERT-SHARD" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-015" id="req-lir-015">
+        <h3>REQ-LIR-015: Unified Expert Parallelism (UNIEP) IR 表达</h3>
+        <p>LIR 表达统一专家并行（UNIEP）的通信语义。UNIEP 核心是 AllToAll dispatch/combine 融合：dispatch 阶段按 expert_map 将 token 路由到目标 rank，combine 阶段按 token_map 收集专家输出。</p>
+        <p>对应 gllm 的 AllToAllStrategy（NvlinkAllToAll/RdmaAllToAll）+ ExpertPlacement。</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>ExpertShard{expert_id, ep_rank, placement, weight_layout}</code> — 专家分片描述</li>
+          <li><code>AllToAllDispatch{tokens, expert_map, strategy}</code> — 专家调度 dispatch</li>
+          <li><code>AllToAllCombine{expert_outputs, token_map, strategy}</code> — 专家输出 combine</li>
+          <li><code>ExpertPlacement{expert_id, rank, device}</code> — 专家放置策略</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>ExpertShard/AllToAllDispatch/AllToAllCombine/ExpertPlacement 定义为 Communication 域 LirOp 变体</li>
+            <li>AllToAllStrategy 映射到 AllToAllDispatch/AllToAllCombine 的 strategy 参数</li>
+            <li>AllToAllDispatch/AllToAllCombine lowering 到 VmInstr AllReduceChunk（AllToAll 模式）组合</li>
+            <li>ExpertShard 放置策略从 MoeDistributedConfig 推导</li>
+            <li>非 MoE 模型不生成 UNIEP IR，零开销</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-COMM-DOMAIN" data-req-entity="ENT-LIR-COMM-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-016" id="req-lir-016">
+        <h3>REQ-LIR-016: Communication Domain pass pipeline</h3>
+        <p>Communication 域独立 pass pipeline 包含三类 pass，按序执行：</p>
+        <ol>
+          <li><strong>通信融合 pass</strong>（CommFusionPass）：相邻 AllReduce 合并、冗余通信消除、通信-通信融合</li>
+          <li><strong>通信调度 pass</strong>（CommSchedulePass）：chunk 级重叠调度（MC2）、OverlapHint 策略映射、双流屏障插入</li>
+          <li><strong>通信优化 pass</strong>（CommOptimizePass）：量化压缩（FP8/INT8 AllReduce）、拓扑感知路由（NVLink 优先于 RDMA）、通信缓冲区复用</li>
+        </ol>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>三类 pass 定义完整，按序执行：CommFusionPass → CommSchedulePass → CommOptimizePass</li>
+            <li>CommFusionPass 可合并相邻同 dtype 同 op 的 AllReduce</li>
+            <li>CommSchedulePass 根据 OverlapHint 生成重叠/非重叠 VmInstr 序列</li>
+            <li>CommOptimizePass 可将 AllReduce 压缩为低精度通信</li>
+            <li>三类 pass 均为 nccl feature-gated，非分布式场景下不注册</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ===== Communication Domain Extension Phase 2 (REQ-LIR-017~026) ===== -->
+
+      <section data-entity-ref="ENT-LIR-WEIGHT-SHARD" data-req-entity="ENT-LIR-WEIGHT-SHARD" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-017" id="req-lir-017">
+        <h3>REQ-LIR-017: Tensor Parallelism (TP) IR 表达</h3>
+        <p>LIR 表达张量并行（TP）的通信语义。TP 将权重按列/行切分到多 rank，每个 rank 独立计算部分结果，AllReduce/ReduceScatter+AllGather 聚合。LIR 表达切分策略与同步聚合点。</p>
+        <p>来源：SGLang ✅ / vLLM ✅ / gllm ✅（CompilerGraph + DeviceProfile 驱动 TP 切分）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>WeightShard{rank, world_size, axis}</code> — 权重切分描述（axis: Row/Col）</li>
+          <li><code>AllReduceSync{reduce_op, dtype}</code> — AllReduce 同步聚合（Sum/Max/Min）</li>
+          <li><code>ReduceScatterSlice{chunk_size, dtype}</code> — ReduceScatter 切片聚合</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>WeightShard/AllReduceSync/ReduceScatterSlice 定义为 Communication 域 LirOp 变体</li>
+            <li>AllReduceSync lowering 到 AllReduceChunk VmInstr</li>
+            <li>WeightShard → 权重加载时按 rank 偏移，编译时 bake 进地址计算</li>
+            <li>TP 粒度与 CompilerGraph 的 Op 切分一致</li>
+            <li>单 rank 场景（world_size=1）TP IR 不生成，零开销</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-RING-ATTN" data-req-entity="ENT-LIR-RING-ATTN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-018" id="req-lir-018">
+        <h3>REQ-LIR-018: Context Parallelism (CP) IR 表达</h3>
+        <p>LIR 表达上下文并行（CP）的通信语义。CP 将长序列按 chunk 分配到多 rank，Ring Attention 每步传递 KV chunk，实现超长上下文推理。通信模式为环形 Send/Recv。</p>
+        <p>来源：vLLM ✅（Ring Attention）/ SGLang ❌ / gllm ❌（预留）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>RingAttention{chunk_idx, world_size, kv_send_rank, kv_recv_rank}</code> — Ring Attention 通信步骤</li>
+          <li><code>ContextSync{sync_point, barrier_id}</code> — 上下文同步屏障</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>RingAttention/ContextSync 定义为 Communication 域 LirOp 变体</li>
+            <li>RingAttention lowering 到 P2pCopy + CommBarrier VmInstr 组合</li>
+            <li>ContextSync lowering 到 CommBarrier VmInstr</li>
+            <li>CP 仅在 seq_len > max_seq_per_rank 时激活</li>
+            <li>非分布式场景零开销（CP IR 不生成）</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-KV-TRANSFER" data-req-entity="ENT-LIR-KV-TRANSFER" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-019" id="req-lir-019">
+        <h3>REQ-LIR-019: PD Disaggregation IR 表达</h3>
+        <p>LIR 表达 Prefill-Decode 分离架构的 KV 迁移语义。PD 分离架构中，Prefill 节点计算 KV cache 后通过 RDMA/NVLink 传输到 Decode 节点。LIR 表达 KV 迁移的语义（不表达传输协议细节，那是 CommInstr 层的职责）。</p>
+        <p>来源：SGLang ✅ / vLLM ✅ / gllm ✅（PdDisaggConfig）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>KvTransferOut{session_id, layer_range, page_indices}</code> — KV cache 输出迁移</li>
+          <li><code>KvTransferIn{session_id, layer_range, page_indices}</code> — KV cache 输入接收</li>
+          <li><code>PdHandshake{role, session_id}</code> — PD 节点握手同步（role: Prefill/Decode）</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>KvTransferOut/KvTransferIn/PdHandshake 定义为 Communication 域 LirOp 变体</li>
+            <li>KvTransferOut lowering 到 AsyncCopy + AsyncCopyCommit CommInstr</li>
+            <li>KvTransferIn lowering 到 AsyncWaitGroup + 数据拷贝 CommInstr</li>
+            <li>PdHandshake lowering 到 AllReduce 状态同步 CommInstr</li>
+            <li>PdDisaggMode::Collocated 时不生成 PD IR</li>
+            <li>layer_range 支持 PP 场景下部分层迁移</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-COMM-QUANT" data-req-entity="ENT-LIR-COMM-QUANT" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-020" id="req-lir-020">
+        <h3>REQ-LIR-020: Quantized Communication IR 表达</h3>
+        <p>LIR 表达通信前量化压缩与通信后反量化恢复的语义。通信量化（FP32→INT8/FP8，4x 带宽节省）+ Delta Encoding（差分编码+位打包，进一步压缩）。LIR 表达压缩策略，CommInstr 层执行实际量化操作。</p>
+        <p>来源：gllm ✅（QuantizedComm in gllm-nccl）/ SGLang ❌ / vLLM ❌</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>CommQuantize{src_dtype, dst_dtype, scale, count}</code> — 通信前量化压缩</li>
+          <li><code>CommDequantize{src_dtype, dst_dtype, scale, count}</code> — 通信后反量化恢复</li>
+          <li><code>CommDeltaEncode{bits_per_elem, prev, count}</code> — Delta 差分编码</li>
+          <li><code>CommDeltaDecode{bits_per_elem, prev, count}</code> — Delta 差分解码</li>
+          <li><code>CommBitPack{bits_per_elem, count}</code> — 位打包压缩</li>
+          <li><code>CommBitUnpack{bits_per_elem, count}</code> — 位解包恢复</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>CommQuantize/CommDequantize/CommDeltaEncode/CommDeltaDecode/CommBitPack/CommBitUnpack 定义为 Communication 域 LirOp 变体</li>
+            <li>CommQuantize lowering 到 CommInstr::Quantize</li>
+            <li>CommDequantize lowering 到 CommInstr::Dequantize</li>
+            <li>CommDeltaEncode lowering 到 CommInstr::DeltaEncode</li>
+            <li>CommBitPack lowering 到 CommInstr::BitPack</li>
+            <li>CommCompressHint 驱动压缩策略选择</li>
+            <li>量化精度损失由 SPEC 10-QUALITY 约束</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-FLUX" data-req-entity="ENT-LIR-FLUX" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-021" id="req-lir-021">
+        <h3>REQ-LIR-021: FLUX Decomposition IR 表达</h3>
+        <p>LIR 表达 FLUX 分解的通信语义。FLUX 将标准 AllReduce 分解为 ReduceScatter → LocalCompute → AllGather 三阶段。ReduceScatter 完成后每个 rank 持有完全归约的 home chunk，立即开始本地计算（与 AllGather 并行），实现 ≥90% 通信-计算重叠。</p>
+        <p>来源：gllm ✅（flux_lower.rs in gllm-nccl）/ SGLang ❌ / vLLM ❌</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>FluxReduceScatter{chunk_count, dtype, reduce_op}</code> — FLUX ReduceScatter 阶段</li>
+          <li><code>FluxLocalCompute{home_chunk_idx}</code> — FLUX 本地计算阶段（绑定 Compute 域 LirOp）</li>
+          <li><code>FluxAllGather{chunk_count, dtype}</code> — FLUX AllGather 阶段</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>FluxReduceScatter/FluxLocalCompute/FluxAllGather 定义为 Communication 域 LirOp 变体</li>
+            <li>FluxReduceScatter lowering 到 Ring ReduceScatter CommPlan</li>
+            <li>FluxLocalCompute 绑定 Compute 域 LirOp（不独立 lowering）</li>
+            <li>FluxAllGather lowering 到 Ring AllGather CommPlan</li>
+            <li>三阶段 DAG 依赖边表达：FluxReduceScatter → FluxLocalCompute → FluxAllGather</li>
+            <li>FLUX 仅在 OverlapHint::ForceFlux 时激活</li>
+            <li>world_size ≥ 2 前提条件</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-ALGO-SELECT" data-req-entity="ENT-LIR-ALGO-SELECT" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-022" id="req-lir-022">
+        <h3>REQ-LIR-022: Algorithm Selection IR 表达</h3>
+        <p>LIR 表达通信算法选择语义。通信算法选择是 LIR Communication Domain 的核心决策点。算法选择基于消息大小、拓扑、延迟/带宽偏好。LIR 表达选择的算法，gllm-nccl 执行对应的 lower 路径。</p>
+        <p>来源：gllm ✅（8 种 CollectiveAlgorithm）/ SGLang ❌ / vLLM ❌</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>CommAlgorithmSelect{algorithm, msg_bytes, dtype}</code> — 通信算法选择</li>
+          <li>算法枚举：Ring / Tree / TopoAwareRing / CollNetDirect / ChunkedPipeline / HierarchicalRing / HardwareReduce / FluxPipeline</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>CommAlgorithmSelect 定义为 Communication 域 LirOp 变体</li>
+            <li>8 种算法枚举完整定义</li>
+            <li>Ring → ring_lower 映射正确</li>
+            <li>Tree → tree_lower 映射正确</li>
+            <li>FluxPipeline → flux_lower 映射正确</li>
+            <li>HardwareReduce → hw_reduce_lower 映射正确</li>
+            <li>HierarchicalRing → hier_lower 映射正确</li>
+            <li>自动选择（CollectiveConfig.algorithm）或用户覆盖（CommConfig.algorithm_override）</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-PREFIX" data-req-entity="ENT-LIR-PREFIX" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-023" id="req-lir-023">
+        <h3>REQ-LIR-023: Prefix Sharing IR 表达</h3>
+        <p>LIR 表达分布式场景下 KV 前缀共享语义。RadixAttention 用 Radix Tree 匹配共享前缀，命中时复用已有 KV cache 避免重复计算。LIR 表达前缀匹配、复用、淘汰的语义。</p>
+        <p>来源：SGLang ✅（RadixAttention）/ vLLM ✅（prefix caching）/ gllm ✅（KvPrefixIndex）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>PrefixMatch{hash, min_match_len}</code> — 前缀匹配查询</li>
+          <li><code>PrefixReuse{prefix_len, kv_offset}</code> — 前缀 KV 复用绑定</li>
+          <li><code>PrefixEvict{policy, min_evict_len}</code> — 前缀 KV 淘汰</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>PrefixMatch/PrefixReuse/PrefixEvict 定义为 Communication 域 LirOp 变体</li>
+            <li>PrefixMatch lowering 到 KvPrefixIndex 查询</li>
+            <li>PrefixReuse lowering 到 KV cache offset 绑定</li>
+            <li>PrefixEvict lowering 到 KV cache 淘汰策略</li>
+            <li>前缀匹配在 BUILD 阶段完成（非运行时）</li>
+            <li>分布式场景需跨 rank 的 KV 页迁移</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-CHUNKED-PF" data-req-entity="ENT-LIR-CHUNKED-PF" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-024" id="req-lir-024">
+        <h3>REQ-LIR-024: Chunked Prefill IR 表达</h3>
+        <p>LIR 表达长序列 prefill 分块执行语义。长序列 prefill 分块执行，避免单次 prefill 占用全部计算资源。每个 chunk 独立执行 attention，chunk 间通过 KV cache 传递状态。分布式场景下 chunk 调度与通信重叠。</p>
+        <p>来源：SGLang ✅ / vLLM ✅ / gllm ✅（scheduler/chunked_prefill.rs）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>ChunkedPrefill{chunk_size, total_seq_len, chunk_idx}</code> — 分块 prefill 执行</li>
+          <li><code>ChunkBoundary{is_first, is_last}</code> — chunk 边界标记</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>ChunkedPrefill/ChunkBoundary 定义为 Communication 域 LirOp 变体</li>
+            <li>ChunkedPrefill lowering 到 SymDim::Symbolic("seq_len") 绑定 + Prefill/Decode 路径切换</li>
+            <li>ChunkBoundary lowering 到 KV cache 追加模式</li>
+            <li>chunk_size 由调度器动态决定（非编译时常量）</li>
+            <li>最后一个 chunk 可能小于 chunk_size（SymDim 正确处理）</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-SPEC-DECODE" data-req-entity="ENT-LIR-SPEC-DECODE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-025" id="req-lir-025">
+        <h3>REQ-LIR-025: Speculative Decoding Distributed IR 表达</h3>
+        <p>LIR 表达分布式推测解码的 draft-verify 通信语义。Draft 模型在独立 rank 或低优先级 SM 分区生成候选 token，Verify 阶段在目标模型验证。DraftKvSync 表达 draft 模型 KV cache 与目标模型的同步。</p>
+        <p>来源：SGLang ✅（DFlash/EAGLE）/ vLLM ✅（EAGLE）/ gllm ✅（speculative/）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>DraftGenerate{num_candidates, draft_model_id}</code> — Draft 模型候选生成</li>
+          <li><code>VerifyAccept{candidate_tokens, accept_mask}</code> — 目标模型验证接受</li>
+          <li><code>DraftKvSync{layer_range, mode}</code> — Draft-Target KV cache 同步（mode: FullSync/Incremental）</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>DraftGenerate/VerifyAccept/DraftKvSync 定义为 Communication 域 LirOp 变体</li>
+            <li>DraftGenerate lowering 到小模型 CompilerGraph 编译路径</li>
+            <li>VerifyAccept lowering 到目标模型 forward + token 比对</li>
+            <li>DraftKvSync lowering 到 KV cache 页迁移（复用 KvTransferOut/In）</li>
+            <li>单机场景下 Draft/Verify 共享 GPU 通过 SM 分区隔离</li>
+            <li>分布式场景通过 P2P 传输</li>
+          </ol>
+        </div>
+      </section>
+
+      <section data-entity-ref="ENT-LIR-EPLB" data-req-entity="ENT-LIR-EPLB" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-026" id="req-lir-026">
+        <h3>REQ-LIR-026: EPLB (Expert Placement Load Balancing) IR 表达</h3>
+        <p>LIR 表达 EPLB 动态重分配专家权重到不同 rank 的语义。基于历史 token 负载均衡，算法包括 deepseek（贪心）、deepseek_vec（向量化）、elasticity_aware（弹性感知）。LIR 表达负载记录、重均衡决策、权重迁移。</p>
+        <p>来源：SGLang ✅（EPLB with deepseek/deepseek_vec/elasticity_aware 算法）/ vLLM ❌ / gllm ❌（预留 ExpertPlacement）</p>
+        <p>核心 IR 元素：</p>
+        <ul>
+          <li><code>ExpertLoadRecord{num_layers, num_physical_experts}</code> — 专家负载记录</li>
+          <li><code>ExpertRebalance{algorithm, num_replicas, num_groups}</code> — 专家重均衡决策（algorithm: Deepseek/DeepseekVec/ElasticityAware）</li>
+          <li><code>ExpertWeightMigrate{src_rank, dst_rank, expert_indices}</code> — 专家权重迁移</li>
+        </ul>
+        <div data-criteria="">
+          <strong>验收标准：</strong>
+          <ol>
+            <li>ExpertLoadRecord/ExpertRebalance/ExpertWeightMigrate 定义为 Communication 域 LirOp 变体</li>
+            <li>ExpertLoadRecord lowering 到 MoE dispatch 时的负载累加</li>
+            <li>ExpertRebalance lowering 到 AllReduce 负载 + 贪心/向量化算法</li>
+            <li>ExpertWeightMigrate lowering 到 P2P 权重传输 + 映射表更新</li>
+            <li>EPLB 仅在 ExpertPlacement::HotCold 时激活</li>
+            <li>重均衡频率由 eplb_config.step_interval 控制</li>
+          </ol>
+        </div>
+      </section>
+
+    </section>
+
+    <!-- ========== Communication Domain Entities ========== -->
+
+    <section id="s-comm-entities" data-section="13">
+      <h2>13. Communication Domain Entity 定义</h2>
+
+      <section id="ent-lir-comm-domain" data-entity="ENT-LIR-COMM-DOMAIN" data-req-ref="REQ-LIR-012 REQ-LIR-016 REQ-LIR-017 REQ-LIR-018 REQ-LIR-019 REQ-LIR-020 REQ-LIR-021 REQ-LIR-022 REQ-LIR-023 REQ-LIR-024 REQ-LIR-025 REQ-LIR-026" data-entity-model-type="relational" data-entity-ref="ENT-LIR-DOMAIN" data-xref="REQ-LIR-012 REQ-LIR-016">
+        <h4>ENT-LIR-COMM-DOMAIN</h4>
+        <p>CommDomain — Communication 域定义</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="name" data-type="enum" data-required="true"><td>name</td><td>enum</td><td>是</td><td>Communication</td><td>域名称（LirDomain::Communication）</td></tr>
+          <tr data-field="pass_count" data-type="integer" data-required="true"><td>pass_count</td><td>integer</td><td>是</td><td>3</td><td>域内 pass 数量（Fusion/Schedule/Optimize）</td></tr>
+          <tr data-field="dependency_count" data-type="integer" data-required="true"><td>dependency_count</td><td>integer</td><td>是</td><td>≥2</td><td>域间依赖数量（依赖 Compute + Memory 域结果）</td></tr>
+          <tr data-field="overlap_strategies" data-type="enum_set" data-required="true"><td>overlap_strategies</td><td>enum_set</td><td>是</td><td>Auto|PreferOverlap|PreferIsolated|ForceDoubleBuffer|ForceFlux</td><td>支持的重叠策略集合（对应 OverlapHint）</td></tr>
+          <tr data-field="feature_gated" data-type="boolean" data-required="true"><td>feature_gated</td><td>boolean</td><td>是</td><td>true</td><td>nccl feature-gated 标记</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-pipeline-stage" data-entity="ENT-LIR-PIPELINE-STAGE" data-req-ref="REQ-LIR-013" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-013">
+        <h4>ENT-LIR-PIPELINE-STAGE</h4>
+        <p>PipelineStage — 流水线阶段定义</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="stage_id" data-type="integer" data-required="true"><td>stage_id</td><td>integer</td><td>是</td><td>≥0</td><td>阶段编号（0 = first stage, 1 = second stage）</td></tr>
+          <tr data-field="micro_batch_count" data-type="integer" data-required="true"><td>micro_batch_count</td><td>integer</td><td>是</td><td>≥1</td><td>微批次数量</td></tr>
+          <tr data-field="forward_ops" data-type="vec&lt;LirOp&gt;" data-required="true"><td>forward_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>前向计算 LirOp 序列</td></tr>
+          <tr data-field="backward_ops" data-type="vec&lt;LirOp&gt;" data-required="false"><td>backward_ops</td><td>vec&lt;LirOp&gt;</td><td>否</td><td>可为空</td><td>反向计算 LirOp 序列（训练场景）</td></tr>
+          <tr data-field="boundary" data-type="StageBoundary" data-required="true"><td>boundary</td><td>StageBoundary</td><td>是</td><td>—</td><td>阶段边界同步点</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-comm-overlap" data-entity="ENT-LIR-COMM-OVERLAP" data-req-ref="REQ-LIR-014" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-014">
+        <h4>ENT-LIR-COMM-OVERLAP</h4>
+        <p>CommComputeOverlap — 通信-计算重叠区域</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="comm_ops" data-type="vec&lt;LirOp&gt;" data-required="true"><td>comm_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>通信侧 LirOp 序列（AllReduceChunk 等）</td></tr>
+          <tr data-field="compute_ops" data-type="vec&lt;LirOp&gt;" data-required="true"><td>compute_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>计算侧 LirOp 序列</td></tr>
+          <tr data-field="chunk_partition" data-type="ChunkPartition" data-required="true"><td>chunk_partition</td><td>ChunkPartition</td><td>是</td><td>—</td><td>chunk 分割描述</td></tr>
+          <tr data-field="sync_point" data-type="DualStreamBarrier" data-required="true"><td>sync_point</td><td>DualStreamBarrier</td><td>是</td><td>—</td><td>双流同步屏障</td></tr>
+          <tr data-field="overlap_hint" data-type="OverlapHint" data-required="true"><td>overlap_hint</td><td>OverlapHint</td><td>是</td><td>Auto|PreferOverlap|PreferIsolated|ForceDoubleBuffer|ForceFlux</td><td>重叠策略（对应 gllm OverlapHint）</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-expert-shard" data-entity="ENT-LIR-EXPERT-SHARD" data-req-ref="REQ-LIR-015" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-015">
+        <h4>ENT-LIR-EXPERT-SHARD</h4>
+        <p>ExpertShard — 专家分片描述</p>
+        <table data-entity-table="">
+          <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
+          <tr data-field="expert_id" data-type="integer" data-required="true"><td>expert_id</td><td>integer</td><td>是</td><td>≥0</td><td>专家编号</td></tr>
+          <tr data-field="ep_rank" data-type="integer" data-required="true"><td>ep_rank</td><td>integer</td><td>是</td><td>≥0</td><td>专家并行 rank</td></tr>
+          <tr data-field="placement" data-type="ExpertPlacement" data-required="true"><td>placement</td><td>ExpertPlacement</td><td>是</td><td>—</td><td>专家放置策略（rank + device）</td></tr>
+          <tr data-field="weight_layout" data-type="TensorLayout" data-required="true"><td>weight_layout</td><td>TensorLayout</td><td>是</td><td>—</td><td>权重张量布局（引用 Memory 域结果）</td></tr>
+        </table>
+      </section>
+
+      <section id="ent-lir-weight-shard" data-entity="ENT-LIR-WEIGHT-SHARD" data-req-ref="REQ-LIR-017" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-017">
+        <h4>ENT-LIR-WEIGHT-SHARD</h4>
+        <p>张量并行权重切分描述。字段：rank(u32)/world_size(u32)/axis(ShardAxis: Row|Col)。Row 切分：权重按行切分，输出需 AllReduce；Col 切分：权重按列切分，输出需 ReduceScatter+AllGather。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-WEIGHT-SHARD", "fields":["rank","world_size","axis"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-ring-attn" data-entity="ENT-LIR-RING-ATTN" data-req-ref="REQ-LIR-018" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-018">
+        <h4>ENT-LIR-RING-ATTN</h4>
+        <p>Ring Attention 通信步骤描述。字段：chunk_idx(u32)/world_size(u32)/kv_send_rank(u32)/kv_recv_rank(u32)。每步：发送本地 KV chunk 到 recv_rank，接收 send_rank 的 KV chunk，执行 local attention。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-RING-ATTN", "fields":["chunk_idx","world_size","kv_send_rank","kv_recv_rank"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-kv-transfer" data-entity="ENT-LIR-KV-TRANSFER" data-req-ref="REQ-LIR-019" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-019">
+        <h4>ENT-LIR-KV-TRANSFER</h4>
+        <p>PD 分离 KV 迁移描述。字段：session_id(u64)/layer_range(Range&lt;usize&gt;)/page_indices(Vec&lt;u64&gt;)。KvTransferOut 在 Prefill 节点标记 KV 页为迁移就绪；KvTransferIn 在 Decode 节点接收并绑定 KV 页。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-KV-TRANSFER", "fields":["session_id","layer_range","page_indices"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-comm-quant" data-entity="ENT-LIR-COMM-QUANT" data-req-ref="REQ-LIR-020" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-020">
+        <h4>ENT-LIR-COMM-QUANT</h4>
+        <p>通信量化压缩描述。字段：src_dtype(DType)/dst_dtype(DType)/scale(f32)/count(usize)。CommQuantize 在通信前将 FP32 量化为 INT8/FP8；CommDequantize 在通信后恢复。Delta Encoding + Bit Packing 进一步压缩。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-COMM-QUANT", "fields":["src_dtype","dst_dtype","scale","count"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-flux" data-entity="ENT-LIR-FLUX" data-req-ref="REQ-LIR-021" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-021">
+        <h4>ENT-LIR-FLUX</h4>
+        <p>FLUX 分解三阶段描述。字段：chunk_count(u32)/dtype(DType)/reduce_op(ReduceOp)。FluxReduceScatter 完成后每个 rank 持有 home chunk；FluxLocalCompute 在 home chunk 上执行计算；FluxAllGather 收集所有 chunk。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-FLUX", "fields":["chunk_count","dtype","reduce_op"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-algo-select" data-entity="ENT-LIR-ALGO-SELECT" data-req-ref="REQ-LIR-022" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-022">
+        <h4>ENT-LIR-ALGO-SELECT</h4>
+        <p>通信算法选择描述。字段：algorithm(CollectiveAlgorithm)/msg_bytes(usize)/dtype(DType)。8 种算法：Ring/Tree/TopoAwareRing/CollNetDirect/ChunkedPipeline/HierarchicalRing/HardwareReduce/FluxPipeline。选择基于消息大小、拓扑、延迟/带宽偏好。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-ALGO-SELECT", "fields":["algorithm","msg_bytes","dtype"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-prefix" data-entity="ENT-LIR-PREFIX" data-req-ref="REQ-LIR-023" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-023">
+        <h4>ENT-LIR-PREFIX</h4>
+        <p>前缀共享描述。字段：hash(u64)/min_match_len(usize)/prefix_len(usize)/kv_offset(usize)/policy(EvictPolicy)。PrefixMatch 查询 Radix Tree 匹配共享前缀；PrefixReuse 绑定 KV cache offset；PrefixEvict 按策略淘汰。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-PREFIX", "fields":["hash","min_match_len","prefix_len","kv_offset","policy"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-chunked-pf" data-entity="ENT-LIR-CHUNKED-PF" data-req-ref="REQ-LIR-024" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-024">
+        <h4>ENT-LIR-CHUNKED-PF</h4>
+        <p>分块 Prefill 描述。字段：chunk_size(usize)/total_seq_len(usize)/chunk_idx(usize)/is_first(bool)/is_last(bool)。每个 chunk 独立执行 attention，chunk 间通过 KV cache 传递状态。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-CHUNKED-PF", "fields":["chunk_size","total_seq_len","chunk_idx","is_first","is_last"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-spec-decode" data-entity="ENT-LIR-SPEC-DECODE" data-req-ref="REQ-LIR-025" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-025">
+        <h4>ENT-LIR-SPEC-DECODE</h4>
+        <p>分布式推测解码描述。字段：num_candidates(usize)/draft_model_id(String)/candidate_tokens(Vec&lt;u32&gt;)/accept_mask(Vec&lt;bool&gt;)/layer_range(Range&lt;usize&gt;)/mode(KvSyncMode)。DraftGenerate 生成候选；VerifyAccept 验证接受；DraftKvSync 同步 KV cache。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-SPEC-DECODE", "fields":["num_candidates","draft_model_id","candidate_tokens","accept_mask","layer_range","mode"] }
+        </script>
+      </section>
+
+      <section id="ent-lir-eplb" data-entity="ENT-LIR-EPLB" data-req-ref="REQ-LIR-026" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-026">
+        <h4>ENT-LIR-EPLB</h4>
+        <p>EPLB 专家负载均衡描述。字段：num_layers(usize)/num_physical_experts(usize)/algorithm(EplbAlgorithm: Deepseek|DeepseekVec|ElasticityAware)/src_rank(u32)/dst_rank(u32)/expert_indices(Vec&lt;usize&gt;)。ExpertLoadRecord 记录负载；ExpertRebalance 决策重均衡；ExpertWeightMigrate 迁移权重。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.gsc.local/v1", "@type":"Entity", "id":"ENT-LIR-EPLB", "fields":["num_layers","num_physical_experts","algorithm","src_rank","dst_rank","expert_indices"] }
+        </script>
+      </section>
+
+    </section>
+
+    <!-- ========== Communication Domain Decisions ========== -->
+
+    <section id="s-comm-decisions" data-section="14">
+      <h2>14. Communication Domain Decision 定义</h2>
+
+      <section id="dec-lir-009" data-decision="DEC-LIR-009" data-decision-dimension="architectural">
+        <h3>DEC-LIR-009: Communication Domain 作为第四域（vs 子域 vs 独立 pass）</h3>
+        <p>Communication 语义在 LIR 域划分中的位置：独立第四域 vs Compute 域子域 vs 独立 pass。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: Compute 域子域（通信归入计算，语义耦合，pass 调度不灵活）</li>
+            <li>Option B: 独立 pass 在 Compute 域执行（通信 pass 与计算 pass 混排，依赖隐式）</li>
+            <li>Option C: 独立第四域 Communication（chosen — 通信语义正交于计算/内存/布局，独立域使 pass 更聚焦，nccl feature-gated 零开销）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option C：独立第四域 Communication</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>通信语义（AllReduce/AllToAll/P2P）与计算语义正交：通信操作不执行算术计算，而是跨 rank 数据移动与同步。独立域使通信融合/调度/优化 pass 聚焦，避免与 Compute 域融合 pass 混排导致调度冲突。nccl feature-gated 保证非分布式场景零开销。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-009"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-010" data-decision="DEC-LIR-010" data-decision-dimension="technical">
+        <h3>DEC-LIR-010: PP2 微批次粒度选择</h3>
+        <p>Pipeline Parallel 2-stage 的微批次切分粒度：token-level vs request-level vs layer-level。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: token-level 微批次（粒度最细，通信最频繁，调度开销大）</li>
+            <li>Option B: request-level 微批次（chosen — 按请求切分，通信频率适中，调度开销可控）</li>
+            <li>Option C: layer-level 微批次（粒度太粗，2-stage 流水线气泡率过高）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：request-level 微批次</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>2-stage 流水线中 request-level 微批次平衡了通信频率与流水线气泡率。每个 micro-batch 包含若干请求的完整 forward pass，stage 间通信一次激活传输。token-level 粒度导致 stage 间通信过于频繁，调度开销占比过高。layer-level 粒度太粗，2-stage 下流水线气泡率接近 50%。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-010"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-011" data-decision="DEC-LIR-011" data-decision-dimension="technical">
+        <h3>DEC-LIR-011: MC2 chunk 分割策略</h3>
+        <p>Communication-Compute Overlap 的 chunk 分割策略：等分 vs 自适应。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 等分 chunk（实现简单，但通信-计算时间不匹配时效率低）</li>
+            <li>Option B: 自适应 chunk（chosen — 按通信/计算时间比动态分割，重叠率最优）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：自适应 chunk</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>自适应 chunk 根据 AllReduce 通信时间与后续计算时间的比值动态分割 chunk 大小，使通信流处理 chunk N 时计算流恰好完成 chunk N-1 的计算，最大化重叠率。等分 chunk 在通信/计算时间不匹配时产生等待间隙。自适应策略由 CommSchedulePass 根据 DeviceProfile（NVLink 带宽/SM 数量）和 ComputePattern 计算量估算推导。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-011"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-012" data-decision="DEC-LIR-012" data-decision-dimension="technical">
+        <h3>DEC-LIR-012: UNIEP dispatch/combine 融合 vs 分离</h3>
+        <p>UNIEP AllToAll dispatch 与 combine 的 IR 表达：融合为单一 LirOp vs 分离为两个独立 LirOp。</p>
+        <div data-decision-options="">
+          <h4>方案选项</h4>
+          <ul>
+            <li>Option A: 融合为单一 AllToAll LirOp（dispatch+combine 封装，但中间状态不可优化）</li>
+            <li>Option B: 分离为 AllToAllDispatch + AllToAllCombine 两个 LirOp（chosen — 中间 expert 计算可插入优化 pass）</li>
+          </ul>
+        </div>
+        <div data-decision-chosen="">
+          <h4>选定方案</h4>
+          <p>Option B：分离为 AllToAllDispatch + AllToAllCombine</p>
+        </div>
+        <div data-decision-rationale="">
+          <h4>理由</h4>
+          <p>dispatch 与 combine 之间存在 expert FFN 计算，分离为两个 LirOp 使 expert 计算可作为 Compute 域 LirOp 插入 dispatch/combine 之间，接受 Compute 域融合 pass 优化。融合为单一 LirOp 将 expert 计算封装在内部，Compute 域 pass 无法触及。分离后 dispatch→expert_compute→combine 的三段结构清晰，对应 MoE 路由→计算→收集的物理数据流。</p>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/decision",
+          "@type": "Decision",
+          "id": "DEC-LIR-012"
+        }
+        </script>
+      </section>
+
+      <section id="dec-lir-013" data-decision="DEC-LIR-013" data-decision-dimension="architectural">
+        <h3>DEC-LIR-013: TP 切分策略选择</h3>
+        <p>权重切分按行（Row）vs 按列（Col）的选择影响通信模式。Row 切分输出需 AllReduce；Col 切分输出需 ReduceScatter+AllGather。选择依据：GEMM 形状、通信量、硬件拓扑。</p>
+        <ul>
+          <li>选项 A：Row 切分 — AllReduce 通信量 = hidden_size × dtype_size，适合 hidden_size 较小</li>
+          <li>选项 B：Col 切分 — ReduceScatter+AllGather 通信量 = output_size × dtype_size / world_size，适合 output_size 较大</li>
+        </ul>
+        <p>决策：LIR 不硬编码选择，由 CommSchedulePass 根据 DeviceProfile + 消息大小自动选择。权重切分策略在 BUILD 阶段由 CompilerGraph 确定。</p>
+      </section>
+
+      <section id="dec-lir-014" data-decision="DEC-LIR-014" data-decision-dimension="architectural">
+        <h3>DEC-LIR-014: 通信量化策略选择</h3>
+        <p>通信量化（FP32→INT8/FP8）节省 4x 带宽，但引入精度损失。量化策略由 CommCompressHint 驱动。</p>
+        <ul>
+          <li>选项 A：AlwaysCompress — 所有 AllReduce 通信前量化，带宽受限场景最优</li>
+          <li>选项 B：NeverCompress — 不量化，精度优先场景</li>
+          <li>选项 C：Auto — 基于消息大小自适应：小消息不量化（延迟主导），大消息量化（带宽主导）</li>
+          <li>选项 D：ForceQuant(scheme) — 用户指定量化方案</li>
+        </ul>
+        <p>决策：Auto 为默认。CommOptimizePass 根据 CommCompressHint + 消息大小 + 硬件带宽自动决策。量化精度损失由 SPEC 10-QUALITY 约束（相对误差 &lt; 1e-3）。</p>
+      </section>
+
+      <section id="dec-lir-015" data-decision="DEC-LIR-015" data-decision-dimension="technical">
+        <h3>DEC-LIR-015: PD 分离传输协议选择</h3>
+        <p>PD 分离架构中 KV 迁移传输协议选择：NVLink（同节点，带宽 ~300 GB/s）vs RDMA（跨节点，带宽 ~50 GB/s）。</p>
+        <ul>
+          <li>选项 A：NVLink — 同节点，延迟低带宽高，KvTransferOut/In lowering 到 P2pCopy</li>
+          <li>选项 B：RDMA — 跨节点，需 RDMA 注册+传输，lowering 到 RdmaPageFetch/RdmaPagePush</li>
+        </ul>
+        <p>决策：由 SystemTopology 自动探测。PdDisaggConfig.role=Auto 时自动选择；同节点走 NVLink，跨节点走 RDMA。LIR 层不硬编码，CommSchedulePass 根据 topology 输出决定。</p>
+      </section>
+
+      <section id="dec-lir-016" data-decision="DEC-LIR-016" data-decision-dimension="technical">
+        <h3>DEC-LIR-016: EPLB 算法选择</h3>
+        <p>EPLB 专家负载均衡算法选择：deepseek（贪心）/ deepseek_vec（向量化）/ elasticity_aware（弹性感知）。</p>
+        <ul>
+          <li>选项 A：Deepseek — 贪心算法，O(E×R) 复杂度，适合专家数较少</li>
+          <li>选项 B：DeepseekVec — 向量化贪心，O(E×R/lanes)，SIMD 加速，适合专家数较多</li>
+          <li>选项 C：ElasticityAware — 弹性感知，考虑专家复制+迁移成本，适合高动态负载</li>
+        </ul>
+        <p>决策：由 ExpertPlacement 驱动。RoundRobin 时不需要 EPLB；HotCold 时默认 DeepseekVec（平衡性能和精度）。用户可通过 MoeDistributedConfig 覆盖。</p>
+      </section>
+
+      <section id="dec-lir-017" data-decision="DEC-LIR-017" data-decision-dimension="architectural">
+        <h3>DEC-LIR-017: FLUX vs MC2 通信重叠策略</h3>
+        <p>FLUX（ReduceScatter→LocalCompute→AllGather）vs MC2（AllReduceChunk 双流交替）通信-计算重叠策略选择。</p>
+        <ul>
+          <li>选项 A：MC2 — AllReduceChunk chunk 级交替，实现简单，SM80+ 可达 60-80% 重叠</li>
+          <li>选项 B：FLUX — ReduceScatter→LocalCompute→AllGather 三阶段，理论 ≥90% 重叠，但需要 ReduceScatter 支持</li>
+        </ul>
+        <p>决策：OverlapHint 驱动。PreferOverlap/ForceDoubleBuffer → MC2；ForceFlux → FLUX。Auto 时 CommSchedulePass 根据硬件能力自动选择（SM90+ 优先 FLUX，SM80-89 优先 MC2）。</p>
+      </section>
+
+      <section id="dec-lir-018" data-decision="DEC-LIR-018" data-decision-dimension="architectural">
+        <h3>DEC-LIR-018: CP Ring Attention 与 TP 的兼容</h3>
+        <p>Context Parallelism 与 Tensor Parallelism 共存时，Ring Attention 的 KV chunk 传递需要在 TP group 内同步。</p>
+        <ul>
+          <li>选项 A：CP-TP 分离 — CP 组独立于 TP 组，Ring Attention 在 CP 组内传递 KV，TP 组内正常 AllReduce</li>
+          <li>选项 B：CP-TP 融合 — Ring Attention 同时处理 CP 和 TP 通信，减少同步次数</li>
+        </ul>
+        <p>决策：选项 A（CP-TP 分离）。CP group 和 TP group 是独立的通信域，RingAttention 在 CP group 内传递 KV，AllReduceSync 在 TP group 内聚合。通信域正交，零干扰。</p>
+      </section>
+
+    </section>
+
+    <!-- ========== Communication Domain Dataflows ========== -->
+
+    <section id="s-comm-dataflow" data-section="15">
+      <h2>15. Communication Domain Dataflow 定义</h2>
+
+      <section id="df-lir-005" data-flow-from="ENT-LIR-COMM-DOMAIN" data-flow-to="ENT-VM-INSTR" data-dataflow="DF-LIR-005" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-005: AllReduceChunk lowering</h3>
+        <p>Communication 域 AllReduce 语义 LirOp lowering 到 AllReduceChunk VmInstr。AllReduceChunk 携带 sendbuf/recvbuf/count/dtype/op/rank/world_size/chunk_idx，直接映射到 VmInstr::AllReduceChunk。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: CommComputeOverlap LirOp (Communication 域)</li>
+            <li>to: VmInstr::AllReduceChunk 序列</li>
+            <li>transform: comm_lir_to_vminstr(CommComputeOverlap) → Vec&lt;VmInstr::AllReduceChunk&gt;</li>
+            <li>direction: sync（编译时一次性）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-005",
+          "from": "ENT-LIR-COMM-DOMAIN",
+          "to": "ENT-VM-INSTR"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-006" data-flow-from="ENT-LIR-PIPELINE-STAGE" data-flow-to="ENT-LIR-PIPELINE-STAGE" data-dataflow="DF-LIR-006" data-dataflow-dimension="technical" data-dataflow-direction="async">
+        <h3>DF-LIR-006: Pipeline Stage 激活传递</h3>
+        <p>PP2 流水线 stage 间激活数据传递：StageSend(stage_0) → inter-node 传输 → StageRecv(stage_1)。激活数据通过 P2pPageFetch（同节点 NVLink）或 RdmaPageFetch（跨节点 RDMA）传输。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: StageSend LirOp (stage_id=0)</li>
+            <li>to: StageRecv LirOp (stage_id=1)</li>
+            <li>transform: StageSend → P2pPageFetch/RdmaPageFetch → StageRecv</li>
+            <li>direction: async（运行时异步传输）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-006",
+          "from": "ENT-LIR-PIPELINE-STAGE",
+          "to": "ENT-LIR-PIPELINE-STAGE"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-007" data-flow-from="ENT-LIR-EXPERT-SHARD" data-flow-to="ENT-LIR-EXPERT-SHARD" data-dataflow="DF-LIR-007" data-dataflow-dimension="technical" data-dataflow-direction="async">
+        <h3>DF-LIR-007: Expert AllToAll dispatch/combine 数据流</h3>
+        <p>UNIEP 专家并行 AllToAll 数据流：AllToAllDispatch 按专家路由表将 token 分发到目标 rank → 目标 rank 执行 expert FFN 计算 → AllToAllCombine 按源 rank 收集 expert 输出合并回原 token 顺序。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: AllToAllDispatch LirOp (本 rank tokens)</li>
+            <li>to: AllToAllCombine LirOp (本 rank combined outputs)</li>
+            <li>transform: dispatch(token→expert_rank) → expert_compute → combine(expert_rank→token)</li>
+            <li>direction: async（运行时 AllToAll 异步通信）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@id": "DF-LIR-007",
+          "@type": "Dataflow",
+          "from": "ENT-LIR-EXPERT-SHARD",
+          "to": "ENT-LIR-EXPERT-SHARD"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-008" data-flow-from="ENT-LIR-COMM-OVERLAP" data-flow-to="ENT-VM-INSTR" data-dataflow="DF-LIR-008" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-008: Comm-Compute overlap chunk 调度数据流</h3>
+        <p>MC2 通信-计算重叠的 chunk 调度数据流：CommComputeOverlap LirOp 根据 OverlapHint 和 ChunkPartition 生成 AllReduceChunk + DualStreamBarrier VmInstr 序列。ForceDoubleBuffer 模式生成双缓冲交替序列；ForceFlux 模式生成流式 chunk 序列；PreferIsolated 模式生成顺序执行序列。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: CommComputeOverlap LirOp + OverlapHint + ChunkPartition</li>
+            <li>to: Vec&lt;VmInstr&gt; (AllReduceChunk + DualStreamBarrier 交替序列)</li>
+            <li>transform: overlap_schedule(CommComputeOverlap, OverlapHint) → Vec&lt;VmInstr&gt;</li>
+            <li>direction: sync（编译时调度生成）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/dataflow",
+          "@type": "Dataflow",
+          "id": "DF-LIR-008",
+          "from": "ENT-LIR-COMM-OVERLAP",
+          "to": "ENT-VM-INSTR"
+        }
+        </script>
+      </section>
+
+      <section id="df-lir-009" data-flow-from="ENT-LIR-WEIGHT-SHARD" data-flow-to="ENT-LIR-COMM-DOMAIN" data-dataflow="DF-LIR-009" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-009: TP 权重切分到 AllReduce 聚合</h3>
+        <p>TP 权重切分数据流：WeightShard(axis=Row) → 每个 rank 独立计算 GEMV → AllReduceSync(Sum) 聚合部分结果。WeightShard(axis=Col) → 每个 rank 独立计算 GEMV → ReduceScatterSlice + AllGather 聚合。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: WeightShard LirOp (Communication 域)</li>
+            <li>to: AllReduceSync/ReduceScatterSlice LirOp (Communication 域)</li>
+            <li>transform: tp_shard_weight(weight, rank, axis) → partial_result → allreduce/partial_result → complete_result</li>
+            <li>direction: sync（编译时确定切分+聚合模式）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        { "@context":"https://spec.example.com/dataflow", "@type":"Dataflow", "id":"DF-LIR-009", "from":"ENT-LIR-WEIGHT-SHARD", "to":"ENT-LIR-COMM-DOMAIN" }
+        </script>
+      </section>
+
+      <section id="df-lir-010" data-flow-from="ENT-LIR-KV-TRANSFER" data-flow-to="ENT-LIR-KV-TRANSFER" data-dataflow="DF-LIR-010" data-dataflow-dimension="technical" data-dataflow-direction="async">
+        <h3>DF-LIR-010: PD 分离 KV 迁移数据流</h3>
+        <p>PD 分离 KV 迁移数据流：KvTransferOut（Prefill 节点）→ RDMA/NVLink 传输 → KvTransferIn（Decode 节点）。传输以 page 为粒度，PdHandshake 保证两端同步。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: KvTransferOut LirOp (Prefill rank)</li>
+            <li>to: KvTransferIn LirOp (Decode rank)</li>
+            <li>transform: kv_pages → rdma/nvlink_transfer → kv_pages_bound</li>
+            <li>direction: async（运行时异步传输）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        { "@context":"https://spec.example.com/dataflow", "@type":"Dataflow", "id":"DF-LIR-010", "from":"ENT-LIR-KV-TRANSFER", "to":"ENT-LIR-KV-TRANSFER" }
+        </script>
+      </section>
+
+      <section id="df-lir-011" data-flow-from="ENT-LIR-COMM-QUANT" data-flow-to="ENT-LIR-COMM-QUANT" data-dataflow="DF-LIR-011" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+        <h3>DF-LIR-011: 通信量化数据流</h3>
+        <p>通信量化数据流：CommQuantize(FP32→INT8/FP8) → AllReduceChunk(低精度通信) → CommDequantize(INT8/FP8→FP32)。Delta Encoding 路径：CommDeltaEncode → CommBitPack → 通信 → CommBitUnpack → CommDeltaDecode。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: CommQuantize LirOp (Communication 域)</li>
+            <li>to: CommDequantize LirOp (Communication 域)</li>
+            <li>transform: fp32_data → quantize → low_precision_allreduce → dequantize → fp32_data</li>
+            <li>direction: sync（编译时确定量化策略）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        { "@context":"https://spec.example.com/dataflow", "@type":"Dataflow", "id":"DF-LIR-011", "from":"ENT-LIR-COMM-QUANT", "to":"ENT-LIR-COMM-QUANT" }
+        </script>
+      </section>
+
+      <section id="df-lir-012" data-flow-from="ENT-LIR-FLUX" data-flow-to="ENT-LIR-FLUX" data-dataflow="DF-LIR-012" data-dataflow-dimension="technical" data-dataflow-direction="async">
+        <h3>DF-LIR-012: FLUX 三阶段数据流</h3>
+        <p>FLUX 分解数据流：FluxReduceScatter → 每个 rank 持有 home chunk → FluxLocalCompute（与 FluxAllGather 并行）→ FluxAllGather 收集所有 chunk。三阶段 DAG 依赖：FluxReduceScatter → FluxLocalCompute → FluxAllGather。</p>
+        <div data-dataflow-contract="">
+          <h4>契约</h4>
+          <ul>
+            <li>from: FluxReduceScatter LirOp</li>
+            <li>to: FluxAllGather LirOp</li>
+            <li>transform: all_data → reduce_scatter → home_chunks → local_compute → partial_results → all_gather → complete_results</li>
+            <li>direction: async（运行时异步重叠）</li>
+            <li>feature: nccl</li>
+          </ul>
+        </div>
+        <script type="application/ld+json">
+        { "@context":"https://spec.example.com/dataflow", "@type":"Dataflow", "id":"DF-LIR-012", "from":"ENT-LIR-FLUX", "to":"ENT-LIR-FLUX" }
+        </script>
+      </section>
+
+    </section>
+
+    <!-- ========== Communication Domain Controlflows ========== -->
+
+    <section id="s-comm-controlflow" data-section="16">
+      <h2>16. Communication Domain Controlflow 定义</h2>
+
+      <section id="cf-lir-003" data-controlflow="CF-LIR-003" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-COMM-DOMAIN" data-controlflow-target="ENT-LIR-DOMAIN">
+        <h3>CF-LIR-003: 通信域 pass pipeline 执行顺序</h3>
+        <p>Communication 域 pass pipeline 按固定顺序执行：CommFusionPass → CommSchedulePass → CommOptimizePass。CommFusionPass 先合并冗余通信（减少通信量）；CommSchedulePass 次之（根据 OverlapHint 调度 chunk 级重叠）；CommOptimizePass 最后（量化压缩进一步减少通信量）。Communication 域在 Memory 域之后执行，依赖 Compute 和 Memory 域结果确定通信模式和缓冲区布局。</p>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/controlflow",
+          "@type": "Controlflow",
+          "id": "CF-LIR-003",
+          "relation": "sequence",
+          "source": "CommFusionPass",
+          "target": "CommSchedulePass→CommOptimizePass"
+        }
+        </script>
+      </section>
+
+      <section id="cf-lir-004" data-controlflow="CF-LIR-004" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-PIPELINE-STAGE" data-controlflow-target="ENT-LIR-PIPELINE-STAGE">
+        <h3>CF-LIR-004: Pipeline 1F1B 调度控制流</h3>
+        <p>PP2 1F1B（One Forward One Backward）调度控制流：stage 0 执行 forward micro-batch 0 → StageSend → stage 1 执行 forward micro-batch 0 → stage 0 执行 forward micro-batch 1（与 stage 1 的 forward micro-batch 0 重叠）→ ... → 稳态阶段每个 stage 同时执行 forward N+1 和 backward N-1。StageBoundary 同步点保证 stage 间激活传递的顺序性。</p>
+        <script type="application/ld+json">
+        {
+          "@context": "https://spec.example.com/controlflow",
+          "@type": "Controlflow",
+          "id": "CF-LIR-004",
+          "relation": "sequence",
+          "source": "StageBoundary(warmup)",
+          "target": "StageBoundary(steady_state)→StageBoundary(cooldown)"
+        }
+        </script>
+      </section>
+
+      <section id="cf-lir-005" data-controlflow="CF-LIR-005" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-WEIGHT-SHARD" data-controlflow-target="ENT-LIR-WEIGHT-SHARD">
+        <h3>CF-LIR-005: TP 切分→计算→聚合执行顺序</h3>
+        <p>TP 执行顺序：WeightShard 加载切分权重 → Compute 域执行 GEMV/GEMM → AllReduceSync/ReduceScatterSlice 聚合。切分和聚合由 Communication 域 pass pipeline 保证顺序。WeightShard 在 BUILD 阶段确定，AllReduceSync 在 CommSchedulePass 中调度。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.example.com/controlflow", "@type":"Controlflow", "id":"CF-LIR-005", "relation":"sequence", "source":"WeightShard(load)", "target":"Compute→AllReduceSync/ReduceScatterSlice" }
+        </script>
+      </section>
+
+      <section id="cf-lir-006" data-controlflow="CF-LIR-006" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-FLUX" data-controlflow-target="ENT-LIR-FLUX">
+        <h3>CF-LIR-006: FLUX 三阶段执行控制流</h3>
+        <p>FLUX 三阶段严格顺序：FluxReduceScatter 完成前 FluxLocalCompute 不启动；FluxLocalCompute 在 home chunk 上执行计算；FluxAllGather 与 FluxLocalCompute 可并行（home chunk 计算完成后立即启动对应 AllGather step）。CommSchedulePass 生成三阶段 VmInstr 序列 + DualStreamBarrier 同步。</p>
+        <script type="application/ld+json">
+        { "@context":"https://spec.example.com/controlflow", "@type":"Controlflow", "id":"CF-LIR-006", "relation":"sequence+overlap", "source":"FluxReduceScatter", "target":"FluxLocalCompute→FluxAllGather" }
+        </script>
+      </section>
+
+    </section>
+
+    <!-- ========== Communication Domain Tests ========== -->
+
+    <section id="s-comm-tests" data-section="17">
+      <h2>17. Communication Domain Test 定义</h2>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-012" data-test="TEST-LIR-012" id="test-lir-012">
+        <h4>TEST-LIR-012: Communication Domain 定义测试</h4>
+        <p>验证 Communication 域类型定义完整，属于 LirDomain::Communication，有独立 pass pipeline 包含三类 pass，nccl feature-gated 验证（关闭 nccl 时 Communication 域不激活）。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-013" data-test="TEST-LIR-013" id="test-lir-013">
+        <h4>TEST-LIR-013: PP2 IR 表达测试</h4>
+        <p>验证 PipelineStage/StageSend/StageRecv/StageBoundary/ActivationBuffer 定义为 Communication 域 LirOp 变体，1F1B 调度控制流可通过 StageBoundary 序列表达，StageSend/StageRecv lowering 到 P2pPageFetch/RdmaPageFetch VmInstr。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-014" data-test="TEST-LIR-014" id="test-lir-014">
+        <h4>TEST-LIR-014: MC2 IR 表达测试</h4>
+        <p>验证 CommComputeOverlap/ChunkPartition/DualStreamBarrier/OverlapRegion 定义为 Communication 域 LirOp 变体，OverlapHint 五变体映射到 OverlapRegion 重叠策略，CommComputeOverlap lowering 到 AllReduceChunk + DualStreamBarrier VmInstr 组合。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-015" data-test="TEST-LIR-015" id="test-lir-015">
+        <h4>TEST-LIR-015: UNIEP IR 表达测试</h4>
+        <p>验证 ExpertShard/AllToAllDispatch/AllToAllCombine/ExpertPlacement 定义为 Communication 域 LirOp 变体，AllToAllStrategy 映射到 dispatch/combine strategy 参数，AllToAllDispatch/AllToAllCombine lowering 到 VmInstr AllReduceChunk（AllToAll 模式）组合。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-016" data-test="TEST-LIR-016" id="test-lir-016">
+        <h4>TEST-LIR-016: Communication Domain pass pipeline 测试</h4>
+        <p>验证三类 pass 按序执行（CommFusionPass → CommSchedulePass → CommOptimizePass），CommFusionPass 可合并相邻同 dtype 同 op 的 AllReduce，CommSchedulePass 根据 OverlapHint 生成重叠/非重叠 VmInstr 序列，CommOptimizePass 可将 AllReduce 压缩为低精度通信。</p>
+      </section>
+
+      <section data-level="integration" data-test-categories="integration" data-req-ref="REQ-LIR-012 REQ-LIR-013 REQ-LIR-014 REQ-LIR-015" data-test="TEST-LIR-017" id="test-lir-017">
+        <h4>TEST-LIR-017: Communication Domain 端到端集成测试</h4>
+        <p>验证 Communication 域 LirOp 通过完整 LIR pipeline lowering 到 VmInstr，四域 pass pipeline 正确调度（Layout→Compute→Memory→Communication），nccl feature 关闭时 Communication 域不参与 pipeline 且无编译错误。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-017" data-test="TEST-LIR-018" id="test-lir-018">
+        <h4>TEST-LIR-018: TP IR 表达测试</h4>
+        <p>验证 WeightShard/AllReduceSync/ReduceScatterSlice 定义为 Communication 域 LirOp 变体，AllReduceSync lowering 到 AllReduceChunk VmInstr，WeightShard 编译时 bake 进地址计算，world_size=1 时零开销。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-018" data-test="TEST-LIR-019" id="test-lir-019">
+        <h4>TEST-LIR-019: CP IR 表达测试</h4>
+        <p>验证 RingAttention/ContextSync 定义为 Communication 域 LirOp 变体，RingAttention lowering 到 P2pCopy + CommBarrier VmInstr，非分布式场景零开销。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-019" data-test="TEST-LIR-020" id="test-lir-020">
+        <h4>TEST-LIR-020: PD Disaggregation IR 表达测试</h4>
+        <p>验证 KvTransferOut/KvTransferIn/PdHandshake 定义为 Communication 域 LirOp 变体，lowering 到 CommInstr 正确，PdDisaggMode::Collocated 时不生成 PD IR。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-020" data-test="TEST-LIR-021" id="test-lir-021">
+        <h4>TEST-LIR-021: Quantized Communication IR 表达测试</h4>
+        <p>验证 CommQuantize/CommDequantize/CommDeltaEncode/CommDeltaDecode/CommBitPack/CommBitUnpack 定义为 Communication 域 LirOp 变体，lowering 到 CommInstr 对应变体，CommCompressHint 驱动策略选择。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-021" data-test="TEST-LIR-022" id="test-lir-022">
+        <h4>TEST-LIR-022: FLUX Decomposition IR 表达测试</h4>
+        <p>验证 FluxReduceScatter/FluxLocalCompute/FluxAllGather 定义为 Communication 域 LirOp 变体，三阶段 DAG 依赖正确，lowering 到 CommPlan 正确。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-022" data-test="TEST-LIR-023" id="test-lir-023">
+        <h4>TEST-LIR-023: Algorithm Selection IR 表达测试</h4>
+        <p>验证 CommAlgorithmSelect 定义为 Communication 域 LirOp 变体，8 种算法枚举完整定义，每种算法到 lower 路径映射正确。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-023" data-test="TEST-LIR-024" id="test-lir-024">
+        <h4>TEST-LIR-024: Prefix Sharing IR 表达测试</h4>
+        <p>验证 PrefixMatch/PrefixReuse/PrefixEvict 定义为 Communication 域 LirOp 变体，lowering 到 KvPrefixIndex 查询和 KV cache 操作。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-024" data-test="TEST-LIR-025" id="test-lir-025">
+        <h4>TEST-LIR-025: Chunked Prefill IR 表达测试</h4>
+        <p>验证 ChunkedPrefill/ChunkBoundary 定义为 Communication 域 LirOp 变体，lowering 到 SymDim 绑定和 KV cache 操作。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-025" data-test="TEST-LIR-026" id="test-lir-026">
+        <h4>TEST-LIR-026: Speculative Decoding Distributed IR 表达测试</h4>
+        <p>验证 DraftGenerate/VerifyAccept/DraftKvSync 定义为 Communication 域 LirOp 变体，lowering 到编译路径和 KV cache 操作。</p>
+      </section>
+
+      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-026" data-test="TEST-LIR-027" id="test-lir-027">
+        <h4>TEST-LIR-027: EPLB IR 表达测试</h4>
+        <p>验证 ExpertLoadRecord/ExpertRebalance/ExpertWeightMigrate 定义为 Communication 域 LirOp 变体，lowering 到负载累加和 P2P 传输。</p>
+      </section>
+
+      <section data-level="integration" data-test-categories="integration" data-req-ref="REQ-LIR-017 REQ-LIR-018 REQ-LIR-019 REQ-LIR-020 REQ-LIR-021 REQ-LIR-022" data-test="TEST-LIR-028" id="test-lir-028">
+        <h4>TEST-LIR-028: Communication Domain Phase 2 端到端集成测试</h4>
+        <p>验证 Phase 2 全部 REQ (LIR-017~026) LirOp 通过完整 LIR pipeline lowering 到 VmInstr/CommInstr，Communication 域 pass pipeline 正确处理新增 LirOp，nccl feature 关闭时零开销。</p>
+      </section>
+
+    </section>
+</main>
+</body>
+</html>

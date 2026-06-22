@@ -35,6 +35,13 @@ pub struct ModelContextHolder<B: Backend<E> + 'static, E: Element = f32> {
     /// Distributed page routing table for cross-node KV cache lookup (REQ-DP-014).
     #[cfg(feature = "nccl")]
     pub distributed_routing_table: Option<gllm_kernels::PageRoutingTable>,
+    /// NCCL communication handle wrapper (REQ-DIST-001).
+    /// None = not yet initialized; Some = init_distributed() called.
+    #[cfg(feature = "nccl")]
+    pub comm_handle: Option<crate::engine::distributed_config::CommHandleWrapper>,
+    /// Parallel config snapshot from init_distributed() (REQ-DIST-001).
+    #[cfg(feature = "nccl")]
+    pub parallel_config: Option<crate::engine::distributed_config::ParallelConfig>,
 }
 
 #[cfg(test)]

@@ -7,6 +7,8 @@
 //! - `dispatch`: §15.3 CPU/GPU 真正并行 — Core Disaggregation 硬件分发
 //! - `hot_patch`: §14.4 Hot JMP Patching — 全局物理共识级 JIT 代码热修补
 //! - `prefetch_pipeline`: §14.5 RDMA/PCIe 流水线预取编排
+//! - `distributed_dispatch`: REQ-DIST-014 分布式 MoE 调度决策 (nccl feature-gated)
+//! - `eplb`: REQ-DIST-015 EPLB 专家负载均衡 (nccl feature-gated)
 
 pub mod dispatch;
 pub mod fault_handler;
@@ -15,6 +17,11 @@ pub mod prefetch;
 pub mod prefetch_pipeline;
 pub mod routing;
 pub mod thermal;
+
+#[cfg(feature = "nccl")]
+pub mod distributed_dispatch;
+#[cfg(feature = "nccl")]
+pub mod eplb;
 
 pub use dispatch::{ExpertHardwareAssignment, MoeDispatchPlan, MoeHardwareDispatcher};
 pub use fault_handler::{ExpertFault, ExpertFaultHandler, FaultResolution, FaultStats};

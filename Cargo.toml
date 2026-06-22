@@ -29,7 +29,7 @@ hip = ["gllm-kernels/jit-hip"]
 metal = ["gllm-kernels/jit-metal"]
 
 # 开发/调试 features
-nccl = ["gllm-kernels/nccl"]
+nccl = ["gllm-kernels/nccl", "dep:gllm-nccl"]
 sg-debug = []
 
 # nvCOMP GPU ANS 压缩 (NVIDIA only)
@@ -37,6 +37,7 @@ nvcomp = []
 
 [dependencies]
 gllm-kernels = { path = "../gllm-kernels", default-features = false }
+gllm-nccl = { path = "../gllm-nccl", optional = true }
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }

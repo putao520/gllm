@@ -35,6 +35,8 @@ pub mod parallel;
 pub mod pytorch;
 pub mod safetensors;
 pub mod weight_compress; // COMP12: Weight page compression (SPEC 22 §6)
+#[cfg(feature = "nccl")]
+pub mod weight_shard; // TP Weight Sharding (REQ-DIST-004)
 pub mod weight_tier;
 
 pub use downloader::{ModelScopeDownloader, ProgressBar};

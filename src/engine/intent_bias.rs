@@ -121,41 +121,59 @@ impl OverlapHint {
             Self::Auto => "select_mk_variant()",
             Self::PreferOverlap => "Cluster5x3",
             Self::PreferIsolated => "Cluster6x2",
-            Self::ForceDoubleBuffer | Self::ForceFlux => "select_mk_variant()",
+            Self::ForceDoubleBuffer => "DoubleBufferCluster",
+            Self::ForceFlux => "FluxDecompose",
         }
     }
 
     /// SM70-89 映射的 MkVariant 名
     pub fn mk_variant_sm70_89(&self) -> &'static str {
         match self {
-            Self::Auto | Self::ForceDoubleBuffer | Self::ForceFlux => "select_mk_variant()",
-            Self::PreferOverlap | Self::PreferIsolated => "GridSync",
+            Self::Auto => "select_mk_variant()",
+            Self::PreferOverlap => "GridSync",
+            Self::PreferIsolated => "GridSync",
+            Self::ForceDoubleBuffer => "DoubleBufferGridSync",
+            Self::ForceFlux => "FluxGridSync",
         }
     }
 
     /// SM<60 映射的 MkVariant 名
     pub fn mk_variant_sm_below60(&self) -> &'static str {
         match self {
-            Self::Auto | Self::ForceDoubleBuffer | Self::ForceFlux => "select_mk_variant()",
+            Self::Auto => "select_mk_variant()",
             Self::PreferIsolated | Self::PreferOverlap => "Serial",
+            Self::ForceDoubleBuffer => "DoubleBufferSerial",
+            Self::ForceFlux => "FluxSerial",
         }
     }
 
     /// SM60-69 映射的 MkVariant 名 (REQ-IB-003)
     pub fn mk_variant_sm60_69(&self) -> &'static str {
         match self {
-            Self::PreferOverlap | Self::PreferIsolated => "GridSync",
-            Self::Auto | Self::ForceDoubleBuffer | Self::ForceFlux => "select_mk_variant()",
+            Self::Auto => "select_mk_variant()",
+            Self::PreferOverlap => "GridSync",
+            Self::PreferIsolated => "GridSync",
+            Self::ForceDoubleBuffer => "DoubleBufferGridSync",
+            Self::ForceFlux => "FluxGridSync",
         }
     }
 
-    /// 解析通信重叠偏好，处理单 GPU 降级 (REQ-IB-003)
+    /// 解析通信重叠偏好，处理单 GPU 降级 (REQ-IB-003, REQ-DIST-007)
     ///
-    /// ForceFlux 在单 GPU 环境下无意义，自动降级为 Auto 并发出警告。
+    /// ForceFlux / ForceDoubleBuffer 在单 GPU 环境下无意义，
+    /// 自动降级为 Auto 并发出警告。
     pub fn resolve_overlap(&self, is_single_gpu: bool) -> OverlapHint {
-        if *self == Self::ForceFlux && is_single_gpu {
-            log::warn!("ForceFlux requires multi-GPU; falling back to Auto on single GPU");
-            Self::Auto
+        if is_single_gpu {
+            match self {
+                Self::ForceFlux | Self::ForceDoubleBuffer => {
+                    log::warn!(
+                        "{:?} requires multi-GPU; falling back to Auto on single GPU",
+                        self
+                    );
+                    Self::Auto
+                }
+                _ => *self,
+            }
         } else {
             *self
         }
@@ -412,9 +430,9 @@ mod tests {
         assert_eq!(OverlapHint::PreferIsolated.mk_variant_sm90plus(), "Cluster6x2");
         assert_eq!(
             OverlapHint::ForceDoubleBuffer.mk_variant_sm90plus(),
-            "select_mk_variant()"
+            "DoubleBufferCluster"
         );
-        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm90plus(), "select_mk_variant()");
+        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm90plus(), "FluxDecompose");
     }
 
     #[test]
@@ -422,6 +440,11 @@ mod tests {
         assert_eq!(OverlapHint::Auto.mk_variant_sm70_89(), "select_mk_variant()");
         assert_eq!(OverlapHint::PreferOverlap.mk_variant_sm70_89(), "GridSync");
         assert_eq!(OverlapHint::PreferIsolated.mk_variant_sm70_89(), "GridSync");
+        assert_eq!(
+            OverlapHint::ForceDoubleBuffer.mk_variant_sm70_89(),
+            "DoubleBufferGridSync"
+        );
+        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm70_89(), "FluxGridSync");
     }
 
     #[test]
@@ -429,6 +452,11 @@ mod tests {
         assert_eq!(OverlapHint::Auto.mk_variant_sm_below60(), "select_mk_variant()");
         assert_eq!(OverlapHint::PreferIsolated.mk_variant_sm_below60(), "Serial");
         assert_eq!(OverlapHint::PreferOverlap.mk_variant_sm_below60(), "Serial");
+        assert_eq!(
+            OverlapHint::ForceDoubleBuffer.mk_variant_sm_below60(),
+            "DoubleBufferSerial"
+        );
+        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm_below60(), "FluxSerial");
     }
 
     #[test]
@@ -451,9 +479,9 @@ mod tests {
         assert_eq!(OverlapHint::Auto.mk_variant_sm60_69(), "select_mk_variant()");
         assert_eq!(
             OverlapHint::ForceDoubleBuffer.mk_variant_sm60_69(),
-            "select_mk_variant()"
+            "DoubleBufferGridSync"
         );
-        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm60_69(), "select_mk_variant()");
+        assert_eq!(OverlapHint::ForceFlux.mk_variant_sm60_69(), "FluxGridSync");
     }
 
     #[test]
@@ -469,12 +497,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_overlap_other_variants_unchanged() {
+    fn resolve_overlap_force_double_buffer_single_gpu_downgrades() {
+        let result = OverlapHint::ForceDoubleBuffer.resolve_overlap(true);
+        assert_eq!(result, OverlapHint::Auto);
+    }
+
+    #[test]
+    fn resolve_overlap_force_double_buffer_multi_gpu_unchanged() {
+        let result = OverlapHint::ForceDoubleBuffer.resolve_overlap(false);
+        assert_eq!(result, OverlapHint::ForceDoubleBuffer);
+    }
+
+    #[test]
+    fn resolve_overlap_non_force_variants_unchanged() {
         for hint in [
             OverlapHint::Auto,
             OverlapHint::PreferOverlap,
             OverlapHint::PreferIsolated,
-            OverlapHint::ForceDoubleBuffer,
         ] {
             assert_eq!(hint.resolve_overlap(true), hint, "single GPU should not affect {:?}", hint);
             assert_eq!(hint.resolve_overlap(false), hint, "multi GPU should not affect {:?}", hint);

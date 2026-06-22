@@ -382,6 +382,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 three_tier_swap: None,
                 #[cfg(feature = "nccl")]
                 distributed_routing_table: None,
+                #[cfg(feature = "nccl")]
+                comm_handle: None,
+                #[cfg(feature = "nccl")]
+                parallel_config: None,
             },
             observability: super::coordinator::observability::ObservabilityCoordinator {
                 observer: BasicObserver::new(),
@@ -389,6 +393,71 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         executor.register_weight_pages();
         Ok(executor)
+    }
+
+    /// Initialize distributed infrastructure from a DistributedConfig (REQ-DIST-001).
+    ///
+    /// - world_size <= 1: single-node mode, no NCCL init needed, only records config.
+    /// - world_size > 1: creates CommHandleWrapper, stores ParallelConfig,
+    ///   builds PageRoutingTable for cross-node KV cache routing.
+    ///
+    /// Must be called after `from_loader()`. Idempotent: calling twice is a no-op
+    /// (the second call is ignored if comm_handle is already Some).
+    #[cfg(feature = "nccl")]
+    pub fn init_distributed(
+        &mut self,
+        config: crate::engine::distributed_config::DistributedConfig,
+    ) -> Result<(), ExecutorError> {
+        // Idempotent: skip if already initialized
+        if self.model_ctx.comm_handle.is_some() {
+            log::info!("[executor] init_distributed: already initialized, skipping");
+            return Ok(());
+        }
+
+        if config.parallel.world_size <= 1 {
+            log::info!("[executor] init_distributed: single-node mode, no NCCL init needed");
+            // Still store the parallel config for reference
+            self.model_ctx.parallel_config = Some(config.parallel);
+            return Ok(());
+        }
+
+        let handle = crate::engine::distributed_config::CommHandleWrapper::from_config(&config.parallel)
+            .map_err(|e| ExecutorError::Config(
+                ModelConfigError::InvalidConfig(format!("distributed init failed: {:?}", e))
+            ))?;
+        self.model_ctx.comm_handle = Some(handle);
+        self.model_ctx.parallel_config = Some(config.parallel.clone());
+
+        // Build distributed routing table (L0-3)
+        let routing_table = self.build_distributed_routing_table(&config.parallel);
+        self.model_ctx.distributed_routing_table = Some(routing_table);
+
+        log::info!(
+            "[executor] init_distributed: rank={}, world_size={}, tp={}, pp={}, ep={}",
+            self.model_ctx.comm_handle.as_ref().unwrap().rank(),
+            self.model_ctx.comm_handle.as_ref().unwrap().world_size(),
+            config.parallel.tp_size,
+            config.parallel.pp_size,
+            config.parallel.ep_size,
+        );
+        Ok(())
+    }
+
+    /// Build a PageRoutingTable for distributed KV cache routing (REQ-DIST-001, L0-3).
+    ///
+    /// Current implementation: simple round-robin based on tp_size and rank.
+    /// Each page maps to rank = page_id % tp_size.
+    /// Subsequent Layer 3 will refine based on KvDistributionConfig.
+    #[cfg(feature = "nccl")]
+    fn build_distributed_routing_table(
+        &self,
+        parallel: &crate::engine::distributed_config::ParallelConfig,
+    ) -> gllm_kernels::PageRoutingTable {
+        // Create an empty routing table with local node metadata.
+        // Pages will be registered dynamically as KV cache blocks are allocated.
+        // The routing table starts empty; entries are populated via upsert()
+        // as the scheduler allocates pages across the distributed group.
+        gllm_kernels::PageRoutingTable::new(parallel.rank, parallel.tp_size)
     }
 
     /// §21 WP-002/007 + §35 REQ-QWP-005: Register weight pages to HGAL and populate weight_page_table.

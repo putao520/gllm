@@ -18,6 +18,117 @@ pub struct DispatchCoordinator {
     pub policy: PolicyVariant,
 }
 
+// ── L3-1: PD 分离角色路由 (REQ-DIST-011) ──────────────────────────────────
+
+#[cfg(feature = "nccl")]
+pub mod pd_disagg {
+    use crate::engine::distributed_config::{NodeRole, PdDisaggConfig, PdDisaggMode};
+
+    /// PD 分离角色决策 (REQ-DIST-011)
+    ///
+    /// 根据 `PdDisaggMode` 和 `NodeRole` 选择编译路径：
+    /// - **Collocated** (默认): 正常编译，Prefill + Decode 同一进程
+    /// - **PrefillOnly**: 省略采样管线，不生成 Argmax/TopK/TopP/Sample VmInstr
+    /// - **DecodeOnly**: 省略 encoder forward（prefill 路径），只编译 decode 循环
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum PdRoleDecision {
+        /// 标准：Prefill + Decode 同进程
+        Collocated,
+        /// 仅 Prefill：编译图不含采样管线
+        PrefillOnly,
+        /// 仅 Decode：编译图不含 prefill forward
+        DecodeOnly,
+    }
+
+    impl PdRoleDecision {
+        /// 根据 PdDisaggConfig 决定角色
+        pub fn from_config(config: &PdDisaggConfig) -> Self {
+            match config.mode {
+                PdDisaggMode::Collocated => Self::Collocated,
+                PdDisaggMode::Disaggregated => match config.role {
+                    NodeRole::Auto => Self::Collocated, // Auto = 默认同进程
+                    NodeRole::PrefillOnly => Self::PrefillOnly,
+                    NodeRole::DecodeOnly => Self::DecodeOnly,
+                    NodeRole::Mixed => Self::Collocated,
+                },
+            }
+        }
+
+        /// 是否需要采样管线
+        pub fn needs_sampling(&self) -> bool {
+            !matches!(self, Self::PrefillOnly)
+        }
+
+        /// 是否需要 prefill forward
+        pub fn needs_prefill(&self) -> bool {
+            !matches!(self, Self::DecodeOnly)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn make_config(mode: PdDisaggMode, role: NodeRole) -> PdDisaggConfig {
+            PdDisaggConfig { mode, role }
+        }
+
+        #[test]
+        fn pd_role_decision_collocated_mode_always_collocated() {
+            for role in [NodeRole::Auto, NodeRole::PrefillOnly, NodeRole::DecodeOnly, NodeRole::Mixed] {
+                let config = make_config(PdDisaggMode::Collocated, role);
+                assert_eq!(PdRoleDecision::from_config(&config), PdRoleDecision::Collocated);
+            }
+        }
+
+        #[test]
+        fn pd_role_decision_disaggregated_auto_is_collocated() {
+            let config = make_config(PdDisaggMode::Disaggregated, NodeRole::Auto);
+            assert_eq!(PdRoleDecision::from_config(&config), PdRoleDecision::Collocated);
+        }
+
+        #[test]
+        fn pd_role_decision_disaggregated_prefill_only() {
+            let config = make_config(PdDisaggMode::Disaggregated, NodeRole::PrefillOnly);
+            let decision = PdRoleDecision::from_config(&config);
+            assert_eq!(decision, PdRoleDecision::PrefillOnly);
+            assert!(!decision.needs_sampling());
+            assert!(decision.needs_prefill());
+        }
+
+        #[test]
+        fn pd_role_decision_disaggregated_decode_only() {
+            let config = make_config(PdDisaggMode::Disaggregated, NodeRole::DecodeOnly);
+            let decision = PdRoleDecision::from_config(&config);
+            assert_eq!(decision, PdRoleDecision::DecodeOnly);
+            assert!(decision.needs_sampling());
+            assert!(!decision.needs_prefill());
+        }
+
+        #[test]
+        fn pd_role_decision_disaggregated_mixed_is_collocated() {
+            let config = make_config(PdDisaggMode::Disaggregated, NodeRole::Mixed);
+            assert_eq!(PdRoleDecision::from_config(&config), PdRoleDecision::Collocated);
+        }
+
+        #[test]
+        fn pd_role_decision_collocated_needs_both() {
+            let config = make_config(PdDisaggMode::Collocated, NodeRole::Auto);
+            let decision = PdRoleDecision::from_config(&config);
+            assert!(decision.needs_sampling());
+            assert!(decision.needs_prefill());
+        }
+
+        #[test]
+        fn pd_role_decision_all_variants_distinct() {
+            use std::collections::HashSet;
+            let all = [PdRoleDecision::Collocated, PdRoleDecision::PrefillOnly, PdRoleDecision::DecodeOnly];
+            let set: HashSet<PdRoleDecision> = all.into_iter().collect();
+            assert_eq!(set.len(), 3);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

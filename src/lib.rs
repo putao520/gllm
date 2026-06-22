@@ -101,8 +101,8 @@ pub use engine::distributed_config::{
 };
 #[cfg(feature = "nccl")]
 pub use engine::distributed_config::{
-    CommConfig, DistributedConfig, KvDistributionConfig, MoeDistributedConfig, ParallelConfig,
-    PdDisaggConfig,
+    CommConfig, CommHandleWrapper, DistributedConfig, DistributedConfigError,
+    KvDistributionConfig, MoeDistributedConfig, ParallelConfig, PdDisaggConfig,
 };
 pub use engine::batch_executor::{GenerateRequest, GenerateResult};
 pub use graph::profile::{AttentionKind, FfnKind, GraphProfile, GraphProfiler, ResidualKind};

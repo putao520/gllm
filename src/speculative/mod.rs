@@ -21,6 +21,8 @@ pub mod cache;
 pub mod eagle;
 pub mod engine;
 pub mod mtp;
+#[cfg(feature = "nccl")]
+pub mod saguaro;
 pub mod tree;
 pub mod verify;
 
