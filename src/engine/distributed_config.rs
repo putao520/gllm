@@ -382,6 +382,15 @@ impl CommHandleWrapper {
         self.world_size > 1
     }
 
+    /// Get the topology of this communication group (REQ-DIST-010).
+    ///
+    /// Returns `None` if the NCCL communicator has not been initialized
+    /// (call `init_nccl()` first in distributed mode).
+    // @trace REQ-DIST-010 [entity:ENT-DIST-TP-COMM]
+    pub fn topology(&self) -> Option<gllm_nccl::Topology> {
+        self.inner.as_ref().map(|h| h.topology().clone())
+    }
+
     /// Test-only constructor (REQ-DIST-008)
     #[cfg(test)]
     pub fn new_for_test(rank: u32, world_size: u32) -> Self {

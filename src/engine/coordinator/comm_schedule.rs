@@ -1,8 +1,9 @@
-//! 通信调度与算法选择 (REQ-DIST-007, REQ-DIST-008, REQ-DIST-009, REQ-DIST-010)
+//! 通信调度与算法选择 (REQ-DIST-006, REQ-DIST-007, REQ-DIST-008, REQ-DIST-009, REQ-DIST-010)
 //!
 //! 当 `nccl` feature 启用时，本模块提供：
 //! - CommScheduleDecision: 通信-计算重叠调度决策
 //! - QuantCommDecision: 量化通信压缩决策（连接 gllm-nccl QuantizedComm）
+//! - resolve_quant_comm: 从 CommConfig + CommHandleWrapper 决策量化策略
 //! - AlgorithmOverride: 通信算法覆盖（连接 gllm-nccl select_algorithm）
 
 #[cfg(feature = "nccl")]
@@ -212,38 +213,56 @@ pub mod comm_schedule {
     /// 量化通信决策 (REQ-DIST-009)
     ///
     /// 连接 gllm-nccl `QuantizedComm` 实现实际的量化/反量化。
-    /// `quant_scheme` 字段映射到 gllm-nccl `QuantScheme`：
-    /// - "fp8_e4m3" → QuantScheme::Fp8E4M3
-    /// - "fp8_e5m2" → QuantScheme::Fp8E5M2
-    /// - "int8" → QuantScheme::Int8Symmetric
-    /// - "bf16" → QuantScheme::Bf16
-    /// - "fp16" → QuantScheme::Fp16
+    /// 由 `CommCompressHint` 驱动选择量化策略：
+    /// - `NoCompression`: 不压缩（CommCompressHint::None / 单机模式）
+    /// - `Fp8Compress`: FP8 量化压缩（CommCompressHint::Fp8 / AlwaysCompress / ForceQuant）
+    ///   带宽节省 >= 50%（BF16→FP8 减半），精度损失 < 0.1%
+    /// - `InternCompress`: INT8 对称量化压缩（CommCompressHint::Intern）
+    ///   带宽节省 4x（FP32→INT8），数值误差 < 1e-3
+    /// - `AutoCompress`: 由系统根据 buffer 大小和延迟阈值自动决定
+    /// - `NeverCompress`: 永不压缩
+    // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM] [dataflow:DF-DIST-002]
     #[derive(Debug, Clone, PartialEq)]
     pub enum QuantCommDecision {
-        /// 不压缩（默认回退）
+        /// 不压缩（默认回退 / 单机模式 / CommCompressHint::None）
         NoCompression,
         /// 自动决策（根据 buffer 大小和延迟阈值）
         AutoCompress,
-        /// 始终量化压缩
-        AlwaysCompress {
-            /// 量化方案名称
+        /// FP8 量化压缩 (REQ-DIST-009)
+        /// 带宽节省 >= 50%（BF16→FP8 减半），精度损失 < 0.1%
+        /// quant_scheme: "fp8_e4m3" 或 "fp8_e5m2"
+        Fp8Compress {
+            /// 量化方案名称 ("fp8_e4m3" / "fp8_e5m2")
             quant_scheme: String,
         },
+        /// INT8 对称量化压缩
+        /// 带宽节省 4x（FP32→INT8），数值误差 < 1e-3
+        InternCompress,
         /// 永不压缩
         NeverCompress,
     }
 
     impl QuantCommDecision {
         /// 从 CommCompressHint 构造决策 (REQ-DIST-009)
+        ///
+        /// 映射规则：
+        /// - None → NoCompression
+        /// - Fp8 → Fp8Compress { quant_scheme: "fp8_e4m3" }
+        /// - Intern → InternCompress
+        /// - Auto → AutoCompress
+        /// - AlwaysCompress → Fp8Compress { quant_scheme: "fp8_e4m3" }
+        /// - ForceQuant → Fp8Compress { quant_scheme: "fp8_e4m3" }
+        /// - NeverCompress → NeverCompress
+        // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM] [controlflow:CF-DIST-002]
         pub fn from_hint(hint: &crate::engine::distributed_config::CommCompressHint) -> Self {
             use crate::engine::distributed_config::CommCompressHint;
             match hint {
                 CommCompressHint::Auto => Self::AutoCompress,
-                CommCompressHint::AlwaysCompress => Self::AlwaysCompress {
+                CommCompressHint::AlwaysCompress => Self::Fp8Compress {
                     quant_scheme: "fp8_e4m3".to_string(),
                 },
                 CommCompressHint::NeverCompress => Self::NeverCompress,
-                CommCompressHint::ForceQuant => Self::AlwaysCompress {
+                CommCompressHint::ForceQuant => Self::Fp8Compress {
                     quant_scheme: "fp8_e4m3".to_string(),
                 },
             }
@@ -253,31 +272,39 @@ pub mod comm_schedule {
         ///
         /// 返回 None 表示无需量化（NoCompression/NeverCompress/AutoCompress），
         /// 返回 Some(QuantScheme) 表示应执行量化。
+        // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM] [dataflow:DF-DIST-002]
         pub fn to_quant_scheme(&self) -> Option<gllm_nccl::lower_types::QuantScheme> {
             use gllm_nccl::lower_types::QuantScheme;
             match self {
                 Self::NoCompression | Self::NeverCompress | Self::AutoCompress => None,
-                Self::AlwaysCompress { quant_scheme } => match quant_scheme.as_str() {
+                Self::Fp8Compress { quant_scheme } => match quant_scheme.as_str() {
                     "fp8_e4m3" => Some(QuantScheme::Fp8E4M3),
                     "fp8_e5m2" => Some(QuantScheme::Fp8E5M2),
-                    "int8" => Some(QuantScheme::Int8Symmetric),
-                    "bf16" => Some(QuantScheme::Bf16),
-                    "fp16" => Some(QuantScheme::Fp16),
                     _ => None,
                 },
+                Self::InternCompress => Some(QuantScheme::Int8Symmetric),
             }
         }
 
         /// 构建 gllm-nccl QuantizedComm 描述符 (REQ-DIST-009)
         ///
+        /// 量化通信管线：
+        /// 1. 传输前量化压缩（pre_send_quantize）：FP32/BF16 → INT8/FP8
+        /// 2. 传输后反量化恢复（post_recv_dequantize）：INT8/FP8 → FP32/BF16
+        ///
         /// 如果量化激活，返回 `QuantizedComm` 实例用于生成
         /// pre-send quantize / post-recv dequantize 指令。
         /// 如果无需量化，返回 None。
-        pub fn build_quantized_comm(&self) -> Option<gllm_nccl::lower::quantized_comm::QuantizedComm> {
+        ///
+        /// `src_dtype` 参数指定源数据精度（BF16/FP32），默认 FP32。
+        /// FP8 量化带宽节省 >= 50%（BF16→FP8 减半），精度损失 < 0.1%。
+        // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM] [dataflow:DF-DIST-002]
+        pub fn build_quantized_comm(
+            &self,
+            src_dtype: gllm_nccl::comm_ir::dtype::CommDType,
+        ) -> Option<gllm_nccl::lower::quantized_comm::QuantizedComm> {
             let quant_scheme = self.to_quant_scheme()?;
             let target_dtype = quant_scheme.to_comm_dtype();
-            // 源 dtype 默认 FP32（通信基线精度）
-            let src_dtype = gllm_nccl::comm_ir::dtype::CommDType::Fp32;
             Some(gllm_nccl::lower::quantized_comm::QuantizedComm::new(
                 target_dtype, src_dtype,
             ))
@@ -285,7 +312,9 @@ pub mod comm_schedule {
 
         /// 计算压缩后的带宽节省倍数
         ///
-        /// 返回相对于 FP32 的带宽节省因子（1 = 无节省，4 = 4x 节省）。
+        /// 返回相对于源 dtype 的带宽节省因子（1 = 无节省，2 = 2x 节省，4 = 4x 节省）。
+        /// FP8: 2x（BF16→FP8）或 4x（FP32→FP8），INT8: 4x（FP32→INT8）。
+        // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM]
         pub fn bandwidth_saving(&self) -> usize {
             self.to_quant_scheme()
                 .map(|qs| qs.bandwidth_saving())
@@ -293,11 +322,37 @@ pub mod comm_schedule {
         }
 
         /// 计算压缩后的元素字节数
+        // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM]
         pub fn compressed_elem_size(&self) -> usize {
             self.to_quant_scheme()
                 .map(|qs| qs.compressed_elem_size())
                 .unwrap_or(4) // FP32 default
         }
+
+        /// 是否实际执行量化压缩
+        // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM]
+        pub fn is_compressed(&self) -> bool {
+            self.to_quant_scheme().is_some()
+        }
+    }
+
+    /// 根据通信配置和硬件状态决定量化通信策略 (REQ-DIST-009)
+    ///
+    /// 决策逻辑：
+    /// - 单机模式 → NoCompression（无需通信，无需压缩）
+    /// - CommCompressHint::Auto → AutoCompress（由系统根据 buffer 大小自动决定）
+    /// - CommCompressHint::AlwaysCompress → Fp8Compress（FP8 量化，带宽节省 >= 50%）
+    /// - CommCompressHint::ForceQuant → Fp8Compress（强制 FP8 量化）
+    /// - CommCompressHint::NeverCompress → NeverCompress
+    // @trace REQ-DIST-009 [entity:ENT-DIST-QUANT-COMM] [controlflow:CF-DIST-002]
+    pub fn resolve_quant_comm(
+        comm_config: &CommConfig,
+        comm_handle: &CommHandleWrapper,
+    ) -> QuantCommDecision {
+        if !comm_handle.is_distributed() {
+            return QuantCommDecision::NoCompression;
+        }
+        QuantCommDecision::from_hint(&comm_config.compress)
     }
 
     // ─── L2-4: 算法选择覆盖 (REQ-DIST-010) ───
@@ -306,49 +361,65 @@ pub mod comm_schedule {
     ///
     /// 当 CommConfig.algorithm_override 非空时，强制使用指定算法，
     /// 覆盖 gllm-nccl select_algorithm() 的自动选择。
+    ///
+    /// 覆盖优先级：AlgorithmOverride > StrategyArbiter 自动选择
+    /// 不可用算法覆盖返回 Err，不静默降级（SPEC 铁律）。
+    // @trace REQ-DIST-010 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-002]
     #[derive(Debug, Clone, PartialEq)]
-    pub struct AlgorithmOverride {
-        pub algorithm_name: String,
+    pub enum AlgorithmOverride {
+        /// 自动选择：调用 gllm-nccl select_algorithm() 根据硬件拓扑自动选择最优算法
+        Auto,
+        /// 强制使用指定算法：覆盖自动选择
+        /// 不可用的算法名称会导致 select_or_auto 返回 Err（不静默降级）
+        Force(String),
     }
 
     impl AlgorithmOverride {
         /// 从 CommConfig 构造算法覆盖 (REQ-DIST-010)
         ///
         /// `CommConfig.algorithm_override` 类型为 `String`；
-        /// 空字符串表示不覆盖（返回 None）。
-        pub fn from_config(comm_config: &CommConfig) -> Option<Self> {
+        /// 空字符串 → Auto（使用自动选择）。
+        /// 非空字符串 → Force（强制使用指定算法）。
+        // @trace REQ-DIST-010 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-002]
+        pub fn from_config(comm_config: &CommConfig) -> Self {
             if comm_config.algorithm_override.is_empty() {
-                None
+                Self::Auto
             } else {
-                Some(Self {
-                    algorithm_name: comm_config.algorithm_override.clone(),
-                })
+                Self::Force(comm_config.algorithm_override.clone())
             }
         }
 
         /// 解析算法名称为 gllm-nccl CollectiveAlgorithm 枚举 (REQ-DIST-010)
         ///
-        /// 如果 algorithm_name 为空或无法识别，返回 None（使用自动选择）。
+        /// 如果 algorithm_name 无法识别，返回 None（表示覆盖无效）。
         /// 否则返回对应的 CollectiveAlgorithm 变体。
+        // @trace REQ-DIST-010 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-002]
         pub fn resolve_algorithm(&self) -> Option<gllm_nccl::CollectiveAlgorithm> {
-            match self.algorithm_name.as_str() {
-                "Ring" => Some(gllm_nccl::CollectiveAlgorithm::Ring),
-                "Tree" => Some(gllm_nccl::CollectiveAlgorithm::Tree),
-                "TopoAwareRing" => Some(gllm_nccl::CollectiveAlgorithm::TopoAwareRing),
-                "ChunkedPipeline" => Some(gllm_nccl::CollectiveAlgorithm::ChunkedPipeline),
-                "HierarchicalRing" => Some(gllm_nccl::CollectiveAlgorithm::HierarchicalRing),
-                "HardwareReduce" => Some(gllm_nccl::CollectiveAlgorithm::HardwareReduce),
-                "FluxPipeline" => Some(gllm_nccl::CollectiveAlgorithm::FluxPipeline),
-                "CollNetDirect" => Some(gllm_nccl::CollectiveAlgorithm::CollNetDirect),
-                "Direct" => Some(gllm_nccl::CollectiveAlgorithm::Direct),
-                _ => None,
+            match self {
+                Self::Auto => None,
+                Self::Force(name) => match name.as_str() {
+                    "Ring" => Some(gllm_nccl::CollectiveAlgorithm::Ring),
+                    "Tree" => Some(gllm_nccl::CollectiveAlgorithm::Tree),
+                    "TopoAwareRing" => Some(gllm_nccl::CollectiveAlgorithm::TopoAwareRing),
+                    "ChunkedPipeline" => Some(gllm_nccl::CollectiveAlgorithm::ChunkedPipeline),
+                    "HierarchicalRing" => Some(gllm_nccl::CollectiveAlgorithm::HierarchicalRing),
+                    "HardwareReduce" => Some(gllm_nccl::CollectiveAlgorithm::HardwareReduce),
+                    "FluxPipeline" => Some(gllm_nccl::CollectiveAlgorithm::FluxPipeline),
+                    "CollNetDirect" => Some(gllm_nccl::CollectiveAlgorithm::CollNetDirect),
+                    "Direct" => Some(gllm_nccl::CollectiveAlgorithm::Direct),
+                    _ => None,
+                },
             }
         }
 
-        /// 根据拓扑和消息大小自动选择算法 (REQ-DIST-010)
+        /// 根据拓扑和消息大小选择算法 (REQ-DIST-010)
         ///
-        /// 如果有显式覆盖且可识别，使用覆盖值。
-        /// 否则调用 gllm-nccl `select_algorithm()` 自动选择。
+        /// - AlgorithmOverride::Auto → 调用 gllm-nccl select_algorithm() 自动选择最优算法
+        /// - AlgorithmOverride::Force(algo) 且可识别 → 使用指定算法（覆盖自动选择）
+        /// - AlgorithmOverride::Force(algo) 且不可识别 → 返回 Err（不静默降级）
+        ///
+        /// 覆盖优先级：AlgorithmOverride > StrategyArbiter 自动选择
+        // @trace REQ-DIST-010 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-002]
         pub fn select_or_auto(
             &self,
             topology: &gllm_nccl::Topology,
@@ -356,14 +427,61 @@ pub mod comm_schedule {
             msg_bytes: usize,
             world_size: usize,
             total_sms: u32,
-        ) -> gllm_nccl::CollectiveAlgorithm {
-            // 优先使用显式覆盖
-            if let Some(algo) = self.resolve_algorithm() {
-                return algo;
+        ) -> Result<gllm_nccl::CollectiveAlgorithm, String> {
+            match self {
+                Self::Auto => {
+                    // 自动模式：调用 gllm-nccl select_algorithm 根据硬件拓扑自动选择
+                    gllm_nccl::select_algorithm(topology, op, msg_bytes, world_size, total_sms)
+                        .map_err(|e| format!("select_algorithm failed: {:?}", e))
+                }
+                Self::Force(name) => {
+                    // 覆盖模式：强制使用指定算法
+                    if let Some(algo) = self.resolve_algorithm() {
+                        Ok(algo)
+                    } else {
+                        // 不可用算法覆盖返回 Err，不静默降级（SPEC 铁律）
+                        Err(format!(
+                            "AlgorithmOverride: unrecognized algorithm '{}' — \
+                             valid options: Ring, Tree, TopoAwareRing, ChunkedPipeline, \
+                             HierarchicalRing, HardwareReduce, FluxPipeline, CollNetDirect, Direct",
+                            name
+                        ))
+                    }
+                }
             }
-            // 回退到 gllm-nccl 自动选择
-            gllm_nccl::select_algorithm(topology, op, msg_bytes, world_size, total_sms)
-                .unwrap_or(gllm_nccl::CollectiveAlgorithm::Ring)
+        }
+
+        /// 将算法选择应用到 CommHandleWrapper (REQ-DIST-010)
+        ///
+        /// 在分布式模式下，通过 CommHandleWrapper 的内部 CommHandle
+        /// 获取拓扑信息并执行算法选择。返回选定的 CollectiveAlgorithm。
+        ///
+        /// - 单机模式：返回 Ring（默认）
+        /// - 分布式模式 + Auto：根据拓扑自动选择
+        /// - 分布式模式 + Force：使用指定算法或返回 Err
+        // @trace REQ-DIST-010 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-002]
+        pub fn apply_to_handle(
+            &self,
+            comm_handle: &CommHandleWrapper,
+            op: gllm_nccl::CollectiveOp,
+            msg_bytes: usize,
+        ) -> Result<gllm_nccl::CollectiveAlgorithm, String> {
+            if !comm_handle.is_distributed() {
+                return Ok(gllm_nccl::CollectiveAlgorithm::Ring);
+            }
+
+            // 从 CommHandleWrapper 获取拓扑信息
+            let topology = comm_handle
+                .topology()
+                .ok_or_else(|| "AlgorithmOverride: CommHandle not initialized — call init_nccl() first".to_string())?;
+
+            self.select_or_auto(
+                &topology,
+                op,
+                msg_bytes,
+                comm_handle.world_size() as usize,
+                0, // total_sms not available from CommHandleWrapper
+            )
         }
     }
 
@@ -646,7 +764,7 @@ pub mod comm_schedule {
             assert_ne!(ColumnParallelStrategy::ReduceScatter, ColumnParallelStrategy::AllGather);
         }
 
-        // ─── QuantCommDecision 测试 ───
+        // ─── QuantCommDecision 测试 (REQ-DIST-009) ───
 
         #[test]
         fn quant_comm_auto() {
@@ -660,7 +778,7 @@ pub mod comm_schedule {
         fn quant_comm_always_compress() {
             assert_eq!(
                 QuantCommDecision::from_hint(&CommCompressHint::AlwaysCompress),
-                QuantCommDecision::AlwaysCompress {
+                QuantCommDecision::Fp8Compress {
                     quant_scheme: "fp8_e4m3".to_string()
                 }
             );
@@ -678,7 +796,7 @@ pub mod comm_schedule {
         fn quant_comm_force_quant() {
             assert_eq!(
                 QuantCommDecision::from_hint(&CommCompressHint::ForceQuant),
-                QuantCommDecision::AlwaysCompress {
+                QuantCommDecision::Fp8Compress {
                     quant_scheme: "fp8_e4m3".to_string()
                 }
             );
@@ -686,7 +804,7 @@ pub mod comm_schedule {
 
         #[test]
         fn quant_comm_to_quant_scheme_fp8_e4m3() {
-            let decision = QuantCommDecision::AlwaysCompress {
+            let decision = QuantCommDecision::Fp8Compress {
                 quant_scheme: "fp8_e4m3".to_string(),
             };
             assert_eq!(
@@ -697,7 +815,7 @@ pub mod comm_schedule {
 
         #[test]
         fn quant_comm_to_quant_scheme_fp8_e5m2() {
-            let decision = QuantCommDecision::AlwaysCompress {
+            let decision = QuantCommDecision::Fp8Compress {
                 quant_scheme: "fp8_e5m2".to_string(),
             };
             assert_eq!(
@@ -707,19 +825,16 @@ pub mod comm_schedule {
         }
 
         #[test]
-        fn quant_comm_to_quant_scheme_int8() {
-            let decision = QuantCommDecision::AlwaysCompress {
-                quant_scheme: "int8".to_string(),
-            };
+        fn quant_comm_to_quant_scheme_intern() {
             assert_eq!(
-                decision.to_quant_scheme(),
+                QuantCommDecision::InternCompress.to_quant_scheme(),
                 Some(gllm_nccl::lower_types::QuantScheme::Int8Symmetric)
             );
         }
 
         #[test]
         fn quant_comm_to_quant_scheme_unknown_returns_none() {
-            let decision = QuantCommDecision::AlwaysCompress {
+            let decision = QuantCommDecision::Fp8Compress {
                 quant_scheme: "unknown".to_string(),
             };
             assert_eq!(decision.to_quant_scheme(), None);
@@ -734,10 +849,10 @@ pub mod comm_schedule {
 
         #[test]
         fn quant_comm_build_quantized_comm_fp8() {
-            let decision = QuantCommDecision::AlwaysCompress {
+            let decision = QuantCommDecision::Fp8Compress {
                 quant_scheme: "fp8_e4m3".to_string(),
             };
-            let qc = decision.build_quantized_comm();
+            let qc = decision.build_quantized_comm(gllm_nccl::comm_ir::dtype::CommDType::Fp32);
             assert!(qc.is_some());
             let qc = qc.unwrap();
             assert!(qc.is_active());
@@ -746,26 +861,47 @@ pub mod comm_schedule {
         }
 
         #[test]
+        fn quant_comm_build_quantized_comm_fp8_from_bf16() {
+            // REQ-DIST-009: FP8 通信带宽节省 >= 50%（BF16→FP8 减半）
+            let decision = QuantCommDecision::Fp8Compress {
+                quant_scheme: "fp8_e4m3".to_string(),
+            };
+            let qc = decision.build_quantized_comm(gllm_nccl::comm_ir::dtype::CommDType::Bf16);
+            assert!(qc.is_some());
+            let qc = qc.unwrap();
+            assert!(qc.is_active());
+            assert_eq!(qc.bandwidth_saving(), 2); // BF16(2) → FP8(1) = 2x = 50% saving
+        }
+
+        #[test]
+        fn quant_comm_build_quantized_comm_intern() {
+            let decision = QuantCommDecision::InternCompress;
+            let qc = decision.build_quantized_comm(gllm_nccl::comm_ir::dtype::CommDType::Fp32);
+            assert!(qc.is_some());
+            let qc = qc.unwrap();
+            assert!(qc.is_active());
+            assert_eq!(qc.compressed_elem_size(), 1); // INT8 = 1 byte
+            assert_eq!(qc.bandwidth_saving(), 4); // 4 bytes → 1 byte
+        }
+
+        #[test]
         fn quant_comm_build_quantized_comm_no_compression_returns_none() {
-            assert!(QuantCommDecision::NoCompression.build_quantized_comm().is_none());
-            assert!(QuantCommDecision::NeverCompress.build_quantized_comm().is_none());
-            assert!(QuantCommDecision::AutoCompress.build_quantized_comm().is_none());
+            assert!(QuantCommDecision::NoCompression.build_quantized_comm(gllm_nccl::comm_ir::dtype::CommDType::Fp32).is_none());
+            assert!(QuantCommDecision::NeverCompress.build_quantized_comm(gllm_nccl::comm_ir::dtype::CommDType::Fp32).is_none());
+            assert!(QuantCommDecision::AutoCompress.build_quantized_comm(gllm_nccl::comm_ir::dtype::CommDType::Fp32).is_none());
         }
 
         #[test]
         fn quant_comm_bandwidth_saving_fp8() {
-            let decision = QuantCommDecision::AlwaysCompress {
+            let decision = QuantCommDecision::Fp8Compress {
                 quant_scheme: "fp8_e4m3".to_string(),
             };
             assert_eq!(decision.bandwidth_saving(), 4);
         }
 
         #[test]
-        fn quant_comm_bandwidth_saving_int8() {
-            let decision = QuantCommDecision::AlwaysCompress {
-                quant_scheme: "int8".to_string(),
-            };
-            assert_eq!(decision.bandwidth_saving(), 4);
+        fn quant_comm_bandwidth_saving_intern() {
+            assert_eq!(QuantCommDecision::InternCompress.bandwidth_saving(), 4);
         }
 
         #[test]
@@ -776,7 +912,7 @@ pub mod comm_schedule {
 
         #[test]
         fn quant_comm_compressed_elem_size_fp8() {
-            let decision = QuantCommDecision::AlwaysCompress {
+            let decision = QuantCommDecision::Fp8Compress {
                 quant_scheme: "fp8_e4m3".to_string(),
             };
             assert_eq!(decision.compressed_elem_size(), 1);
@@ -787,96 +923,228 @@ pub mod comm_schedule {
             assert_eq!(QuantCommDecision::NoCompression.compressed_elem_size(), 4);
         }
 
-        // ─── AlgorithmOverride 测试 ───
+        #[test]
+        fn quant_comm_is_compressed() {
+            assert!(!QuantCommDecision::NoCompression.is_compressed());
+            assert!(!QuantCommDecision::NeverCompress.is_compressed());
+            assert!(!QuantCommDecision::AutoCompress.is_compressed());
+            assert!(QuantCommDecision::Fp8Compress { quant_scheme: "fp8_e4m3".to_string() }.is_compressed());
+            assert!(QuantCommDecision::InternCompress.is_compressed());
+        }
+
+        // ─── resolve_quant_comm 测试 (REQ-DIST-009) ───
 
         #[test]
-        fn algorithm_override_empty_string_returns_none() {
+        fn resolve_quant_comm_single_gpu_returns_no_compression() {
+            let handle = make_single_handle();
+            let config = make_comm_config(OverlapHint::Auto);
+            assert_eq!(
+                resolve_quant_comm(&config, &handle),
+                QuantCommDecision::NoCompression
+            );
+        }
+
+        #[test]
+        fn resolve_quant_comm_distributed_auto() {
+            let handle = make_distributed_handle();
+            let config = CommConfig {
+                compress: CommCompressHint::Auto,
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_quant_comm(&config, &handle),
+                QuantCommDecision::AutoCompress
+            );
+        }
+
+        #[test]
+        fn resolve_quant_comm_distributed_always_compress() {
+            let handle = make_distributed_handle();
+            let config = CommConfig {
+                compress: CommCompressHint::AlwaysCompress,
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_quant_comm(&config, &handle),
+                QuantCommDecision::Fp8Compress { quant_scheme: "fp8_e4m3".to_string() }
+            );
+        }
+
+        #[test]
+        fn resolve_quant_comm_distributed_force_quant() {
+            let handle = make_distributed_handle();
+            let config = CommConfig {
+                compress: CommCompressHint::ForceQuant,
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_quant_comm(&config, &handle),
+                QuantCommDecision::Fp8Compress { quant_scheme: "fp8_e4m3".to_string() }
+            );
+        }
+
+        #[test]
+        fn resolve_quant_comm_distributed_never_compress() {
+            let handle = make_distributed_handle();
+            let config = CommConfig {
+                compress: CommCompressHint::NeverCompress,
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_quant_comm(&config, &handle),
+                QuantCommDecision::NeverCompress
+            );
+        }
+
+        // ─── AlgorithmOverride 测试 (REQ-DIST-010) ───
+
+        #[test]
+        fn algorithm_override_empty_string_returns_auto() {
             let config = CommConfig {
                 algorithm_override: String::new(),
                 ..Default::default()
             };
-            assert_eq!(AlgorithmOverride::from_config(&config), None);
+            assert_eq!(AlgorithmOverride::from_config(&config), AlgorithmOverride::Auto);
         }
 
         #[test]
-        fn algorithm_override_non_empty_returns_some() {
+        fn algorithm_override_non_empty_returns_force() {
             let config = CommConfig {
                 algorithm_override: "Ring".to_string(),
                 ..Default::default()
             };
-            let override_ = AlgorithmOverride::from_config(&config);
-            assert!(override_.is_some());
-            assert_eq!(override_.unwrap().algorithm_name, "Ring");
+            assert_eq!(
+                AlgorithmOverride::from_config(&config),
+                AlgorithmOverride::Force("Ring".to_string())
+            );
         }
 
         #[test]
         fn algorithm_override_resolve_ring() {
-            let ao = AlgorithmOverride { algorithm_name: "Ring".to_string() };
+            let ao = AlgorithmOverride::Force("Ring".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::Ring));
         }
 
         #[test]
         fn algorithm_override_resolve_tree() {
-            let ao = AlgorithmOverride { algorithm_name: "Tree".to_string() };
+            let ao = AlgorithmOverride::Force("Tree".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::Tree));
         }
 
         #[test]
         fn algorithm_override_resolve_flux_pipeline() {
-            let ao = AlgorithmOverride { algorithm_name: "FluxPipeline".to_string() };
+            let ao = AlgorithmOverride::Force("FluxPipeline".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::FluxPipeline));
         }
 
         #[test]
         fn algorithm_override_resolve_hardware_reduce() {
-            let ao = AlgorithmOverride { algorithm_name: "HardwareReduce".to_string() };
+            let ao = AlgorithmOverride::Force("HardwareReduce".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::HardwareReduce));
         }
 
         #[test]
         fn algorithm_override_resolve_chunked_pipeline() {
-            let ao = AlgorithmOverride { algorithm_name: "ChunkedPipeline".to_string() };
+            let ao = AlgorithmOverride::Force("ChunkedPipeline".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::ChunkedPipeline));
         }
 
         #[test]
         fn algorithm_override_resolve_hierarchical_ring() {
-            let ao = AlgorithmOverride { algorithm_name: "HierarchicalRing".to_string() };
+            let ao = AlgorithmOverride::Force("HierarchicalRing".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::HierarchicalRing));
         }
 
         #[test]
         fn algorithm_override_resolve_topo_aware_ring() {
-            let ao = AlgorithmOverride { algorithm_name: "TopoAwareRing".to_string() };
+            let ao = AlgorithmOverride::Force("TopoAwareRing".to_string());
             assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::TopoAwareRing));
         }
 
         #[test]
+        fn algorithm_override_resolve_collnet_direct() {
+            let ao = AlgorithmOverride::Force("CollNetDirect".to_string());
+            assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::CollNetDirect));
+        }
+
+        #[test]
+        fn algorithm_override_resolve_direct() {
+            let ao = AlgorithmOverride::Force("Direct".to_string());
+            assert_eq!(ao.resolve_algorithm(), Some(gllm_nccl::CollectiveAlgorithm::Direct));
+        }
+
+        #[test]
         fn algorithm_override_resolve_unknown_returns_none() {
-            let ao = AlgorithmOverride { algorithm_name: "UnknownAlgo".to_string() };
+            let ao = AlgorithmOverride::Force("UnknownAlgo".to_string());
+            assert_eq!(ao.resolve_algorithm(), None);
+        }
+
+        #[test]
+        fn algorithm_override_auto_resolve_returns_none() {
+            let ao = AlgorithmOverride::Auto;
             assert_eq!(ao.resolve_algorithm(), None);
         }
 
         #[test]
         fn algorithm_override_select_or_auto_with_override() {
-            let ao = AlgorithmOverride { algorithm_name: "Tree".to_string() };
+            let ao = AlgorithmOverride::Force("Tree".to_string());
             let topo = gllm_nccl::topology::make_test_topology(4, true);
             let algo = ao.select_or_auto(
                 &topo, gllm_nccl::CollectiveOp::AllReduce, 512 * 1024, 4, 0,
-            );
+            ).unwrap();
             assert_eq!(algo, gllm_nccl::CollectiveAlgorithm::Tree);
         }
 
         #[test]
-        fn algorithm_override_select_or_auto_without_override_falls_back() {
-            let ao = AlgorithmOverride { algorithm_name: "UnknownAlgo".to_string() };
+        fn algorithm_override_select_or_auto_auto_mode() {
+            let ao = AlgorithmOverride::Auto;
             let topo = gllm_nccl::topology::make_test_topology(4, true);
             let algo = ao.select_or_auto(
                 &topo, gllm_nccl::CollectiveOp::AllReduce, 512 * 1024, 4, 0,
-            );
-            // 回退到 gllm-nccl select_algorithm 自动选择
+            ).unwrap();
             // NVLink full + 512KB → Ring
             assert_eq!(algo, gllm_nccl::CollectiveAlgorithm::Ring);
+        }
+
+        #[test]
+        fn algorithm_override_select_or_auto_unknown_returns_err() {
+            // REQ-DIST-010: 不可用算法覆盖返回 Err，不静默降级
+            let ao = AlgorithmOverride::Force("UnknownAlgo".to_string());
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let result = ao.select_or_auto(
+                &topo, gllm_nccl::CollectiveOp::AllReduce, 512 * 1024, 4, 0,
+            );
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err();
+            assert!(err_msg.contains("UnknownAlgo"), "Error should mention the invalid algorithm name");
+            assert!(err_msg.contains("unrecognized"), "Error should say 'unrecognized'");
+        }
+
+        #[test]
+        fn algorithm_override_apply_to_handle_single_gpu() {
+            let handle = make_single_handle();
+            let ao = AlgorithmOverride::Force("Tree".to_string());
+            let result = ao.apply_to_handle(
+                &handle,
+                gllm_nccl::CollectiveOp::AllReduce,
+                512 * 1024,
+            );
+            // 单机模式直接返回 Ring
+            assert_eq!(result.unwrap(), gllm_nccl::CollectiveAlgorithm::Ring);
+        }
+
+        #[test]
+        fn algorithm_override_apply_to_handle_distributed_no_nccl_init() {
+            let handle = make_distributed_handle();
+            let ao = AlgorithmOverride::Auto;
+            let result = ao.apply_to_handle(
+                &handle,
+                gllm_nccl::CollectiveOp::AllReduce,
+                512 * 1024,
+            );
+            // 分布式模式但 NCCL 未初始化 → Err
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("init_nccl"));
         }
     }
 }
