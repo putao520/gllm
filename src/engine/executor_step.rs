@@ -154,6 +154,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [dataflow:DF-DIST-004]
         self.pd_receive_kv_pages(&pd_role);
 
+        // ── REQ-DIST-012/013: KV distribution dispatch ──
+        // Resolve KvDistDecision and execute the appropriate KV distribution
+        // strategy (Local/OnDemand/Mirror/PartialHeadMirror/TieredCache)
+        // before the forward pass begins.
+        // @trace REQ-DIST-012 [entity:ENT-DIST-KV-XFER] [dataflow:DF-DIST-004]
+        // @trace REQ-DIST-013 [entity:ENT-DIST-KV-MODE]
+        self.kv_dist_dispatch_step();
+
         let dispatch_plan = self.prepare_sub_batch_dispatch(&batch.requests);
 
         let BuildSequencesOutput { sequences, request_indices: req_indices, batch_results: fail_results } =
@@ -1894,6 +1902,55 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         &mut self,
         _pd_role: &super::coordinator::dispatch::pd_disagg::PdRoleDecision,
     ) {
+        // No-op without nccl feature
+    }
+
+    /// KV distribution dispatch step (REQ-DIST-012/013).
+    ///
+    /// Resolves the current `KvDistDecision` from `KvCoordinator`'s stored
+    /// `kv_distribution_config` and executes the appropriate KV distribution
+    /// strategy before the forward pass:
+    /// - **Local**: no-op
+    /// - **OnDemand**: pull KV pages from remote on demand
+    /// - **Mirror**: AllGather to replicate KV pages
+    /// - **PartialHeadMirror**: AllGather partial head slices
+    /// - **TieredCache**: delegate to ThreeTierSwapCoordinator for tier migration
+    // @trace REQ-DIST-012 [entity:ENT-DIST-KV-XFER] [dataflow:DF-DIST-004]
+    // @trace REQ-DIST-013 [entity:ENT-DIST-KV-MODE]
+    #[cfg(feature = "nccl")]
+    fn kv_dist_dispatch_step(&mut self) {
+        let comm_handle = match self.model_ctx.comm_handle.as_ref() {
+            Some(h) => h,
+            None => return, // no comm handle = single-node, skip
+        };
+
+        let decision = match self.kv.resolve_kv_dist_decision(comm_handle) {
+            Some(d) => d,
+            None => return, // no distribution config = skip
+        };
+
+        if !decision.needs_cross_node_transfer() {
+            return; // Local mode — no dispatch needed
+        }
+
+        log::debug!(
+            "executor: REQ-DIST-012/013 KV distribution dispatch — decision={:?}",
+            decision,
+        );
+
+        // Delegate to KvCoordinator.kv_dist_dispatch for mode-specific logic.
+        // ThreeTierSwapCoordinator is accessed from model_ctx for TieredCache mode.
+        if let Err(e) = self.kv.kv_dist_dispatch(comm_handle, &self.model_ctx.three_tier_swap) {
+            log::warn!(
+                "executor: REQ-DIST-012/013 KV distribution dispatch failed: {}",
+                e,
+            );
+        }
+    }
+
+    /// No-op stub for non-nccl builds.
+    #[cfg(not(feature = "nccl"))]
+    fn kv_dist_dispatch_step(&mut self) {
         // No-op without nccl feature
     }
 }
