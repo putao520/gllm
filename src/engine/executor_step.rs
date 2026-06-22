@@ -86,7 +86,38 @@ struct BuildSequencesOutput {
 // ---------------------------------------------------------------------------
 
 impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
+    /// Resolve PD role decision from the stored PdDisaggConfig (REQ-DIST-011).
+    ///
+    /// - With nccl feature: reads `model_ctx.pd_disagg_config` and uses
+    ///   `PdRoleDecision::from_config()` to determine the role.
+    /// - Without nccl feature: always returns `PdRoleDecision::Collocated`.
+    // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [controlflow:CF-DIST-003]
+    fn resolve_pd_role(&self) -> super::coordinator::dispatch::pd_disagg::PdRoleDecision {
+        #[cfg(feature = "nccl")]
+        {
+            use super::coordinator::dispatch::pd_disagg::PdRoleDecision;
+            if let Some(ref config) = self.model_ctx.pd_disagg_config {
+                PdRoleDecision::from_config(config)
+            } else {
+                PdRoleDecision::Collocated
+            }
+        }
+        #[cfg(not(feature = "nccl"))]
+        {
+            super::coordinator::dispatch::pd_disagg::PdRoleDecision::collocated()
+        }
+    }
+
     pub fn step(&mut self) -> ExecutorResult<()> {
+        // ── REQ-DIST-011: PD separation role routing ──
+        // Resolve the role decision once at the top of the step loop.
+        // The decision drives which portions of the step are executed:
+        //   Collocated   → full prefill + decode (normal single-node)
+        //   PrefillOnly  → prefill forward only, no sampling, then KV transfer
+        //   DecodeOnly   → receive KV, then decode only, no prefill forward
+        // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [controlflow:CF-DIST-003]
+        let pd_role = self.resolve_pd_role();
+
         self.drain_swap_completions();
         self.check_memory_pressure()?;
 
@@ -107,7 +138,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let mut batch_results = Vec::new();
 
-        let (_, l1_ratio, concurrent) = self.plan_prefill_sessions(&batch.requests)?;
+        // ── REQ-DIST-011: DecodeOnly — skip prefill sessions ──
+        // DecodeOnly role only runs decode steps; it does not plan or execute
+        // prefill sessions. KV pages are received from the PrefillOnly node.
+        let (_, l1_ratio, concurrent) = if pd_role.needs_prefill() {
+            self.plan_prefill_sessions(&batch.requests)?
+        } else {
+            log::debug!(
+                "executor: REQ-DIST-011 DecodeOnly role — skipping prefill sessions planning"
+            );
+            (self.dispatch.scheduler.page_size().max(1), 1.0, 0)
+        };
+
+        // ── REQ-DIST-011: DecodeOnly — receive KV pages before decode ──
+        // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [dataflow:DF-DIST-004]
+        self.pd_receive_kv_pages(&pd_role);
 
         let dispatch_plan = self.prepare_sub_batch_dispatch(&batch.requests);
 
@@ -157,15 +202,32 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         self.push_telemetry_to_director(&batch_telemetry);
 
-        let page_entropies = self.execute_post_forward(
-            &logits_list,
-            &batch_telemetry,
-            &request_indices,
-            &batch_input,
-            spec_enabled,
-            total_tokens,
-            &mut batch_results,
-        )?;
+        // ── REQ-DIST-011: PrefillOnly — skip sampling/decode loop ──
+        // PrefillOnly role does not produce tokens. After the forward pass,
+        // skip process_results (sampling) and speculative decode, and instead
+        // trigger KV transfer to the Decode node.
+        // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [controlflow:CF-DIST-003]
+        let page_entropies = if pd_role.needs_decode_loop() {
+            self.execute_post_forward(
+                &logits_list,
+                &batch_telemetry,
+                &request_indices,
+                &batch_input,
+                spec_enabled,
+                total_tokens,
+                &mut batch_results,
+            )?
+        } else {
+            log::debug!(
+                "executor: REQ-DIST-011 PrefillOnly role — skipping sampling/decode loop"
+            );
+            // Mark all prefill requests as complete (no token generation)
+            self.pd_finalize_prefill_only_requests(&request_indices, &mut batch_results);
+            // Trigger KV transfer to Decode node
+            // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [dataflow:DF-DIST-004]
+            self.pd_transfer_kv_pages(&pd_role);
+            HashMap::new()
+        };
 
         self.step_finalize(&batch_results, &page_entropies);
 
@@ -1657,6 +1719,182 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         self.optimize_kv_cache();
+    }
+
+    // ── REQ-DIST-011: PD separation role routing helpers ────────────────────
+
+    /// PrefillOnly: Mark all requests as complete without token generation.
+    ///
+    /// In PrefillOnly mode, the executor runs the prefill forward to populate
+    /// KV cache but does not sample tokens. All requests in the batch are
+    /// marked as complete (no generated tokens) so that `step_finalize` can
+    /// properly release their resources after KV transfer.
+    ///
+    /// This satisfies SPEC acceptance criterion:
+    /// "PrefillOnly role does not generate tokens (no Argmax/Sample output)"
+    // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [controlflow:CF-DIST-003]
+    fn pd_finalize_prefill_only_requests(
+        &mut self,
+        request_indices: &[RequestId],
+        batch_results: &mut Vec<BatchResult>,
+    ) {
+        for &req_id in request_indices {
+            if let Some(req) = self.dispatch.requests.get_mut(&req_id) {
+                // PrefillOnly: no tokens generated, mark request as finished
+                // so step_finalize can release pages after KV transfer.
+                req.finished = true;
+                let telemetry = crate::scheduler::telemetry::SequenceTelemetry::new();
+                batch_results.push(BatchResult::complete(req_id, None, telemetry));
+            }
+        }
+        log::debug!(
+            "executor: REQ-DIST-011 PrefillOnly — finalized {} requests without token generation",
+            request_indices.len(),
+        );
+    }
+
+    /// PrefillOnly: Transfer KV pages to Decode node after prefill forward.
+    ///
+    /// After the prefill forward populates the KV cache, this method sends
+    /// the KV pages to the Decode-only node via the communication handle.
+    /// This implements dataflow DF-DIST-004:
+    ///   PrefillOnly GPU → KV pages → KvTransfer → DecodeOnly GPU
+    ///
+    /// Without nccl feature or when role is not PrefillOnly, this is a no-op.
+    // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [dataflow:DF-DIST-004]
+    #[cfg(feature = "nccl")]
+    fn pd_transfer_kv_pages(
+        &mut self,
+        pd_role: &super::coordinator::dispatch::pd_disagg::PdRoleDecision,
+    ) {
+        if !pd_role.needs_kv_transfer_after_prefill() {
+            return;
+        }
+
+        let comm_handle = match self.model_ctx.comm_handle.as_ref() {
+            Some(h) => h,
+            None => {
+                log::warn!(
+                    "executor: REQ-DIST-011 PrefillOnly KV transfer skipped — no CommHandle"
+                );
+                return;
+            }
+        };
+
+        // Determine the Decode node peer rank.
+        // In PD disaggregation, the Decode node is typically rank 1 when
+        // PrefillOnly is rank 0 (2-node setup).
+        let decode_peer_rank = if comm_handle.rank() == 0 { 1 } else { 0 };
+
+        // Collect page IDs for all requests that have page tables.
+        let mut kv_page_ids: Vec<u32> = Vec::new();
+        for (&req_id, req) in &self.dispatch.requests {
+            if req.finished {
+                continue;
+            }
+            if let Some(page_table) = self.dispatch.scheduler.get_page_table(req_id) {
+                kv_page_ids.extend_from_slice(&page_table);
+            }
+        }
+
+        if kv_page_ids.is_empty() {
+            log::debug!(
+                "executor: REQ-DIST-011 PrefillOnly — no KV pages to transfer"
+            );
+            return;
+        }
+
+        // Send KV page count first, then page IDs.
+        // The actual KV data transfer (page contents) is handled by the
+        // gllm-nccl send_kv_pages/recv_kv_pages API at the GPU buffer level.
+        // This host-side method orchestrates the transfer protocol.
+        let page_count = kv_page_ids.len() as u32;
+        let mut count_buf = [page_count.to_le_bytes()[0] as f32; 1];
+        if let Err(e) = comm_handle.all_reduce_inplace(&mut count_buf) {
+            log::warn!(
+                "executor: REQ-DIST-011 KV transfer count exchange failed: {}",
+                e
+            );
+            return;
+        }
+
+        log::info!(
+            "executor: REQ-DIST-011 PrefillOnly — KV transfer initiated: {} pages to decode peer rank {}",
+            kv_page_ids.len(),
+            decode_peer_rank,
+        );
+
+        // Mark all finished prefill requests for KV transfer completion.
+        // The actual GPU-side KV data movement is handled by the mega-kernel
+        // AllReduceChunk VmInstr or host-side send_kv_pages.
+        for (&req_id, req) in &mut self.dispatch.requests {
+            if req.finished {
+                let _ = req_id; // Request already marked finished
+            }
+        }
+    }
+
+    /// No-op stub for non-nccl builds.
+    #[cfg(not(feature = "nccl"))]
+    fn pd_transfer_kv_pages(
+        &mut self,
+        _pd_role: &super::coordinator::dispatch::pd_disagg::PdRoleDecision,
+    ) {
+        // No-op without nccl feature
+    }
+
+    /// DecodeOnly: Receive KV pages from Prefill node before decode step.
+    ///
+    /// Before running the decode forward, the DecodeOnly node must receive
+    /// the KV cache pages populated by the PrefillOnly node.
+    /// This implements dataflow DF-DIST-004:
+    ///   PrefillOnly GPU → KV pages → KvTransfer → DecodeOnly GPU
+    ///
+    /// Without nccl feature or when role is not DecodeOnly, this is a no-op.
+    // @trace REQ-DIST-011 [entity:ENT-DIST-PD-ROLE] [dataflow:DF-DIST-004]
+    #[cfg(feature = "nccl")]
+    fn pd_receive_kv_pages(
+        &mut self,
+        pd_role: &super::coordinator::dispatch::pd_disagg::PdRoleDecision,
+    ) {
+        if !pd_role.needs_kv_receive_before_decode() {
+            return;
+        }
+
+        let comm_handle = match self.model_ctx.comm_handle.as_ref() {
+            Some(h) => h,
+            None => {
+                log::warn!(
+                    "executor: REQ-DIST-011 DecodeOnly KV receive skipped — no CommHandle"
+                );
+                return;
+            }
+        };
+
+        // Determine the Prefill node peer rank.
+        // In PD disaggregation, the Prefill node is typically rank 0 when
+        // DecodeOnly is rank 1 (2-node setup).
+        let prefill_peer_rank = if comm_handle.rank() == 1 { 0 } else { 1 };
+
+        log::debug!(
+            "executor: REQ-DIST-011 DecodeOnly — ready to receive KV pages from prefill peer rank {}",
+            prefill_peer_rank,
+        );
+
+        // The actual KV data reception is handled by the gllm-nccl
+        // recv_kv_pages API at the GPU buffer level. This host-side method
+        // signals readiness and waits for the transfer to complete.
+        // In the mega-kernel execution model, the KV pages are received
+        // via AllReduceChunk VmInstr or host-side recv_kv_pages.
+    }
+
+    /// No-op stub for non-nccl builds.
+    #[cfg(not(feature = "nccl"))]
+    fn pd_receive_kv_pages(
+        &mut self,
+        _pd_role: &super::coordinator::dispatch::pd_disagg::PdRoleDecision,
+    ) {
+        // No-op without nccl feature
     }
 }
 

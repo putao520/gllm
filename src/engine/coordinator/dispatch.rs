@@ -63,6 +63,21 @@ pub mod pd_disagg {
         pub fn needs_prefill(&self) -> bool {
             !matches!(self, Self::DecodeOnly)
         }
+
+        /// 是否需要完整 decode 循环（采样 + token 生成 + 停止条件）
+        pub fn needs_decode_loop(&self) -> bool {
+            !matches!(self, Self::PrefillOnly)
+        }
+
+        /// PrefillOnly 角色在 prefill 完成后是否需要触发 KV 传输到 Decode 节点
+        pub fn needs_kv_transfer_after_prefill(&self) -> bool {
+            matches!(self, Self::PrefillOnly)
+        }
+
+        /// DecodeOnly 角色是否需要先接收 KV pages 再执行 decode
+        pub fn needs_kv_receive_before_decode(&self) -> bool {
+            matches!(self, Self::DecodeOnly)
+        }
     }
 
     #[cfg(test)]
@@ -94,6 +109,9 @@ pub mod pd_disagg {
             assert_eq!(decision, PdRoleDecision::PrefillOnly);
             assert!(!decision.needs_sampling());
             assert!(decision.needs_prefill());
+            assert!(!decision.needs_decode_loop());
+            assert!(decision.needs_kv_transfer_after_prefill());
+            assert!(!decision.needs_kv_receive_before_decode());
         }
 
         #[test]
@@ -103,6 +121,9 @@ pub mod pd_disagg {
             assert_eq!(decision, PdRoleDecision::DecodeOnly);
             assert!(decision.needs_sampling());
             assert!(!decision.needs_prefill());
+            assert!(decision.needs_decode_loop());
+            assert!(!decision.needs_kv_transfer_after_prefill());
+            assert!(decision.needs_kv_receive_before_decode());
         }
 
         #[test]
@@ -117,6 +138,9 @@ pub mod pd_disagg {
             let decision = PdRoleDecision::from_config(&config);
             assert!(decision.needs_sampling());
             assert!(decision.needs_prefill());
+            assert!(decision.needs_decode_loop());
+            assert!(!decision.needs_kv_transfer_after_prefill());
+            assert!(!decision.needs_kv_receive_before_decode());
         }
 
         #[test]
@@ -125,6 +149,67 @@ pub mod pd_disagg {
             let all = [PdRoleDecision::Collocated, PdRoleDecision::PrefillOnly, PdRoleDecision::DecodeOnly];
             let set: HashSet<PdRoleDecision> = all.into_iter().collect();
             assert_eq!(set.len(), 3);
+        }
+    }
+}
+
+/// Non-nccl stub: always Collocated (single-node mode).
+/// This allows executor_step to reference PdRoleDecision without nccl feature.
+#[cfg(not(feature = "nccl"))]
+pub mod pd_disagg {
+    /// PD 分离角色决策 — 单机 stub (REQ-DIST-011)
+    ///
+    /// 无 nccl 时始终 Collocated：Prefill + Decode 同进程，无分离。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum PdRoleDecision {
+        Collocated,
+    }
+
+    impl PdRoleDecision {
+        /// 单机模式始终返回 Collocated
+        pub fn collocated() -> Self {
+            Self::Collocated
+        }
+
+        /// Collocated 角色需要采样管线
+        pub fn needs_sampling(&self) -> bool {
+            true
+        }
+
+        /// Collocated 角色需要 prefill forward
+        pub fn needs_prefill(&self) -> bool {
+            true
+        }
+
+        /// Collocated 角色需要完整 decode 循环
+        pub fn needs_decode_loop(&self) -> bool {
+            true
+        }
+
+        /// Collocated 无需 KV 传输
+        pub fn needs_kv_transfer_after_prefill(&self) -> bool {
+            false
+        }
+
+        /// Collocated 无需 KV 接收
+        pub fn needs_kv_receive_before_decode(&self) -> bool {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn pd_role_decision_non_nccl_always_collocated() {
+            let decision = PdRoleDecision::collocated();
+            assert_eq!(decision, PdRoleDecision::Collocated);
+            assert!(decision.needs_sampling());
+            assert!(decision.needs_prefill());
+            assert!(decision.needs_decode_loop());
+            assert!(!decision.needs_kv_transfer_after_prefill());
+            assert!(!decision.needs_kv_receive_before_decode());
         }
     }
 }
