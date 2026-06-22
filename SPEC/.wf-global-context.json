@@ -1,0 +1,52 @@
+{
+  "s1": {
+    "decisions": [],
+    "consultSummary": "## 分布式推理补齐 — 最终完整交付方案\n\n### 总则\n\nSPEC 定义范围内每一项 REQ：完整代码实现 + 完整测试通过 + `oracle_gate canCommit=true`。全部 REQ 最终状态 implemented，100% 交付。\n\n### 交付范围（全部 implemented）\n\n**gllm/SPEC/43-DISTRIBUTED-IMPLEMENTATION — 34 个 REQ**\n\n现有 17 项（REQ-DIST-001~017）：description 修复 + 按代码证据升级，其中 003（routing table）与 016（CP）补齐完整代码后 implemented。\n\n新增 PP 流水线并行 6 项（REQ-DIST-018~023）：\n- 018 Stage 切分器：按层均分 S stage，每 stage 独立 `compile()` 产出 `MegaKernelFn`\n- 019 参数化调度器：`virtual_stage_count v` 由 DeviceProfile 推导，v=1 朴素流水、v>1 交错流水，同一调度器统一实现\n- 020 Stage 间激活传输：StageSend/Recv → P2pPageFetch（同节点）/ RdmaPageFetch（跨节点）VmInstr\n- 021 ActivationBuffer 双缓冲生命周期与背压\n- 022 StageBoundary 同步点（Barrier/Signal）\n- 023 PP×TP×CP 3D 并行拓扑组合校验\n\nREQ-DIST-016 上下文并行：环形 AllGather KV，长序列 attention 跨 GPU 切分。\n\n集成优化 7 项（REQ-DIST-024~030）：PP 通信-计算重叠（复用 gllm-nccl FLUX+SMPART）/ TP AllReduce 量化压缩管线（复用 QUANT+COMP）/ 跨节点 KV 迁移预测预取 / MoE AllToAll 计算重叠 / PD 分离 chunked KV 传输流水线 / 分布式推测解码批量 draft 传输 / 硬件归约集成（NVSwitch SHARP + Infinity Fabric + CXL，复用 HWREDUCE）。\n\n**gllm-nccl/SPEC/08-DISTRIBUTED-PAGING**\n- REQ-DP-014 implemented：Rust CAS 协议层（已完成）+ RDMA CAS PTX atomic 指令模板（完整实现）+ CAS 重试循环（完整实现）+ 跨节点并发一致性集成测试（完整编写执行）\n- REQ-DP-011 扩展 atomic 变体验收条款\n\n### 测试覆盖（100% 用例编写并执行）\n\n| 维度 | 执行环境 | 覆盖 |\n|------|---------|------|\n| 协议层 / 决策层单测 | pt-worker 192.168.1.205 | 全部 REQ Rust 逻辑层 |\n| GPU codegen / TP / PP / CP 执行 | 5070 Ti 192.168.1.200 SM 12.0 | GPU 路径真实执行 |\n| 跨节点 NCCL / RDMA 通信 | 5070 Ti 服务器 + NCCL 运行时 | 集体通信、RDMA CAS 跨节点一致性 |\n\n每个 REQ 关联测试用例完整编写入库并在对应环境执行通过。\n\n### 实施顺序（每阶段交付完整 implemented REQ）\n\n- A：SPEC 全量写入（34 REQ 完整定义 + description 修复 + 6 dataflow + 5 controlflow 补全）\n- B：PP 完整调度器 + CP 环形 AllGather（016/018~023 implemented）\n- C：routing table 完整实现（含同类横扫）+ RDMA CAS PTX 模板完整实现（003/DP-014 implemented）\n- D：7 项集成优化完整编码（024~030 implemented）\n- E：test-full 10 维度验证，34 REQ + DP-014 全部 implemented 收口，残留 0\n\n### 决策摘要\n\n```json\n{\n  \"scope\": \"ALL REQs implemented, 100% delivery, full test coverage\",\n  \"gllm_43\": \"REQ-DIST-001~030 + REQ-DIST-016 = 34 REQs, all implemented\",\n  \"gllm",
+    "sessionId": "00be6489-5484-47d4-af57-bc4369a1a5c3"
+  },
+  "s2": {
+    "auditFailures": [],
+    "fixApplied": [],
+    "healthOk": true,
+    "auditPass": true,
+    "gateOk": true,
+    "baseline": 0
+  },
+  "s3": {
+    "planPath": "/home/putao/code/rust/gllm/SPEC/plan.md",
+    "tasks": [],
+    "epoch": 1
+  },
+  "s4": {
+    "failedTasks": [
+      "TASK-01",
+      "TASK-02",
+      "TASK-03",
+      "TASK-04",
+      "TASK-05",
+      "TASK-06",
+      "TASK-07",
+      "TASK-08",
+      "TASK-09",
+      "TASK-10",
+      "TASK-11",
+      "TASK-12",
+      "TASK-13",
+      "TASK-14",
+      "TASK-15",
+      "TASK-16",
+      "TASK-17",
+      "TASK-18",
+      "TASK-19",
+      "TASK-20",
+      "TASK-21",
+      "TASK-22"
+    ],
+    "failureReasons": [
+      "epoch1: completed"
+    ]
+  },
+  "s5s6": {},
+  "loopHistory": [],
+  "epoch": 1
+}
