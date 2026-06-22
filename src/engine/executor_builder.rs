@@ -398,11 +398,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// Initialize distributed infrastructure from a DistributedConfig (REQ-DIST-001).
     ///
     /// - world_size <= 1: single-node mode, no NCCL init needed, only records config.
-    /// - world_size > 1: creates CommHandleWrapper, stores ParallelConfig,
-    ///   builds PageRoutingTable for cross-node KV cache routing.
+    /// - world_size > 1: creates CommHandleWrapper, calls init_nccl() to initialize
+    ///   the NCCL communicator, stores ParallelConfig, builds PageRoutingTable for
+    ///   cross-node KV cache routing.
     ///
     /// Must be called after `from_loader()`. Idempotent: calling twice is a no-op
     /// (the second call is ignored if comm_handle is already Some).
+    // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE]
     #[cfg(feature = "nccl")]
     pub fn init_distributed(
         &mut self,
@@ -421,10 +423,25 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return Ok(());
         }
 
-        let handle = crate::engine::distributed_config::CommHandleWrapper::from_config(&config.parallel)
-            .map_err(|e| ExecutorError::Config(
-                ModelConfigError::InvalidConfig(format!("distributed init failed: {:?}", e))
+        // Validate ParallelConfig before creating handle
+        if !config.parallel.validate() {
+            return Err(ExecutorError::DistributedInit(
+                "ParallelConfig validation failed: tp*pp*ep != world_size or rank out of range".to_string()
+            ));
+        }
+
+        let mut handle = crate::engine::distributed_config::CommHandleWrapper::from_config(&config.parallel)
+            .map_err(|e| ExecutorError::DistributedInit(
+                format!("CommHandleWrapper creation failed: {:?}", e)
             ))?;
+
+        // REQ-DIST-001: init_nccl() during executor build — initializes the NCCL
+        // communicator so collective operations are ready before any inference.
+        handle.init_nccl()
+            .map_err(|e| ExecutorError::DistributedInit(
+                format!("NCCL init failed: {:?}", e)
+            ))?;
+
         self.model_ctx.comm_handle = Some(handle);
         self.model_ctx.parallel_config = Some(config.parallel.clone());
 
@@ -433,12 +450,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.model_ctx.distributed_routing_table = Some(routing_table);
 
         log::info!(
-            "[executor] init_distributed: rank={}, world_size={}, tp={}, pp={}, ep={}",
+            "[executor] init_distributed: rank={}, world_size={}, tp={}, pp={}, ep={}, nccl_initialized={}",
             self.model_ctx.comm_handle.as_ref().unwrap().rank(),
             self.model_ctx.comm_handle.as_ref().unwrap().world_size(),
             config.parallel.tp_size,
             config.parallel.pp_size,
             config.parallel.ep_size,
+            self.model_ctx.comm_handle.as_ref().unwrap().is_nccl_initialized(),
         );
         Ok(())
     }

@@ -1142,6 +1142,24 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cpu(exec) => exec.sg_ring_buffer(),
         }
     }
+
+    /// Initialize distributed infrastructure from a DistributedConfig (REQ-DIST-001).
+    ///
+    /// Delegates to `Executor::init_distributed()` on the concrete backend variant.
+    /// Must be called after model loading. Idempotent.
+    // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE]
+    #[cfg(feature = "nccl")]
+    pub fn init_distributed(
+        &mut self,
+        config: crate::engine::distributed_config::DistributedConfig,
+    ) -> Result<(), crate::engine::executor::ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.init_distributed(config),
+            BackendExecutor::Rocm(exec) => exec.init_distributed(config),
+            BackendExecutor::Metal(exec) => exec.init_distributed(config),
+            BackendExecutor::Cpu(exec) => exec.init_distributed(config),
+        }
+    }
 }
 
 /// Backward-compatible type alias for f32 backend executor.

@@ -1012,3 +1012,29 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
 }
 
+// ── Executor Drop (REQ-DIST-001) ──────────────────────────────────────────────
+
+/// Drop implementation for Executor (REQ-DIST-001).
+///
+/// Explicitly cleans up CommHandleWrapper before the rest of the Executor
+/// fields are dropped. In distributed mode, CommHandleWrapper::drop performs
+/// a barrier AllReduce + ncclCommDestroy. This must happen before any other
+/// coordinator drops that might reference NCCL resources.
+impl<B: Backend<E> + 'static, E: Element> Drop for Executor<B, E> {
+    fn drop(&mut self) {
+        // REQ-DIST-001: Explicit CommHandleWrapper cleanup — barrier + NCCL destroy.
+        // The Option::take() ensures the CommHandleWrapper is dropped here
+        // (before other fields), and its Drop impl handles the NCCL barrier.
+        #[cfg(feature = "nccl")]
+        {
+            if let Some(mut comm_handle) = self.model_ctx.comm_handle.take() {
+                log::info!(
+                    "[Executor] Drop: cleaning up CommHandleWrapper (rank={})",
+                    comm_handle.rank()
+                );
+                comm_handle.destroy();
+            }
+        }
+    }
+}
+

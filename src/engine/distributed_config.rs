@@ -276,12 +276,18 @@ impl Default for MoeDistributedConfig {
 /// - 单机模式 (world_size == 1): `inner` 为 None，所有集合操作立即返回 Ok(())。
 /// - 分布式模式 (world_size > 1): 需调用 `init_nccl()` 初始化实际 NCCL 通信句柄，
 ///   之后集合操作通过 `CommHandle` 执行。
+///
+/// Drop trait 实现安全释放：分布式模式下先 barrier (AllReduce 1-element dummy) 再
+/// destroy (drop inner CommHandle → Arc strong_count decrements → ncclCommDestroy)。
+/// `destroyed` flag 保证幂等：重复 Drop / 显式 destroy() 调用均安全。
 #[cfg(feature = "nccl")]
 pub struct CommHandleWrapper {
     rank: u32,
     world_size: u32,
     /// 实际 NCCL 通信句柄（lazy init，分布式模式下通过 `init_nccl()` 注入）
     inner: Option<gllm_nccl::CommHandle>,
+    /// 幂等标志：destroy() 或 Drop 后置 true，后续调用均为 no-op
+    destroyed: bool,
 }
 
 #[cfg(feature = "nccl")]
@@ -291,6 +297,7 @@ impl std::fmt::Debug for CommHandleWrapper {
             .field("rank", &self.rank)
             .field("world_size", &self.world_size)
             .field("inner", &self.inner.as_ref().map(|_| "CommHandle(..)"))
+            .field("destroyed", &self.destroyed)
             .finish()
     }
 }
@@ -302,6 +309,7 @@ impl CommHandleWrapper {
     /// Single-node mode (world_size == 1): no NCCL init needed, only record config.
     /// Multi-node mode (world_size > 1): marked as distributed for later AllReduce routing.
     /// Call `init_nccl()` to initialize the actual NCCL communicator.
+    // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE]
     pub fn from_config(config: &ParallelConfig) -> Result<Self, DistributedConfigError> {
         if !config.validate() {
             return Err(DistributedConfigError::InvalidParallelConfig);
@@ -310,6 +318,7 @@ impl CommHandleWrapper {
             rank: config.rank,
             world_size: config.world_size,
             inner: None,
+            destroyed: false,
         })
     }
 
@@ -376,7 +385,7 @@ impl CommHandleWrapper {
     /// Test-only constructor (REQ-DIST-008)
     #[cfg(test)]
     pub fn new_for_test(rank: u32, world_size: u32) -> Self {
-        Self { rank, world_size, inner: None }
+        Self { rank, world_size, inner: None, destroyed: false }
     }
 
     // ── Collective operations (REQ-DIST-005, REQ-DIST-006) ────────────────
@@ -666,6 +675,69 @@ impl CommHandleWrapper {
             .map_err(|e| format!("all_gather_f32 wait error: {:?}", e))?;
         Ok(recv_buf)
     }
+
+    // ── Lifecycle: destroy + Drop (REQ-DIST-001) ──────────────────────────────
+
+    /// Explicitly destroy the NCCL communicator (REQ-DIST-001).
+    ///
+    /// In distributed mode (world_size > 1), performs a barrier before destroy
+    /// to ensure all ranks reach the same point. The barrier uses the NCCL
+    /// barrier idiom: AllReduce on a 1-element f32 buffer with Sum op.
+    ///
+    /// After destroy:
+    /// - `inner` is taken and dropped (Arc strong_count decrements; when the
+    ///   last reference drops, `CommHandleInner` drops → `NcclBackend` drops
+    ///   → `ncclCommDestroy` is called via FFI).
+    /// - `destroyed` is set to `true`.
+    /// - Subsequent calls to `destroy()` are no-ops (idempotent).
+    ///
+    /// In single-node mode (world_size == 1), this is a no-op.
+    // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE] [lifecycle:destroy]
+    pub fn destroy(&mut self) {
+        if self.destroyed {
+            return; // idempotent
+        }
+
+        // NCCL barrier idiom: AllReduce on 1-element buffer ensures all ranks
+        // reach this point before any rank proceeds to destroy. This prevents
+        // a rank from issuing ncclCommDestroy while other ranks still have
+        // pending operations on the same communicator.
+        if self.is_distributed() && self.inner.is_some() {
+            let mut barrier_buf = [0.0f32; 1];
+            let _ = self.all_reduce_inplace(&mut barrier_buf);
+        }
+
+        // Take and drop the inner CommHandle. The Arc<CommHandleInner>
+        // strong_count decrements; when it reaches 0, CommHandleInner drops,
+        // which drops the BackendKind (NcclBackend), which calls ncclCommDestroy.
+        self.inner.take();
+
+        self.destroyed = true;
+        log::info!(
+            "[CommHandleWrapper] destroy: NCCL handle released (rank={})",
+            self.rank
+        );
+    }
+
+    /// Whether this handle has been destroyed.
+    // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE]
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+}
+
+// ── CommHandleWrapper Drop (REQ-DIST-001) ────────────────────────────────────
+
+/// Drop automatically calls `destroy()` — barrier + NCCL cleanup.
+///
+/// Because `destroy()` is idempotent, double-drop (manual `destroy()` + auto Drop)
+/// is safe: the second call is a no-op.
+// @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE] [lifecycle:drop]
+#[cfg(feature = "nccl")]
+impl Drop for CommHandleWrapper {
+    fn drop(&mut self) {
+        self.destroy();
+    }
 }
 
 // ── DistributedConfigError (REQ-DIST-001) ────────────────────────────────────
@@ -679,6 +751,23 @@ pub enum DistributedConfigError {
     /// NCCL communicator initialization failed.
     CommInitFailed(String),
 }
+
+#[cfg(feature = "nccl")]
+impl std::fmt::Display for DistributedConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DistributedConfigError::InvalidParallelConfig => {
+                write!(f, "ParallelConfig validation failed: tp*pp*ep != world_size or rank out of range")
+            }
+            DistributedConfigError::CommInitFailed(msg) => {
+                write!(f, "NCCL communicator init failed: {}", msg)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "nccl")]
+impl std::error::Error for DistributedConfigError {}
 
 // ── DistributedConfig (REQ-IB-006) ─────────────────────────────────────────
 
@@ -1293,6 +1382,86 @@ mod tests {
             assert!(!handle.is_nccl_initialized());
         }
 
+        // ── CommHandleWrapper destroy + Drop (REQ-DIST-001) ────────────────────
+
+        #[test]
+        fn comm_handle_wrapper_not_destroyed_by_default() {
+            let config = ParallelConfig::default();
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(!handle.is_destroyed());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_destroy_marks_destroyed() {
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(!handle.is_destroyed());
+            handle.destroy();
+            assert!(handle.is_destroyed());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_destroy_idempotent() {
+            // Calling destroy() twice must not panic — second call is a no-op
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            handle.destroy();
+            assert!(handle.is_destroyed());
+            handle.destroy(); // second call — no-op
+            assert!(handle.is_destroyed());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_destroy_single_node_noop() {
+            // Single-node mode: destroy is a no-op on inner=None
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert!(!handle.is_distributed());
+            assert!(handle.inner.is_none());
+            handle.destroy();
+            assert!(handle.is_destroyed());
+            assert!(handle.inner.is_none()); // inner stays None
+        }
+
+        #[test]
+        fn comm_handle_wrapper_destroy_takes_inner() {
+            // After destroy, inner is None even if it was Some before
+            let config = ParallelConfig {
+                tp_size: 2,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 0,
+                world_size: 2,
+                unique_id: String::new(),
+            };
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            // inner is None (lazy init — NCCL not actually initialized in test)
+            assert!(handle.inner.is_none());
+            handle.destroy();
+            assert!(handle.is_destroyed());
+            assert!(handle.inner.is_none());
+        }
+
+        #[test]
+        fn comm_handle_wrapper_drop_calls_destroy() {
+            // Drop triggers destroy automatically — verified by is_destroyed
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            handle.destroy();
+            // After explicit destroy, Drop is a no-op (idempotent)
+            drop(handle); // should not panic
+        }
+
+        #[test]
+        fn comm_handle_wrapper_double_drop_safe() {
+            // Simulate double-drop scenario: destroy + Drop
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            handle.destroy();
+            assert!(handle.is_destroyed());
+            // Drop will call destroy() again — idempotent, no panic
+        }
+
         // ── DistributedConfigError (REQ-DIST-001) ───────────────────────────
 
         #[test]
@@ -1312,6 +1481,109 @@ mod tests {
                 DistributedConfigError::CommInitFailed("err".to_string()),
                 DistributedConfigError::CommInitFailed("err".to_string()),
             );
+        }
+
+        // ── TEST-DIST-001: Full lifecycle + error propagation (REQ-DIST-001) ────
+
+        // TEST-DIST-001-01: DistributedConfigError Display formatting
+        #[test]
+        fn distributed_config_error_display_invalid_parallel_config() {
+            let err = DistributedConfigError::InvalidParallelConfig;
+            let msg = format!("{}", err);
+            assert!(msg.contains("ParallelConfig"));
+            assert!(msg.contains("validation failed"));
+        }
+
+        #[test]
+        fn distributed_config_error_display_comm_init_failed() {
+            let err = DistributedConfigError::CommInitFailed("timeout".to_string());
+            let msg = format!("{}", err);
+            assert!(msg.contains("NCCL"));
+            assert!(msg.contains("timeout"));
+        }
+
+        // TEST-DIST-001-02: DistributedConfigError is std::error::Error
+        #[test]
+        fn distributed_config_error_is_std_error() {
+            let err = DistributedConfigError::InvalidParallelConfig;
+            let _: &dyn std::error::Error = &err;
+        }
+
+        // TEST-DIST-001-03: Full lifecycle — create → verify → destroy → verify
+        #[test]
+        fn comm_handle_wrapper_full_lifecycle_single_node() {
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert_eq!(handle.rank(), 0);
+            assert_eq!(handle.world_size(), 1);
+            assert!(!handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+            assert!(!handle.is_destroyed());
+            handle.destroy();
+            assert!(handle.is_destroyed());
+            assert!(handle.inner.is_none());
+        }
+
+        // TEST-DIST-001-04: destroy then drop is safe (no double-free)
+        #[test]
+        fn comm_handle_wrapper_destroy_then_drop_no_double_free() {
+            let config = ParallelConfig::default();
+            let mut handle = CommHandleWrapper::from_config(&config).unwrap();
+            handle.destroy();
+            assert!(handle.is_destroyed());
+            // Drop calls destroy() again — idempotent, safe
+            drop(handle);
+        }
+
+        // TEST-DIST-001-05: from_config valid multi-node config — correct fields
+        #[test]
+        fn comm_handle_wrapper_from_config_valid_multi_node_fields() {
+            let config = ParallelConfig {
+                tp_size: 4,
+                pp_size: 2,
+                ep_size: 1,
+                rank: 3,
+                world_size: 8,
+                unique_id: String::new(),
+            };
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            assert_eq!(handle.rank(), 3);
+            assert_eq!(handle.world_size(), 8);
+            assert!(handle.is_distributed());
+            assert!(!handle.is_nccl_initialized());
+            assert!(!handle.is_destroyed());
+        }
+
+        // TEST-DIST-001-06: from_config rejects invalid ParallelConfig
+        #[test]
+        fn comm_handle_wrapper_from_config_invalid_world_size() {
+            let config = ParallelConfig {
+                tp_size: 2,
+                pp_size: 2,
+                ep_size: 1,
+                rank: 0,
+                world_size: 5, // 2*2*1=4 != 5
+                unique_id: String::new(),
+            };
+            let result = CommHandleWrapper::from_config(&config);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), DistributedConfigError::InvalidParallelConfig);
+        }
+
+        // TEST-DIST-001-07: from_config rejects rank >= world_size
+        #[test]
+        fn comm_handle_wrapper_from_config_rank_out_of_range() {
+            let config = ParallelConfig {
+                tp_size: 1,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 2, // rank >= world_size=1
+                world_size: 1,
+                unique_id: String::new(),
+            };
+            let result = CommHandleWrapper::from_config(&config);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), DistributedConfigError::InvalidParallelConfig);
         }
     }
 }

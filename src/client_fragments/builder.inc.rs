@@ -233,9 +233,17 @@ impl ClientBuilder {
             .model_id
             .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
         let kind = self.kind.unwrap_or(ModelKind::Chat);
+
+        // REQ-DIST-001: pass distributed config to build_state
+        #[cfg(feature = "nccl")]
+        let distributed_config = self.distributed.clone();
+        #[cfg(not(feature = "nccl"))]
+        let distributed_config = ();
+
         let mut state = Self::build_state(
             &model_id, kind, self.inference_mode, self.compute_dtype, self.gguf_file_filter.as_deref(),
             self.weight_paging_enabled, &self.intent_bias,
+            distributed_config,
         )?;
 
         if let Some(ref reranker_id) = self.reranker_model_id {
@@ -321,6 +329,11 @@ impl ClientBuilder {
     /// `weight_paging_enabled`: when `true`, configures the mega-kernel JIT to
     /// inject page fault detection and prefetch instructions at weight access
     /// points (SPEC/21 §8).
+    ///
+    /// `distributed_config`: when the `nccl` feature is enabled, this is a
+    /// `DistributedConfig` that initializes NCCL communicators for multi-GPU
+    /// inference (REQ-DIST-001). Without `nccl`, this is `()`.
+    #[cfg(feature = "nccl")]
     pub(crate) fn build_state(
         model_id: &str,
         kind: ModelKind,
@@ -329,6 +342,42 @@ impl ClientBuilder {
         gguf_file_filter: Option<&str>,
         weight_paging_enabled: bool,
         intent_bias: &crate::engine::intent_bias::IntentBias,
+        distributed_config: crate::engine::distributed_config::DistributedConfig,
+    ) -> Result<ClientState, ClientError> {
+        Self::build_state_inner(
+            model_id, kind, inference_mode, compute_dtype, gguf_file_filter,
+            weight_paging_enabled, intent_bias, Some(distributed_config),
+        )
+    }
+
+    #[cfg(not(feature = "nccl"))]
+    pub(crate) fn build_state(
+        model_id: &str,
+        kind: ModelKind,
+        inference_mode: InferenceMode,
+        compute_dtype: Option<gllm_kernels::types::DType>,
+        gguf_file_filter: Option<&str>,
+        weight_paging_enabled: bool,
+        intent_bias: &crate::engine::intent_bias::IntentBias,
+        _distributed_config: (),
+    ) -> Result<ClientState, ClientError> {
+        Self::build_state_inner(
+            model_id, kind, inference_mode, compute_dtype, gguf_file_filter,
+            weight_paging_enabled, intent_bias, None,
+        )
+    }
+
+    /// Core implementation shared by all feature configurations.
+    fn build_state_inner(
+        model_id: &str,
+        kind: ModelKind,
+        inference_mode: InferenceMode,
+        compute_dtype: Option<gllm_kernels::types::DType>,
+        gguf_file_filter: Option<&str>,
+        weight_paging_enabled: bool,
+        intent_bias: &crate::engine::intent_bias::IntentBias,
+        #[cfg(feature = "nccl")] distributed_config: Option<crate::engine::distributed_config::DistributedConfig>,
+        #[cfg(not(feature = "nccl"))] _distributed_config: Option<()>,
     ) -> Result<ClientState, ClientError> {
         let mut config = LoaderConfig::from_env();
         if let Some(filter) = gguf_file_filter {
@@ -457,6 +506,23 @@ impl ClientBuilder {
             executor.set_weight_page_jit_config(wp_config);
         }
 
+        // ── Distributed Infrastructure (REQ-DIST-001) ──
+        // Initialize NCCL communicator if a non-default DistributedConfig is
+        // provided. Single-node (world_size==1) skips NCCL init but still
+        // records the ParallelConfig. Multi-node creates CommHandleWrapper,
+        // stores ParallelConfig, and builds PageRoutingTable.
+        // @trace REQ-DIST-001 [entity:ENT-DIST-COMMHANDLE] [lifecycle:init]
+        #[cfg(feature = "nccl")]
+        {
+            if let Some(dist_cfg) = distributed_config {
+                let default_cfg = crate::engine::distributed_config::DistributedConfig::default();
+                if dist_cfg != default_cfg {
+                    let mut executor = backend.executor_mut();
+                    executor.init_distributed(dist_cfg)?;
+                }
+            }
+        }
+
         Ok(ClientState {
             model_id: model_id.to_string(),
             manifest,
@@ -476,7 +542,12 @@ impl ClientBuilder {
         model_id: &str,
         kind: ModelKind,
     ) -> Result<PipelineModelState, ClientError> {
-        let state = Self::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default())?;
+        // Pipeline sub-models use default (single-node) distributed config
+        #[cfg(feature = "nccl")]
+        let dist_cfg = crate::engine::distributed_config::DistributedConfig::default();
+        #[cfg(not(feature = "nccl"))]
+        let dist_cfg = ();
+        let state = Self::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), dist_cfg)?;
         Ok(PipelineModelState {
             model_id: state.model_id,
             manifest: state.manifest,

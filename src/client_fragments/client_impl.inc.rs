@@ -185,7 +185,7 @@ impl Client {
 
     /// Create a new client with the specified model and kind (sync, blocking).
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
-        let state = ClientBuilder::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default())?;
+        let state = ClientBuilder::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), Default::default())?;
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
@@ -220,7 +220,7 @@ impl Client {
     /// @trace REQ-API-1 [entity:ENT-CLIENT] load_model — Builder 构建后加载模型
     pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {
         let model_id = Self::normalize_model_id(model_id)?;
-        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default())?;
+        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), Default::default())?;
         self.state.store(Some(Arc::new(state)));
         Ok(())
     }
@@ -254,7 +254,7 @@ impl Client {
             .ok_or(ClientError::NoModelLoaded)?;
 
         // Atomic swap: old state kept alive for in-flight reads, new state installed
-        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default())?;
+        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), Default::default())?;
         self.state.store(Some(Arc::new(state)));
         Ok(())
     }
@@ -828,7 +828,7 @@ impl Client {
         model_id: &str,
         kind: ModelKind,
     ) -> Result<ClientState, ClientError> {
-        ClientBuilder::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default())
+        ClientBuilder::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), Default::default())
     }
 
     pub(crate) fn require_state(&self) -> Result<Arc<ClientState>, ClientError> {

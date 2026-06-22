@@ -560,6 +560,10 @@ pub enum ExecutorError {
         total: usize,
         max_seq_len: usize,
     },
+    /// Distributed initialization error (REQ-DIST-001).
+    #[cfg(feature = "nccl")]
+    #[error("distributed init failed: {0}")]
+    DistributedInit(String),
 }
 
 pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
@@ -675,6 +679,40 @@ mod tests {
                 assert_eq!(max_seq_len, 512);
             }
             _ => panic!("expected SequenceTooLong variant"),
+        }
+    }
+
+    // ── TEST-DIST-001: ExecutorError::DistributedInit (REQ-DIST-001) ─────────
+
+    #[cfg(feature = "nccl")]
+    #[test]
+    fn executor_error_distributed_init_display() {
+        let err = ExecutorError::DistributedInit("NCCL init failed: timeout".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("distributed init failed"));
+        assert!(msg.contains("NCCL init failed: timeout"));
+    }
+
+    #[cfg(feature = "nccl")]
+    #[test]
+    fn executor_error_distributed_init_is_error() {
+        let err = ExecutorError::DistributedInit("test".to_string());
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[cfg(feature = "nccl")]
+    #[test]
+    fn executor_error_distributed_init_from_distributed_config_error() {
+        // Verify that DistributedConfigError can be mapped to ExecutorError::DistributedInit
+        use crate::engine::distributed_config::DistributedConfigError;
+        let dc_err = DistributedConfigError::CommInitFailed("timeout".to_string());
+        let exec_err = ExecutorError::DistributedInit(format!("{:?}", dc_err));
+        match &exec_err {
+            ExecutorError::DistributedInit(msg) => {
+                assert!(msg.contains("CommInitFailed"));
+                assert!(msg.contains("timeout"));
+            }
+            _ => panic!("expected DistributedInit variant"),
         }
     }
 }
