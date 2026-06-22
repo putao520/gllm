@@ -95,7 +95,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-COMMHANDLE</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-001</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">CommHandle 生命周期管理：executor build 时调用 init_nccl() 初始化 NCCL 通信域，获取 CommHandle（封装 ncclComm_t + rank + tp_size）；executor Drop 时自动释放 NCCL 资源。CommHandle 是所有分布式通信的基础句柄，贯穿 Layer 0~5 全链路。初始化前提：ParallelConfig 已配置（tp_size &gt;= 1, rank 有效）、gllm-nccl feature 已启用、CUDA/ROCm runtime 已初始化。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>单 GPU: is_distributed() == false, rank() == 0, world_size() == 1</li><li>多 GPU: is_distributed() == true, rank 值域 [0, world_size)</li><li>Drop 无资源泄漏（ncclCommDestroy 被调用）</li><li>重复 Drop 安全（幂等）</li></ol></div><p data-req-description="CommHandle 生命周期管理：executor build 时调用 init_nccl() 初始化 NCCL 通信域，获取 CommHandle（封装 ncclComm_t + rank + tp_size）；executor Drop 时自动释放 NCCL 资源。CommHandle 是所有分布式通信的基础句柄，贯穿 Layer 0~5 全链路。">CommHandle 生命周期管理：executor build 时调用 init_nccl() 初始化 NCCL 通信域，获取 CommHandle（封装 ncclComm_t + rank + tp_size）；executor Drop 时自动释放 NCCL 资源。CommHandle 是所有分布式通信的基础句柄，贯穿 Layer 0~5 全链路。</p><div data-criterion="单 GPU: is_distributed() == false, rank() == 0, world_size() == 1">单 GPU: is_distributed() == false, rank() == 0, world_size() == 1</div><div data-criterion="多 GPU: is_distributed() == true, rank 值域 [0, world_size)">多 GPU: is_distributed() == true, rank 值域 [0, world_size)</div><div data-criterion="Drop 无资源泄漏（ncclCommDestroy 被调用）">Drop 无资源泄漏（ncclCommDestroy 被调用）</div><div data-criterion="重复 Drop 安全（幂等）">重复 Drop 安全（幂等）</div></div>
     </section>
 
     <section data-artifact-type="dataflow" id="artifact-dataflow" data-section="1.2">
@@ -121,7 +121,7 @@
           <li>未配置 distributed 时默认 tp_size=1, rank=0（单 GPU 模式）</li>
         </ul>
         <p><strong>关联 Dataflow</strong>: DF-DIST-001</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">DistributedConfig 完整传递链 Client → Executor：ClientConfig 包含 distributed 字段（Option&lt;DistributedConfig&gt;），DistributedConfig 包含 ParallelConfig(tp_size, rank)、PdDisaggConfig、KvDistributionConfig、CommCompressHint、AlgorithmOverride。传递路径：ClientBuilder.distributed() → ClientConfig → ExecutorBuilder → Executor。确保分布式配置从用户入口到执行引擎的端到端传递，无信息丢失。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>ClientConfig.distributed.tp_size == Executor.comm_handle.world_size()</li><li>ClientConfig.distributed.rank == Executor.comm_handle.rank()</li><li>未配置 distributed 时默认 tp_size=1, rank=0（单 GPU 模式）</li></ol></div><p data-req-description="DistributedConfig 完整传递链 Client → Executor：ClientConfig 包含 distributed 字段（Option<DistributedConfig>），DistributedConfig 包含 ParallelConfig(tp_size, rank)、PdDisaggConfig、KvDistributionConfig、CommCompressHint、AlgorithmOverride。传递路径：ClientBuilder.distributed() → ClientConfig → ExecutorBuilder → Executor。确保分布式配置从用户入口到执行引擎的端到端传递，无信息丢失。">DistributedConfig 完整传递链 Client → Executor：ClientConfig 包含 distributed 字段（Option&lt;DistributedConfig&gt;），DistributedConfig 包含 ParallelConfig(tp_size, rank)、PdDisaggConfig、KvDistributionConfig、CommCompressHint、AlgorithmOverride。传递路径：ClientBuilder.distributed() → ClientConfig → ExecutorBuilder → Executor。确保分布式配置从用户入口到执行引擎的端到端传递，无信息丢失。</p><div data-criterion="ClientConfig.distributed.tp_size == Executor.comm_handle.world_size()">ClientConfig.distributed.tp_size == Executor.comm_handle.world_size()</div><div data-criterion="ClientConfig.distributed.rank == Executor.comm_handle.rank()">ClientConfig.distributed.rank == Executor.comm_handle.rank()</div><div data-criterion="未配置 distributed 时默认 tp_size=1, rank=0（单 GPU 模式）">未配置 distributed 时默认 tp_size=1, rank=0（单 GPU 模式）</div></div>
     </section>
 
     <section id="s1.3" data-section="1.3">
@@ -150,7 +150,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-ROUTING-TABLE</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">分布式页路由表构建与调度器接线：基于 KvDistributionConfig 构建 ENT-DIST-ROUTING-TABLE，路由表记录每个 KV page 的物理位置（本地 GPU / 远端 GPU ID / 共享内存偏移）。PagedScheduler 在分配 page 时查询路由表，决定 page 分配到哪个 GPU 的 HBM。路由表支持动态更新（KV 迁移时更新条目）。前提：CommHandle 已初始化（REQ-DIST-001）、KvDistributionConfig 已配置、PagedScheduler 页分配器可用。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>单 GPU: 所有页映射到本地</li><li>TP 模式: 每个秩持有自己分片的 KV 页</li><li>KV 分布模式切换时路由表正确重建</li></ol></div><p data-req-description="分布式页路由表构建与调度器接线：基于 KvDistributionConfig 构建 ENT-DIST-ROUTING-TABLE，路由表记录每个 KV page 的物理位置（本地 GPU / 远端 GPU ID / 共享内存偏移）。PagedScheduler 在分配 page 时查询路由表，决定 page 分配到哪个 GPU 的 HBM。路由表支持动态更新（KV 迁移时更新条目）。">分布式页路由表构建与调度器接线：基于 KvDistributionConfig 构建 ENT-DIST-ROUTING-TABLE，路由表记录每个 KV page 的物理位置（本地 GPU / 远端 GPU ID / 共享内存偏移）。PagedScheduler 在分配 page 时查询路由表，决定 page 分配到哪个 GPU 的 HBM。路由表支持动态更新（KV 迁移时更新条目）。</p><div data-criterion="单 GPU: 所有页映射到本地">单 GPU: 所有页映射到本地</div><div data-criterion="TP 模式: 每个秩持有自己分片的 KV 页">TP 模式: 每个秩持有自己分片的 KV 页</div><div data-criterion="KV 分布模式切换时路由表正确重建">KV 分布模式切换时路由表正确重建</div></div>
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -192,7 +192,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-TP-SHARD</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-002</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">TP 权重分片加载：按 Tensor Parallelism 策略将模型权重切分到各 GPU rank。分片规则：(1) Attention QKVProj/OProj — 按 num_heads/tp_size 切分列维度，每个 rank 持有 1/tp_size 的 head；(2) FFN GateUpProj/DownProj — GateUpProj 按行切分（每个 rank 持有 1/tp_size 行），DownProj 按列切分；(3) lm_head — 按 vocab_size/tp_size 切分列维度；(4) embedding/RMSNorm/RoPE — 所有 rank 持有完整副本（replicated）。分片在 weight_loader 加载时按 rank 过滤，无需运行时通信。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>tp_size=2 时 QKVProj 列数减半</li><li>tp_size=4 时 GateUpProj 行数减为 1/4</li><li>所有 rank 的 embedding 权重 bit-wise 一致</li><li>分片后模型 forward 数值与单 GPU 等价（在 AllReduce 聚合后）</li></ol></div><p data-req-description="TP 权重分片加载：按 Tensor Parallelism 策略将模型权重切分到各 GPU rank。分片规则：(1) Attention QKVProj/OProj — 按 num_heads/tp_size 切分列维度，每个 rank 持有 1/tp_size 的 head；(2) FFN GateUpProj/DownProj — GateUpProj 按行切分（每个 rank 持有 1/tp_size 行），DownProj 按列切分；(3) lm_head — 按 vocab_size/tp_size 切分列维度；(4) embedding/RMSNorm/RoPE — 所有 rank 持有完整副本（replicated）。分片在 weight_loader 加载时按 rank 过滤，无需运行时通信。">TP 权重分片加载：按 Tensor Parallelism 策略将模型权重切分到各 GPU rank。分片规则：(1) Attention QKVProj/OProj — 按 num_heads/tp_size 切分列维度，每个 rank 持有 1/tp_size 的 head；(2) FFN GateUpProj/DownProj — GateUpProj 按行切分（每个 rank 持有 1/tp_size 行），DownProj 按列切分；(3) lm_head — 按 vocab_size/tp_size 切分列维度；(4) embedding/RMSNorm/RoPE — 所有 rank 持有完整副本（replicated）。分片在 weight_loader 加载时按 rank 过滤，无需运行时通信。</p><div data-criterion="tp_size=2 时 QKVProj 列数减半">tp_size=2 时 QKVProj 列数减半</div><div data-criterion="tp_size=4 时 GateUpProj 行数减为 1/4">tp_size=4 时 GateUpProj 行数减为 1/4</div><div data-criterion="所有 rank 的 embedding 权重 bit-wise 一致">所有 rank 的 embedding 权重 bit-wise 一致</div><div data-criterion="分片后模型 forward 数值与单 GPU 等价（在 AllReduce 聚合后）">分片后模型 forward 数值与单 GPU 等价（在 AllReduce 聚合后）</div></div>
     </section>
 
     <section id="s2.2" data-section="2.2">
@@ -221,7 +221,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-TP-COMM</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-002</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-001</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">TP AllReduce 通信：Attention 计算后各 rank 持有部分 head 的输出，需 AllReduce 求和还原完整 hidden_state。CompilerGraph 包含 AllReduce VmInstr call stub，JIT 编译时生成 NCCL AllReduce 调用点。通信发生在每个 Transformer 层的 Attention 输出后。前提：TP 权重分片完成（REQ-DIST-004）、CommHandle 可用、CompilerGraph 包含 AllReduce VmInstr call stub。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>AllReduce 后各 rank hidden_state 数值一致</li><li>AllReduce 通信延迟与 payload 大小线性相关</li><li>单 GPU 模式下无 AllReduce 通信开销</li></ol></div><p data-req-description="TP AllReduce 通信：Attention 计算后各 rank 持有部分 head 的输出，需 AllReduce 求和还原完整 hidden_state。CompilerGraph 包含 AllReduce VmInstr call stub，JIT 编译时生成 NCCL AllReduce 调用点。通信发生在每个 Transformer 层的 Attention 输出后。">TP AllReduce 通信：Attention 计算后各 rank 持有部分 head 的输出，需 AllReduce 求和还原完整 hidden_state。CompilerGraph 包含 AllReduce VmInstr call stub，JIT 编译时生成 NCCL AllReduce 调用点。通信发生在每个 Transformer 层的 Attention 输出后。</p><div data-criterion="AllReduce 后各 rank hidden_state 数值一致">AllReduce 后各 rank hidden_state 数值一致</div><div data-criterion="AllReduce 通信延迟与 payload 大小线性相关">AllReduce 通信延迟与 payload 大小线性相关</div><div data-criterion="单 GPU 模式下无 AllReduce 通信开销">单 GPU 模式下无 AllReduce 通信开销</div></div>
     </section>
 
     <section id="s2.3" data-section="2.3">
@@ -250,7 +250,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-TP-COMM</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-003</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-001</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">TP 列并行通信：FFN 层采用列并行策略，GateUpProj 按行切分后各 rank 独立计算，输出需 ReduceScatter 汇聚到对应 rank；DownProj 按列切分后各 rank 计算部分结果，需 AllGather 还原完整输出。ReduceScatter + AllGather 组合实现列并行 FFN 的完整通信。前提：TP 权重分片完成（REQ-DIST-004）、CommHandle 支持 ReduceScatter/AllGather、通信-计算重叠调度器可用（REQ-DIST-007/008）。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>ReduceScatter 后各 rank 持有对应分片的 FFN 输出</li><li>AllGather 后各 rank 持有完整 FFN 输出</li><li>ReduceScatter+AllGather 组合与单次 AllReduce 数值等价</li></ol></div><p data-req-description="TP 列并行通信：FFN 层采用列并行策略，GateUpProj 按行切分后各 rank 独立计算，输出需 ReduceScatter 汇聚到对应 rank；DownProj 按列切分后各 rank 计算部分结果，需 AllGather 还原完整输出。ReduceScatter + AllGather 组合实现列并行 FFN 的完整通信。">TP 列并行通信：FFN 层采用列并行策略，GateUpProj 按行切分后各 rank 独立计算，输出需 ReduceScatter 汇聚到对应 rank；DownProj 按列切分后各 rank 计算部分结果，需 AllGather 还原完整输出。ReduceScatter + AllGather 组合实现列并行 FFN 的完整通信。</p><div data-criterion="ReduceScatter 后各 rank 持有对应分片的 FFN 输出">ReduceScatter 后各 rank 持有对应分片的 FFN 输出</div><div data-criterion="AllGather 后各 rank 持有完整 FFN 输出">AllGather 后各 rank 持有完整 FFN 输出</div><div data-criterion="ReduceScatter+AllGather 组合与单次 AllReduce 数值等价">ReduceScatter+AllGather 组合与单次 AllReduce 数值等价</div></div>
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -286,7 +286,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-DOUBLE-BUFFER</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-003</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-002</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">双缓冲通信-计算重叠：通信 stream 与计算 stream 并行执行。当 rank N 在计算当前 chunk 的 FFN 时，通信 stream 同时传输上一个 chunk 的 AllReduce 结果。双缓冲策略将通信延迟隐藏在计算时间内，理论加速比 = compute_time / max(compute_time, comm_time)。前提：TP 通信已实现（REQ-DIST-005/006）、GPU 支持 SM 分区（ComputeCapability &gt;= 7.0）、Mega-Kernel 支持多 stream 调度。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>双缓冲模式下通信延迟完全隐藏在计算时间内</li><li>无双缓冲时延迟 = compute + comm，有双缓冲时延迟 ≈ max(compute, comm)</li><li>SM 分区正确隔离通信和计算 stream</li></ol></div><p data-req-description="双缓冲通信-计算重叠：通信 stream 与计算 stream 并行执行。当 rank N 在计算当前 chunk 的 FFN 时，通信 stream 同时传输上一个 chunk 的 AllReduce 结果。双缓冲策略将通信延迟隐藏在计算时间内，理论加速比 = compute_time / max(compute_time, comm_time)。">双缓冲通信-计算重叠：通信 stream 与计算 stream 并行执行。当 rank N 在计算当前 chunk 的 FFN 时，通信 stream 同时传输上一个 chunk 的 AllReduce 结果。双缓冲策略将通信延迟隐藏在计算时间内，理论加速比 = compute_time / max(compute_time, comm_time)。</p><div data-criterion="双缓冲模式下通信延迟完全隐藏在计算时间内">双缓冲模式下通信延迟完全隐藏在计算时间内</div><div data-criterion="无双缓冲时延迟 = compute + comm，有双缓冲时延迟 ≈ max(compute, comm)">无双缓冲时延迟 = compute + comm，有双缓冲时延迟 ≈ max(compute, comm)</div><div data-criterion="SM 分区正确隔离通信和计算 stream">SM 分区正确隔离通信和计算 stream</div></div>
     </section>
 
     <section id="s3.2" data-section="3.2">
@@ -315,7 +315,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-FLUX</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-003</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-002</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">FLUX 分解调度：将列并行 FFN 的 ReduceScatter→LocalCompute→AllGather 三阶段流水线化。FLUX 将大粒度 AllReduce 分解为细粒度 ReduceScatter + AllGather，配合 chunk 切分实现通信-计算流水线重叠。每个 chunk 独立完成三阶段，chunk 间形成流水线。前提：列并行通信已实现（REQ-DIST-006）、gllm-nccl flux_decompose() 可用、GPU 支持 concurrent kernel execution。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>FLUX 3 阶段流水线正确执行：ReduceScatter → LocalCompute → AllGather</li><li>chunk 粒度调度：多个 chunk 间形成流水线重叠</li><li>FLUX 分解延迟 ≈ ReduceScatter_latency + max(compute_latency, AllGather_latency)</li></ol></div><p data-req-description="FLUX 分解调度：将列并行 FFN 的 ReduceScatter→LocalCompute→AllGather 三阶段流水线化。FLUX 将大粒度 AllReduce 分解为细粒度 ReduceScatter + AllGather，配合 chunk 切分实现通信-计算流水线重叠。每个 chunk 独立完成三阶段，chunk 间形成流水线。">FLUX 分解调度：将列并行 FFN 的 ReduceScatter→LocalCompute→AllGather 三阶段流水线化。FLUX 将大粒度 AllReduce 分解为细粒度 ReduceScatter + AllGather，配合 chunk 切分实现通信-计算流水线重叠。每个 chunk 独立完成三阶段，chunk 间形成流水线。</p><div data-criterion="FLUX 3 阶段流水线正确执行：ReduceScatter → LocalCompute → AllGather">FLUX 3 阶段流水线正确执行：ReduceScatter → LocalCompute → AllGather</div><div data-criterion="chunk 粒度调度：多个 chunk 间形成流水线重叠">chunk 粒度调度：多个 chunk 间形成流水线重叠</div><div data-criterion="FLUX 分解延迟 ≈ ReduceScatter_latency + max(compute_latency, AllGather_latency)">FLUX 分解延迟 ≈ ReduceScatter_latency + max(compute_latency, AllGather_latency)</div></div>
     </section>
 
     <section id="s3.3" data-section="3.3">
@@ -343,7 +343,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-QUANT-COMM</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-002</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">量化通信：AllReduce/ReduceScatter/AllGather 传输前将激活值量化为 FP8（E4M3/E5M2），传输后反量化还原。FP8 通信带宽节省 &gt;= 50%（BF16→FP8 减半），精度损失通过动态缩放因子控制。量化/反量化算子注册到 ScalarOpRegistry，走完整 JIT 管线生成特化代码。前提：TP 通信已实现（REQ-DIST-005/006）、量化算子已注册到 ScalarOpRegistry、DeviceProfile 支持目标量化格式。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>FP8 通信带宽节省 &gt;= 50%（BF16→FP8 减半）</li><li>FP8 通信后模型精度损失 &lt; 0.1%（困惑度差异）</li><li>量化/反量化延迟 &lt; 通信节省时间的 10%</li></ol></div><p data-req-description="量化通信：AllReduce/ReduceScatter/AllGather 传输前将激活值量化为 FP8（E4M3/E5M2），传输后反量化还原。FP8 通信带宽节省 >= 50%（BF16→FP8 减半），精度损失通过动态缩放因子控制。量化/反量化算子注册到 ScalarOpRegistry，走完整 JIT 管线生成特化代码。">量化通信：AllReduce/ReduceScatter/AllGather 传输前将激活值量化为 FP8（E4M3/E5M2），传输后反量化还原。FP8 通信带宽节省 &gt;= 50%（BF16→FP8 减半），精度损失通过动态缩放因子控制。量化/反量化算子注册到 ScalarOpRegistry，走完整 JIT 管线生成特化代码。</p><div data-criterion="FP8 通信带宽节省 >= 50%（BF16→FP8 减半）">FP8 通信带宽节省 &gt;= 50%（BF16→FP8 减半）</div><div data-criterion="FP8 通信后模型精度损失 < 0.1%（困惑度差异）">FP8 通信后模型精度损失 &lt; 0.1%（困惑度差异）</div><div data-criterion="量化/反量化延迟 < 通信节省时间的 10%">量化/反量化延迟 &lt; 通信节省时间的 10%</div></div>
     </section>
 
     <section id="s3.4" data-section="3.4">
@@ -370,7 +370,7 @@
           <li>不可用算法覆盖返回 Err，不静默降级</li>
         </ul>
         <p><strong>关联 Controlflow</strong>: CF-DIST-002</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">算法选择覆盖：AlgorithmOverride 允许用户覆盖自动算法选择。默认由 StrategyArbiter 根据 DeviceProfile + 模型结构自动选择最优通信算法（AllReduce vs ReduceScatter+AllGather vs FLUX）。AlgorithmOverride 提供强制指定：ForceAllReduce / ForceReduceScatterGather / ForceFlux / ForceQuantComm。覆盖优先级：AlgorithmOverride &gt; StrategyArbiter 自动选择。前提：策略仲裁器已实现（SPEC/12-STRATEGY-ARBITER）、至少一种通信算法已实现。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>AlgorithmOverride 强制指定时跳过 StrategyArbiter 自动选择</li><li>ForceAllReduce/ForceReduceScatterGather/ForceFlux/ForceQuantComm 四种覆盖均生效</li><li>覆盖优先级：AlgorithmOverride &gt; StrategyArbiter 自动选择</li></ol></div><p data-req-description="算法选择覆盖：AlgorithmOverride 允许用户覆盖自动算法选择。默认由 StrategyArbiter 根据 DeviceProfile + 模型结构自动选择最优通信算法（AllReduce vs ReduceScatter+AllGather vs FLUX）。AlgorithmOverride 提供强制指定：ForceAllReduce / ForceReduceScatterGather / ForceFlux / ForceQuantComm。覆盖优先级：AlgorithmOverride > StrategyArbiter 自动选择。">算法选择覆盖：AlgorithmOverride 允许用户覆盖自动算法选择。默认由 StrategyArbiter 根据 DeviceProfile + 模型结构自动选择最优通信算法（AllReduce vs ReduceScatter+AllGather vs FLUX）。AlgorithmOverride 提供强制指定：ForceAllReduce / ForceReduceScatterGather / ForceFlux / ForceQuantComm。覆盖优先级：AlgorithmOverride &gt; StrategyArbiter 自动选择。</p><div data-criterion="AlgorithmOverride 强制指定时跳过 StrategyArbiter 自动选择">AlgorithmOverride 强制指定时跳过 StrategyArbiter 自动选择</div><div data-criterion="ForceAllReduce/ForceReduceScatterGather/ForceFlux/ForceQuantComm 四种覆盖均生效">ForceAllReduce/ForceReduceScatterGather/ForceFlux/ForceQuantComm 四种覆盖均生效</div><div data-criterion="覆盖优先级：AlgorithmOverride > StrategyArbiter 自动选择">覆盖优先级：AlgorithmOverride &gt; StrategyArbiter 自动选择</div></div>
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -407,7 +407,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-PD-ROLE</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-003</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">PD 分离角色路由：Prefill-Decode Disaggregated 模式下，PrefillOnly 角色跳过 decode 阶段 ops（Argmax/Sample/TokenDecode），仅执行 prefill forward；DecodeOnly 角色跳过 prefill 阶段的完整 prompt 处理，仅执行 decode step。CompilerGraph 支持按角色裁剪：PdDisaggConfig.mode=Disaggregated 时，build 阶段根据 role 裁剪图尾部 ops。前提：PdDisaggConfig 已配置（mode=Disaggregated, role=PrefillOnly/DecodeOnly）、CommHandle 已初始化、CompilerGraph 支持按角色裁剪。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>PrefillOnly 角色不生成 token（无 Argmax/Sample 输出）</li><li>DecodeOnly 角色跳过完整 prompt 处理（无 prefill forward）</li><li>PdDisaggConfig.mode=Collocated 时行为与单机模式完全一致</li></ol></div><p data-req-description="PD 分离角色路由：Prefill-Decode Disaggregated 模式下，PrefillOnly 角色跳过 decode 阶段 ops（Argmax/Sample/TokenDecode），仅执行 prefill forward；DecodeOnly 角色跳过 prefill 阶段的完整 prompt 处理，仅执行 decode step。CompilerGraph 支持按角色裁剪：PdDisaggConfig.mode=Disaggregated 时，build 阶段根据 role 裁剪图尾部 ops。">PD 分离角色路由：Prefill-Decode Disaggregated 模式下，PrefillOnly 角色跳过 decode 阶段 ops（Argmax/Sample/TokenDecode），仅执行 prefill forward；DecodeOnly 角色跳过 prefill 阶段的完整 prompt 处理，仅执行 decode step。CompilerGraph 支持按角色裁剪：PdDisaggConfig.mode=Disaggregated 时，build 阶段根据 role 裁剪图尾部 ops。</p><div data-criterion="PrefillOnly 角色不生成 token（无 Argmax/Sample 输出）">PrefillOnly 角色不生成 token（无 Argmax/Sample 输出）</div><div data-criterion="DecodeOnly 角色跳过完整 prompt 处理（无 prefill forward）">DecodeOnly 角色跳过完整 prompt 处理（无 prefill forward）</div><div data-criterion="PdDisaggConfig.mode=Collocated 时行为与单机模式完全一致">PdDisaggConfig.mode=Collocated 时行为与单机模式完全一致</div></div>
     </section>
 
     <section id="s4.2" data-section="4.2">
@@ -437,7 +437,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-KV-XFER</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">跨节点 KV 传输：PrefillOnly 节点完成 prefill 后，将 KV pages 通过 RDMA/NCCL send 传输到 DecodeOnly 节点。全链路：send_kv_pages(local_pages) → NCCL send → network → NCCL recv → recv_kv_pages(remote_pages) → 填充 DecodeOnly 节点的 KV cache。传输粒度为 page 级（与 PagedAttention 对齐），支持批量传输减少小包开销。前提：PD 分离角色路由已实现（REQ-DIST-011）、CommHandle 支持 send/recv、KV pages 已分配并填充数据。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>KV pages 传输后 DecodeOnly 节点 KV cache 内容与 PrefillOnly 节点一致</li><li>传输粒度为 page 级，支持批量传输</li><li>RDMA/NCCL send/recv 传输延迟可测量</li></ol></div><p data-req-description="跨节点 KV 传输：PrefillOnly 节点完成 prefill 后，将 KV pages 通过 RDMA/NCCL send 传输到 DecodeOnly 节点。全链路：send_kv_pages(local_pages) → NCCL send → network → NCCL recv → recv_kv_pages(remote_pages) → 填充 DecodeOnly 节点的 KV cache。传输粒度为 page 级（与 PagedAttention 对齐），支持批量传输减少小包开销。">跨节点 KV 传输：PrefillOnly 节点完成 prefill 后，将 KV pages 通过 RDMA/NCCL send 传输到 DecodeOnly 节点。全链路：send_kv_pages(local_pages) → NCCL send → network → NCCL recv → recv_kv_pages(remote_pages) → 填充 DecodeOnly 节点的 KV cache。传输粒度为 page 级（与 PagedAttention 对齐），支持批量传输减少小包开销。</p><div data-criterion="KV pages 传输后 DecodeOnly 节点 KV cache 内容与 PrefillOnly 节点一致">KV pages 传输后 DecodeOnly 节点 KV cache 内容与 PrefillOnly 节点一致</div><div data-criterion="传输粒度为 page 级，支持批量传输">传输粒度为 page 级，支持批量传输</div><div data-criterion="RDMA/NCCL send/recv 传输延迟可测量">RDMA/NCCL send/recv 传输延迟可测量</div></div>
     </section>
 
     <section id="s4.3" data-section="4.3">
@@ -474,7 +474,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-KV-MODE</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-004</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">5 模式 KV 分布：(1) Local — 所有 KV pages 存储在本地 GPU，无跨 GPU 通信（默认模式）；(2) Remote — KV pages 按需从远端 GPU 读取，读后释放远端资源（PD 分离场景）；(3) Replicated — KV pages 在所有 GPU 完整镜像，内存开销最大但零通信（小模型场景）；(4) Sharded — 按 head 维度部分镜像，每个 GPU 镜像 1/tp_size 的 head（TP 模式默认）；(5) Tiered — 三级缓存（GPU HBM → CPU DRAM → 远端 GPU），按热度自动迁移（长上下文场景）。模式由 KvDistributionConfig.mode 指定，运行时不可切换。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>层数级复制模式：所有 rank 持有所有层的完整 KV，副本数 = tp_size</li><li>Head 级复制模式：每个 head 的 KV 只存一份，副本数 = 1</li><li>Head 级复制 HBM 占用为层数级复制的 1/tp_size</li></ol></div><p data-req-description="5 模式 KV 分布：(1) Local — 所有 KV pages 存储在本地 GPU，无跨 GPU 通信（默认模式）；(2) Remote — KV pages 按需从远端 GPU 读取，读后释放远端资源（PD 分离场景）；(3) Replicated — KV pages 在所有 GPU 完整镜像，内存开销最大但零通信（小模型场景）；(4) Sharded — 按 head 维度部分镜像，每个 GPU 镜像 1/tp_size 的 head（TP 模式默认）；(5) Tiered — 三级缓存（GPU HBM → CPU DRAM → 远端 GPU），按热度自动迁移（长上下文场景）。模式由 KvDistributionConfig.mode 指定，运行时不可切换。">KV 分布策略：定义两种 KV 分布模式：(1) 层数级复制(Layer-level Replicated) — 所有 rank 持有所有层的完整 KV cache，无跨 rank 通信但 HBM 占用 = tp_size × 单 rank KV 大小；(2) Head 级复制(Head-level Replicated) — 每个 rank 仅持有自己负责的 head 的 KV，HBM 占用 = 单 rank KV 大小，但 Attention 计算需 AllGather 收集其他 rank 的 KV。KvDistributionConfig.strategy 指定策略。</p><div data-criterion="层数级复制模式：所有 rank 持有所有层的完整 KV，副本数 = tp_size">层数级复制模式：所有 rank 持有所有层的完整 KV，副本数 = tp_size</div><div data-criterion="Head 级复制模式：每个 head 的 KV 只存一份，副本数 = 1">Head 级复制模式：每个 head 的 KV 只存一份，副本数 = 1</div><div data-criterion="Head 级复制 HBM 占用为层数级复制的 1/tp_size">Head 级复制 HBM 占用为层数级复制的 1/tp_size</div></div>
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -516,7 +516,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-MOE-DIST</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-005</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-004</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">分布式 MoE AllToAll dispatch：MoE 层 expert 分布在多 GPU 上，token 路由后需 AllToAll 通信将 token 发送到对应 expert 所在 GPU。支持三种 expert placement 策略：(1) Uniform — expert 均匀分配到各 GPU；(2) HotReplica — 热 expert 镜像到多 GPU，冷 expert 独占单 GPU；(3) Custom — 用户自定义 placement 映射。AllToAll 通信由 gllm-nccl 提供，dispatch 和 gather 各一次 AllToAll。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>SM 分区比例按动态配置生效：comm_sm_ratio ∈ [0.1, 0.5]</li><li>计算 stream 仅使用分配的 SM 集合，不溢出到通信 SM</li><li>通信 stream 仅使用分配的 SM 集合，不溢出到计算 SM</li></ol></div><p data-req-description="分布式 MoE AllToAll dispatch：MoE 层 expert 分布在多 GPU 上，token 路由后需 AllToAll 通信将 token 发送到对应 expert 所在 GPU。支持三种 expert placement 策略：(1) Uniform — expert 均匀分配到各 GPU；(2) HotReplica — 热 expert 镜像到多 GPU，冷 expert 独占单 GPU；(3) Custom — 用户自定义 placement 映射。AllToAll 通信由 gllm-nccl 提供，dispatch 和 gather 各一次 AllToAll。">通信 SM 分区：GPU Stream 级 SM 分区，将一部分 SM 专用于 NCCL 通信 stream，另一部分专用于计算 stream。SM 分区比例由 comm_sm_ratio 配置（默认 0.3 = 30% SM 给通信）。分区通过 CUDA SM_MASK 或 HIP cooperative group 实现。确保通信和计算不争抢同一组 SM，避免资源竞争导致的性能抖动。</p><div data-criterion="SM 分区比例按动态配置生效：comm_sm_ratio ∈ [0.1, 0.5]">SM 分区比例按动态配置生效：comm_sm_ratio ∈ [0.1, 0.5]</div><div data-criterion="计算 stream 仅使用分配的 SM 集合，不溢出到通信 SM">计算 stream 仅使用分配的 SM 集合，不溢出到通信 SM</div><div data-criterion="通信 stream 仅使用分配的 SM 集合，不溢出到计算 SM">通信 stream 仅使用分配的 SM 集合，不溢出到计算 SM</div></div>
     </section>
 
     <section id="s5.2" data-section="5.2">
@@ -545,7 +545,7 @@
         </ul>
         <p><strong>关联 Entity</strong>: ENT-DIST-EPLB</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-004</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">EPLB 运行时重均衡：Expert-Parallel Load Balancer 监控各 expert 的 token 路由频率，当负载不均衡度超过阈值时触发 expert 重分布。热 expert 自动镜像到多 GPU（增加副本数），冷 expert 回收副本释放显存。重均衡过程：(1) ExpertThermalManager 统计路由频率 → (2) 计算重分布方案 → (3) 跨 GPU 传输 expert 权重 → (4) 更新路由表。前提：分布式 MoE 已实现（REQ-DIST-014）、ExpertThermalManager 已实现、expert 权重可跨 GPU 传输。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>ncclCommAbort 后 CommHandle 状态标记为 Aborted</li><li>Aborted 状态下所有通信操作返回错误而非 panic</li><li>超时后 NCCL 资源正确释放（无句柄泄漏）</li></ol></div><p data-req-description="EPLB 运行时重均衡：Expert-Parallel Load Balancer 监控各 expert 的 token 路由频率，当负载不均衡度超过阈值时触发 expert 重分布。热 expert 自动镜像到多 GPU（增加副本数），冷 expert 回收副本释放显存。重均衡过程：(1) ExpertThermalManager 统计路由频率 → (2) 计算重分布方案 → (3) 跨 GPU 传输 expert 权重 → (4) 更新路由表。">NCCL 通信容错：NCCL 通信超时检测与恢复。超时阈值由 nccl_timeout_ms 配置（默认 30s）。超时后执行 ncclCommAbort 强制中止当前通信，标记 CommHandle 为 Aborted 状态。恢复策略：尝试重建通信域（ncclCommInitRank），成功后 CommHandle 恢复为 Active 状态。重建失败则将该 rank 标记为 Failed，调度器排除该 rank。</p><div data-criterion="ncclCommAbort 后 CommHandle 状态标记为 Aborted">ncclCommAbort 后 CommHandle 状态标记为 Aborted</div><div data-criterion="Aborted 状态下所有通信操作返回错误而非 panic">Aborted 状态下所有通信操作返回错误而非 panic</div><div data-criterion="超时后 NCCL 资源正确释放（无句柄泄漏）">超时后 NCCL 资源正确释放（无句柄泄漏）</div></div>
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -582,7 +582,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-CP</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-006</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-005</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">Ring Attention Context Parallelism：将超长序列按 context_parallel_size 切分到多 GPU，每个 GPU 处理一段 sub-sequence。Ring Attention 算法：各 GPU 在本地 sub-sequence 上计算 attention，然后通过环形通信传递 KV block，每步计算一个 KV block 的 attention 贡献，cp_size 步后汇聚完整 attention 输出。通信模式：环形 send/recv（点对点），无集合通信开销。前提：CommHandle 支持 send/recv（点对点通信）、FlashAttention 已实现、序列长度 &gt; 单 GPU 可容纳的 max_seq_len。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>StridedAllReduce 融合单次 NCCL 调用完成多个连续 AllReduce</li><li>融合后通信延迟 &lt; 多次独立 AllReduce 延迟之和</li><li>融合不影响数值正确性（融合前后结果 bit-wise 一致）</li></ol></div><p data-req-description="Ring Attention Context Parallelism：将超长序列按 context_parallel_size 切分到多 GPU，每个 GPU 处理一段 sub-sequence。Ring Attention 算法：各 GPU 在本地 sub-sequence 上计算 attention，然后通过环形通信传递 KV block，每步计算一个 KV block 的 attention 贡献，cp_size 步后汇聚完整 attention 输出。通信模式：环形 send/recv（点对点），无集合通信开销。">通信融合优化：多个连续 AllReduce 操作融合为单次 NCCL 调用。融合条件：连续 AllReduce 的数据在内存中相邻（stride 一致），且中间无其他计算依赖。融合策略：StridedAllReduce — 将多个连续 buffer 拼接为单次 AllReduce 调用，减少 NCCL kernel launch 开销。编译器在 Fusion Pass 中识别融合机会，自动将连续 AllReduce VmInstr 合并。</p><div data-criterion="StridedAllReduce 融合单次 NCCL 调用完成多个连续 AllReduce">StridedAllReduce 融合单次 NCCL 调用完成多个连续 AllReduce</div><div data-criterion="融合后通信延迟 < 多次独立 AllReduce 延迟之和">融合后通信延迟 &lt; 多次独立 AllReduce 延迟之和</div><div data-criterion="融合不影响数值正确性（融合前后结果 bit-wise 一致）">融合不影响数值正确性（融合前后结果 bit-wise 一致）</div></div>
     </section>
 
     <section id="s6.2" data-section="6.2">
@@ -613,7 +613,7 @@
         <p><strong>关联 Entity</strong>: ENT-DIST-SAGUARO</p>
         <p><strong>关联 Dataflow</strong>: DF-DIST-006</p>
         <p><strong>关联 Controlflow</strong>: CF-DIST-005</p>
-      <div data-criteria=""><strong>验收标准：</strong><ol><li>TODO: 定义验收标准</li></ol></div><p data-req-description="">SAGUARO 分布式推测解码：Draft 模型和 Verify 模型部署在不同 GPU 上并行执行。Draft 模型生成候选 token 序列，Verify 模型并行验证。通信流程：Draft GPU 生成 tokens → send 到 Verify GPU → Verify GPU 并行验证 → 返回接受/拒绝结果 → Draft GPU 根据结果继续生成。SAGUARO 的核心优势：Draft 和 Verify 完全解耦，可使用不同硬件/不同模型大小，通信量仅为 token IDs（极小带宽）。前提：推测解码已实现（speculative/）、CommHandle 支持 send/recv、Draft 模型和 Verify 模型已加载到不同 GPU。</p></div>
+      <div data-criteria=""><strong>验收标准：</strong><ol><li>量化的模型在 TP 模式下精度与单 GPU 等价（困惑度差异 &lt; 0.1%）</li><li>量化激活值 AllReduce 后反量化结果与 BF16 AllReduce 结果误差 &lt; 0.01%</li><li>MoE ExpertParallel 通信正确性：各 rank expert 输出汇总后与单 GPU 等价</li></ol></div><p data-req-description="SAGUARO 分布式推测解码：Draft 模型和 Verify 模型部署在不同 GPU 上并行执行。Draft 模型生成候选 token 序列，Verify 模型并行验证。通信流程：Draft GPU 生成 tokens → send 到 Verify GPU → Verify GPU 并行验证 → 返回接受/拒绝结果 → Draft GPU 根据结果继续生成。SAGUARO 的核心优势：Draft 和 Verify 完全解耦，可使用不同硬件/不同模型大小，通信量仅为 token IDs（极小带宽）。">分布式精度对齐：确保分布式推理的数值精度与单 GPU 推理等价。对齐验证维度：(1) TP 权重分片后各 rank 的 Attention 输出 AllReduce 聚合结果与单 GPU 一致；(2) 量化激活值 AllReduce 后的反量化精度；(3) MoE ExpertParallel 的 expert 输出汇总正确性。验证方法：单 GPU golden vs 多 GPU distributed output，逐层对比 hidden_state，容差 &lt; 1e-3。</p><div data-criterion="量化的模型在 TP 模式下精度与单 GPU 等价（困惑度差异 < 0.1%）">量化的模型在 TP 模式下精度与单 GPU 等价（困惑度差异 &lt; 0.1%）</div><div data-criterion="量化激活值 AllReduce 后反量化结果与 BF16 AllReduce 结果误差 < 0.01%">量化激活值 AllReduce 后反量化结果与 BF16 AllReduce 结果误差 &lt; 0.01%</div><div data-criterion="MoE ExpertParallel 通信正确性：各 rank expert 输出汇总后与单 GPU 等价">MoE ExpertParallel 通信正确性：各 rank expert 输出汇总后与单 GPU 等价</div></div>
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════════ -->
