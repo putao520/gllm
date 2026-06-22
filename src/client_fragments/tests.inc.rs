@@ -218,6 +218,7 @@ mod error_config_tests {
     fn client_config_weight_paging_enabled() {
         let config = ClientConfig {
             weight_paging_enabled: true,
+            ..ClientConfig::default()
         };
         assert!(config.weight_paging_enabled);
     }

@@ -94,6 +94,15 @@ pub use intent_tracker::{
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
 
-pub use engine::arbiter::{ArbiterHwView, DeviceFamily, GraphArchetype, InferenceMode, StrategyArbiter, StrategyBias};
+pub use engine::arbiter::{ArbiterHwView, DeviceFamily, GraphArchetype, InferenceMode, StrategyArbiter, StrategyBias, StrategyBiasResolver};
+pub use engine::intent_bias::{IntentBias, OverlapHint, ScenarioHint};
+pub use engine::distributed_config::{
+    AllToAllStrategy, CommCompressHint, ExpertPlacement, KvDistMode, NodeRole, PdDisaggMode,
+};
+#[cfg(feature = "nccl")]
+pub use engine::distributed_config::{
+    CommConfig, DistributedConfig, KvDistributionConfig, MoeDistributedConfig, ParallelConfig,
+    PdDisaggConfig,
+};
 pub use engine::batch_executor::{GenerateRequest, GenerateResult};
 pub use graph::profile::{AttentionKind, FfnKind, GraphProfile, GraphProfiler, ResidualKind};

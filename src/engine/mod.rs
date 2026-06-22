@@ -19,6 +19,8 @@ pub mod mega_kernel_callback;
 pub mod mega_kernel_gpu;
 pub mod mtp_executor;
 pub mod callbacks;
+pub mod intent_bias;
+pub mod distributed_config;
 
 /// 引擎上下文。提供给各类 runtime hook 的引擎访问接口。
 ///

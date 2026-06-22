@@ -454,7 +454,7 @@ fn lower_op(prog: &amp;mut VmProgram, op: &amp;Op, sess: &amp;CompileSession) -&
 <li>enumeration_kind: enum (77+ variants)</li>
 <li>opcode_version: integer (=3)</li>
 </ul>
-<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="enumeration_kind" data-type="enum" data-required="true"><td>enumeration_kind</td><td>enum</td><td>是</td><td>77+ variants</td><td>唯一 IR 枚举变体（OpKind 已删除）</td></tr><tr data-field="opcode_version" data-type="integer" data-required="true"><td>opcode_version</td><td>integer</td><td>是</td><td>=3</td><td>OPCODE JIT cache 版本号 (OpKind 删除后 v3)</td></tr></table></div></section>
+<table data-entity-table=""><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr><tr data-field="enumeration_kind" data-type="enum[OpKind]" data-required="true"><td>enumeration_kind</td><td>enum[OpKind]</td><td>是</td><td>77+ variants</td><td>唯一 IR 枚举变体（OpKind 已删除）</td></tr><tr data-field="opcode_version" data-type="integer" data-required="true"><td>opcode_version</td><td>integer</td><td>是</td><td>=3</td><td>OPCODE JIT cache 版本号 (OpKind 删除后 v3)</td></tr></table></div></section>
 
 <section id="attentionspec" data-entity="AttentionSpec" data-req-ref="REQ-FATOP-002 REQ-FATOP-004 REQ-FATOP-005 REQ-FATOP-016 REQ-FATOP-017" data-entity-model-type="memory-layout" data-entity-ref="CompileSession GemmSpec NormSpec Op" data-xref="REQ-FATOP-002 REQ-FATOP-004 REQ-FATOP-005 REQ-FATOP-016 REQ-FATOP-017">
 <h3>Entity: AttentionSpec</h3>

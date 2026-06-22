@@ -6,6 +6,7 @@
 
 use gllm_kernels::dispatch::DeviceProfile;
 
+use crate::engine::intent_bias::{IntentBias, ScenarioHint};
 pub use crate::graph::profile::GraphArchetype;
 
 // ── InferenceMode (SPEC §2.1) ──────────────────────────────────────────────
@@ -201,6 +202,94 @@ impl StrategyArbiter {
         if l1_richness > 0.0 {
             bias.fusion_cost_scale *= 1.0 / l1_richness.sqrt();
         }
+    }
+
+    /// 带 IntentBias 的仲裁入口 (REQ-IB-005)
+    ///
+    /// 当 IntentBias 存在时走 StrategyBiasResolver::resolve() 三阶段管线，
+    /// 无 IntentBias 时走原有 arbitrate() 路径。
+    // @trace REQ-IB-005 [entity:ENT-STRATEGY-ARBITER] [api:POST /internal/strategy/arbitrate]
+    pub fn arbitrate_with_bias(
+        mode: InferenceMode,
+        archetype: &GraphArchetype,
+        hw: &ArbiterHwView,
+        intent_bias: &IntentBias,
+    ) -> StrategyBias {
+        StrategyBiasResolver::resolve(intent_bias, mode, archetype, hw)
+    }
+}
+
+// ── StrategyBiasResolver (REQ-IB-004) ──────────────────────────────────────
+
+/// StrategyBiasResolver — 意图偏好与自动推导合并管线 (REQ-IB-004)
+///
+/// 三阶段:
+/// 1. stage1_auto_bias: StrategyArbiter::arbitrate() 自动推导基线
+/// 2. stage2_scenario_override: IntentBias 字段覆盖基线
+/// 3. stage3_clamp_result: bias.validate() clamp 所有字段到合法范围
+pub struct StrategyBiasResolver;
+
+impl StrategyBiasResolver {
+    /// 三阶段合并入口 (REQ-IB-004)
+    ///
+    /// Stage 1: 自动推导基线 — 根据场景偏好选择 InferenceMode 基线，
+    ///          走完整仲裁管线 (mode_baseline + archetype_modulation + hardware_adjustment)。
+    /// Stage 2: IntentBias 字段覆盖 — scenario 调制系数、数值旋钮覆盖。
+    /// Stage 3: clamp 所有字段到合法范围 — bias.validate()。
+    // @trace REQ-IB-004 [entity:ENT-STRATEGY-BIAS] [api:POST /internal/strategy/resolve_bias]
+    // @trace REQ-IB-013 [dataflow:DF-IB-001] [from:API-CLIENT-INTENT] [to:ENT-STRATEGY-BIAS]
+    // @trace REQ-IB-014 [controlflow:CF-IB-001] [source:API-STRATEGY-ARBITRATE] [target:ENT-STRATEGY-BIAS]
+    pub fn resolve(
+        intent_bias: &IntentBias,
+        mode_fallback: InferenceMode,
+        archetype: &GraphArchetype,
+        hw: &ArbiterHwView,
+    ) -> StrategyBias {
+        // Stage 1: 自动推导基线
+        // scenario 决定 InferenceMode 基线：非 Auto 时用 scenario 映射，
+        // Auto 时使用调用方传入的 mode_fallback（保持现有推导链）
+        let mode_baseline = if intent_bias.scenario == ScenarioHint::Auto {
+            mode_fallback
+        } else {
+            intent_bias.scenario.inference_mode_baseline()
+        };
+        let mut bias = StrategyArbiter::arbitrate(mode_baseline, archetype, hw);
+
+        // Stage 2: IntentBias 字段覆盖
+
+        // 2a: scenario 调制系数 — 非 Auto 时应用各维度调制
+        if intent_bias.scenario != ScenarioHint::Auto {
+            bias.kv_cache_budget_scale *= intent_bias.scenario.kv_cache_budget_scale_mod();
+            bias.quantization_aggressiveness *= intent_bias.scenario.quantization_aggressiveness_mod();
+            bias.expert_prefetch_priority *= intent_bias.scenario.expert_prefetch_priority_mod();
+            bias.pipeline_cost_scale *= intent_bias.scenario.pipeline_cost_scale_mod();
+            // expert_eviction_aggressiveness 调制系数（MemoryConstrained = 1.5, 其余 = 1.0）
+            bias.expert_eviction_aggressiveness *= intent_bias.scenario.expert_eviction_aggressiveness_mod();
+            // fusion_cost_scale 与 pipeline_cost_scale 同调制
+            bias.fusion_cost_scale *= intent_bias.scenario.pipeline_cost_scale_mod();
+        }
+
+        // 2b: comm_overlap 覆盖 MkVariant 选择 + CommScheduleHint
+        // (通过 OverlapHint 映射表影响后续配置，不直接修改 StrategyBias 字段)
+        // OverlapHint 的映射在 MegaKernel 配置阶段消费，此处仅记录偏好
+
+        // 2c: decode_sm_ratio 覆盖 SmPartitionConfig
+        // (这个值在 MegaKernel 配置时使用，不存 StrategyBias)
+
+        // 2d: kv_budget_scale 覆盖 StrategyBias.kv_cache_budget_scale
+        if let Some(scale) = intent_bias.kv_budget_scale {
+            bias.kv_cache_budget_scale = scale as f64;
+        }
+
+        // 2e: quant_aggression 覆盖 StrategyBias.quantization_aggressiveness
+        if let Some(agg) = intent_bias.quant_aggression {
+            bias.quantization_aggressiveness = agg as f64;
+        }
+
+        // Stage 3: clamp 所有字段到合法范围
+        bias.validate();
+
+        bias
     }
 }
 
@@ -17859,6 +17948,239 @@ mod tests {
             throughput.kv_cache_budget_scale,
             latency.kv_cache_budget_scale
         );
+    }
+
+    // ── StrategyBiasResolver (REQ-IB-004) ──────────────────────────────────
+
+    #[test]
+    fn strategy_bias_resolver_auto_scenario_preserves_arbitrate() {
+        // When scenario=Auto, resolve should produce the same result as arbitrate
+        let intent = IntentBias::default(); // scenario=Auto
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Latency, &arch, &hw);
+        let direct = StrategyArbiter::arbitrate(InferenceMode::Latency, &arch, &hw);
+
+        assert_approx(resolved.kv_cache_budget_scale, direct.kv_cache_budget_scale, 0.01);
+        assert_approx(resolved.quantization_aggressiveness, direct.quantization_aggressiveness, 0.01);
+        assert_approx(resolved.pipeline_cost_scale, direct.pipeline_cost_scale, 0.01);
+        assert_approx(resolved.expert_prefetch_priority, direct.expert_prefetch_priority, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_latency_critical_overrides_baseline() {
+        // LatencyCritical should force InferenceMode::Latency baseline
+        let intent = IntentBias {
+            scenario: ScenarioHint::LatencyCritical,
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Throughput, &arch, &hw);
+        let latency_direct = StrategyArbiter::arbitrate(InferenceMode::Latency, &arch, &hw);
+
+        // LatencyCritical uses Latency baseline, modulation coefficients are all 1.0
+        assert_approx(resolved.kv_cache_budget_scale, latency_direct.kv_cache_budget_scale, 0.01);
+        assert_approx(resolved.quantization_aggressiveness, latency_direct.quantization_aggressiveness, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_long_context_modulation() {
+        // LongContext: Latency baseline + kv_cache_budget_scale *= 1.5 + quantization_aggressiveness *= 0.7
+        let intent = IntentBias {
+            scenario: ScenarioHint::LongContext,
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Latency, &arch, &hw);
+        let latency_baseline = StrategyArbiter::arbitrate(InferenceMode::Latency, &arch, &hw);
+
+        // kv_cache_budget_scale should be 1.5x baseline (after clamp)
+        let expected_kv = (latency_baseline.kv_cache_budget_scale * 1.5).clamp(0.2, 3.0);
+        assert_approx(resolved.kv_cache_budget_scale, expected_kv, 0.01);
+
+        // quantization_aggressiveness should be 0.7x baseline (after clamp)
+        let expected_quant = (latency_baseline.quantization_aggressiveness * 0.7).clamp(0.3, 3.0);
+        assert_approx(resolved.quantization_aggressiveness, expected_quant, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_kv_budget_scale_override() {
+        // kv_budget_scale=Some(2.0) should directly override StrategyBias.kv_cache_budget_scale
+        let intent = IntentBias {
+            scenario: ScenarioHint::Auto,
+            kv_budget_scale: Some(2.0),
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Latency, &arch, &hw);
+        // 2.0 is within [0.2, 3.0] clamp range, so should be exactly 2.0
+        assert_approx(resolved.kv_cache_budget_scale, 2.0, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_quant_aggression_override() {
+        // quant_aggression=Some(0.5) should directly override StrategyBias.quantization_aggressiveness
+        let intent = IntentBias {
+            scenario: ScenarioHint::Auto,
+            quant_aggression: Some(0.5),
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Latency, &arch, &hw);
+        // 0.5 is within [0.3, 3.0] clamp range, so should be exactly 0.5
+        assert_approx(resolved.quantization_aggressiveness, 0.5, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_distributed_heavy_modulation() {
+        // DistributedHeavy: Throughput baseline + expert_prefetch_priority *= 2.0 + pipeline_cost_scale *= 0.6
+        let intent = IntentBias {
+            scenario: ScenarioHint::DistributedHeavy,
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Throughput, &arch, &hw);
+        let throughput_baseline = StrategyArbiter::arbitrate(InferenceMode::Throughput, &arch, &hw);
+
+        // expert_prefetch_priority should be 2.0x baseline (after clamp)
+        let expected_prefetch = (throughput_baseline.expert_prefetch_priority * 2.0).clamp(0.1, 5.0);
+        assert_approx(resolved.expert_prefetch_priority, expected_prefetch, 0.01);
+
+        // pipeline_cost_scale should be 0.6x baseline (after clamp)
+        let expected_pipeline = (throughput_baseline.pipeline_cost_scale * 0.6).clamp(0.2, 3.0);
+        assert_approx(resolved.pipeline_cost_scale, expected_pipeline, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_memory_constrained_modulation() {
+        // MemoryConstrained: Throughput baseline + kv *= 0.7, quant *= 1.5, eviction *= 1.5
+        let intent = IntentBias {
+            scenario: ScenarioHint::MemoryConstrained,
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Throughput, &arch, &hw);
+        let throughput_baseline = StrategyArbiter::arbitrate(InferenceMode::Throughput, &arch, &hw);
+
+        // kv_cache_budget_scale should be 0.7x baseline (after clamp)
+        let expected_kv = (throughput_baseline.kv_cache_budget_scale * 0.7).clamp(0.2, 3.0);
+        assert_approx(resolved.kv_cache_budget_scale, expected_kv, 0.01);
+
+        // quantization_aggressiveness should be 1.5x baseline (after clamp)
+        let expected_quant = (throughput_baseline.quantization_aggressiveness * 1.5).clamp(0.3, 3.0);
+        assert_approx(resolved.quantization_aggressiveness, expected_quant, 0.01);
+
+        // expert_eviction_aggressiveness should be 1.5x baseline (after clamp)
+        let expected_eviction = (throughput_baseline.expert_eviction_aggressiveness * 1.5).clamp(0.0, 2.0);
+        assert_approx(resolved.expert_eviction_aggressiveness, expected_eviction, 0.01);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_arbitrate_with_bias_entry() {
+        // StrategyArbiter::arbitrate_with_bias should delegate to StrategyBiasResolver::resolve
+        let intent = IntentBias {
+            scenario: ScenarioHint::LongContext,
+            kv_budget_scale: Some(1.5),
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let via_arbiter = StrategyArbiter::arbitrate_with_bias(InferenceMode::Latency, &arch, &hw, &intent);
+        let via_resolver = StrategyBiasResolver::resolve(&intent, InferenceMode::Latency, &arch, &hw);
+
+        // Both paths must produce identical results
+        assert_approx(via_arbiter.kv_cache_budget_scale, via_resolver.kv_cache_budget_scale, 0.001);
+        assert_approx(via_arbiter.quantization_aggressiveness, via_resolver.quantization_aggressiveness, 0.001);
+        assert_approx(via_arbiter.pipeline_cost_scale, via_resolver.pipeline_cost_scale, 0.001);
+        assert_approx(via_arbiter.expert_prefetch_priority, via_resolver.expert_prefetch_priority, 0.001);
+    }
+
+    #[test]
+    fn strategy_bias_resolver_combined_scenario_and_knobs() {
+        // Combined: LongContext scenario + kv_budget_scale + quant_aggression overrides
+        let intent = IntentBias {
+            scenario: ScenarioHint::LongContext,
+            kv_budget_scale: Some(2.0),
+            quant_aggression: Some(0.5),
+            ..Default::default()
+        };
+        let arch = GraphArchetype {
+            compute_intensive: 0.5,
+            memory_intensive: 0.3,
+            parallelism_exploitable: 0.4,
+            fusion_profitable: 0.5,
+            pipeline_valuable: 0.5,
+        };
+        let hw = cpu_avx512();
+
+        let resolved = StrategyBiasResolver::resolve(&intent, InferenceMode::Latency, &arch, &hw);
+
+        // kv_budget_scale override should take precedence over scenario modulation
+        assert_approx(resolved.kv_cache_budget_scale, 2.0, 0.01);
+        // quant_aggression override should take precedence over scenario modulation
+        assert_approx(resolved.quantization_aggressiveness, 0.5, 0.01);
     }
 
 }

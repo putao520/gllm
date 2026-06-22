@@ -88,18 +88,46 @@ impl From<crate::model_config::ModelConfigError> for ClientError {
 ///
 /// Controls the compression codec and storage tier behavior for KV cache
 /// pages and weight pages. When `None`, the system uses default codec
-/// Public configuration struct for the gllm Client (SPEC 21-WEIGHT-PAGING §9).
+/// Public configuration struct for the gllm Client (SPEC 21-WEIGHT-PAGING §9,
+/// REQ-IB-012).
 ///
 /// Controls global Client-level options. Passed to `ClientBuilder` via
 /// builder methods and consumed during `build_state()`.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClientConfig {
     /// Enable weight paging for mega-kernel JIT (SPEC/21 §8).
     ///
     /// When `true`, the JIT compiler injects page fault detection and prefetch
     /// trigger instructions at weight access points. Default: `false`.
     pub weight_paging_enabled: bool,
+    /// 用户意图偏好配置 (REQ-IB-001)
+    pub intent_bias: crate::engine::intent_bias::IntentBias,
+    /// 分布式推理配置 (REQ-IB-006)，nccl feature-gated
+    #[cfg(feature = "nccl")]
+    pub distributed: crate::engine::distributed_config::DistributedConfig,
+}
+
+// @trace REQ-IB-012 [entity:ENT-CLIENT-CONFIG] [api:POST /internal/client/config]
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            weight_paging_enabled: false,
+            intent_bias: crate::engine::intent_bias::IntentBias::default(),
+            #[cfg(feature = "nccl")]
+            distributed: crate::engine::distributed_config::DistributedConfig::default(),
+        }
+    }
+}
+
+#[cfg(not(feature = "nccl"))]
+impl ClientConfig {
+    /// 创建仅含 intent_bias 的 ClientConfig（非 nccl 构建路径）
+    pub fn new(intent_bias: crate::engine::intent_bias::IntentBias) -> Self {
+        Self {
+            weight_paging_enabled: false,
+            intent_bias,
+        }
+    }
 }
 
 
