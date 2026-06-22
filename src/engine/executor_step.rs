@@ -132,6 +132,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let moe_dispatch_plan = self.moe_dispatch_and_prefetch();
 
+        // REQ-DIST-014/015: Distributed MoE dispatch + EPLB check.
+        // @trace REQ-DIST-014 [entity:ENT-DIST-MOE-DISPATCH] [lifecycle:step]
+        // @trace REQ-DIST-015 [entity:ENT-DIST-EPLB] [lifecycle:step]
+        self.moe_distributed_dispatch_step(&moe_dispatch_plan);
+
         self.update_histogram_and_compact(&batch_input, l1_ratio, concurrent, &dispatch_plan);
 
         // 4. Run Backend Forward
@@ -676,6 +681,199 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         moe_dispatch_plan
+    }
+
+    /// REQ-DIST-014/015: Distributed MoE dispatch + EPLB check.
+    ///
+    /// When running in distributed mode with MoE, this method:
+    /// 1. Records expert invocations into ExpertLoadStats (REQ-DIST-015)
+    /// 2. Checks if EPLB window expired and triggers rebalance if needed (REQ-DIST-015)
+    /// 3. Performs cross-GPU AllToAll dispatch if MoeDistDecision requires it (REQ-DIST-014)
+    ///
+    /// Single-node mode: no-op (all logic is nccl-feature-gated).
+    // @trace REQ-DIST-014 [entity:ENT-DIST-MOE-DISPATCH] [lifecycle:step]
+    // @trace REQ-DIST-015 [entity:ENT-DIST-EPLB] [lifecycle:step]
+    #[cfg(feature = "nccl")]
+    fn moe_distributed_dispatch_step(
+        &mut self,
+        moe_dispatch_plan: &Option<crate::moe::dispatch::MoeDispatchPlan>,
+    ) {
+        // ── REQ-DIST-015: Record expert invocations into ExpertLoadStats ──
+        if let (Some(ref plan), Some(ref mut stats)) =
+            (moe_dispatch_plan, &mut self.inference.expert_load_stats)
+        {
+            // Record GPU-routed experts
+            for assignment in &plan.gpu_experts {
+                stats.record_invocation(assignment.expert_idx);
+            }
+            // Record CPU-routed experts
+            for assignment in &plan.cpu_experts {
+                stats.record_invocation(assignment.expert_idx);
+            }
+        }
+
+        // ── REQ-DIST-015: EPLB window check + rebalance ──
+        // Borrow comm_handle separately from inference fields to avoid borrow conflicts.
+        if self.model_ctx.comm_handle.is_some() {
+            let comm_handle_ref = self.model_ctx.comm_handle.as_ref().unwrap();
+            if let (Some(ref mut stats), Some(ref mut decision)) =
+                (&mut self.inference.expert_load_stats, &mut self.inference.moe_dist_decision)
+            {
+                if stats.is_window_expired() {
+                    // Aggregate stats from all ranks for global view
+                    if let Err(e) = stats.aggregate_from_all_ranks(comm_handle_ref) {
+                        log::warn!(
+                            "executor: REQ-DIST-015 EPLB aggregate failed: {} — using local stats only",
+                            e,
+                        );
+                    }
+
+                    let threshold = self.inference.eplb_imbalance_threshold;
+                    let eplb_decision = crate::moe::eplb::eplb::should_rebalance(
+                        stats, comm_handle_ref, threshold,
+                    );
+
+                    if eplb_decision.needs_rebalance {
+                        log::info!(
+                            "executor: REQ-DIST-015 EPLB rebalance triggered — hot_experts={:?}, cold_experts={:?}, imbalance_ratio={:.2}",
+                            &eplb_decision.hot_expert_ids[..eplb_decision.hot_expert_ids.len().min(8)],
+                            &eplb_decision.cold_expert_ids[..eplb_decision.cold_expert_ids.len().min(8)],
+                            stats.imbalance_ratio(),
+                        );
+
+                        // REQ-DIST-015: Update HotCold placement with EPLB results.
+                        // Hot experts are mirrored to all GPUs; cold experts stay on single GPU.
+                        // This drives update_hot_cold_counts which only affects HotCold placement.
+                        let hot_count = eplb_decision.hot_expert_ids.len();
+                        let cold_count = eplb_decision.cold_expert_ids.len();
+                        decision.update_hot_cold_counts(hot_count, cold_count);
+
+                        log::info!(
+                            "executor: REQ-DIST-015 EPLB updated HotCold — hot_count={}, cold_count={}",
+                            hot_count, cold_count,
+                        );
+                    }
+
+                    // Reset window for next measurement period
+                    stats.reset_window();
+                }
+            }
+        }
+
+        // ── REQ-DIST-014: Cross-GPU AllToAll dispatch ──
+        if let (Some(ref decision), Some(ref plan)) =
+            (&self.inference.moe_dist_decision, moe_dispatch_plan)
+        {
+            if decision.needs_cross_gpu_dispatch() {
+                if let Some(ref comm_handle) = self.model_ctx.comm_handle {
+                    // Build token_indices and expert_ids from the dispatch plan
+                    let mut token_indices: Vec<u32> = Vec::new();
+                    let mut expert_ids: Vec<u32> = Vec::new();
+
+                    for assignment in &plan.gpu_experts {
+                        token_indices.push(assignment.token_count as u32);
+                        expert_ids.push(assignment.expert_idx as u32);
+                    }
+                    for assignment in &plan.cpu_experts {
+                        // CPU experts are local — assign token_count=0 for dispatch purposes
+                        token_indices.push(0);
+                        expert_ids.push(assignment.expert_idx as u32);
+                    }
+
+                    if !token_indices.is_empty() {
+                        match decision.dispatch_experts(&token_indices, &expert_ids, comm_handle) {
+                            Ok(mut dispatch_result) => {
+                                // REQ-DIST-014: Exchange send/recv counts via AllGather
+                                if let Err(e) = decision.all_to_all_exchange_counts(&mut dispatch_result, comm_handle) {
+                                    log::warn!(
+                                        "executor: REQ-DIST-014 AllToAll exchange counts failed: {}",
+                                        e,
+                                    );
+                                } else {
+                                    log::debug!(
+                                        "executor: REQ-DIST-014 AllToAll dispatch — send_counts={:?}, recv_counts={:?}",
+                                        &dispatch_result.send_counts,
+                                        &dispatch_result.recv_counts,
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "executor: REQ-DIST-014 dispatch_experts failed: {} — falling back to local dispatch",
+                                    e,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "nccl"))]
+    fn moe_distributed_dispatch_step(
+        &mut self,
+        _moe_dispatch_plan: &Option<crate::moe::dispatch::MoeDispatchPlan>,
+    ) {
+        // No-op without nccl feature
+    }
+
+    // ── REQ-DIST-007/008: TP Communication Scheduling ──
+
+    /// Resolve CommScheduleDecision from distributed config and execute
+    /// TP AllReduce with the selected communication strategy.
+    ///
+    /// This is the Host-side TP communication scheduling point. Called after
+    /// the forward pass completes, when tensor-parallel layers need to
+    /// synchronize their partial results across ranks.
+    ///
+    /// The scheduling decision is resolved from `CommConfig.overlap` (OverlapHint),
+    /// which was set during `init_distributed()` from `Client.distributed()` config.
+    /// - OverlapHint::ForceDoubleBuffer → DoubleBuffer (REQ-DIST-007)
+    /// - OverlapHint::ForceFlux → FluxDecompose (REQ-DIST-008)
+    /// - Other → StandardAllReduce
+    ///
+    /// In single-node mode (no comm_handle), this is a no-op.
+    ///
+    /// Note: In the Mega-Kernel execution model, TP communication is typically
+    /// handled by GPU kernel AllReduceChunk VmInstr. This Host-side method
+    /// serves as the fallback for Host-initiated AllReduce and for testing
+    /// the scheduling decision pipeline end-to-end.
+    // @trace REQ-DIST-007 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-003]
+    // @trace REQ-DIST-008 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-004]
+    #[cfg(feature = "nccl")]
+    pub fn tp_comm_scheduled_reduce(
+        &mut self,
+        buffer: &mut [f32],
+    ) -> Result<(), String> {
+        let comm_handle = match self.model_ctx.comm_handle.as_ref() {
+            Some(h) => h,
+            None => return Ok(()), // single-node, no TP needed
+        };
+
+        let comm_config = match self.model_ctx.comm_config.as_ref() {
+            Some(c) => c,
+            None => {
+                // No comm config = no overlap hint → StandardAllReduce
+                return self.compute.tp_all_reduce(buffer, comm_handle);
+            }
+        };
+
+        let schedule = super::coordinator::comm_schedule::comm_schedule::resolve_comm_schedule(
+            comm_config,
+            comm_handle,
+        );
+
+        self.compute.tp_all_reduce_scheduled(buffer, comm_handle, &schedule)
+    }
+
+    /// No-op stub for single-node builds without nccl feature.
+    #[cfg(not(feature = "nccl"))]
+    pub fn tp_comm_scheduled_reduce(
+        &mut self,
+        _buffer: &mut [f32],
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     fn build_sequences(
