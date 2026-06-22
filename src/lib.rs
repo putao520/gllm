@@ -107,7 +107,16 @@ pub use engine::distributed_config::{
 #[cfg(feature = "nccl")]
 pub use engine::pipeline::config::{PipelineConfig, PipelineConfigError};
 #[cfg(feature = "nccl")]
-pub use engine::pipeline::topology::{Topology2D, Topology2DError};
+pub use engine::pipeline::topology::{Topology2D, Topology2DError, Topology3D, Topology3DError};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::micro_batch::{
+    MicroBatch, MicroBatchScheduler, MicroBatchSchedulerError,
+    InterleavedScheduler, InterleavedSchedulerError, InterleavedScheduleStep, SchedulePhase,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::activation_xfer::{
+    ActivationTransport, ActivationTransportError, ActivationDirection,
+};
 #[cfg(feature = "nccl")]
 pub use loader::weight_shard::{
     is_shared_weight, extract_layer_index, should_load_weight_for_stage, filter_weights_by_stage,
