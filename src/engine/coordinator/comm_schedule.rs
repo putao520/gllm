@@ -1,4 +1,4 @@
-//! 通信调度与算法选择 (REQ-DIST-008, REQ-DIST-009, REQ-DIST-010)
+//! 通信调度与算法选择 (REQ-DIST-007, REQ-DIST-008, REQ-DIST-009, REQ-DIST-010)
 //!
 //! 当 `nccl` feature 启用时，本模块提供：
 //! - CommScheduleDecision: 通信-计算重叠调度决策
@@ -10,31 +10,63 @@ pub mod comm_schedule {
     use crate::engine::distributed_config::{CommConfig, CommHandleWrapper};
     use crate::engine::intent_bias::OverlapHint;
 
-    // ─── L2-2: 通信调度决策 (REQ-DIST-008) ───
+    // ─── L2-2: 通信调度决策 (REQ-DIST-007, REQ-DIST-008) ───
 
-    /// 通信调度决策 (REQ-DIST-008)
+    /// 通信调度决策 (REQ-DIST-007, REQ-DIST-008)
+    /// 也用于 REQ-DIST-005 TP AllReduce 通信调度
+    // @trace REQ-DIST-005 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-001]
+    // @trace REQ-DIST-007 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-003]
+    // @trace REQ-DIST-008 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-004]
     #[derive(Debug, Clone, PartialEq)]
     pub enum CommScheduleDecision {
         /// 标准 AllReduce，无特殊调度
         StandardAllReduce,
-        /// 双缓冲重叠：通信和计算交替进行
+        /// 双缓冲重叠 (REQ-DIST-007)：通信和计算交替进行
+        /// comm_sm_ratio 指定通信 SM 占总 SM 的比例（0.0~1.0）
         DoubleBuffer {
             /// 通信 SM 占比
             comm_sm_ratio: f32,
         },
-        /// FLUX 分解：AllReduce → ReduceScatter + LocalCompute + AllGather
+        /// FLUX 分解 (REQ-DIST-008)：AllReduce → ReduceScatter + LocalCompute + AllGather
+        /// ring_size 通常 = world_size
         FluxDecompose {
             /// Ring 大小（通常 = world_size）
             ring_size: u32,
         },
+        /// 列并行通信 (REQ-DIST-006)：DownProj 后 ReduceScatter；AllGather 前置到下一层 QKV
+        ColumnParallel {
+            /// 列并行通信策略
+            strategy: ColumnParallelStrategy,
+        },
+    }
+
+    /// 列并行通信策略 (REQ-DIST-006)
+    ///
+    /// 描述列并行层使用的通信原语：
+    /// - `ReduceScatter`：DownProj 后，将各 rank 的部分结果按列分片求和聚合
+    /// - `AllGather`：下一层 QKV 前，将各 rank 的分片聚合为完整结果
+    // @trace REQ-DIST-006 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-003]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ColumnParallelStrategy {
+        /// ReduceScatter：DownProj 后调用，将各 rank 部分结果按列分片求和
+        ReduceScatter,
+        /// AllGather：下一层 QKV 前调用，将各 rank 分片聚合为完整结果
+        AllGather,
     }
 
     impl CommScheduleDecision {
-        /// 生成通信计划 (CommPlan) 用于实际的通信执行
+        /// 生成通信计划 (CommPlan) 用于实际的通信执行 (REQ-DIST-007, REQ-DIST-008)
         ///
-        /// 对于 FluxDecompose 模式，调用 gllm-nccl `lower_to_comm_plan()`
-        /// 生成 ReduceScatter + LocalCompute + AllGather 的完整通信计划。
-        /// 对于其他模式，返回 None（使用标准 AllReduce 路径）。
+        /// - DoubleBuffer (REQ-DIST-007): 调用 gllm-nccl `lower_to_comm_plan()` 生成
+        ///   带 `OverlapMode::DoubleBuffer` 调度提示的 CommPlan。通信 stream 与计算
+        ///   stream 并行执行，Layer N 通信与 Layer N+1 计算重叠。
+        /// - FluxDecompose (REQ-DIST-008): 调用 gllm-nccl `lower_to_comm_plan()` 生成
+        ///   ReduceScatter + LocalCompute + AllGather 三阶段流水线 CommPlan。
+        /// - ColumnParallel (REQ-DIST-006): ReduceScatter/AllGather 通过
+        ///   CommHandleWrapper 直接执行，不走 CommPlan 路径。
+        /// - StandardAllReduce: 返回 None（使用标准 AllReduce 路径）。
+        // @trace REQ-DIST-007 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-004]
+        // @trace REQ-DIST-008 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-005]
         pub fn build_comm_plan(
             &self,
             topology: &gllm_nccl::Topology,
@@ -46,10 +78,15 @@ pub mod comm_schedule {
             total_sms: u32,
         ) -> Option<Result<gllm_nccl::comm_ir::CommPlan, String>> {
             match self {
-                Self::StandardAllReduce | Self::DoubleBuffer { .. } => None,
-                Self::FluxDecompose { .. } => {
-                    // FluxDecompose: 调用 gllm-nccl lower_to_comm_plan
-                    // 自动选择算法（FluxPipeline if topology supports it）
+                Self::StandardAllReduce => None,
+                Self::DoubleBuffer { comm_sm_ratio } => {
+                    // REQ-DIST-007: DoubleBuffer 双缓冲通信-计算重叠。
+                    // 调用 gllm-nccl lower_to_comm_plan 生成基础 CommPlan，
+                    // 然后覆写 schedule 为 DoubleBuffer 模式：
+                    // - overlap_mode = DoubleBuffer（通信/计算交替）
+                    // - buffer_slots = 2（双缓冲）
+                    // - comm_trigger = ConcurrentWithCompute（通信与计算并发触发）
+                    // - min_tile_bytes = msg_bytes / world_size（按 rank 分片粒度）
                     let result = gllm_nccl::lower::lower_to_comm_plan(
                         topology,
                         gllm_nccl::CollectiveOp::AllReduce,
@@ -60,14 +97,68 @@ pub mod comm_schedule {
                         world_size,
                         total_sms,
                     )
-                    .map_err(|e| format!("lower_to_comm_plan failed: {:?}", e));
+                    .map(|mut plan| {
+                        // 覆写调度提示为 DoubleBuffer 模式
+                        plan.schedule = gllm_nccl::comm_ir::CommScheduleHint {
+                            overlap_mode: gllm_nccl::comm_ir::OverlapMode::DoubleBuffer,
+                            buffer_slots: 2,
+                            comm_trigger: gllm_nccl::comm_ir::CommTrigger::ConcurrentWithCompute,
+                            min_tile_bytes: msg_bytes as u64 / world_size.max(1) as u64,
+                        };
+                        log::trace!(
+                            "[comm_schedule] REQ-DIST-007: DoubleBuffer CommPlan generated — \
+                             comm_sm_ratio={:.2}, buffer_slots=2, overlap=DoubleBuffer, \
+                             min_tile_bytes={}, rank={}, world_size={}",
+                            comm_sm_ratio,
+                            msg_bytes as u64 / world_size.max(1) as u64,
+                            rank,
+                            world_size,
+                        );
+                        plan
+                    })
+                    .map_err(|e| format!("DoubleBuffer lower_to_comm_plan failed: {:?}", e));
                     Some(result)
                 }
+                Self::FluxDecompose { ring_size } => {
+                    // REQ-DIST-008: FluxDecompose FLUX 分解调度。
+                    // 调用 gllm-nccl lower_to_comm_plan，当拓扑支持 FluxPipeline 时
+                    // 自动选择 flux_decompose() 生成三阶段流水线：
+                    // ReduceScatter → LocalCompute → AllGather
+                    let result = gllm_nccl::lower::lower_to_comm_plan(
+                        topology,
+                        gllm_nccl::CollectiveOp::AllReduce,
+                        dtype,
+                        reduce_op,
+                        msg_bytes,
+                        rank,
+                        world_size,
+                        total_sms,
+                    )
+                    .map(|plan| {
+                        log::trace!(
+                            "[comm_schedule] REQ-DIST-008: FluxDecompose CommPlan generated — \
+                             ring_size={}, overlap={:?}, buffer_slots={}, nodes={}, \
+                             rank={}, world_size={}",
+                            ring_size,
+                            plan.schedule.overlap_mode,
+                            plan.schedule.buffer_slots,
+                            plan.nodes.len(),
+                            rank,
+                            world_size,
+                        );
+                        plan
+                    })
+                    .map_err(|e| format!("FluxDecompose lower_to_comm_plan failed: {:?}", e));
+                    Some(result)
+                }
+                // ColumnParallel (REQ-DIST-006): ReduceScatter/AllGather 通过
+                // CommHandleWrapper 直接执行，不生成 CommPlan。
+                Self::ColumnParallel { .. } => None,
             }
         }
     }
 
-    /// 根据通信配置和硬件状态决定通信调度策略 (REQ-DIST-008)
+    /// 根据通信配置和硬件状态决定通信调度策略 (REQ-DIST-007, REQ-DIST-008)
     ///
     /// 决策逻辑：
     /// - 单机模式 → StandardAllReduce
@@ -75,6 +166,8 @@ pub mod comm_schedule {
     /// - ForceDoubleBuffer → DoubleBuffer（comm_sm_ratio = 0.3）
     /// - Auto/PreferOverlap/PreferIsolated → StandardAllReduce
     ///   （未来可根据拓扑信息自动选择 DoubleBuffer 或 FluxDecompose）
+    // @trace REQ-DIST-007 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-003]
+    // @trace REQ-DIST-008 [entity:ENT-DIST-TP-COMM] [controlflow:CF-DIST-004]
     pub fn resolve_comm_schedule(
         comm_config: &CommConfig,
         comm_handle: &CommHandleWrapper,
@@ -94,6 +187,24 @@ pub mod comm_schedule {
                 ring_size: comm_handle.world_size(),
             },
         }
+    }
+
+    /// 列并行层通信调度决策 (REQ-DIST-006)
+    ///
+    /// 根据层类型决定列并行通信使用 ReduceScatter 还是 AllGather：
+    /// - DownProj 后 → ReduceScatter：各 rank 的部分结果按列分片求和聚合
+    /// - QKV 前置 → AllGather：将各 rank 分片聚合为完整结果
+    ///
+    /// 当 `tp_size == 1` 时返回 None（单机无需列并行通信）。
+    // @trace REQ-DIST-006 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-003] [controlflow:CF-DIST-002]
+    pub fn resolve_column_parallel_schedule(
+        tp_size: u32,
+        strategy: ColumnParallelStrategy,
+    ) -> Option<CommScheduleDecision> {
+        if tp_size <= 1 {
+            return None;
+        }
+        Some(CommScheduleDecision::ColumnParallel { strategy })
     }
 
     // ─── L2-3: 量化通信决策 (REQ-DIST-009) ───
@@ -374,6 +485,165 @@ pub mod comm_schedule {
             // but still returns a valid CommPlan
             let plan = result.unwrap();
             assert!(plan.is_ok());
+        }
+
+        // ─── REQ-DIST-007: DoubleBuffer build_comm_plan 测试 ───
+
+        #[test]
+        fn double_buffer_returns_some_plan() {
+            let decision = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let result = decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                512 * 1024, 0, 4, 0
+            );
+            assert!(result.is_some());
+            let plan = result.unwrap();
+            assert!(plan.is_ok());
+        }
+
+        #[test]
+        fn double_buffer_plan_has_double_buffer_overlap_mode() {
+            let decision = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let result = decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                512 * 1024, 0, 4, 0
+            );
+            let plan = result.unwrap().unwrap();
+            assert_eq!(plan.schedule.overlap_mode, gllm_nccl::comm_ir::OverlapMode::DoubleBuffer);
+        }
+
+        #[test]
+        fn double_buffer_plan_has_two_buffer_slots() {
+            let decision = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let result = decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                512 * 1024, 0, 4, 0
+            );
+            let plan = result.unwrap().unwrap();
+            assert_eq!(plan.schedule.buffer_slots, 2);
+        }
+
+        #[test]
+        fn double_buffer_plan_has_concurrent_trigger() {
+            let decision = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let result = decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                512 * 1024, 0, 4, 0
+            );
+            let plan = result.unwrap().unwrap();
+            assert_eq!(plan.schedule.comm_trigger, gllm_nccl::comm_ir::CommTrigger::ConcurrentWithCompute);
+        }
+
+        #[test]
+        fn double_buffer_plan_min_tile_bytes_divided_by_world_size() {
+            let decision = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let msg_bytes = 512 * 1024;
+            let result = decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                msg_bytes, 0, 4, 0
+            );
+            let plan = result.unwrap().unwrap();
+            assert_eq!(plan.schedule.min_tile_bytes, msg_bytes as u64 / 4);
+        }
+
+        #[test]
+        fn double_buffer_plan_preserves_allreduce_op() {
+            let decision = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            let result = decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                512 * 1024, 0, 4, 0
+            );
+            let plan = result.unwrap().unwrap();
+            assert_eq!(plan.op, gllm_nccl::comm_ir::CommOp::AllReduce);
+        }
+
+        // ─── ColumnParallel (REQ-DIST-006) 测试 ───
+
+        #[test]
+        fn column_parallel_reduce_scatter_decision() {
+            let decision = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::ReduceScatter,
+            };
+            assert_eq!(
+                decision,
+                CommScheduleDecision::ColumnParallel {
+                    strategy: ColumnParallelStrategy::ReduceScatter
+                }
+            );
+        }
+
+        #[test]
+        fn column_parallel_all_gather_decision() {
+            let decision = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::AllGather,
+            };
+            assert_eq!(
+                decision,
+                CommScheduleDecision::ColumnParallel {
+                    strategy: ColumnParallelStrategy::AllGather
+                }
+            );
+        }
+
+        #[test]
+        fn column_parallel_build_comm_plan_returns_none() {
+            // ColumnParallel 不走 CommPlan 路径
+            let decision = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::ReduceScatter,
+            };
+            let topo = gllm_nccl::topology::make_test_topology(4, true);
+            assert!(decision.build_comm_plan(
+                &topo, gllm_nccl::DType::Fp32, gllm_nccl::ReduceOp::Sum,
+                1024, 0, 4, 0
+            ).is_none());
+        }
+
+        #[test]
+        fn resolve_column_parallel_schedule_tp1_returns_none() {
+            assert!(resolve_column_parallel_schedule(1, ColumnParallelStrategy::ReduceScatter).is_none());
+            assert!(resolve_column_parallel_schedule(1, ColumnParallelStrategy::AllGather).is_none());
+        }
+
+        #[test]
+        fn resolve_column_parallel_schedule_tp0_returns_none() {
+            assert!(resolve_column_parallel_schedule(0, ColumnParallelStrategy::ReduceScatter).is_none());
+        }
+
+        #[test]
+        fn resolve_column_parallel_schedule_tp2_reduce_scatter() {
+            let result = resolve_column_parallel_schedule(2, ColumnParallelStrategy::ReduceScatter);
+            assert!(result.is_some());
+            assert_eq!(
+                result.unwrap(),
+                CommScheduleDecision::ColumnParallel {
+                    strategy: ColumnParallelStrategy::ReduceScatter
+                }
+            );
+        }
+
+        #[test]
+        fn resolve_column_parallel_schedule_tp4_all_gather() {
+            let result = resolve_column_parallel_schedule(4, ColumnParallelStrategy::AllGather);
+            assert!(result.is_some());
+            assert_eq!(
+                result.unwrap(),
+                CommScheduleDecision::ColumnParallel {
+                    strategy: ColumnParallelStrategy::AllGather
+                }
+            );
+        }
+
+        #[test]
+        fn column_parallel_strategy_equality() {
+            assert_eq!(ColumnParallelStrategy::ReduceScatter, ColumnParallelStrategy::ReduceScatter);
+            assert_eq!(ColumnParallelStrategy::AllGather, ColumnParallelStrategy::AllGather);
+            assert_ne!(ColumnParallelStrategy::ReduceScatter, ColumnParallelStrategy::AllGather);
         }
 
         // ─── QuantCommDecision 测试 ───

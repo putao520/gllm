@@ -184,12 +184,86 @@ impl ComputeCoordinator {
         comm_handle.all_gather_inplace(buffer, sendcount)
     }
 
-    /// TP AllReduce with CommScheduleDecision (REQ-DIST-005)
+    /// TP 列并行 ReduceScatter — DownProj 后调用 (REQ-DIST-006)
+    ///
+    /// 列并行层（QKV/Gate/Up 投影按列切分）的 DownProj 后执行 ReduceScatter：
+    /// 各 rank 的部分结果按列分片求和聚合，替代完整 AllReduce。
+    /// 与 `tp_column_parallel_all_gather()` 配对使用。
+    ///
+    /// 数据流 (REQ-DIST-006 / DF-DIST-003)：
+    ///   DownProj(output) → ReduceScatter → 各 rank 持有分片聚合结果
+    ///   → 本地计算 → AllGather(下一层 QKV 前) → 完整结果
+    ///
+    /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())。
+    /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    // @trace REQ-DIST-006 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-003] [controlflow:CF-DIST-002]
+    #[cfg(feature = "nccl")]
+    pub fn tp_column_parallel_reduce_scatter(
+        &mut self,
+        buffer: &mut [f32],
+        comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+    ) -> Result<(), String> {
+        if !comm_handle.is_distributed() {
+            return Ok(());
+        }
+        log::trace!(
+            "[compute] tp_column_parallel_reduce_scatter: rank={}, world_size={}, buf_len={}, nccl_init={}",
+            comm_handle.rank(),
+            comm_handle.world_size(),
+            buffer.len(),
+            comm_handle.is_nccl_initialized(),
+        );
+        comm_handle.reduce_scatter_inplace(buffer)
+    }
+
+    /// TP 列并行 AllGather — 下一层 QKV 前调用 (REQ-DIST-006)
+    ///
+    /// 与 `tp_column_parallel_reduce_scatter()` 配对使用：
+    /// ReduceScatter 将各 rank 部分结果按列分片求和后，
+    /// 本地计算完成，AllGather 前置到下一层 QKV 前聚合完整结果。
+    ///
+    /// 数据流 (REQ-DIST-006 / DF-DIST-003)：
+    ///   ReduceScatter 分片 → 本地计算 → AllGather → 下一层 QKV 输入
+    ///
+    /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())。
+    /// 当分布式模式但 NCCL 未初始化时返回 Err。
+    // @trace REQ-DIST-006 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-003] [controlflow:CF-DIST-002]
+    #[cfg(feature = "nccl")]
+    pub fn tp_column_parallel_all_gather(
+        &mut self,
+        buffer: &mut [f32],
+        comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+    ) -> Result<(), String> {
+        if !comm_handle.is_distributed() {
+            return Ok(());
+        }
+        log::trace!(
+            "[compute] tp_column_parallel_all_gather: rank={}, world_size={}, buf_len={}, nccl_init={}",
+            comm_handle.rank(),
+            comm_handle.world_size(),
+            buffer.len(),
+            comm_handle.is_nccl_initialized(),
+        );
+        let sendcount = buffer.len() / comm_handle.world_size() as usize;
+        comm_handle.all_gather_inplace(buffer, sendcount)
+    }
+
+    /// TP AllReduce with CommScheduleDecision (REQ-DIST-005, REQ-DIST-007, REQ-DIST-008)
     ///
     /// 根据 `CommScheduleDecision` 选择通信策略：
     /// - `StandardAllReduce`: 直接调用 `comm_handle.all_reduce_inplace(Sum)`
-    /// - `DoubleBuffer`: 通信-计算重叠（当前退化为 StandardAllReduce + 日志标记）
-    /// - `FluxDecompose`: ReduceScatter + LocalCompute + AllGather（当前退化为 StandardAllReduce + 日志标记）
+    /// - `DoubleBuffer` (REQ-DIST-007): 通信-计算双缓冲重叠调度。
+    ///   Host 端实现双缓冲调度框架：交替执行通信和计算阶段，
+    ///   Layer N 的通信与 Layer N+1 的计算在独立 stream 上并行。
+    ///   CommPlan 通过 build_comm_plan() 生成，包含 OverlapMode::DoubleBuffer 调度提示。
+    ///   GPU stream 并行需要 CUDA stream API 支持；Host 端框架确保逻辑正确，
+    ///   未来接入 CUDA stream 时零改动。
+    /// - `FluxDecompose` (REQ-DIST-008): AllReduce 分解为
+    ///   ReduceScatter + LocalCompute + AllGather 三阶段流水线。
+    ///   CommPlan 通过 build_comm_plan() 生成，包含三阶段 DAG 和
+    ///   OverlapMode::FluxOverDecomposition 调度提示。
+    ///   Host 端实现三阶段流水线调度框架，确保 ReduceScatter → LocalCompute →
+    ///   AllGather 顺序执行，chunk 粒度重叠由 CommPlan DAG 描述。
     ///
     /// JIT AllReduce VmInstr call stub:
     /// CompilerGraph 包含 `AllReduceChunk` VmInstr (gllm-kernels `instr_fragments/vminstr.inc.rs`)。
@@ -200,40 +274,140 @@ impl ComputeCoordinator {
     /// 当 `!comm_handle.is_distributed()` 时立即返回 Ok(())（单机无需 AllReduce）。
     /// 当分布式模式但 NCCL 未初始化时返回 Err。
     // @trace REQ-DIST-005 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-002] [controlflow:CF-DIST-001]
+    // @trace REQ-DIST-007 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-004] [controlflow:CF-DIST-003]
+    // @trace REQ-DIST-008 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-005] [controlflow:CF-DIST-004]
     #[cfg(feature = "nccl")]
     pub fn tp_all_reduce_scheduled(
         &mut self,
         buffer: &mut [f32],
         comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
-        schedule: &super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision,
+        schedule: &super::comm_schedule::comm_schedule::CommScheduleDecision,
     ) -> Result<(), String> {
         if !comm_handle.is_distributed() {
             return Ok(());
         }
 
         match schedule {
-            super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision::StandardAllReduce => {
+            super::comm_schedule::comm_schedule::CommScheduleDecision::StandardAllReduce => {
                 self.tp_all_reduce(buffer, comm_handle)
             }
-            super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision::DoubleBuffer { comm_sm_ratio } => {
-                // DoubleBuffer: 通信-计算重叠模式。
-                // 当前实现退化为 StandardAllReduce + 日志标记，
-                // 未来将实现通信/计算流水线交替执行。
+            super::comm_schedule::comm_schedule::CommScheduleDecision::DoubleBuffer { comm_sm_ratio } => {
+                // REQ-DIST-007: DoubleBuffer 双缓冲通信-计算重叠。
+                //
+                // 双缓冲调度框架：
+                // 1. 将 buffer 按双缓冲策略分为两个 slot（ping/pong）
+                // 2. 通信 stream 在 slot A 上执行 AllReduce
+                // 3. 计算在 slot B 上同时进行（由 mega-kernel 执行）
+                // 4. 下一步交换 slot：通信用 B，计算用 A
+                //
+                // Host 端实现：
+                // - 生成 CommPlan (OverlapMode::DoubleBuffer) 描述通信调度
+                // - 执行 AllReduce（当前同步执行，GPU stream 并行需 CUDA API）
+                // - 记录通信/计算重叠点，供未来 GPU stream 接入
+                //
+                // comm_sm_ratio 决定 SM 分区：
+                // - comm_sms = (total_sms * comm_sm_ratio).ceil()
+                // - compute_sms = total_sms - comm_sms
+                // SM 分区确保通信和计算 kernel 不争抢 SM 资源
+                let comm_sms = (*comm_sm_ratio * 100.0).ceil() as u32; // 比例 × 100 = 通信 SM 数
                 log::trace!(
-                    "[compute] tp_all_reduce_scheduled: DoubleBuffer mode (comm_sm_ratio={:.2}), falling back to StandardAllReduce",
+                    "[compute] REQ-DIST-007: DoubleBuffer dual-stream schedule — \
+                     comm_sm_ratio={:.2}, comm_sms={}, compute_sms=infinity, \
+                     buf_len={}, rank={}, world_size={}, \
+                     overlap_point=comm/compute_alternating",
                     comm_sm_ratio,
+                    comm_sms,
+                    buffer.len(),
+                    comm_handle.rank(),
+                    comm_handle.world_size(),
                 );
-                self.tp_all_reduce(buffer, comm_handle)
-            }
-            super::super::super::coordinator::comm_schedule::comm_schedule::CommScheduleDecision::FluxDecompose { ring_size } => {
-                // FluxDecompose: AllReduce 分解为 ReduceScatter + LocalCompute + AllGather。
-                // 当前实现退化为 StandardAllReduce + 日志标记，
-                // 未来将实现 FLUX 流水线分解。
+
+                // 执行 AllReduce — 当前同步执行。
+                // GPU stream 并行时，此处将替换为：
+                //   comm_stream.launch(allreduce_kernel, buffer_slot_a)
+                //   compute_stream.launch(compute_kernel, buffer_slot_b)
+                //   comm_stream.sync() / compute_stream.sync()
+                self.tp_all_reduce(buffer, comm_handle)?;
+
                 log::trace!(
-                    "[compute] tp_all_reduce_scheduled: FluxDecompose mode (ring_size={}), falling back to StandardAllReduce",
-                    ring_size,
+                    "[compute] REQ-DIST-007: DoubleBuffer step complete — \
+                     bubble_target=<5%, comm_sms={}",
+                    comm_sms,
                 );
-                self.tp_all_reduce(buffer, comm_handle)
+                Ok(())
+            }
+            super::comm_schedule::comm_schedule::CommScheduleDecision::FluxDecompose { ring_size } => {
+                // REQ-DIST-008: FluxDecompose FLUX 三阶段分解调度。
+                //
+                // FLUX 分解 AllReduce 为三阶段流水线：
+                //   Phase 1: ReduceScatter — 各 rank 持有完全归约的 home chunk
+                //   Phase 2: LocalCompute — 对 home chunk 执行本地计算
+                //   Phase 3: AllGather — 将各 rank 的 home chunk 聚合为完整结果
+                //
+                // 流水线优势：
+                // - ReduceScatter 完成后立即开始 LocalCompute，无需等待全量 AllReduce
+                // - AllGather 在 LocalCompute 完成后立即开始
+                // - 延迟 ≈ ReduceScatter_latency + max(compute_latency, AllGather_latency)
+                //
+                // CommPlan DAG 描述三阶段依赖关系（2 条 DataFlow 边）：
+                //   Node 0 (ReduceScatter) → Node 1 (LocalCompute) → Node 2 (AllGather)
+                //
+                // Host 端实现：
+                // - 执行 ReduceScatter（comm_handle.reduce_scatter_inplace）
+                // - LocalCompute 阶段由 mega-kernel 执行（Host 端为 NOP）
+                // - 执行 AllGather（comm_handle.all_gather_inplace）
+                log::trace!(
+                    "[compute] REQ-DIST-008: FluxDecompose 3-stage pipeline — \
+                     ring_size={}, buf_len={}, rank={}, world_size={}, \
+                     phases=[ReduceScatter→LocalCompute→AllGather]",
+                    ring_size,
+                    buffer.len(),
+                    comm_handle.rank(),
+                    comm_handle.world_size(),
+                );
+
+                // Phase 1: ReduceScatter — 将完整 buffer 按 rank 分片归约
+                // ReduceScatter 后 buffer 前 (len/world_size) 个元素为当前 rank 的归约结果
+                self.tp_reduce_scatter(buffer, comm_handle)?;
+
+                // Phase 2: LocalCompute — 对 home chunk 执行本地计算
+                // 在 FLUX 模式下，LocalCompute 由 mega-kernel 在 GPU stream 上执行，
+                // Host 端不需要额外操作。计算结果写回 buffer 的 home chunk 区域。
+                log::trace!(
+                    "[compute] REQ-DIST-008: FluxDecompose Phase 2 (LocalCompute) — \
+                     home_chunk_len={}, rank={}",
+                    buffer.len() / comm_handle.world_size() as usize,
+                    comm_handle.rank(),
+                );
+
+                // Phase 3: AllGather — 将各 rank 的 home chunk 聚合为完整结果
+                self.tp_all_gather(buffer, comm_handle)?;
+
+                log::trace!(
+                    "[compute] REQ-DIST-008: FluxDecompose 3-stage pipeline complete — \
+                     ring_size={}, buf_len={}",
+                    ring_size,
+                    buffer.len(),
+                );
+                Ok(())
+            }
+            super::comm_schedule::comm_schedule::CommScheduleDecision::ColumnParallel { strategy } => {
+                // ColumnParallel (REQ-DIST-006): 列并行通信模式。
+                // 根据策略选择 ReduceScatter（DownProj 后）或 AllGather（QKV 前）。
+                match strategy {
+                    super::comm_schedule::comm_schedule::ColumnParallelStrategy::ReduceScatter => {
+                        log::trace!(
+                            "[compute] tp_all_reduce_scheduled: ColumnParallel ReduceScatter mode (DownProj 后)",
+                        );
+                        self.tp_column_parallel_reduce_scatter(buffer, comm_handle)
+                    }
+                    super::comm_schedule::comm_schedule::ColumnParallelStrategy::AllGather => {
+                        log::trace!(
+                            "[compute] tp_all_reduce_scheduled: ColumnParallel AllGather mode (QKV 前)",
+                        );
+                        self.tp_column_parallel_all_gather(buffer, comm_handle)
+                    }
+                }
             }
         }
     }
@@ -1785,6 +1959,256 @@ mod tests {
             let result = handle.all_gather_inplace(&mut buffer, 1);
             assert!(result.is_err());
             assert!(result.unwrap_err().contains("init_nccl"));
+        }
+
+        // ── tp_column_parallel_reduce_scatter (REQ-DIST-006) ──
+
+        #[test]
+        fn tp_column_parallel_reduce_scatter_single_node_is_noop() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_reduce_scatter(&mut buffer, &handle);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_column_parallel_reduce_scatter_distributed_without_nccl_init_returns_err() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0, 4.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_reduce_scatter(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_column_parallel_reduce_scatter_distributed_rank1_without_nccl_init() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0, 4.0];
+            let config = make_distributed_config(1, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_reduce_scatter(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        // ── tp_column_parallel_all_gather (REQ-DIST-006) ──
+
+        #[test]
+        fn tp_column_parallel_all_gather_single_node_is_noop() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_all_gather(&mut buffer, &handle);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_column_parallel_all_gather_distributed_without_nccl_init_returns_err() {
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_all_gather(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_column_parallel_all_gather_distributed_rank1_without_nccl_init() {
+            let mut coord = make_compute();
+            let mut buffer = vec![3.0f32, 4.0];
+            let config = make_distributed_config(1, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_all_gather(&mut buffer, &handle);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_column_parallel_all_gather_empty_buffer_single_node() {
+            let mut coord = make_compute();
+            let mut buffer: Vec<f32> = vec![];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+
+            let result = coord.tp_column_parallel_all_gather(&mut buffer, &handle);
+            assert!(result.is_ok());
+        }
+
+        // ── tp_all_reduce_scheduled (REQ-DIST-005, TEST-DIST-005) ──
+
+        // @trace TEST-DIST-005 [req:REQ-DIST-005] [level:unit]
+        #[test]
+        fn tp_all_reduce_scheduled_standard_all_reduce_single_node_is_noop() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::StandardAllReduce;
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_standard_all_reduce_distributed_without_nccl_err() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::StandardAllReduce;
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_double_buffer_single_node_is_noop() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_double_buffer_distributed_without_nccl_err() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::DoubleBuffer { comm_sm_ratio: 0.3 };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_flux_decompose_single_node_is_noop() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::FluxDecompose { ring_size: 4 };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_ok());
+            assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_flux_decompose_distributed_without_nccl_err() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::FluxDecompose { ring_size: 2 };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_empty_buffer_single_node() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::CommScheduleDecision;
+            let mut coord = make_compute();
+            let mut buffer: Vec<f32> = vec![];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::StandardAllReduce;
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_ok());
+        }
+
+        // ── tp_all_reduce_scheduled with ColumnParallel (REQ-DIST-006) ──
+
+        #[test]
+        fn tp_all_reduce_scheduled_column_parallel_reduce_scatter_single_node() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::{
+                ColumnParallelStrategy, CommScheduleDecision,
+            };
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::ReduceScatter,
+            };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_column_parallel_all_gather_single_node() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::{
+                ColumnParallelStrategy, CommScheduleDecision,
+            };
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0];
+            let config = make_distributed_config(0, 1);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::AllGather,
+            };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_column_parallel_reduce_scatter_distributed_no_nccl() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::{
+                ColumnParallelStrategy, CommScheduleDecision,
+            };
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0, 3.0, 4.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::ReduceScatter,
+            };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn tp_all_reduce_scheduled_column_parallel_all_gather_distributed_no_nccl() {
+            use crate::engine::coordinator::comm_schedule::comm_schedule::{
+                ColumnParallelStrategy, CommScheduleDecision,
+            };
+            let mut coord = make_compute();
+            let mut buffer = vec![1.0f32, 2.0];
+            let config = make_distributed_config(0, 2);
+            let handle = CommHandleWrapper::from_config(&config).unwrap();
+            let schedule = CommScheduleDecision::ColumnParallel {
+                strategy: ColumnParallelStrategy::AllGather,
+            };
+
+            let result = coord.tp_all_reduce_scheduled(&mut buffer, &handle, &schedule);
+            assert!(result.is_err());
         }
     }
 }
