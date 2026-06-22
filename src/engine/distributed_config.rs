@@ -395,6 +395,7 @@ impl CommHandleWrapper {
     /// - Single-node mode: returns Ok(()) immediately (no communication needed).
     /// - Distributed mode with NCCL initialized: calls `CommHandle::all_reduce` + `wait()`.
     /// - Distributed mode without NCCL init: returns Err.
+    // @trace REQ-DIST-005 [entity:ENT-DIST-TP-COMM] [dataflow:DF-DIST-002]
     pub fn all_reduce_inplace(&self, buffer: &mut [f32]) -> Result<(), String> {
         if !self.is_distributed() {
             return Ok(());

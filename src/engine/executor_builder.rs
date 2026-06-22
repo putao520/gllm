@@ -301,6 +301,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             residual_bus: bus,
             gate_skip_flags: HashMap::new(),
             mtp_controller: crate::engine::mtp_executor::MtpController::new(),
+            #[cfg(feature = "nccl")]
+            moe_dist_decision: None,
+            #[cfg(feature = "nccl")]
+            expert_load_stats: None,
+            #[cfg(feature = "nccl")]
+            eplb_imbalance_threshold: 2.0,
         }
     }
 
@@ -492,7 +498,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // @trace REQ-DIST-004 [entity:ENT-DIST-TP-SHARD] [dataflow:DF-DIST-002]
         self.model_ctx.weights.shard_for_tp(&config.parallel)
             .map_err(|e| ExecutorError::DistributedInit(
-                format!("TP weight sharding failed: {}", e)
+                format!("TP weight sharding failed: {:?}", e)
             ))?;
 
         log::info!(
@@ -504,6 +510,42 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             config.parallel.ep_size,
             self.model_ctx.comm_handle.as_ref().unwrap().is_nccl_initialized(),
         );
+
+        // REQ-DIST-014: Initialize distributed MoE dispatch decision.
+        // MoeDistDecision is resolved from MoeDistributedConfig + CommHandleWrapper
+        // and stored in InferenceCoordinator for per-step dispatch.
+        // @trace REQ-DIST-014 [entity:ENT-DIST-MOE-DISPATCH] [lifecycle:init]
+        if let (Some(ref moe_config), Some(ref comm_handle), Some(ref moe_dispatcher)) =
+            (&self.model_ctx.moe_distributed_config, &self.model_ctx.comm_handle, &self.inference.moe_dispatcher)
+        {
+            let num_experts = moe_dispatcher.config().num_experts;
+            let decision = crate::moe::distributed_dispatch::distributed_dispatch::MoeDistDecision::from_config(
+                moe_config,
+                num_experts,
+                comm_handle,
+            );
+            log::info!(
+                "[executor] REQ-DIST-014: MoeDistDecision initialized — placement={:?}, all_to_all={:?}, num_experts={}, needs_cross_gpu={}",
+                decision.placement, decision.all_to_all, num_experts, decision.needs_cross_gpu_dispatch(),
+            );
+            self.inference.moe_dist_decision = Some(decision);
+        }
+
+        // REQ-DIST-015: Initialize expert load statistics for EPLB.
+        // ExpertLoadStats tracks per-expert invocation counts in a sliding window.
+        // @trace REQ-DIST-015 [entity:ENT-DIST-EPLB] [lifecycle:init]
+        if let Some(ref moe_dispatcher) = self.inference.moe_dispatcher {
+            let num_experts = moe_dispatcher.config().num_experts;
+            if num_experts > 0 {
+                let stats = crate::moe::eplb::eplb::ExpertLoadStats::new(num_experts);
+                log::info!(
+                    "[executor] REQ-DIST-015: ExpertLoadStats initialized — num_experts={}, window=60s",
+                    num_experts,
+                );
+                self.inference.expert_load_stats = Some(stats);
+            }
+        }
+
         Ok(())
     }
 

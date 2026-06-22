@@ -1645,4 +1645,345 @@ mod tests {
             "roberta.encoder.layer.0.attention.self.query.bias"
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TP 权重分片 — WeightsHandle::shard_for_tp (REQ-DIST-004, TEST-DIST-004)
+    // nccl feature-gated
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[cfg(feature = "nccl")]
+    mod shard_for_tp_tests {
+        use super::*;
+        use crate::compat::backend_trait::{Backend, Element, WeightPlacement};
+        use crate::engine::distributed_config::ParallelConfig;
+        use crate::loader::{QuantizedTensor, RawFloatTensor, WeightsHandle};
+
+        fn make_config(tp_size: u32, rank: u32) -> ParallelConfig {
+            ParallelConfig {
+                tp_size,
+                pp_size: 1,
+                ep_size: 1,
+                rank,
+                world_size: tp_size,
+                unique_id: String::new(),
+            }
+        }
+
+        fn make_raw_float_weights_handle() -> WeightsHandle<crate::compat::cpu_backend::CpuBackend<f32>, f32> {
+            // Build a WeightsHandle with BF16 raw_floats simulating a small model:
+            // L0.q_proj: [4, 8] BF16 — column parallel
+            // L0.o_proj: [8, 4] BF16 — row parallel
+            // embed: [4, 8] BF16 — no shard (embedding)
+            let mut raw_floats = std::collections::HashMap::new();
+
+            // L0.q_proj: [4, 8] BF16 → 4*8*2 = 64 bytes
+            let q_proj_data: Vec<u8> = (0..32)
+                .flat_map(|i| half::bf16::from_f32(i as f32).to_le_bytes())
+                .collect();
+            raw_floats.insert(
+                "L0.q_proj.weight".to_string(),
+                RawFloatTensor {
+                    data: q_proj_data,
+                    dtype: ::safetensors::Dtype::BF16,
+                    shape: vec![4, 8],
+                },
+            );
+
+            // L0.o_proj: [8, 4] BF16 → 8*4*2 = 64 bytes
+            let o_proj_data: Vec<u8> = (0..32)
+                .flat_map(|i| half::bf16::from_f32((i + 100) as f32).to_le_bytes())
+                .collect();
+            raw_floats.insert(
+                "L0.o_proj.weight".to_string(),
+                RawFloatTensor {
+                    data: o_proj_data,
+                    dtype: ::safetensors::Dtype::BF16,
+                    shape: vec![8, 4],
+                },
+            );
+
+            // embed: [4, 8] BF16 → no sharding
+            let embed_data: Vec<u8> = (0..32)
+                .flat_map(|i| half::bf16::from_f32((i + 200) as f32).to_le_bytes())
+                .collect();
+            raw_floats.insert(
+                "model.embed_tokens.weight".to_string(),
+                RawFloatTensor {
+                    data: embed_data.clone(),
+                    dtype: ::safetensors::Dtype::BF16,
+                    shape: vec![4, 8],
+                },
+            );
+
+            let mut shapes = std::collections::HashMap::new();
+            shapes.insert("L0.q_proj.weight".to_string(), vec![4, 8]);
+            shapes.insert("L0.o_proj.weight".to_string(), vec![8, 4]);
+            shapes.insert("model.embed_tokens.weight".to_string(), vec![4, 8]);
+
+            let mut meta = std::collections::HashMap::new();
+            for name in ["L0.q_proj.weight", "L0.o_proj.weight", "model.embed_tokens.weight"] {
+                meta.insert(
+                    name.to_string(),
+                    crate::loader::TensorMeta {
+                        name: name.to_string(),
+                        shape: shapes[name].clone(),
+                        dtype: ::safetensors::Dtype::BF16,
+                    },
+                );
+            }
+
+            WeightsHandle::new_with_quantized_and_sparse(
+                std::collections::HashMap::new(),
+                shapes,
+                meta,
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+        }
+
+        // @trace TEST-DIST-004 [req:REQ-DIST-004] [level:unit]
+        #[test]
+        fn shard_for_tp_single_node_is_noop() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(1, 0);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+            // Shape unchanged
+            assert_eq!(handle.tensor_shape("L0.q_proj.weight"), Some(&[4, 8][..]));
+            assert_eq!(handle.tensor_shape("L0.o_proj.weight"), Some(&[8, 4][..]));
+        }
+
+        #[test]
+        fn shard_for_tp_tp0_is_noop() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = ParallelConfig {
+                tp_size: 0,
+                pp_size: 1,
+                ep_size: 1,
+                rank: 0,
+                world_size: 0,
+                unique_id: String::new(),
+            };
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn shard_for_tp_column_parallel_halves_cols() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(2, 0);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+
+            // L0.q_proj: ColumnParallel → [4, 8/2] = [4, 4]
+            assert_eq!(handle.tensor_shape("L0.q_proj.weight"), Some(&[4, 4][..]));
+
+            // Data size should also be halved: 4*4*2 = 32 bytes
+            let q_proj = handle.raw_float_tensor("L0.q_proj.weight").unwrap();
+            assert_eq!(q_proj.data.len(), 32);
+        }
+
+        #[test]
+        fn shard_for_tp_column_parallel_rank1_gets_right_half() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(2, 1);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+
+            // L0.q_proj: ColumnParallel rank 1 → [4, 4]
+            assert_eq!(handle.tensor_shape("L0.q_proj.weight"), Some(&[4, 4][..]));
+        }
+
+        #[test]
+        fn shard_for_tp_row_parallel_halves_rows() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(2, 0);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+
+            // L0.o_proj: RowParallel → [8/2, 4] = [4, 4]
+            assert_eq!(handle.tensor_shape("L0.o_proj.weight"), Some(&[4, 4][..]));
+
+            // Data size should also be halved: 4*4*2 = 32 bytes
+            let o_proj = handle.raw_float_tensor("L0.o_proj.weight").unwrap();
+            assert_eq!(o_proj.data.len(), 32);
+        }
+
+        #[test]
+        fn shard_for_tp_embedding_not_sharded() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(2, 0);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+
+            // embed_tokens: not sharded → shape unchanged
+            assert_eq!(
+                handle.tensor_shape("model.embed_tokens.weight"),
+                Some(&[4, 8][..])
+            );
+        }
+
+        #[test]
+        fn shard_for_tp_meta_shapes_updated() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(2, 0);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+
+            // Verify that both `shapes` HashMap and `meta` HashMap are updated
+            assert_eq!(handle.tensor_shape("L0.q_proj.weight"), Some(&[4, 4][..]));
+            let meta = handle.meta.get("L0.q_proj.weight").unwrap();
+            assert_eq!(meta.shape, vec![4, 4]);
+        }
+
+        #[test]
+        fn shard_for_tp_not_divisible_returns_err() {
+            let mut raw_floats = std::collections::HashMap::new();
+            // [3, 5] BF16 — 3 rows, 5 cols → neither 3 nor 5 is divisible by 2
+            let data: Vec<u8> = (0..15)
+                .flat_map(|i| half::bf16::from_f32(i as f32).to_le_bytes())
+                .collect();
+            raw_floats.insert(
+                "L0.q_proj.weight".to_string(),
+                RawFloatTensor {
+                    data,
+                    dtype: ::safetensors::Dtype::BF16,
+                    shape: vec![3, 5],
+                },
+            );
+
+            let mut shapes = std::collections::HashMap::new();
+            shapes.insert("L0.q_proj.weight".to_string(), vec![3, 5]);
+
+            let mut meta = std::collections::HashMap::new();
+            meta.insert(
+                "L0.q_proj.weight".to_string(),
+                crate::loader::TensorMeta {
+                    name: "L0.q_proj.weight".to_string(),
+                    shape: vec![3, 5],
+                    dtype: ::safetensors::Dtype::BF16,
+                },
+            );
+
+            let mut handle: WeightsHandle<crate::compat::cpu_backend::CpuBackend<f32>, f32> = WeightsHandle::new_with_quantized_and_sparse(
+                std::collections::HashMap::new(),
+                shapes,
+                meta,
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            );
+
+            let config = make_config(2, 0);
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn shard_for_tp_quantized_weight_needs_shard_returns_err() {
+            let mut quantized = std::collections::HashMap::new();
+            quantized.insert(
+                "L0.q_proj.weight".to_string(),
+                QuantizedTensor {
+                    data: vec![0u8; 64],
+                    quant_type: gllm_kernels::quant::QuantType::Q4_0,
+                    shape: vec![4, 8],
+                    ggml_dtype: crate::loader::gguf::GgmlDType::Q4_0,
+                },
+            );
+
+            let mut shapes = std::collections::HashMap::new();
+            shapes.insert("L0.q_proj.weight".to_string(), vec![4, 8]);
+
+            let mut meta = std::collections::HashMap::new();
+            meta.insert(
+                "L0.q_proj.weight".to_string(),
+                crate::loader::TensorMeta {
+                    name: "L0.q_proj.weight".to_string(),
+                    shape: vec![4, 8],
+                    dtype: ::safetensors::Dtype::F32,
+                },
+            );
+
+            let mut handle: WeightsHandle<crate::compat::cpu_backend::CpuBackend<f32>, f32> = WeightsHandle::new_with_quantized_and_sparse(
+                std::collections::HashMap::new(),
+                shapes,
+                meta,
+                quantized,
+                std::collections::HashMap::new(),
+            );
+
+            let config = make_config(2, 0);
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn shard_for_tp_f16_column_parallel() {
+            // Test F16 path
+            let mut raw_floats = std::collections::HashMap::new();
+            let data: Vec<u8> = (0..16)
+                .flat_map(|i| half::f16::from_f32(i as f32).to_le_bytes())
+                .collect();
+            raw_floats.insert(
+                "L0.q_proj.weight".to_string(),
+                RawFloatTensor {
+                    data,
+                    dtype: ::safetensors::Dtype::F16,
+                    shape: vec![2, 8],
+                },
+            );
+
+            let mut shapes = std::collections::HashMap::new();
+            shapes.insert("L0.q_proj.weight".to_string(), vec![2, 8]);
+
+            let mut meta = std::collections::HashMap::new();
+            meta.insert(
+                "L0.q_proj.weight".to_string(),
+                crate::loader::TensorMeta {
+                    name: "L0.q_proj.weight".to_string(),
+                    shape: vec![2, 8],
+                    dtype: ::safetensors::Dtype::F16,
+                },
+            );
+
+            let mut handle: WeightsHandle<crate::compat::cpu_backend::CpuBackend<f32>, f32> = WeightsHandle::new_with_quantized_and_sparse(
+                std::collections::HashMap::new(),
+                shapes,
+                meta,
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            );
+
+            let config = make_config(2, 0);
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+            // ColumnParallel: [2, 8] → [2, 4]
+            assert_eq!(handle.tensor_shape("L0.q_proj.weight"), Some(&[2, 4][..]));
+            let q_proj = handle.raw_float_tensor("L0.q_proj.weight").unwrap();
+            assert_eq!(q_proj.dtype, ::safetensors::Dtype::F16);
+            assert_eq!(q_proj.data.len(), 2 * 4 * 2); // 2*4 elements * 2 bytes each
+        }
+
+        #[test]
+        fn shard_for_tp_tp4_rank2_column_parallel() {
+            let mut handle = make_raw_float_weights_handle();
+            let config = make_config(4, 2);
+
+            let result = handle.shard_for_tp(&config);
+            assert!(result.is_ok());
+
+            // L0.q_proj: ColumnParallel → [4, 8/4] = [4, 2]
+            assert_eq!(handle.tensor_shape("L0.q_proj.weight"), Some(&[4, 2][..]));
+
+            // L0.o_proj: RowParallel → [8/4, 4] = [2, 4]
+            assert_eq!(handle.tensor_shape("L0.o_proj.weight"), Some(&[2, 4][..]));
+        }
+    }
 }

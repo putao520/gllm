@@ -250,7 +250,7 @@ fn parallel_bytes_to_f32_lossless(data: &[u8]) -> Result<Vec<f32>> {
 
 /// Parallel `&[u8]` → `Vec<f32>` for any 16-bit half-precision type
 /// (`half::f16` or `half::bf16`).
-pub fn parallel_half_to_f32<H>(data: &[u8]) -> Result<Vec<f32>>
+pub(crate) fn parallel_half_to_f32<H>(data: &[u8]) -> Result<Vec<f32>>
 where
     H: Copy + Send + Sync + 'static,
     H: HalfToF32,
@@ -312,7 +312,7 @@ fn parallel_f64_to_f32(data: &[u8]) -> Result<Vec<f32>> {
 
 /// Internal trait bridging `half::f16` / `half::bf16` to their `to_f32`
 /// implementation inside a generic context.
-trait HalfToF32 {
+pub(crate) trait HalfToF32 {
     fn to_f32_fast(self) -> f32;
 }
 
@@ -841,7 +841,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
     pub fn shard_for_tp(
         &mut self,
         config: &crate::engine::distributed_config::ParallelConfig,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if config.tp_size <= 1 {
             return Ok(());
         }
@@ -864,35 +864,35 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
                 }
                 Some(s) => {
                     let raw = self.raw_floats.get_mut(name).ok_or_else(|| {
-                        format!("shard_for_tp: raw_float '{}' not found", name)
+                        LoaderError::Backend(format!("shard_for_tp: raw_float '{}' not found", name))
                     })?;
                     let shape = raw.shape.clone();
                     if shape.len() != 2 {
-                        return Err(format!(
+                        return Err(LoaderError::Backend(format!(
                             "shard_for_tp: raw_float '{}' has non-2D shape {:?}",
                             name, shape
-                        ));
+                        )));
                     }
                     let rows = shape[0];
                     let cols = shape[1];
-                    let elem_bytes = raw.dtype.size();
 
                     // Convert raw bytes → f32
                     let mut f32_data = match raw.dtype {
                         Dtype::BF16 => crate::loader::parallel_half_to_f32::<half::bf16>(&raw.data)
-                            .map_err(|e| format!("shard_for_tp: BF16→F32 conversion failed for '{}': {}", name, e))?,
+                            .map_err(|e| LoaderError::Backend(format!("shard_for_tp: BF16→F32 conversion failed for '{}': {}", name, e)))?,
                         Dtype::F16 => crate::loader::parallel_half_to_f32::<half::f16>(&raw.data)
-                            .map_err(|e| format!("shard_for_tp: F16→F32 conversion failed for '{}': {}", name, e))?,
+                            .map_err(|e| LoaderError::Backend(format!("shard_for_tp: F16→F32 conversion failed for '{}': {}", name, e)))?,
                         other => {
-                            return Err(format!(
+                            return Err(LoaderError::Backend(format!(
                                 "shard_for_tp: unsupported raw_float dtype {:?} for '{}'",
                                 other, name
-                            ));
+                            )));
                         }
                     };
 
                     // Execute shard
-                    shard_weight(&mut f32_data, rows, cols, config, s)?;
+                    shard_weight(&mut f32_data, rows, cols, config, s)
+                        .map_err(|e| LoaderError::Backend(e))?;
 
                     // Compute new shape
                     let new_shape = match s {
@@ -934,10 +934,10 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
         for name in self.quantized.keys() {
             let strategy = infer_shard_strategy(name);
             if strategy.is_some() {
-                return Err(format!(
+                return Err(LoaderError::Backend(format!(
                     "shard_for_tp: quantized weight '{}' requires sharding but block-boundary-aware sharding is not yet supported",
                     name
-                ));
+                )));
             }
         }
 
