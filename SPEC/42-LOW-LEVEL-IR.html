@@ -60,7 +60,7 @@
         </div>
       </section>
 
-      <section data-entity-ref="ENT-ALGORITHM-PROFILE" data-req-entity="ENT-ALGORITHM-PROFILE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-003" id="req-lir-003">
+      <section data-artifact-type="algorithm" data-entity-ref="ENT-ALGORITHM-PROFILE" data-req-entity="ENT-ALGORITHM-PROFILE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-003" id="artifact-algorithm">
         <h3>REQ-LIR-003: AlgorithmProfile 闭源库算法模式声明式表达</h3>
         <p>闭源库算法模式不是手写 emit 函数，而是声明式参数化描述。AlgorithmProfile 类型定义完整，至少覆盖 GEMM 和 Attention 两个闭源库模式，声明式描述可被 pass pipeline 自动匹配。</p>
         <div data-criteria="">
@@ -148,7 +148,7 @@
         </div>
       </section>
 
-      <section data-entity-ref="ENT-LIR-OP ENT-LIR-DOMAIN" data-req-entity="ENT-LIR-OP,ENT-LIR-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-009" id="req-lir-009">
+      <section data-artifact-type="pipeline" data-entity-ref="ENT-LIR-OP ENT-LIR-DOMAIN" data-req-entity="ENT-LIR-OP,ENT-LIR-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-009" id="artifact-pipeline">
         <h3>REQ-LIR-009: Phase 3 — pass pipeline 迁移</h3>
         <p>Phase 3 将融合 pass 迁移到 LIR Compute 域，内存布局优化 pass 迁移到 LIR Memory 域，常量折叠和死代码消除迁移到 LIR 层，四域 pass pipeline 独立调度。Communication 域 pass（通信融合、chunk 级重叠调度、量化压缩）在 nccl feature 启用时参与 pipeline。</p>
         <div data-criteria="">
@@ -251,7 +251,7 @@
         </table>
       </section>
 
-      <section id="ent-algorithm-profile" data-entity="ENT-ALGORITHM-PROFILE" data-req-ref="REQ-LIR-003 REQ-LIR-010" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-DEVICE-PROFILE" data-xref="REQ-LIR-003 REQ-LIR-010">
+      <section data-artifact-type="algorithm" id="artifact-algorithm" data-entity="ENT-ALGORITHM-PROFILE" data-req-ref="REQ-LIR-003 REQ-LIR-010" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-DEVICE-PROFILE" data-xref="REQ-LIR-003 REQ-LIR-010">
         <h4>ENT-ALGORITHM-PROFILE</h4>
         <p>AlgorithmProfile — 闭源库算法模式声明式表达</p>
         <table data-entity-table="">
@@ -266,10 +266,10 @@
       </section>
     </section>
 
-    <section id="s-module" data-section="4">
+    <section data-artifact-type="module" id="artifact-module" data-section="4">
       <h2>4. Module 定义</h2>
 
-      <section id="mod-lir-001" data-module="MOD-LIR-001" data-module-kind="module">
+      <section data-artifact-type="pipeline" id="mod-lir-001" data-module="MOD-LIR-001" data-module-kind="module">
         <h3>MOD-LIR-001: llir 模块 — LIR 核心定义和 pass pipeline</h3>
         <p>LIR 核心模块，位于 gllm-kernels/src/compiler/llir/。包含 LIR 类型定义、lowering pass、四域 pass pipeline、AlgorithmProfile 匹配。Communication 域 pass 在 nccl feature 启用时可用。</p>
         <div data-module-contains="">
@@ -318,10 +318,10 @@
       </section>
     </section>
 
-    <section id="s-interface" data-section="5">
+    <section data-artifact-type="interface" id="artifact-interface" data-section="5">
       <h2>5. Interface 定义</h2>
 
-      <section id="if-lir-001" data-interface="IF-LIR-001" data-interface-kind="contract">
+      <section data-artifact-type="pipeline" id="if-lir-001" data-interface="IF-LIR-001" data-interface-kind="contract">
         <h3>IF-LIR-001: LirPassPipeline 契约</h3>
         <p>四域独立 pass pipeline 接口。域间通过显式依赖排序：Layout→Compute→Memory→Communication。每个域有独立的 pass 注册和执行调度。Communication 域 nccl feature-gated。</p>
         <div data-interface-input="">
@@ -383,7 +383,7 @@
       </section>
     </section>
 
-    <section id="s-decisions" data-section="7">
+    <section data-artifact-type="decision" id="artifact-decision" data-section="7">
       <h2>7. Decision 定义</h2>
 
       <section id="dec-lir-001" data-decision="DEC-LIR-001" data-decision-dimension="technical">
@@ -441,7 +441,7 @@
         </script>
       </section>
 
-      <section id="dec-lir-003" data-decision="DEC-LIR-003" data-decision-dimension="technical">
+      <section data-artifact-type="algorithm" id="dec-lir-003" data-decision="DEC-LIR-003" data-decision-dimension="technical">
         <h3>DEC-LIR-003: AlgorithmProfile 声明式表达闭源库算法模式（替代手写 emit）</h3>
         <p>闭源库算法模式用 AlgorithmProfile 声明式描述，替代手写 emit_xxx 函数。声明式描述可被 pass pipeline 自动匹配和调度。</p>
         <div data-decision-options="">
@@ -468,7 +468,7 @@
         </script>
       </section>
 
-      <section id="dec-lir-004" data-decision="DEC-LIR-004" data-decision-dimension="technical">
+      <section data-artifact-type="pipeline" id="dec-lir-004" data-decision="DEC-LIR-004" data-decision-dimension="technical">
         <h3>DEC-LIR-004: LIR 四域划分 Compute/Memory/Layout/Communication（各域独立 pass pipeline）</h3>
         <p>LIR 操作按计算语义划分为 Compute(计算)、Memory(内存)、Layout(布局)、Communication(通信) 四个域。各域有独立 pass pipeline，域间通过显式依赖排序。Communication 域为 nccl feature-gated。</p>
         <div data-decision-options="">
@@ -606,7 +606,7 @@
       </section>
     </section>
 
-    <section id="s-dataflow" data-section="8">
+    <section data-artifact-type="dataflow" id="artifact-dataflow" data-section="8">
       <h2>8. Dataflow 定义</h2>
 
       <section id="df-lir-001" data-flow-from="ENT-TRACE-OP" data-flow-to="ENT-LIR-OP" data-dataflow="DF-LIR-001" data-dataflow-dimension="technical" data-dataflow-direction="sync">
@@ -632,7 +632,7 @@
         </script>
       </section>
 
-      <section id="df-lir-002" data-flow-from="ENT-LIR-DOMAIN" data-flow-to="ENT-LIR-DOMAIN" data-dataflow="DF-LIR-002" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+      <section data-artifact-type="pipeline" id="df-lir-002" data-flow-from="ENT-LIR-DOMAIN" data-flow-to="ENT-LIR-DOMAIN" data-dataflow="DF-LIR-002" data-dataflow-dimension="technical" data-dataflow-direction="sync">
         <h3>DF-LIR-002: LIR 四域 pass pipeline</h3>
         <p>LIR 四域 pass pipeline 按依赖顺序执行：Layout→Compute→Memory→Communication。各域独立 pass pipeline，域间通过显式依赖排序。Communication 域在 nccl feature 启用时参与 pipeline。</p>
         <div data-dataflow-contract="">
@@ -678,7 +678,7 @@
         </script>
       </section>
 
-      <section id="df-lir-004" data-flow-from="ENT-LIR-OP" data-flow-to="ENT-ALGORITHM-PROFILE" data-dataflow="DF-LIR-004" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+      <section data-artifact-type="algorithm" id="df-lir-004" data-flow-from="ENT-LIR-OP" data-flow-to="ENT-ALGORITHM-PROFILE" data-dataflow="DF-LIR-004" data-dataflow-dimension="technical" data-dataflow-direction="sync">
         <h3>DF-LIR-004: AlgorithmProfile 匹配数据流</h3>
         <p>LirOp 与 AlgorithmProfile 匹配，选择闭源库算法模式。匹配成功则使用闭源库路径，匹配失败则使用默认 JIT 路径。</p>
         <div data-dataflow-contract="">
@@ -702,10 +702,10 @@
       </section>
     </section>
 
-    <section id="s-controlflow" data-section="9">
+    <section data-artifact-type="controlflow" id="artifact-controlflow" data-section="9">
       <h2>9. Controlflow 定义</h2>
 
-      <section id="cf-lir-001" data-controlflow="CF-LIR-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-DOMAIN" data-controlflow-target="ENT-LIR-DOMAIN">
+      <section data-artifact-type="pipeline" id="cf-lir-001" data-controlflow="CF-LIR-001" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-DOMAIN" data-controlflow-target="ENT-LIR-DOMAIN">
         <h3>CF-LIR-001: LIR pass pipeline 域间执行顺序</h3>
         <p>四域 pass pipeline 按固定顺序执行：Layout→Compute→Memory→Communication。Layout 变换先执行（影响后续计算和内存布局），Compute 优化次之（依赖 Layout 结果），Memory 优化再次（依赖 Compute 结果确定访问模式），Communication 优化最后（依赖 Compute/Memory 结果确定通信模式和缓冲区布局）。Communication 域 nccl feature-gated，非分布式场景下跳过。</p>
         <script type="application/ld+json">
@@ -720,7 +720,7 @@
         </script>
       </section>
 
-      <section id="cf-lir-002" data-controlflow="CF-LIR-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="REQ-LIR-007" data-controlflow-target="REQ-LIR-010">
+      <section data-artifact-type="controlflow" id="cf-lir-002" data-controlflow="CF-LIR-002" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="REQ-LIR-007" data-controlflow-target="REQ-LIR-010">
         <h3>CF-LIR-002: 四阶段渐进迁移控制流</h3>
         <p>四阶段按序执行：Phase 1(类型定义+示范算子) → Phase 2(VmInstr 职责收窄) → Phase 3(pass pipeline 迁移) → Phase 4(闭源库对齐)。每阶段有独立验收标准，前阶段通过后才进入下一阶段。</p>
         <script type="application/ld+json">
@@ -778,7 +778,7 @@ Machine Code
         <p>验证 LirOp 携带完整类型信息，LirRegion 支持嵌套结构，LirTile 携带分块维度和步长信息，三个示范算子通过 LIR 完整表达。</p>
       </section>
 
-      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-003" data-test="TEST-LIR-003" id="test-lir-003">
+      <section data-artifact-type="algorithm" data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-003" data-test="TEST-LIR-003" id="artifact-algorithm">
         <h4>TEST-LIR-003: AlgorithmProfile 声明式表达测试</h4>
         <p>验证 AlgorithmProfile 类型定义完整，至少覆盖 GEMM 和 Attention 两个闭源库模式，声明式描述可被 pass pipeline 自动匹配。</p>
       </section>
@@ -849,7 +849,7 @@ Machine Code
         </div>
       </section>
 
-      <section data-entity-ref="ENT-LIR-PIPELINE-STAGE" data-req-entity="ENT-LIR-PIPELINE-STAGE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-013" id="req-lir-013">
+      <section data-artifact-type="pipeline" data-entity-ref="ENT-LIR-PIPELINE-STAGE" data-req-entity="ENT-LIR-PIPELINE-STAGE" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-013" id="artifact-pipeline">
         <h3>REQ-LIR-013: Pipeline Parallel (PP2) IR 表达</h3>
         <p>LIR 表达 2-stage 流水线并行（PP2）的通信语义。PP2 将模型按层切分为两个 stage，1F1B 调度实现通信-计算重叠：stage 0 计算 micro-batch N+1 时，stage 1 通信 micro-batch N 的激活。</p>
         <p>核心 IR 元素：</p>
@@ -918,7 +918,7 @@ Machine Code
         </div>
       </section>
 
-      <section data-entity-ref="ENT-LIR-COMM-DOMAIN" data-req-entity="ENT-LIR-COMM-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-016" id="req-lir-016">
+      <section data-artifact-type="pipeline" data-entity-ref="ENT-LIR-COMM-DOMAIN" data-req-entity="ENT-LIR-COMM-DOMAIN" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-016" id="artifact-pipeline">
         <h3>REQ-LIR-016: Communication Domain pass pipeline</h3>
         <p>Communication 域独立 pass pipeline 包含三类 pass，按序执行：</p>
         <ol>
@@ -977,7 +977,7 @@ Machine Code
             <li>RingAttention/ContextSync 定义为 Communication 域 LirOp 变体</li>
             <li>RingAttention lowering 到 P2pCopy + CommBarrier VmInstr 组合</li>
             <li>ContextSync lowering 到 CommBarrier VmInstr</li>
-            <li>CP 仅在 seq_len > max_seq_per_rank 时激活</li>
+            <li>CP 仅在 seq_len &gt; max_seq_per_rank 时激活</li>
             <li>非分布式场景零开销（CP IR 不生成）</li>
           </ol>
         </div>
@@ -1057,7 +1057,7 @@ Machine Code
         </div>
       </section>
 
-      <section data-entity-ref="ENT-LIR-ALGO-SELECT" data-req-entity="ENT-LIR-ALGO-SELECT" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-022" id="req-lir-022">
+      <section data-artifact-type="algorithm" data-entity-ref="ENT-LIR-ALGO-SELECT" data-req-entity="ENT-LIR-ALGO-SELECT" data-req-category="architecture" data-req-domain="lir" data-req-status="approved" data-req="REQ-LIR-022" id="artifact-algorithm">
         <h3>REQ-LIR-022: Algorithm Selection IR 表达</h3>
         <p>LIR 表达通信算法选择语义。通信算法选择是 LIR Communication Domain 的核心决策点。算法选择基于消息大小、拓扑、延迟/带宽偏好。LIR 表达选择的算法，gllm-nccl 执行对应的 lower 路径。</p>
         <p>来源：gllm ✅（8 种 CollectiveAlgorithm）/ SGLang ❌ / vLLM ❌</p>
@@ -1186,21 +1186,21 @@ Machine Code
           <tr data-field="name" data-type="enum" data-required="true"><td>name</td><td>enum</td><td>是</td><td>Communication</td><td>域名称（LirDomain::Communication）</td></tr>
           <tr data-field="pass_count" data-type="integer" data-required="true"><td>pass_count</td><td>integer</td><td>是</td><td>3</td><td>域内 pass 数量（Fusion/Schedule/Optimize）</td></tr>
           <tr data-field="dependency_count" data-type="integer" data-required="true"><td>dependency_count</td><td>integer</td><td>是</td><td>≥2</td><td>域间依赖数量（依赖 Compute + Memory 域结果）</td></tr>
-          <tr data-field="overlap_strategies" data-type="enum_set" data-required="true"><td>overlap_strategies</td><td>enum_set</td><td>是</td><td>Auto|PreferOverlap|PreferIsolated|ForceDoubleBuffer|ForceFlux</td><td>支持的重叠策略集合（对应 OverlapHint）</td></tr>
+          <tr data-field="overlap_strategies" data-type="string" data-required="true"><td>overlap_strategies</td><td>enum_set</td><td>是</td><td>Auto|PreferOverlap|PreferIsolated|ForceDoubleBuffer|ForceFlux</td><td>支持的重叠策略集合（对应 OverlapHint）</td></tr>
           <tr data-field="feature_gated" data-type="boolean" data-required="true"><td>feature_gated</td><td>boolean</td><td>是</td><td>true</td><td>nccl feature-gated 标记</td></tr>
         </table>
       </section>
 
-      <section id="ent-lir-pipeline-stage" data-entity="ENT-LIR-PIPELINE-STAGE" data-req-ref="REQ-LIR-013" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-013">
+      <section data-artifact-type="pipeline" id="artifact-pipeline" data-entity="ENT-LIR-PIPELINE-STAGE" data-req-ref="REQ-LIR-013" data-entity-model-type="relational" data-entity-ref="ENT-LIR-OP ENT-LIR-COMM-DOMAIN" data-xref="REQ-LIR-013">
         <h4>ENT-LIR-PIPELINE-STAGE</h4>
         <p>PipelineStage — 流水线阶段定义</p>
         <table data-entity-table="">
           <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
           <tr data-field="stage_id" data-type="integer" data-required="true"><td>stage_id</td><td>integer</td><td>是</td><td>≥0</td><td>阶段编号（0 = first stage, 1 = second stage）</td></tr>
           <tr data-field="micro_batch_count" data-type="integer" data-required="true"><td>micro_batch_count</td><td>integer</td><td>是</td><td>≥1</td><td>微批次数量</td></tr>
-          <tr data-field="forward_ops" data-type="vec&lt;LirOp&gt;" data-required="true"><td>forward_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>前向计算 LirOp 序列</td></tr>
-          <tr data-field="backward_ops" data-type="vec&lt;LirOp&gt;" data-required="false"><td>backward_ops</td><td>vec&lt;LirOp&gt;</td><td>否</td><td>可为空</td><td>反向计算 LirOp 序列（训练场景）</td></tr>
-          <tr data-field="boundary" data-type="StageBoundary" data-required="true"><td>boundary</td><td>StageBoundary</td><td>是</td><td>—</td><td>阶段边界同步点</td></tr>
+          <tr data-field="forward_ops" data-type="string" data-required="true"><td>forward_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>前向计算 LirOp 序列</td></tr>
+          <tr data-field="backward_ops" data-type="string" data-required="false"><td>backward_ops</td><td>vec&lt;LirOp&gt;</td><td>否</td><td>可为空</td><td>反向计算 LirOp 序列（训练场景）</td></tr>
+          <tr data-field="boundary" data-type="string" data-required="true"><td>boundary</td><td>StageBoundary</td><td>是</td><td>—</td><td>阶段边界同步点</td></tr>
         </table>
       </section>
 
@@ -1209,11 +1209,11 @@ Machine Code
         <p>CommComputeOverlap — 通信-计算重叠区域</p>
         <table data-entity-table="">
           <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
-          <tr data-field="comm_ops" data-type="vec&lt;LirOp&gt;" data-required="true"><td>comm_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>通信侧 LirOp 序列（AllReduceChunk 等）</td></tr>
-          <tr data-field="compute_ops" data-type="vec&lt;LirOp&gt;" data-required="true"><td>compute_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>计算侧 LirOp 序列</td></tr>
-          <tr data-field="chunk_partition" data-type="ChunkPartition" data-required="true"><td>chunk_partition</td><td>ChunkPartition</td><td>是</td><td>—</td><td>chunk 分割描述</td></tr>
-          <tr data-field="sync_point" data-type="DualStreamBarrier" data-required="true"><td>sync_point</td><td>DualStreamBarrier</td><td>是</td><td>—</td><td>双流同步屏障</td></tr>
-          <tr data-field="overlap_hint" data-type="OverlapHint" data-required="true"><td>overlap_hint</td><td>OverlapHint</td><td>是</td><td>Auto|PreferOverlap|PreferIsolated|ForceDoubleBuffer|ForceFlux</td><td>重叠策略（对应 gllm OverlapHint）</td></tr>
+          <tr data-field="comm_ops" data-type="string" data-required="true"><td>comm_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>通信侧 LirOp 序列（AllReduceChunk 等）</td></tr>
+          <tr data-field="compute_ops" data-type="string" data-required="true"><td>compute_ops</td><td>vec&lt;LirOp&gt;</td><td>是</td><td>非空</td><td>计算侧 LirOp 序列</td></tr>
+          <tr data-field="chunk_partition" data-type="string" data-required="true"><td>chunk_partition</td><td>ChunkPartition</td><td>是</td><td>—</td><td>chunk 分割描述</td></tr>
+          <tr data-field="sync_point" data-type="string" data-required="true"><td>sync_point</td><td>DualStreamBarrier</td><td>是</td><td>—</td><td>双流同步屏障</td></tr>
+          <tr data-field="overlap_hint" data-type="string" data-required="true"><td>overlap_hint</td><td>OverlapHint</td><td>是</td><td>Auto|PreferOverlap|PreferIsolated|ForceDoubleBuffer|ForceFlux</td><td>重叠策略（对应 gllm OverlapHint）</td></tr>
         </table>
       </section>
 
@@ -1224,8 +1224,8 @@ Machine Code
           <tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr>
           <tr data-field="expert_id" data-type="integer" data-required="true"><td>expert_id</td><td>integer</td><td>是</td><td>≥0</td><td>专家编号</td></tr>
           <tr data-field="ep_rank" data-type="integer" data-required="true"><td>ep_rank</td><td>integer</td><td>是</td><td>≥0</td><td>专家并行 rank</td></tr>
-          <tr data-field="placement" data-type="ExpertPlacement" data-required="true"><td>placement</td><td>ExpertPlacement</td><td>是</td><td>—</td><td>专家放置策略（rank + device）</td></tr>
-          <tr data-field="weight_layout" data-type="TensorLayout" data-required="true"><td>weight_layout</td><td>TensorLayout</td><td>是</td><td>—</td><td>权重张量布局（引用 Memory 域结果）</td></tr>
+          <tr data-field="placement" data-type="string" data-required="true"><td>placement</td><td>ExpertPlacement</td><td>是</td><td>—</td><td>专家放置策略（rank + device）</td></tr>
+          <tr data-field="weight_layout" data-type="string" data-required="true"><td>weight_layout</td><td>TensorLayout</td><td>是</td><td>—</td><td>权重张量布局（引用 Memory 域结果）</td></tr>
         </table>
       </section>
 
@@ -1313,10 +1313,10 @@ Machine Code
 
     <!-- ========== Communication Domain Decisions ========== -->
 
-    <section id="s-comm-decisions" data-section="14">
+    <section data-artifact-type="decision" id="artifact-decision" data-section="14">
       <h2>14. Communication Domain Decision 定义</h2>
 
-      <section id="dec-lir-009" data-decision="DEC-LIR-009" data-decision-dimension="architectural">
+      <section id="dec-lir-009" data-decision="DEC-LIR-009" data-decision-dimension="technical">
         <h3>DEC-LIR-009: Communication Domain 作为第四域（vs 子域 vs 独立 pass）</h3>
         <p>Communication 语义在 LIR 域划分中的位置：独立第四域 vs Compute 域子域 vs 独立 pass。</p>
         <div data-decision-options="">
@@ -1426,7 +1426,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="dec-lir-013" data-decision="DEC-LIR-013" data-decision-dimension="architectural">
+      <section id="dec-lir-013" data-decision="DEC-LIR-013" data-decision-dimension="technical">
         <h3>DEC-LIR-013: TP 切分策略选择</h3>
         <p>权重切分按行（Row）vs 按列（Col）的选择影响通信模式。Row 切分输出需 AllReduce；Col 切分输出需 ReduceScatter+AllGather。选择依据：GEMM 形状、通信量、硬件拓扑。</p>
         <ul>
@@ -1434,9 +1434,13 @@ Machine Code
           <li>选项 B：Col 切分 — ReduceScatter+AllGather 通信量 = output_size × dtype_size / world_size，适合 output_size 较大</li>
         </ul>
         <p>决策：LIR 不硬编码选择，由 CommSchedulePass 根据 DeviceProfile + 消息大小自动选择。权重切分策略在 BUILD 阶段由 CompilerGraph 确定。</p>
-      </section>
+      <script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-LIR-013"
+}</script></section>
 
-      <section id="dec-lir-014" data-decision="DEC-LIR-014" data-decision-dimension="architectural">
+      <section id="dec-lir-014" data-decision="DEC-LIR-014" data-decision-dimension="technical">
         <h3>DEC-LIR-014: 通信量化策略选择</h3>
         <p>通信量化（FP32→INT8/FP8）节省 4x 带宽，但引入精度损失。量化策略由 CommCompressHint 驱动。</p>
         <ul>
@@ -1446,7 +1450,11 @@ Machine Code
           <li>选项 D：ForceQuant(scheme) — 用户指定量化方案</li>
         </ul>
         <p>决策：Auto 为默认。CommOptimizePass 根据 CommCompressHint + 消息大小 + 硬件带宽自动决策。量化精度损失由 SPEC 10-QUALITY 约束（相对误差 &lt; 1e-3）。</p>
-      </section>
+      <script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-LIR-014"
+}</script></section>
 
       <section id="dec-lir-015" data-decision="DEC-LIR-015" data-decision-dimension="technical">
         <h3>DEC-LIR-015: PD 分离传输协议选择</h3>
@@ -1456,7 +1464,11 @@ Machine Code
           <li>选项 B：RDMA — 跨节点，需 RDMA 注册+传输，lowering 到 RdmaPageFetch/RdmaPagePush</li>
         </ul>
         <p>决策：由 SystemTopology 自动探测。PdDisaggConfig.role=Auto 时自动选择；同节点走 NVLink，跨节点走 RDMA。LIR 层不硬编码，CommSchedulePass 根据 topology 输出决定。</p>
-      </section>
+      <script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-LIR-015"
+}</script></section>
 
       <section id="dec-lir-016" data-decision="DEC-LIR-016" data-decision-dimension="technical">
         <h3>DEC-LIR-016: EPLB 算法选择</h3>
@@ -1467,9 +1479,13 @@ Machine Code
           <li>选项 C：ElasticityAware — 弹性感知，考虑专家复制+迁移成本，适合高动态负载</li>
         </ul>
         <p>决策：由 ExpertPlacement 驱动。RoundRobin 时不需要 EPLB；HotCold 时默认 DeepseekVec（平衡性能和精度）。用户可通过 MoeDistributedConfig 覆盖。</p>
-      </section>
+      <script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-LIR-016"
+}</script></section>
 
-      <section id="dec-lir-017" data-decision="DEC-LIR-017" data-decision-dimension="architectural">
+      <section id="dec-lir-017" data-decision="DEC-LIR-017" data-decision-dimension="technical">
         <h3>DEC-LIR-017: FLUX vs MC2 通信重叠策略</h3>
         <p>FLUX（ReduceScatter→LocalCompute→AllGather）vs MC2（AllReduceChunk 双流交替）通信-计算重叠策略选择。</p>
         <ul>
@@ -1477,9 +1493,13 @@ Machine Code
           <li>选项 B：FLUX — ReduceScatter→LocalCompute→AllGather 三阶段，理论 ≥90% 重叠，但需要 ReduceScatter 支持</li>
         </ul>
         <p>决策：OverlapHint 驱动。PreferOverlap/ForceDoubleBuffer → MC2；ForceFlux → FLUX。Auto 时 CommSchedulePass 根据硬件能力自动选择（SM90+ 优先 FLUX，SM80-89 优先 MC2）。</p>
-      </section>
+      <script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-LIR-017"
+}</script></section>
 
-      <section id="dec-lir-018" data-decision="DEC-LIR-018" data-decision-dimension="architectural">
+      <section id="dec-lir-018" data-decision="DEC-LIR-018" data-decision-dimension="technical">
         <h3>DEC-LIR-018: CP Ring Attention 与 TP 的兼容</h3>
         <p>Context Parallelism 与 Tensor Parallelism 共存时，Ring Attention 的 KV chunk 传递需要在 TP group 内同步。</p>
         <ul>
@@ -1487,13 +1507,17 @@ Machine Code
           <li>选项 B：CP-TP 融合 — Ring Attention 同时处理 CP 和 TP 通信，减少同步次数</li>
         </ul>
         <p>决策：选项 A（CP-TP 分离）。CP group 和 TP group 是独立的通信域，RingAttention 在 CP group 内传递 KV，AllReduceSync 在 TP group 内聚合。通信域正交，零干扰。</p>
-      </section>
+      <script type="application/ld+json">{
+  "@context": "https://spec.example.com/decision",
+  "@type": "Decision",
+  "id": "DEC-LIR-018"
+}</script></section>
 
     </section>
 
     <!-- ========== Communication Domain Dataflows ========== -->
 
-    <section id="s-comm-dataflow" data-section="15">
+    <section data-artifact-type="dataflow" id="artifact-dataflow" data-section="15">
       <h2>15. Communication Domain Dataflow 定义</h2>
 
       <section id="df-lir-005" data-flow-from="ENT-LIR-COMM-DOMAIN" data-flow-to="ENT-VM-INSTR" data-dataflow="DF-LIR-005" data-dataflow-dimension="technical" data-dataflow-direction="sync">
@@ -1520,7 +1544,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="df-lir-006" data-flow-from="ENT-LIR-PIPELINE-STAGE" data-flow-to="ENT-LIR-PIPELINE-STAGE" data-dataflow="DF-LIR-006" data-dataflow-dimension="technical" data-dataflow-direction="async">
+      <section data-artifact-type="pipeline" id="df-lir-006" data-flow-from="ENT-LIR-PIPELINE-STAGE" data-flow-to="ENT-LIR-PIPELINE-STAGE" data-dataflow="DF-LIR-006" data-dataflow-dimension="technical" data-dataflow-direction="event">
         <h3>DF-LIR-006: Pipeline Stage 激活传递</h3>
         <p>PP2 流水线 stage 间激活数据传递：StageSend(stage_0) → inter-node 传输 → StageRecv(stage_1)。激活数据通过 P2pPageFetch（同节点 NVLink）或 RdmaPageFetch（跨节点 RDMA）传输。</p>
         <div data-dataflow-contract="">
@@ -1544,7 +1568,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="df-lir-007" data-flow-from="ENT-LIR-EXPERT-SHARD" data-flow-to="ENT-LIR-EXPERT-SHARD" data-dataflow="DF-LIR-007" data-dataflow-dimension="technical" data-dataflow-direction="async">
+      <section data-artifact-type="dataflow" id="df-lir-007" data-flow-from="ENT-LIR-EXPERT-SHARD" data-flow-to="ENT-LIR-EXPERT-SHARD" data-dataflow="DF-LIR-007" data-dataflow-dimension="technical" data-dataflow-direction="event">
         <h3>DF-LIR-007: Expert AllToAll dispatch/combine 数据流</h3>
         <p>UNIEP 专家并行 AllToAll 数据流：AllToAllDispatch 按专家路由表将 token 分发到目标 rank → 目标 rank 执行 expert FFN 计算 → AllToAllCombine 按源 rank 收集 expert 输出合并回原 token 顺序。</p>
         <div data-dataflow-contract="">
@@ -1568,7 +1592,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="df-lir-008" data-flow-from="ENT-LIR-COMM-OVERLAP" data-flow-to="ENT-VM-INSTR" data-dataflow="DF-LIR-008" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+      <section data-artifact-type="dataflow" id="df-lir-008" data-flow-from="ENT-LIR-COMM-OVERLAP" data-flow-to="ENT-VM-INSTR" data-dataflow="DF-LIR-008" data-dataflow-dimension="technical" data-dataflow-direction="sync">
         <h3>DF-LIR-008: Comm-Compute overlap chunk 调度数据流</h3>
         <p>MC2 通信-计算重叠的 chunk 调度数据流：CommComputeOverlap LirOp 根据 OverlapHint 和 ChunkPartition 生成 AllReduceChunk + DualStreamBarrier VmInstr 序列。ForceDoubleBuffer 模式生成双缓冲交替序列；ForceFlux 模式生成流式 chunk 序列；PreferIsolated 模式生成顺序执行序列。</p>
         <div data-dataflow-contract="">
@@ -1610,7 +1634,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="df-lir-010" data-flow-from="ENT-LIR-KV-TRANSFER" data-flow-to="ENT-LIR-KV-TRANSFER" data-dataflow="DF-LIR-010" data-dataflow-dimension="technical" data-dataflow-direction="async">
+      <section data-artifact-type="dataflow" id="df-lir-010" data-flow-from="ENT-LIR-KV-TRANSFER" data-flow-to="ENT-LIR-KV-TRANSFER" data-dataflow="DF-LIR-010" data-dataflow-dimension="technical" data-dataflow-direction="event">
         <h3>DF-LIR-010: PD 分离 KV 迁移数据流</h3>
         <p>PD 分离 KV 迁移数据流：KvTransferOut（Prefill 节点）→ RDMA/NVLink 传输 → KvTransferIn（Decode 节点）。传输以 page 为粒度，PdHandshake 保证两端同步。</p>
         <div data-dataflow-contract="">
@@ -1628,7 +1652,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="df-lir-011" data-flow-from="ENT-LIR-COMM-QUANT" data-flow-to="ENT-LIR-COMM-QUANT" data-dataflow="DF-LIR-011" data-dataflow-dimension="technical" data-dataflow-direction="sync">
+      <section data-artifact-type="dataflow" id="df-lir-011" data-flow-from="ENT-LIR-COMM-QUANT" data-flow-to="ENT-LIR-COMM-QUANT" data-dataflow="DF-LIR-011" data-dataflow-dimension="technical" data-dataflow-direction="sync">
         <h3>DF-LIR-011: 通信量化数据流</h3>
         <p>通信量化数据流：CommQuantize(FP32→INT8/FP8) → AllReduceChunk(低精度通信) → CommDequantize(INT8/FP8→FP32)。Delta Encoding 路径：CommDeltaEncode → CommBitPack → 通信 → CommBitUnpack → CommDeltaDecode。</p>
         <div data-dataflow-contract="">
@@ -1646,7 +1670,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="df-lir-012" data-flow-from="ENT-LIR-FLUX" data-flow-to="ENT-LIR-FLUX" data-dataflow="DF-LIR-012" data-dataflow-dimension="technical" data-dataflow-direction="async">
+      <section data-artifact-type="dataflow" id="df-lir-012" data-flow-from="ENT-LIR-FLUX" data-flow-to="ENT-LIR-FLUX" data-dataflow="DF-LIR-012" data-dataflow-dimension="technical" data-dataflow-direction="event">
         <h3>DF-LIR-012: FLUX 三阶段数据流</h3>
         <p>FLUX 分解数据流：FluxReduceScatter → 每个 rank 持有 home chunk → FluxLocalCompute（与 FluxAllGather 并行）→ FluxAllGather 收集所有 chunk。三阶段 DAG 依赖：FluxReduceScatter → FluxLocalCompute → FluxAllGather。</p>
         <div data-dataflow-contract="">
@@ -1668,10 +1692,10 @@ Machine Code
 
     <!-- ========== Communication Domain Controlflows ========== -->
 
-    <section id="s-comm-controlflow" data-section="16">
+    <section data-artifact-type="controlflow" id="artifact-controlflow" data-section="16">
       <h2>16. Communication Domain Controlflow 定义</h2>
 
-      <section id="cf-lir-003" data-controlflow="CF-LIR-003" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-COMM-DOMAIN" data-controlflow-target="ENT-LIR-DOMAIN">
+      <section data-artifact-type="pipeline" id="cf-lir-003" data-controlflow="CF-LIR-003" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-COMM-DOMAIN" data-controlflow-target="ENT-LIR-DOMAIN">
         <h3>CF-LIR-003: 通信域 pass pipeline 执行顺序</h3>
         <p>Communication 域 pass pipeline 按固定顺序执行：CommFusionPass → CommSchedulePass → CommOptimizePass。CommFusionPass 先合并冗余通信（减少通信量）；CommSchedulePass 次之（根据 OverlapHint 调度 chunk 级重叠）；CommOptimizePass 最后（量化压缩进一步减少通信量）。Communication 域在 Memory 域之后执行，依赖 Compute 和 Memory 域结果确定通信模式和缓冲区布局。</p>
         <script type="application/ld+json">
@@ -1686,7 +1710,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="cf-lir-004" data-controlflow="CF-LIR-004" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-PIPELINE-STAGE" data-controlflow-target="ENT-LIR-PIPELINE-STAGE">
+      <section data-artifact-type="pipeline" id="cf-lir-004" data-controlflow="CF-LIR-004" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-PIPELINE-STAGE" data-controlflow-target="ENT-LIR-PIPELINE-STAGE">
         <h3>CF-LIR-004: Pipeline 1F1B 调度控制流</h3>
         <p>PP2 1F1B（One Forward One Backward）调度控制流：stage 0 执行 forward micro-batch 0 → StageSend → stage 1 执行 forward micro-batch 0 → stage 0 执行 forward micro-batch 1（与 stage 1 的 forward micro-batch 0 重叠）→ ... → 稳态阶段每个 stage 同时执行 forward N+1 和 backward N-1。StageBoundary 同步点保证 stage 间激活传递的顺序性。</p>
         <script type="application/ld+json">
@@ -1709,7 +1733,7 @@ Machine Code
         </script>
       </section>
 
-      <section id="cf-lir-006" data-controlflow="CF-LIR-006" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-FLUX" data-controlflow-target="ENT-LIR-FLUX">
+      <section data-artifact-type="controlflow" id="cf-lir-006" data-controlflow="CF-LIR-006" data-controlflow-relation="precedes" data-controlflow-dimension="technical" data-controlflow-source="ENT-LIR-FLUX" data-controlflow-target="ENT-LIR-FLUX">
         <h3>CF-LIR-006: FLUX 三阶段执行控制流</h3>
         <p>FLUX 三阶段严格顺序：FluxReduceScatter 完成前 FluxLocalCompute 不启动；FluxLocalCompute 在 home chunk 上执行计算；FluxAllGather 与 FluxLocalCompute 可并行（home chunk 计算完成后立即启动对应 AllGather step）。CommSchedulePass 生成三阶段 VmInstr 序列 + DualStreamBarrier 同步。</p>
         <script type="application/ld+json">
@@ -1744,7 +1768,7 @@ Machine Code
         <p>验证 ExpertShard/AllToAllDispatch/AllToAllCombine/ExpertPlacement 定义为 Communication 域 LirOp 变体，AllToAllStrategy 映射到 dispatch/combine strategy 参数，AllToAllDispatch/AllToAllCombine lowering 到 VmInstr AllReduceChunk（AllToAll 模式）组合。</p>
       </section>
 
-      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-016" data-test="TEST-LIR-016" id="test-lir-016">
+      <section data-artifact-type="pipeline" data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-016" data-test="TEST-LIR-016" id="artifact-pipeline">
         <h4>TEST-LIR-016: Communication Domain pass pipeline 测试</h4>
         <p>验证三类 pass 按序执行（CommFusionPass → CommSchedulePass → CommOptimizePass），CommFusionPass 可合并相邻同 dtype 同 op 的 AllReduce，CommSchedulePass 根据 OverlapHint 生成重叠/非重叠 VmInstr 序列，CommOptimizePass 可将 AllReduce 压缩为低精度通信。</p>
       </section>
@@ -1779,7 +1803,7 @@ Machine Code
         <p>验证 FluxReduceScatter/FluxLocalCompute/FluxAllGather 定义为 Communication 域 LirOp 变体，三阶段 DAG 依赖正确，lowering 到 CommPlan 正确。</p>
       </section>
 
-      <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-022" data-test="TEST-LIR-023" id="test-lir-023">
+      <section data-artifact-type="algorithm" data-level="unit" data-test-categories="unit" data-req-ref="REQ-LIR-022" data-test="TEST-LIR-023" id="artifact-algorithm">
         <h4>TEST-LIR-023: Algorithm Selection IR 表达测试</h4>
         <p>验证 CommAlgorithmSelect 定义为 Communication 域 LirOp 变体，8 种算法枚举完整定义，每种算法到 lower 路径映射正确。</p>
       </section>
