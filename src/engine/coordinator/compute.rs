@@ -1699,6 +1699,7 @@ mod tests {
                 tp_size: world_size,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank,
                 world_size,
                 unique_id: String::new(),
@@ -1884,6 +1885,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 5, // 2*1*1=2 != 5
                 unique_id: String::new(),

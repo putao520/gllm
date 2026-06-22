@@ -55,6 +55,10 @@ pub struct ModelContextHolder<B: Backend<E> + 'static, E: Element = f32> {
     /// MoE distributed config from DistributedConfig (REQ-DIST-002).
     #[cfg(feature = "nccl")]
     pub moe_distributed_config: Option<crate::engine::distributed_config::MoeDistributedConfig>,
+    /// Context Parallelism config (REQ-DIST-016).
+    /// None = no CP; Some = Ring Attention enabled with cp_size > 1.
+    #[cfg(feature = "nccl")]
+    pub cp_config: Option<crate::engine::coordinator::context_parallel::context_parallel::CpConfig>,
 }
 
 #[cfg(test)]

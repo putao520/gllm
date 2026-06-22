@@ -255,6 +255,7 @@ pub mod eplb {
                 tp_size: world_size,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank,
                 world_size,
                 unique_id: String::new(),

@@ -109,6 +109,10 @@ pub enum AllToAllStrategy {
 /// 定义 Tensor Parallel / Pipeline Parallel / Expert Parallel 维度，
 /// 以及当前节点在并行组中的 rank 和全局 world_size。
 /// 约束：`tp_size * pp_size * ep_size == world_size` 且 `rank < world_size`。
+///
+/// cp_size: Context Parallelism 维度 (REQ-DIST-016)。
+/// CP 环通信限定在同 PP stage 内 (REQ-DIST-032)。
+/// cp_size == 1 时退化为无 CP（零开销）。
 #[cfg(feature = "nccl")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParallelConfig {
@@ -118,6 +122,8 @@ pub struct ParallelConfig {
     pub pp_size: u32,
     /// Expert Parallel 维度，默认 1，≥1
     pub ep_size: u32,
+    /// Context Parallelism 维度，默认 1，≥1 (REQ-DIST-016)
+    pub cp_size: u32,
     /// 当前节点 rank，默认 0，范围 [0, world_size)
     pub rank: u32,
     /// 全局 world_size，默认 1，必须等于 tp*pp*ep
@@ -134,6 +140,7 @@ impl Default for ParallelConfig {
             tp_size: 1,
             pp_size: 1,
             ep_size: 1,
+            cp_size: 1,
             rank: 0,
             world_size: 1,
             unique_id: String::new(),
@@ -154,6 +161,7 @@ impl ParallelConfig {
         self.tp_size >= 1
             && self.pp_size >= 1
             && self.ep_size >= 1
+            && self.cp_size >= 1
             && self.rank < self.world_size
             && self.tp_size * self.pp_size * self.ep_size == self.world_size
     }
@@ -1043,6 +1051,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 2,
                 ep_size: 2,
+                cp_size: 1,
                 rank: 0,
                 world_size: 8,
                 unique_id: String::new(),
@@ -1056,6 +1065,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 2,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 5, // 2*2*1=4 != 5
                 unique_id: String::new(),
@@ -1069,6 +1079,7 @@ mod tests {
                 tp_size: 1,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 1, // rank >= world_size
                 world_size: 1,
                 unique_id: String::new(),
@@ -1082,6 +1093,7 @@ mod tests {
                 tp_size: 0,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 0,
                 unique_id: String::new(),
@@ -1112,6 +1124,7 @@ mod tests {
                 tp_size: 4,
                 pp_size: 2,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 3,
                 world_size: 8,
                 unique_id: "abc".to_string(),
@@ -1330,6 +1343,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 1,
                 world_size: 2,
                 unique_id: String::new(),
@@ -1346,6 +1360,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 5, // 2*1*1=2 != 5
                 unique_id: String::new(),
@@ -1361,6 +1376,7 @@ mod tests {
                 tp_size: 1,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 5, // rank >= world_size
                 world_size: 1,
                 unique_id: String::new(),
@@ -1383,6 +1399,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 2,
                 unique_id: String::new(),
@@ -1440,6 +1457,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 2,
                 unique_id: String::new(),
@@ -1552,6 +1570,7 @@ mod tests {
                 tp_size: 4,
                 pp_size: 2,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 3,
                 world_size: 8,
                 unique_id: String::new(),
@@ -1571,6 +1590,7 @@ mod tests {
                 tp_size: 2,
                 pp_size: 2,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 5, // 2*2*1=4 != 5
                 unique_id: String::new(),
@@ -1587,6 +1607,7 @@ mod tests {
                 tp_size: 1,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 2, // rank >= world_size=1
                 world_size: 1,
                 unique_id: String::new(),

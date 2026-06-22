@@ -405,6 +405,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 comm_config: None,
                 #[cfg(feature = "nccl")]
                 moe_distributed_config: None,
+                #[cfg(feature = "nccl")]
+                cp_config: None,
             },
             observability: super::coordinator::observability::ObservabilityCoordinator {
                 observer: BasicObserver::new(),
@@ -447,6 +449,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.model_ctx.pd_disagg_config = Some(config.pd_disagg.clone());
         self.model_ctx.comm_config = Some(config.comm.clone());
         self.model_ctx.moe_distributed_config = Some(config.moe.clone());
+
+        // REQ-DIST-016: Initialize CP config from ParallelConfig.cp_size
+        // @trace REQ-DIST-016 [entity:ENT-DIST-CP] [lifecycle:init]
+        if config.parallel.cp_size > 1 {
+            use crate::engine::coordinator::context_parallel::context_parallel::CpConfig;
+            let cp_config = CpConfig::new(
+                config.parallel.cp_size,
+                config.parallel.rank % config.parallel.cp_size,
+                config.parallel.rank / (config.parallel.tp_size * config.parallel.cp_size), // pp_stage_id
+            );
+            if let Err(e) = cp_config.validate() {
+                return Err(ExecutorError::DistributedInit(
+                    format!("CpConfig validation failed: {}", e)
+                ));
+            }
+            log::info!(
+                "[executor] init_distributed: CP enabled — cp_size={}, cp_rank={}, pp_stage_id={}",
+                cp_config.cp_size, cp_config.cp_rank, cp_config.pp_stage_id
+            );
+            self.model_ctx.cp_config = Some(cp_config);
+        }
 
         // REQ-DIST-002: Propagate kv_distribution_config to KvCoordinator
         // so it can resolve KvDistDecision at runtime without referencing ModelContextHolder.
@@ -4041,6 +4064,7 @@ mod tests {
                     tp_size: 2,
                     pp_size: 1,
                     ep_size: 1,
+                cp_size: 1,
                     rank: 1,
                     world_size: 2,
                     unique_id: String::new(),
@@ -4305,6 +4329,7 @@ mod tests {
             let handle = crate::engine::distributed_config::CommHandleWrapper::from_config(
                 &crate::engine::distributed_config::ParallelConfig {
                     tp_size: 2, pp_size: 1, ep_size: 1,
+                cp_size: 1,
                     rank: 0, world_size: 2, unique_id: String::new(),
                 }
             ).unwrap();

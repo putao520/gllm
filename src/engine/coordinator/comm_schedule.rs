@@ -495,6 +495,7 @@ pub mod comm_schedule {
                 tp_size: 4,
                 pp_size: 1,
                 ep_size: 1,
+                cp_size: 1,
                 rank: 0,
                 world_size: 4,
                 unique_id: String::new(),
