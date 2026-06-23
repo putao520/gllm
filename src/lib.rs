@@ -118,6 +118,16 @@ pub use engine::pipeline::activation_xfer::{
     ActivationTransport, ActivationTransportError, ActivationDirection,
 };
 #[cfg(feature = "nccl")]
+pub use engine::pipeline::scheduler::{
+    PipelineOp, MicroBatchStrategy, PipelineScheduler, PipelineSchedulerError,
+    CommComputeOverlap, CommComputeOverlapError, StreamKind, StreamAssignment,
+    PipelineKvCacheManager, PipelineKvCacheManagerError,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::interleaved::{
+    Interleaved1F1B, Interleaved1F1BError, ScheduleComparison,
+};
+#[cfg(feature = "nccl")]
 pub use loader::weight_shard::{
     is_shared_weight, extract_layer_index, should_load_weight_for_stage, filter_weights_by_stage,
 };

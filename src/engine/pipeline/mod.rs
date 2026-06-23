@@ -1,4 +1,4 @@
-//! Pipeline Parallel (PP) 基础设施 (REQ-DIST-018, REQ-DIST-019, REQ-DIST-020, REQ-DIST-023, REQ-DIST-029, REQ-DIST-030)
+//! Pipeline Parallel (PP) 基础设施 (REQ-DIST-018~027)
 //!
 //! nccl feature-gated: 非 nccl 构建零影响。
 //!
@@ -6,6 +6,8 @@
 //! - `topology`: Topology2D + Topology3D — 2D/3D 并行拓扑与通信编排 (REQ-DIST-029, REQ-DIST-030)
 //! - `micro_batch`: MicroBatchScheduler — 微批次切分与交错 PP 调度 (REQ-DIST-020, REQ-DIST-023)
 //! - `activation_xfer`: ActivationTransport — stage 间激活传输 (REQ-DIST-023)
+//! - `scheduler`: PipelineScheduler + CommComputeOverlap + PipelineKvCacheManager — GPipe/1F1B 调度 + 通信计算重叠 + PP KV Cache (REQ-DIST-021, REQ-DIST-022, REQ-DIST-026, REQ-DIST-027)
+//! - `interleaved`: Interleaved1F1B — 交错流水线调度 (REQ-DIST-022)
 
 #[cfg(feature = "nccl")]
 pub mod config;
@@ -15,3 +17,7 @@ pub mod topology;
 pub mod micro_batch;
 #[cfg(feature = "nccl")]
 pub mod activation_xfer;
+#[cfg(feature = "nccl")]
+pub mod scheduler;
+#[cfg(feature = "nccl")]
+pub mod interleaved;
