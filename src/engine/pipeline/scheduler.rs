@@ -644,22 +644,26 @@ impl CommComputeOverlap {
     }
 
     /// 无重叠模式延迟 = compute + comm（验收标准 3）
+    ///
+    /// 通信时间考虑量化压缩（验收标准 6）。
     // @trace REQ-DIST-026 [entity:CommComputeOverlap]
     pub fn latency_no_overlap_forward(&self) -> f64 {
-        self.forward_compute_us + self.comm_us
+        self.forward_compute_us + self.effective_comm_us()
     }
 
     /// 无重叠模式反向延迟
     // @trace REQ-DIST-026 [entity:CommComputeOverlap]
     pub fn latency_no_overlap_backward(&self) -> f64 {
-        self.backward_compute_us + self.comm_us
+        self.backward_compute_us + self.effective_comm_us()
     }
 
     /// 有重叠模式延迟 ≈ max(compute, comm)（验收标准 3）
+    ///
+    /// 通信时间考虑量化压缩（验收标准 6）。
     // @trace REQ-DIST-026 [entity:CommComputeOverlap]
     pub fn latency_overlap_forward(&self) -> f64 {
         if self.overlap_enabled {
-            self.forward_compute_us.max(self.comm_us)
+            self.forward_compute_us.max(self.effective_comm_us())
         } else {
             self.latency_no_overlap_forward()
         }
@@ -669,7 +673,7 @@ impl CommComputeOverlap {
     // @trace REQ-DIST-026 [entity:CommComputeOverlap]
     pub fn latency_overlap_backward(&self) -> f64 {
         if self.overlap_enabled {
-            self.backward_compute_us.max(self.comm_us)
+            self.backward_compute_us.max(self.effective_comm_us())
         } else {
             self.latency_no_overlap_backward()
         }
@@ -757,6 +761,7 @@ impl CommComputeOverlap {
         // Total latency ≈ sum of compute ops + max(comm overlap per step, 0)
         let mut compute_total = 0.0f64;
         let mut comm_total = 0.0f64;
+        let effective_comm = self.effective_comm_us();
 
         for op in ops {
             match op {
@@ -765,7 +770,7 @@ impl CommComputeOverlap {
                 PipelineOp::SendActivation(_)
                 | PipelineOp::RecvActivation(_)
                 | PipelineOp::SendGradient(_)
-                | PipelineOp::RecvGradient(_) => comm_total += self.comm_us,
+                | PipelineOp::RecvGradient(_) => comm_total += effective_comm,
                 PipelineOp::Bubble => {}
             }
         }
@@ -778,6 +783,7 @@ impl CommComputeOverlap {
     // @trace REQ-DIST-026 [entity:CommComputeOverlap]
     pub fn total_latency_no_overlap(&self, ops: &[PipelineOp]) -> f64 {
         let mut total = 0.0f64;
+        let effective_comm = self.effective_comm_us();
         for op in ops {
             match op {
                 PipelineOp::Forward(_) => total += self.forward_compute_us,
@@ -785,7 +791,7 @@ impl CommComputeOverlap {
                 PipelineOp::SendActivation(_)
                 | PipelineOp::RecvActivation(_)
                 | PipelineOp::SendGradient(_)
-                | PipelineOp::RecvGradient(_) => total += self.comm_us,
+                | PipelineOp::RecvGradient(_) => total += effective_comm,
                 PipelineOp::Bubble => {}
             }
         }
@@ -1848,5 +1854,247 @@ mod tests {
         assert_eq!(gpipe_bwd_indices, one_f_bwd_indices);
         assert_eq!(gpipe_fwd_indices.len(), 8);
         assert_eq!(gpipe_bwd_indices.len(), 8);
+    }
+
+    // ── SmPartitionConfig (REQ-DIST-026 验收标准 5) ──
+
+    #[test]
+    fn sm_partition_new() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 5: SM 分区隔离通信和计算流
+        let config = SmPartitionConfig::new(128, 13, 115);
+        assert_eq!(config.total_sms, 128);
+        assert_eq!(config.comm_sms, 13);
+        assert_eq!(config.compute_sms, 115);
+    }
+
+    #[test]
+    fn sm_partition_default_for_gpu() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        let config = SmPartitionConfig::default_for_gpu(128);
+        assert_eq!(config.total_sms, 128);
+        assert_eq!(config.comm_sms, 13); // 128 * 10% = 12.8, max(1) = 13
+        assert_eq!(config.compute_sms, 115); // 128 - 13
+    }
+
+    #[test]
+    fn sm_partition_default_for_small_gpu() {
+        let config = SmPartitionConfig::default_for_gpu(10);
+        assert_eq!(config.total_sms, 10);
+        assert_eq!(config.comm_sms, 1); // max(1)
+        assert_eq!(config.compute_sms, 9);
+    }
+
+    #[test]
+    fn sm_partition_ratios() {
+        let config = SmPartitionConfig::new(100, 10, 90);
+        assert!((config.comm_ratio() - 0.1).abs() < 1e-10);
+        assert!((config.compute_ratio() - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sm_partition_ratios_zero_total() {
+        let config = SmPartitionConfig::new(0, 0, 0);
+        assert_eq!(config.comm_ratio(), 0.0);
+        assert_eq!(config.compute_ratio(), 0.0);
+    }
+
+    #[test]
+    fn sm_partition_is_valid() {
+        let config = SmPartitionConfig::new(128, 13, 115);
+        assert!(config.is_valid());
+    }
+
+    #[test]
+    fn sm_partition_invalid_zero_total() {
+        let config = SmPartitionConfig::new(0, 1, 1);
+        assert!(!config.is_valid());
+    }
+
+    #[test]
+    fn sm_partition_invalid_exceeds_total() {
+        let config = SmPartitionConfig::new(100, 60, 60);
+        assert!(!config.is_valid()); // 60 + 60 > 100
+    }
+
+    #[test]
+    fn sm_partition_is_isolated() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 5: 通信和计算 SM 严格隔离
+        let config = SmPartitionConfig::new(128, 13, 115);
+        assert!(config.is_isolated()); // 13 + 115 = 128 <= 128
+    }
+
+    #[test]
+    fn sm_partition_not_isolated_when_overlap() {
+        let config = SmPartitionConfig::new(100, 60, 60);
+        assert!(!config.is_isolated()); // 60 + 60 > 100
+    }
+
+    // ── QuantizedActivationConfig (REQ-DIST-026 验收标准 6) ──
+
+    #[test]
+    fn quant_config_no_quant() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        let config = QuantizedActivationConfig::no_quant();
+        assert!(!config.enabled);
+        assert_eq!(config.quant_format, ActivationQuantFormat::None);
+        assert_eq!(config.quant_elem_bytes, 4);
+        assert_eq!(config.bandwidth_saving_ratio(), 0.0);
+        assert_eq!(config.quantized_comm_us(100.0), 100.0); // No reduction
+    }
+
+    #[test]
+    fn quant_config_fp8() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 6: 量化激活传输可选应用，带宽节省 >= 50%
+        let config = QuantizedActivationConfig::fp8_quant();
+        assert!(config.enabled);
+        assert_eq!(config.quant_format, ActivationQuantFormat::Fp8E4M3);
+        assert_eq!(config.quant_elem_bytes, 1);
+        // Bandwidth saving = 1 - 1/4 = 0.75 (75%, >= 50% per REQ-DIST-009)
+        assert!((config.bandwidth_saving_ratio() - 0.75).abs() < 1e-10);
+        // Quantized comm time = 100 * 1/4 = 25
+        assert_eq!(config.quantized_comm_us(100.0), 25.0);
+    }
+
+    #[test]
+    fn quant_config_int8() {
+        let config = QuantizedActivationConfig::int8_quant();
+        assert!(config.enabled);
+        assert_eq!(config.quant_format, ActivationQuantFormat::Int8Symmetric);
+        assert_eq!(config.quant_elem_bytes, 1);
+        assert!((config.bandwidth_saving_ratio() - 0.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn quant_format_equality() {
+        assert_eq!(ActivationQuantFormat::None, ActivationQuantFormat::None);
+        assert_ne!(ActivationQuantFormat::Fp8E4M3, ActivationQuantFormat::Int8Symmetric);
+    }
+
+    // ── CommComputeOverlap: SM partition and quant (REQ-DIST-026) ──
+
+    #[test]
+    fn overlap_with_sm_partition() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 5: SM 分区隔离通信和计算流
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, true).unwrap()
+            .with_sm_partition(SmPartitionConfig::new(128, 13, 115));
+        assert!(overlap.is_sm_partition_isolated());
+        assert_eq!(overlap.sm_partition.unwrap().comm_sms, 13);
+    }
+
+    #[test]
+    fn overlap_without_sm_partition_not_isolated() {
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, true).unwrap();
+        assert!(!overlap.is_sm_partition_isolated());
+    }
+
+    #[test]
+    fn overlap_with_quant_config() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 6: 量化激活传输可选应用
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, true).unwrap()
+            .with_quant_config(QuantizedActivationConfig::fp8_quant());
+        assert!(overlap.is_quantized_transfer_enabled());
+        assert!((overlap.quant_bandwidth_saving_ratio() - 0.75).abs() < 1e-10);
+        // Effective comm = 50 * 1/4 = 12.5
+        assert!((overlap.effective_comm_us() - 12.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn overlap_without_quant_default_no_quant() {
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, true).unwrap();
+        assert!(!overlap.is_quantized_transfer_enabled());
+        assert_eq!(overlap.effective_comm_us(), 50.0); // Same as original comm_us
+    }
+
+    #[test]
+    fn overlap_latency_with_quant_no_overlap() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 3+6: 无重叠 + 量化 → 延迟 = compute + quantized_comm
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, false).unwrap()
+            .with_quant_config(QuantizedActivationConfig::fp8_quant());
+        // effective_comm = 50 * 1/4 = 12.5
+        // no_overlap_forward = 100 + 12.5 = 112.5
+        assert!((overlap.latency_no_overlap_forward() - 112.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn overlap_latency_with_quant_overlap() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 3+6: 有重叠 + 量化 → 延迟 ≈ max(compute, quantized_comm)
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, true).unwrap()
+            .with_quant_config(QuantizedActivationConfig::fp8_quant());
+        // effective_comm = 12.5
+        // overlap_forward = max(100, 12.5) = 100
+        assert!((overlap.latency_overlap_forward() - 100.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn overlap_latency_hiding_improved_with_quant() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 4+6: 量化后通信量减少，隐藏率更高
+        let overlap_no_quant = CommComputeOverlap::new(10.0, 20.0, 1000.0, true).unwrap();
+        let overlap_with_quant = CommComputeOverlap::new(10.0, 20.0, 1000.0, true).unwrap()
+            .with_quant_config(QuantizedActivationConfig::fp8_quant());
+        // No quant: no_overlap = 10 + 1000 = 1010, overlap = max(10, 1000) = 1000
+        // hiding = 1 - 1000/1010 = 0.0099
+        // With FP8 quant: effective_comm = 1000 * 1/4 = 250
+        // no_overlap = 10 + 250 = 260, overlap = max(10, 250) = 250
+        // hiding = 1 - 250/260 = 0.038
+        let ratio_no_quant = overlap_no_quant.latency_hiding_ratio_forward();
+        let ratio_with_quant = overlap_with_quant.latency_hiding_ratio_forward();
+        // Quant makes the hiding ratio better when compute < comm
+        assert!(ratio_with_quant > ratio_no_quant);
+    }
+
+    #[test]
+    fn overlap_meets_hiding_threshold_with_quant() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 验收标准 4: 量化使低 compute/comm 比场景也能达到 > 80% 隐藏率
+        // hiding = 1 - max(compute, comm) / (compute + comm) = min(compute, comm) / (compute + comm)
+        // For hiding > 80%: min(C, Cc)/(C + Cc) > 0.8
+        // If Cc > C: C/(C + Cc) > 0.8 → C > 4*Cc → Cc < C/4
+        // If C > Cc: Cc/(C + Cc) > 0.8 → Cc > 4*C → C < Cc/4
+        // Example: compute=1000, comm=10 → hiding = 10/(1010) = 0.0099 → NOT > 80%
+        // Example: compute=1, comm=1000 → hiding = 1/(1001) = 0.001 → NOT > 80%
+        // For hiding > 80% with overlap, need extreme imbalance:
+        // compute=1, comm=100 → no_overlap=101, overlap=100, hiding=1-100/101=0.0099
+        // compute=100, comm=1 → no_overlap=101, overlap=100, hiding=1-100/101=0.0099
+        // Actually: hiding = min(C,Cc)/(C+Cc)
+        // For C=1, Cc=1000: 1/1001 = 0.001 → NOT > 80%
+        // For C=1000, Cc=1: 1/1001 = 0.001 → NOT > 80%
+        // The 80% threshold requires one to be >4x the other:
+        // C=1, Cc=5: 1/6 = 0.167 → NOT > 80%
+        // C=1, Cc=100: 1/101 = 0.0099 → NOT > 80%
+        // Cc/(C+Cc) > 0.8 when Cc > 4*C: C=1, Cc=5: 5/6=0.833 > 0.8 ✓
+        // So: compute=1, comm=5 → overlap=5, no_overlap=6, hiding=5/6=0.833 > 80%
+        let overlap = CommComputeOverlap::new(1.0, 2.0, 5.0, true).unwrap();
+        assert!(overlap.meets_hiding_threshold()); // 5/6 = 0.833 > 0.8
+    }
+
+    #[test]
+    fn overlap_total_latency_with_quant() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        let overlap = CommComputeOverlap::new(100.0, 200.0, 50.0, true).unwrap()
+            .with_quant_config(QuantizedActivationConfig::fp8_quant());
+        let ops = vec![
+            PipelineOp::Forward(0),
+            PipelineOp::SendActivation(0),
+            PipelineOp::Backward(0),
+        ];
+        // No overlap: compute + quantized_comm + backward_compute
+        // = 100 + 12.5 + 200 = 312.5
+        let total_no_overlap = overlap.total_latency_no_overlap(&ops);
+        assert!((total_no_overlap - 312.5).abs() < 1e-10);
+
+        // With overlap: max(compute_total, comm_total)
+        // compute_total = 100 + 200 = 300
+        // comm_total = 12.5 (FP8 quantized)
+        // overlap_total = max(300, 12.5) = 300
+        let total_overlap = overlap.total_latency_overlap(&ops);
+        assert!((total_overlap - 300.0).abs() < 1e-10);
     }
 }

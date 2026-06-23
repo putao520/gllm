@@ -636,6 +636,94 @@ impl CommHandleWrapper {
         Ok(buf)
     }
 
+    // ── Async P2P operations (REQ-DIST-021) ──────────────────────────────────
+
+    /// Async send f32 slice to a peer rank (REQ-DIST-021).
+    ///
+    /// Returns a `gllm_nccl::CommFuture` that can be polled with `is_done()`
+    /// or blocked on with `wait()`. Enables communication-compute overlap.
+    pub fn send_f32_async(
+        &self,
+        peer: u32,
+        data: &[f32],
+    ) -> Result<gllm_nccl::CommFuture, String> {
+        if !self.is_distributed() {
+            return Err("send_f32_async: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "send_f32_async: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        handle
+            .send(
+                data.as_ptr() as *const u8,
+                data.len(),
+                peer as usize,
+                gllm_nccl::DType::Fp32,
+            )
+            .map_err(|e| format!("send_f32_async NCCL error: {:?}", e))
+    }
+
+    /// Async receive f32 slice from a peer rank (REQ-DIST-021).
+    ///
+    /// Returns a `gllm_nccl::CommFuture` that can be polled with `is_done()`
+    /// or blocked on with `wait()`. Enables communication-compute overlap.
+    ///
+    /// The caller provides a pre-allocated buffer to receive into.
+    pub fn recv_f32_async(
+        &self,
+        peer: u32,
+        buf: &mut [f32],
+    ) -> Result<gllm_nccl::CommFuture, String> {
+        if !self.is_distributed() {
+            return Err("recv_f32_async: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "recv_f32_async: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        handle
+            .recv(
+                buf.as_mut_ptr() as *mut u8,
+                buf.len(),
+                peer as usize,
+                gllm_nccl::DType::Fp32,
+            )
+            .map_err(|e| format!("recv_f32_async NCCL error: {:?}", e))
+    }
+
+    /// Async send raw bytes to a peer rank (REQ-DIST-021).
+    pub fn send_bytes_async(
+        &self,
+        peer: u32,
+        data: &[u8],
+    ) -> Result<gllm_nccl::CommFuture, String> {
+        if !self.is_distributed() {
+            return Err("send_bytes_async: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "send_bytes_async: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        handle
+            .send(data.as_ptr(), data.len(), peer as usize, gllm_nccl::DType::Int8)
+            .map_err(|e| format!("send_bytes_async NCCL error: {:?}", e))
+    }
+
+    /// Async receive raw bytes from a peer rank (REQ-DIST-021).
+    pub fn recv_bytes_async(
+        &self,
+        peer: u32,
+        buf: &mut [u8],
+    ) -> Result<gllm_nccl::CommFuture, String> {
+        if !self.is_distributed() {
+            return Err("recv_bytes_async: not in distributed mode".to_string());
+        }
+        let handle = self.inner.as_ref().ok_or_else(|| {
+            "recv_bytes_async: CommHandle not initialized — call init_nccl() first".to_string()
+        })?;
+        handle
+            .recv(buf.as_mut_ptr(), buf.len(), peer as usize, gllm_nccl::DType::Int8)
+            .map_err(|e| format!("recv_bytes_async NCCL error: {:?}", e))
+    }
+
     // ── SAGUARO draft/verify token transfer (REQ-DIST-017) ──────────────────
 
     /// Send raw bytes to a peer rank (for SAGUARO draft token / verify result transfer).
