@@ -4,6 +4,53 @@
 
 ---
 
+## ⚡ 综合归因 — 范式级缺陷模式
+
+### 范式：默认路径覆盖不全（Default-Path Partial Coverage, DPPC）
+
+**定义**：函数/计算只覆盖开发者最熟悉/最常用的场景（"默认路径"），忽略其他合法场景，导致"默认路径正确但非默认路径静默失效或崩溃"。
+
+**认知根因**：锚定偏差（Anchoring Bias）— 开发者锚定在第一个/最常用的场景，后续场景被视为"边界情况"而非"一等公民"。
+
+**3 个实例的共性提取**：
+
+| 维度 | BCE-20260622-001 | BCE-20260622-002 | BCE-20260623-001 |
+|------|------------------|------------------|------------------|
+| **默认路径** | specDir（SPEC 目录） | JS/TS import | generate 图（有 Argmax） |
+| **被忽略路径** | sourceDir（源码目录） | Rust/Go/Python/Java | single-pass 图（无 Argmax） |
+| **失效表现** | 项目根指向不存在目录 | 依赖矩阵全零 | SIGSEGV heap-buffer-overflow |
+| **根因代码** | `d === specDir ? resolve(abs,'..') : abs` | `if (resolvedPath.startsWith('.'))` | `logits_end = offset + N * vocab_size` (vocab_size=0) |
+| **修复模式** | 统一取 parent | 按语言分派 | 取 max(生成, 单遍) |
+
+**DPPC 检测签名**（可横扫新代码）：
+
+1. **条件分支只处理已知枚举值，其他值走空/fallback**：`if X == A { handle } else { skip/0/null }` — 其中 B/C/D 也是合法值
+2. **计算公式中某项为 0 时整体失效**：`result = f(known) + g(unknown)` 其中 `g(unknown)=0` 不代表"无需此项"
+3. **硬编码默认值覆盖动态推导**：`cwd = GSC`（硬编码）vs `cwd = _projectRoot`（动态推导）
+4. **"主流场景"正常但"非主流场景"静默降级**：默认路径产出正确结果，非默认路径产出空/零/错误值且无报错
+
+**DPPC 根治模板**：
+
+1. **枚举所有场景**：在函数/计算设计时显式列出所有合法输入场景（而非仅"默认"+"其他"）
+2. **取并集而非取默认**：`result = max(scenario_A_need, scenario_B_need, ...)` 而非 `result = scenario_A_need`
+3. **断言守卫**：`debug_assert!(result >= all_scenario_needs)` — 编译时/运行时捕获覆盖遗漏
+4. **零值 ≠ 无需求**：当某场景的参数为 0 时，不代表该场景不存在，需区分"参数=0"和"场景不适用"
+
+**跨项目横扫指引**：用以下模式搜索 gllm/gllm-kernels/gsc 代码中的 DPPC 嫌疑点：
+
+```bash
+# 1. 条件分支只处理部分枚举值
+grep -rn 'if.*===.*specDir\|if.*startsWith.*\.\|if.*vocab_size.*>.*0' --include='*.rs' --include='*.mjs'
+
+# 2. unwrap_or(0) 可能掩盖"场景不适用"（0 是合法值还是 fallback？）
+grep -rn 'unwrap_or(0)' --include='*.rs' | grep -v test | grep -v counter
+
+# 3. 硬编码路径/目录
+grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
+```
+
+---
+
 ## BCE-20260622-001: WF SDK "exists but failed to launch" — cwd 指向不存在目录
 
 ### BUG 模式签名
