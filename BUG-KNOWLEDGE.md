@@ -80,33 +80,43 @@ wflib.mjs resolveProjectRoot() 对 sourceDir 直接返回 abs（如 /path/to/pro
 
 ---
 
-## BCE-20260623-001: cargo test SIGSEGV — vision_forward 模块全量测试时段错误
+## BCE-20260623-001: cargo test SIGSEGV — vision_forward scratchpad logits 区域不足
 
 ### BUG 模式签名
 - **patternId**: BCE-20260623-001
-- **title**: compat::vision_forward 全量测试时 SIGSEGV（单独跑通过，全量跑崩溃）
-- **layer**: 设计缺陷（可能的内存累积/unsafe 越界）
+- **title**: compile_cpu logits_end 未覆盖 output_float_elems → scratchpad 越界读取
+- **layer**: 设计缺陷（scratchpad 大小计算未覆盖非生成图 output tensor 场景）
 - **codePattern**:
-  - 单独跑 vision_forward 530 测试全通过
-  - 全量跑 44485 测试时在 vision_forward 附近 SIGSEGV
-  - --skip compat::vision_forward 后 43955 测试全通过
-- **triggerCondition**: 全量 cargo test --lib -- --test-threads=1/2
+  - `logits_end = logits_scratch_offset + max_seq_len * vocab_size * elem_bytes`
+  - 无 Argmax 图: vocab_size=0 → logits_end = logits_scratch_offset → scratchpad 不为 output 分配空间
+  - `execute_as_mega_kernel` 中 `copy_nonoverlapping(src, dst, output_float_elems)` 从 scratchpad 越界读取
+- **triggerCondition**: 任何无 Argmax 的图（vision encoder / embedding / reranker）通过 compile_cpu 编译后调用 execute_as_mega_kernel
 - **detectionSignatures**:
-  - literal: `signal: 11, SIGSEGV: invalid memory reference`
-  - literal: 在 `compat::vision_forward::tests::single_layernorm_executes` 附近
-- **sameClassCriterion**: 任何测试在单独运行通过但在全量运行时 SIGSEGV 的模式
-- **fixTemplate**: 需 GDB 定位 SIGSEGV 精确地址 + 追溯前面测试的内存泄漏/越界
-- **regressionAssertion**: 全量 cargo test --lib -- --test-threads=2 无 SIGSEGV
+  - structural: `logits_end = logits_scratch_offset + N * vocab_size * elem_bytes` 且 vocab_size=0 时 logits_end == logits_scratch_offset
+  - literal: `copy_nonoveranking(src, dst, output_float_elems)` 且 output_float_elems > (scratchpad_bytes - logits_scratch_offset) / 4
+  - antipattern: "scratchpad 大小计算仅考虑 vocab_size 而忽略 output_float_elems"
+- **sameClassCriterion**: 任何 scratchpad/buffer 大小计算仅考虑部分使用场景（如仅 generate 图的 vocab_size）而忽略其他场景（如 single-pass 图的 output tensor）
+- **fixTemplate**: logits_end = logits_scratch_offset + max(generate_logits_bytes, single_pass_output_bytes)；加 debug_assert! 防回归
+- **regressionAssertion**: 对任何 compile_cpu 输出: scratchpad_bytes >= logits_scratch_offset + output_float_elems * elem_bytes
 
 ### 根因
-待查。预存 BUG（在 f7785d5 原始 commit 也存在）。
+`compile_cpu` 中 `logits_end` 计算仅考虑 `max_seq_len * vocab_size * elem_bytes`（生成图的 logits 空间需求），忽略了无 Argmax 图中 output tensor 的空间需求。当 vocab_size=0（无 Argmax 图如 vision encoder）时，`logits_end == logits_scratch_offset`，scratchpad 不为 output tensor 分配空间，但 `execute_as_mega_kernel` 仍从 `scratchpad[logits_scratch_offset]` 读取 `output_float_elems` 个 f32，导致 heap-buffer-overflow。
+
+具体数值（vision encoder tiny_config）：scratchpad_bytes=960, logits_scratch_offset=896, output_float_elems=32。logits 区域 = 960-896 = 64 bytes = 16 f32，但需要 32 f32 = 128 bytes，越界 64 bytes。
+
+GPU compile 路径有同类问题：`total_scratch` 计算同样只考虑 `vocab_size`，未考虑 `output_float_elems`。
 
 ### 影响
-- 全量测试无法通过 CI
-- 需 --skip compat::vision_forward 绕过
+- 全量 cargo test --lib SIGSEGV（signal 11）
+- compat::vision_forward 530 测试全量跑时崩溃
+- 所有无 Argmax 图（vision encoder / embedding / reranker）均受影响
+- 仅 --skip compat::vision_forward 可绕过
 
 ### 根治
-待执行完整 BCE 闭环。
+1. CPU 路径：`logits_end = logits_scratch_offset + max(generate_logits_bytes, single_pass_output_bytes)`
+2. GPU 路径：`total_scratch` 计算增加 `single_pass_output_bytes` 考虑
+3. 加 `debug_assert!(total_scratch >= logits_scratch_offset + output_float_elems * elem_bytes)` 防回归
+4. 修改位置：`gllm-kernels/src/compiler/mod.rs` compile_cpu 函数（~行 697）和 compile_for_gpu 函数（~行 858）
 
 ### 归因时间
 2026-06-23
