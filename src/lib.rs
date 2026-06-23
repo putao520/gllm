@@ -116,16 +116,35 @@ pub use engine::pipeline::micro_batch::{
 #[cfg(feature = "nccl")]
 pub use engine::pipeline::activation_xfer::{
     ActivationTransport, ActivationTransportError, ActivationDirection,
+    PipelineTransferFuture,
 };
 #[cfg(feature = "nccl")]
 pub use engine::pipeline::scheduler::{
     PipelineOp, MicroBatchStrategy, PipelineScheduler, PipelineSchedulerError,
     CommComputeOverlap, CommComputeOverlapError, StreamKind, StreamAssignment,
+    SmPartitionConfig, QuantizedActivationConfig, ActivationQuantFormat,
     PipelineKvCacheManager, PipelineKvCacheManagerError,
 };
 #[cfg(feature = "nccl")]
 pub use engine::pipeline::interleaved::{
     Interleaved1F1B, Interleaved1F1BError, ScheduleComparison,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::bubble::{
+    BubbleAnalyzer, BubbleAnalyzerError, BubbleMetrics,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::adaptive::{
+    AdaptiveMicroBatchSizer, AdaptiveMicroBatchSizerError, AdaptiveConfig,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::gradient_sync::{
+    GradientSync, GradientSyncError, GradientSyncConfig, GradientSyncPhase, GradientSyncStats,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::pd_bridge::{
+    PdPipelineBridge, PdPipelineBridgeError, PdPipelineConfig, PdPipelineConfigError,
+    KvTransferConfig, KvTransferResult,
 };
 #[cfg(feature = "nccl")]
 pub use loader::weight_shard::{
