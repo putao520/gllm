@@ -5914,16 +5914,24 @@ mod tests {
             page_id: 9999,
             page_bytes: 4096,
         });
-        thread::sleep(Duration::from_millis(50));
+
+        // Wait for the actor to process the command with retry.
+        // The actor runs on a separate thread; 50ms may not suffice under load.
+        let mut processed = false;
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(50));
+            drain_completions_and_update(&actor, &page_metadata, &addr_table, &stats, &observer);
+            let s = stats.lock().expect("stats lock");
+            if s.promoted_ok + s.promoted_failed >= 1 {
+                processed = true;
+                break;
+            }
+        }
 
         // Should not panic even though page 9999 has no metadata.
-        drain_completions_and_update(&actor, &page_metadata, &addr_table, &stats, &observer);
-
-        let s = stats.lock().expect("stats lock");
-        // Either promoted_ok or promoted_failed incremented, but no panic.
         assert!(
-            s.promoted_ok + s.promoted_failed >= 1,
-            "should have processed at least one completion",
+            processed,
+            "should have processed at least one completion within 500ms",
         );
 
         actor.shutdown();
@@ -5963,16 +5971,28 @@ mod tests {
             page_id: 1,
             page_bytes: 4096,
         });
-        thread::sleep(Duration::from_millis(50));
-        drain_completions_and_update(&actor, &page_metadata, &addr_table, &stats, &observer);
 
-        let s = stats.lock().expect("stats lock");
-        if s.promoted_ok > 0 {
-            assert!(
-                s.total_latency_us > 0,
-                "latency should be > 0 when swap_in_time was set: latency={}",
-                s.total_latency_us,
-            );
+        // Wait for the actor to process the command with retry.
+        let mut promoted = false;
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(50));
+            drain_completions_and_update(&actor, &page_metadata, &addr_table, &stats, &observer);
+            let s = stats.lock().expect("stats lock");
+            if s.promoted_ok + s.promoted_failed > 0 {
+                promoted = true;
+                break;
+            }
+        }
+
+        if promoted {
+            let s = stats.lock().expect("stats lock");
+            if s.promoted_ok > 0 {
+                assert!(
+                    s.total_latency_us > 0,
+                    "latency should be > 0 when swap_in_time was set: latency={}",
+                    s.total_latency_us,
+                );
+            }
         }
 
         actor.shutdown();
