@@ -354,7 +354,7 @@ impl MegaKernelCompiled {
         //   it computes logits as max_seq_len * vocab * elem_bytes, which for large
         //   context models (Gemma 4 E2B: 131072 * 262144 * 4 = 128 GB) is grossly
         //   oversized. The alloc-based offsets already account for activation buffers.
-        (self.scratchpad_base_bytes + logits_bytes
+        (self.scratchpad_base_bytes + logits_bytes + sampling_bytes
             + mtp_logits_bytes + mtp_sampling_bytes)
             .max(sg_end)
             .max(64)
