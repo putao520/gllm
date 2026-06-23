@@ -49,6 +49,28 @@ grep -rn 'unwrap_or(0)' --include='*.rs' | grep -v test | grep -v counter
 grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 ```
 
+**PSC 横扫结果（2026-06-23）**：gllm + gllm-kernels 双仓全量横扫，发现 33 个嫌疑点。
+
+已根治（3 个）：
+
+| patternId | 位置 | 修复 |
+|-----------|------|------|
+| BCE-20260623-001 | gllm-kernels/compiler/mod.rs logits_end | 取 max(generate, single_pass) |
+| PSC-采样scratch | gllm/abi_types.inc.rs runtime_scratchpad_bytes | 补回 sampling_bytes |
+| PSC-测试 | gllm/compat/sampling.rs top_p_one_is_no_op | greedy(T=0) 替代 stochastic(T=1) |
+
+高优先级待根治（5 个，可能导致崩溃/数据损坏）：
+
+| # | 位置 | 模式 | 风险 |
+|---|------|------|------|
+| H-1 | executor_ops.inc.rs:676 mega_compiled.unwrap_or(0) | 未编译时 scratchpad=0 → buffer overrun | 🔴 |
+| H-2 | gpu_backend_macro.rs:131 kv_caches.get().unwrap_or(0) | KV 指针=null → GPU fault | 🔴 |
+| H-3 | mtp_executor.rs:145 / executor_step.rs:52 logits.max_by().unwrap_or(0) | 空 logits→token 0; NaN→Equal | 🔴 |
+| H-4 | request_state.rs:484 DeviceMemory Drop 只释放 Cuda/Hip | Metal/Host 内存泄漏 | 🔴 |
+| H-5 | gllm-kernels/compiler/mod.rs GPU 路径缺少 sg_end/dwc_end | CPU/GPU 不一致，有 SG/DWC 时越界 | 🔴 |
+
+中优先级待根治（8 个，静默错误/数据丢失）：详见横扫 Agent 产出。
+
 ---
 
 ## BCE-20260622-001: WF SDK "exists but failed to launch" — cwd 指向不存在目录
