@@ -147,6 +147,19 @@ pub use engine::pipeline::pd_bridge::{
     KvTransferConfig, KvTransferResult,
 };
 #[cfg(feature = "nccl")]
+pub use engine::pipeline::cp_bridge::{
+    CpPipelineBridge, CpPipelineBridgeError, CpBridgeConfig, CpSubsegment, CpAllGatherGroup,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::speculative_bridge::{
+    SpeculativePipeline, SpeculativePipelineError, SpecPipelineConfig, DraftVerifyStep,
+};
+#[cfg(feature = "nccl")]
+pub use engine::pipeline::fault_recovery::{
+    StageFaultRecovery, StageFaultRecoveryError, StageStatus, HeartbeatConfig,
+    FaultIsolationState, MigrationPlan, MigrationResult,
+};
+#[cfg(feature = "nccl")]
 pub use loader::weight_shard::{
     is_shared_weight, extract_layer_index, should_load_weight_for_stage, filter_weights_by_stage,
 };

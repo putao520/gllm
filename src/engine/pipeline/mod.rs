@@ -1,4 +1,4 @@
-//! Pipeline Parallel (PP) 基础设施 (REQ-DIST-018~027, REQ-DIST-024~025, REQ-DIST-028, REQ-DIST-031)
+//! Pipeline Parallel (PP) 基础设施 (REQ-DIST-018~027, REQ-DIST-024~025, REQ-DIST-028, REQ-DIST-031~034)
 //!
 //! nccl feature-gated: 非 nccl 构建零影响。
 //!
@@ -12,6 +12,9 @@
 //! - `adaptive`: AdaptiveMicroBatchSizer — 动态微批次大小调整 (REQ-DIST-025)
 //! - `gradient_sync`: GradientSync — PP 梯度回传与权重同步 (REQ-DIST-028)
 //! - `pd_bridge`: PdPipelineBridge — PP 与 PD 分离协同 (REQ-DIST-031)
+//! - `cp_bridge`: CpPipelineBridge — PP 与 Ring Attention Context Parallelism 协同 (REQ-DIST-032)
+//! - `speculative_bridge`: SpeculativePipeline — PP 与 SAGUARO 分布式推测协同 (REQ-DIST-033)
+//! - `fault_recovery`: StageFaultRecovery — PP 故障恢复 (REQ-DIST-034)
 
 #[cfg(feature = "nccl")]
 pub mod config;
@@ -33,3 +36,9 @@ pub mod adaptive;
 pub mod gradient_sync;
 #[cfg(feature = "nccl")]
 pub mod pd_bridge;
+#[cfg(feature = "nccl")]
+pub mod cp_bridge;
+#[cfg(feature = "nccl")]
+pub mod speculative_bridge;
+#[cfg(feature = "nccl")]
+pub mod fault_recovery;
