@@ -77,3 +77,36 @@ wflib.mjs resolveProjectRoot() 对 sourceDir 直接返回 abs（如 /path/to/pro
 
 ### 归因时间
 2026-06-22
+
+---
+
+## BCE-20260623-001: cargo test SIGSEGV — vision_forward 模块全量测试时段错误
+
+### BUG 模式签名
+- **patternId**: BCE-20260623-001
+- **title**: compat::vision_forward 全量测试时 SIGSEGV（单独跑通过，全量跑崩溃）
+- **layer**: 设计缺陷（可能的内存累积/unsafe 越界）
+- **codePattern**:
+  - 单独跑 vision_forward 530 测试全通过
+  - 全量跑 44485 测试时在 vision_forward 附近 SIGSEGV
+  - --skip compat::vision_forward 后 43955 测试全通过
+- **triggerCondition**: 全量 cargo test --lib -- --test-threads=1/2
+- **detectionSignatures**:
+  - literal: `signal: 11, SIGSEGV: invalid memory reference`
+  - literal: 在 `compat::vision_forward::tests::single_layernorm_executes` 附近
+- **sameClassCriterion**: 任何测试在单独运行通过但在全量运行时 SIGSEGV 的模式
+- **fixTemplate**: 需 GDB 定位 SIGSEGV 精确地址 + 追溯前面测试的内存泄漏/越界
+- **regressionAssertion**: 全量 cargo test --lib -- --test-threads=2 无 SIGSEGV
+
+### 根因
+待查。预存 BUG（在 f7785d5 原始 commit 也存在）。
+
+### 影响
+- 全量测试无法通过 CI
+- 需 --skip compat::vision_forward 绕过
+
+### 根治
+待执行完整 BCE 闭环。
+
+### 归因时间
+2026-06-23

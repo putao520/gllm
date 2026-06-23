@@ -1,7 +1,7 @@
 {
   "s1": {
     "decisions": [],
-    "consultSummary": "## 分布式推理补齐 — 最终完整交付方案\n\n### 总则\n\nSPEC 定义范围内每一项 REQ：完整代码实现 + 完整测试通过 + `oracle_gate canCommit=true`。全部 REQ 最终状态 implemented，100% 交付。\n\n### 交付范围（全部 implemented）\n\n**gllm/SPEC/43-DISTRIBUTED-IMPLEMENTATION — 34 个 REQ**\n\n现有 17 项（REQ-DIST-001~017）：description 修复 + 按代码证据升级，其中 003（routing table）与 016（CP）补齐完整代码后 implemented。\n\n新增 PP 流水线并行 6 项（REQ-DIST-018~023）：\n- 018 Stage 切分器：按层均分 S stage，每 stage 独立 `compile()` 产出 `MegaKernelFn`\n- 019 参数化调度器：`virtual_stage_count v` 由 DeviceProfile 推导，v=1 朴素流水、v>1 交错流水，同一调度器统一实现\n- 020 Stage 间激活传输：StageSend/Recv → P2pPageFetch（同节点）/ RdmaPageFetch（跨节点）VmInstr\n- 021 ActivationBuffer 双缓冲生命周期与背压\n- 022 StageBoundary 同步点（Barrier/Signal）\n- 023 PP×TP×CP 3D 并行拓扑组合校验\n\nREQ-DIST-016 上下文并行：环形 AllGather KV，长序列 attention 跨 GPU 切分。\n\n集成优化 7 项（REQ-DIST-024~030）：PP 通信-计算重叠（复用 gllm-nccl FLUX+SMPART）/ TP AllReduce 量化压缩管线（复用 QUANT+COMP）/ 跨节点 KV 迁移预测预取 / MoE AllToAll 计算重叠 / PD 分离 chunked KV 传输流水线 / 分布式推测解码批量 draft 传输 / 硬件归约集成（NVSwitch SHARP + Infinity Fabric + CXL，复用 HWREDUCE）。\n\n**gllm-nccl/SPEC/08-DISTRIBUTED-PAGING**\n- REQ-DP-014 implemented：Rust CAS 协议层（已完成）+ RDMA CAS PTX atomic 指令模板（完整实现）+ CAS 重试循环（完整实现）+ 跨节点并发一致性集成测试（完整编写执行）\n- REQ-DP-011 扩展 atomic 变体验收条款\n\n### 测试覆盖（100% 用例编写并执行）\n\n| 维度 | 执行环境 | 覆盖 |\n|------|---------|------|\n| 协议层 / 决策层单测 | pt-worker 192.168.1.205 | 全部 REQ Rust 逻辑层 |\n| GPU codegen / TP / PP / CP 执行 | 5070 Ti 192.168.1.200 SM 12.0 | GPU 路径真实执行 |\n| 跨节点 NCCL / RDMA 通信 | 5070 Ti 服务器 + NCCL 运行时 | 集体通信、RDMA CAS 跨节点一致性 |\n\n每个 REQ 关联测试用例完整编写入库并在对应环境执行通过。\n\n### 实施顺序（每阶段交付完整 implemented REQ）\n\n- A：SPEC 全量写入（34 REQ 完整定义 + description 修复 + 6 dataflow + 5 controlflow 补全）\n- B：PP 完整调度器 + CP 环形 AllGather（016/018~023 implemented）\n- C：routing table 完整实现（含同类横扫）+ RDMA CAS PTX 模板完整实现（003/DP-014 implemented）\n- D：7 项集成优化完整编码（024~030 implemented）\n- E：test-full 10 维度验证，34 REQ + DP-014 全部 implemented 收口，残留 0\n\n### 决策摘要\n\n```json\n{\n  \"scope\": \"ALL REQs implemented, 100% delivery, full test coverage\",\n  \"gllm_43\": \"REQ-DIST-001~030 + REQ-DIST-016 = 34 REQs, all implemented\",\n  \"gllm",
+    "consultSummary": "## \u5206\u5e03\u5f0f\u63a8\u7406\u8865\u9f50 \u2014 \u6700\u7ec8\u5b8c\u6574\u4ea4\u4ed8\u65b9\u6848\n\n### \u603b\u5219\n\nSPEC \u5b9a\u4e49\u8303\u56f4\u5185\u6bcf\u4e00\u9879 REQ\uff1a\u5b8c\u6574\u4ee3\u7801\u5b9e\u73b0 + \u5b8c\u6574\u6d4b\u8bd5\u901a\u8fc7 + `oracle_gate canCommit=true`\u3002\u5168\u90e8 REQ \u6700\u7ec8\u72b6\u6001 implemented\uff0c100% \u4ea4\u4ed8\u3002\n\n### \u4ea4\u4ed8\u8303\u56f4\uff08\u5168\u90e8 implemented\uff09\n\n**gllm/SPEC/43-DISTRIBUTED-IMPLEMENTATION \u2014 34 \u4e2a REQ**\n\n\u73b0\u6709 17 \u9879\uff08REQ-DIST-001~017\uff09\uff1adescription \u4fee\u590d + \u6309\u4ee3\u7801\u8bc1\u636e\u5347\u7ea7\uff0c\u5176\u4e2d 003\uff08routing table\uff09\u4e0e 016\uff08CP\uff09\u8865\u9f50\u5b8c\u6574\u4ee3\u7801\u540e implemented\u3002\n\n\u65b0\u589e PP \u6d41\u6c34\u7ebf\u5e76\u884c 6 \u9879\uff08REQ-DIST-018~023\uff09\uff1a\n- 018 Stage \u5207\u5206\u5668\uff1a\u6309\u5c42\u5747\u5206 S stage\uff0c\u6bcf stage \u72ec\u7acb `compile()` \u4ea7\u51fa `MegaKernelFn`\n- 019 \u53c2\u6570\u5316\u8c03\u5ea6\u5668\uff1a`virtual_stage_count v` \u7531 DeviceProfile \u63a8\u5bfc\uff0cv=1 \u6734\u7d20\u6d41\u6c34\u3001v>1 \u4ea4\u9519\u6d41\u6c34\uff0c\u540c\u4e00\u8c03\u5ea6\u5668\u7edf\u4e00\u5b9e\u73b0\n- 020 Stage \u95f4\u6fc0\u6d3b\u4f20\u8f93\uff1aStageSend/Recv \u2192 P2pPageFetch\uff08\u540c\u8282\u70b9\uff09/ RdmaPageFetch\uff08\u8de8\u8282\u70b9\uff09VmInstr\n- 021 ActivationBuffer \u53cc\u7f13\u51b2\u751f\u547d\u5468\u671f\u4e0e\u80cc\u538b\n- 022 StageBoundary \u540c\u6b65\u70b9\uff08Barrier/Signal\uff09\n- 023 PP\u00d7TP\u00d7CP 3D \u5e76\u884c\u62d3\u6251\u7ec4\u5408\u6821\u9a8c\n\nREQ-DIST-016 \u4e0a\u4e0b\u6587\u5e76\u884c\uff1a\u73af\u5f62 AllGather KV\uff0c\u957f\u5e8f\u5217 attention \u8de8 GPU \u5207\u5206\u3002\n\n\u96c6\u6210\u4f18\u5316 7 \u9879\uff08REQ-DIST-024~030\uff09\uff1aPP \u901a\u4fe1-\u8ba1\u7b97\u91cd\u53e0\uff08\u590d\u7528 gllm-nccl FLUX+SMPART\uff09/ TP AllReduce \u91cf\u5316\u538b\u7f29\u7ba1\u7ebf\uff08\u590d\u7528 QUANT+COMP\uff09/ \u8de8\u8282\u70b9 KV \u8fc1\u79fb\u9884\u6d4b\u9884\u53d6 / MoE AllToAll \u8ba1\u7b97\u91cd\u53e0 / PD \u5206\u79bb chunked KV \u4f20\u8f93\u6d41\u6c34\u7ebf / \u5206\u5e03\u5f0f\u63a8\u6d4b\u89e3\u7801\u6279\u91cf draft \u4f20\u8f93 / \u786c\u4ef6\u5f52\u7ea6\u96c6\u6210\uff08NVSwitch SHARP + Infinity Fabric + CXL\uff0c\u590d\u7528 HWREDUCE\uff09\u3002\n\n**gllm-nccl/SPEC/08-DISTRIBUTED-PAGING**\n- REQ-DP-014 implemented\uff1aRust CAS \u534f\u8bae\u5c42\uff08\u5df2\u5b8c\u6210\uff09+ RDMA CAS PTX atomic \u6307\u4ee4\u6a21\u677f\uff08\u5b8c\u6574\u5b9e\u73b0\uff09+ CAS \u91cd\u8bd5\u5faa\u73af\uff08\u5b8c\u6574\u5b9e\u73b0\uff09+ \u8de8\u8282\u70b9\u5e76\u53d1\u4e00\u81f4\u6027\u96c6\u6210\u6d4b\u8bd5\uff08\u5b8c\u6574\u7f16\u5199\u6267\u884c\uff09\n- REQ-DP-011 \u6269\u5c55 atomic \u53d8\u4f53\u9a8c\u6536\u6761\u6b3e\n\n### \u6d4b\u8bd5\u8986\u76d6\uff08100% \u7528\u4f8b\u7f16\u5199\u5e76\u6267\u884c\uff09\n\n| \u7ef4\u5ea6 | \u6267\u884c\u73af\u5883 | \u8986\u76d6 |\n|------|---------|------|\n| \u534f\u8bae\u5c42 / \u51b3\u7b56\u5c42\u5355\u6d4b | pt-worker 192.168.1.205 | \u5168\u90e8 REQ Rust \u903b\u8f91\u5c42 |\n| GPU codegen / TP / PP / CP \u6267\u884c | 5070 Ti 192.168.1.200 SM 12.0 | GPU \u8def\u5f84\u771f\u5b9e\u6267\u884c |\n| \u8de8\u8282\u70b9 NCCL / RDMA \u901a\u4fe1 | 5070 Ti \u670d\u52a1\u5668 + NCCL \u8fd0\u884c\u65f6 | \u96c6\u4f53\u901a\u4fe1\u3001RDMA CAS \u8de8\u8282\u70b9\u4e00\u81f4\u6027 |\n\n\u6bcf\u4e2a REQ \u5173\u8054\u6d4b\u8bd5\u7528\u4f8b\u5b8c\u6574\u7f16\u5199\u5165\u5e93\u5e76\u5728\u5bf9\u5e94\u73af\u5883\u6267\u884c\u901a\u8fc7\u3002\n\n### \u5b9e\u65bd\u987a\u5e8f\uff08\u6bcf\u9636\u6bb5\u4ea4\u4ed8\u5b8c\u6574 implemented REQ\uff09\n\n- A\uff1aSPEC \u5168\u91cf\u5199\u5165\uff0834 REQ \u5b8c\u6574\u5b9a\u4e49 + description \u4fee\u590d + 6 dataflow + 5 controlflow \u8865\u5168\uff09\n- B\uff1aPP \u5b8c\u6574\u8c03\u5ea6\u5668 + CP \u73af\u5f62 AllGather\uff08016/018~023 implemented\uff09\n- C\uff1arouting table \u5b8c\u6574\u5b9e\u73b0\uff08\u542b\u540c\u7c7b\u6a2a\u626b\uff09+ RDMA CAS PTX \u6a21\u677f\u5b8c\u6574\u5b9e\u73b0\uff08003/DP-014 implemented\uff09\n- D\uff1a7 \u9879\u96c6\u6210\u4f18\u5316\u5b8c\u6574\u7f16\u7801\uff08024~030 implemented\uff09\n- E\uff1atest-full 10 \u7ef4\u5ea6\u9a8c\u8bc1\uff0c34 REQ + DP-014 \u5168\u90e8 implemented \u6536\u53e3\uff0c\u6b8b\u7559 0\n\n### \u51b3\u7b56\u6458\u8981\n\n```json\n{\n  \"scope\": \"ALL REQs implemented, 100% delivery, full test coverage\",\n  \"gllm_43\": \"REQ-DIST-001~030 + REQ-DIST-016 = 34 REQs, all implemented\",\n  \"gllm",
     "sessionId": "00be6489-5484-47d4-af57-bc4369a1a5c3"
   },
   "s2": {
@@ -18,33 +18,8 @@
     "epoch": 1
   },
   "s4": {
-    "failedTasks": [
-      "TASK-01",
-      "TASK-02",
-      "TASK-03",
-      "TASK-04",
-      "TASK-05",
-      "TASK-06",
-      "TASK-07",
-      "TASK-08",
-      "TASK-09",
-      "TASK-10",
-      "TASK-11",
-      "TASK-12",
-      "TASK-13",
-      "TASK-14",
-      "TASK-15",
-      "TASK-16",
-      "TASK-17",
-      "TASK-18",
-      "TASK-19",
-      "TASK-20",
-      "TASK-21",
-      "TASK-22"
-    ],
-    "failureReasons": [
-      "epoch1: completed"
-    ]
+    "failedTasks": [],
+    "failureReasons": []
   },
   "s5s6": {},
   "loopHistory": [],
