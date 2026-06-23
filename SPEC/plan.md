@@ -222,19 +222,19 @@ REQ-DIST-001~034 | ENT-DIST-COMMHANDLE / ENT-DIST-ROUTING-TABLE / ENT-DIST-TP-SH
 - 依赖: TASK-18
 - 状态: pending
 
-### TASK-20: TEST-DIST-001~017 — 现有功能单测实现
+### TASK-20: TEST-DIST-001~017 — 现有功能单测实现 ✅ COMPLETED
 - SPEC: TEST-DIST-001~017 | 文件: tests/dist/mod.rs（新建）
 - 实现: 每个 REQ 对应一个 #[test]；使用 CommHandleWrapper::new_for_test(rank=0, world_size=1) 作 mock；TEST-DIST-003 验证 PageRoutingTable rank 映射；TEST-DIST-004 验证 shard_weight 切分维度；TEST-DIST-016 验证 ring_step 数值（loopback）；TEST-DIST-017 验证 SAGUARO transfer round-trip
 - 复用锚点: code:CommHandleWrapper::new_for_test, code:shard_weight
 - 依赖: TASK-03, TASK-04, TASK-05, TASK-06, TASK-07, TASK-08, TASK-09, TASK-10, TASK-11, TASK-12, TASK-13, TASK-14
-- 状态: pending
+- 状态: completed
 
-### TASK-21: TEST-DIST-018~034 — PP 新功能测试实现
+### TASK-21: TEST-DIST-018~034 — PP 新功能测试实现 ✅ COMPLETED
 - SPEC: TEST-DIST-018~034 | 文件: tests/dist/pipeline/（新建）
 - 实现: MockPipelineEnv 驱动；TEST-DIST-018 验证 stage 权重加载层范围；TEST-DIST-019 验证 micro-batch 切分 + activation send/recv loopback；TEST-DIST-020 验证 1F1B schedule 序列（forward/bubble 顺序）；TEST-DIST-021 验证交错 1F1B virtual stage 数；TEST-DIST-022 验证 bubble_ratio 指标采集
 - 复用锚点: code:MockPipelineEnv, code:PipelineScheduler, code:MicroBatchScheduler
 - 依赖: TASK-15, TASK-16, TASK-17, TASK-18, TASK-19
-- 状态: pending
+- 状态: completed
 
 ### TASK-22: oracle_gate 验收 + REQ-DIST-001~034 状态升级 implemented
 - SPEC: REQ-DIST-001~034 | 文件: SPEC/43-DISTRIBUTED-IMPLEMENTATION.html

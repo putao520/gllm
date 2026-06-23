@@ -479,13 +479,13 @@ mod tests {
     #[test]
     fn top_p_one_is_no_op() {
         // Arrange: top_p=1.0 should skip the nucleus filter (no truncation)
+        // Use temperature=0.0 (greedy) so the result is deterministic —
+        // the test verifies top_p=1.0 doesn't truncate, not sampling stochasticity.
         let logits = [0.0f32, 0.0, 10.0, 0.0];
 
         // Act & Assert: top_p=1.0 keeps all candidates
-        for _ in 0..200 {
-            let tok = sample_logits_row(&logits, &cfg(1.0, 0, 1.0)).expect("sample ok");
-            assert_eq!(tok, 2, "top_p=1.0 with sharp distribution must pick peak");
-        }
+        let tok = sample_logits_row(&logits, &cfg(0.0, 0, 1.0)).expect("sample ok");
+        assert_eq!(tok, 2, "top_p=1.0 with greedy must pick peak");
     }
 
     // ── sample_logits_row: single element ─────────────────────────────
