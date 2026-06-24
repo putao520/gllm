@@ -72,7 +72,7 @@ grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 | 7 | mid_layer_encode.rs:170 match dtype 只处理 F16/BF16 | FP8/INT8 走空分支 | 数据静默丢弃 |
 | 8 | hgal.rs:314 PagePayloadKind 只处理 2/5 变体 | KvContext/PromptSystem/RAG 优先级=0 | 逐出优先级错误 |
 | 9 | safetensors.rs:681 AWQ group_size fallback=128 | 非标准 AWQ 模型 | 静默错误反量化 |
-| 10 | executor_core.inc.rs:624 output_tokens[0]!=0 判断生成 | token 0 是合法 token | 合法 token 被丢弃 |
+| 10 | executor_core.inc.rs:624 output_tokens[0]!=0 判断生成 | token 0 是合法 token | 合法 token 被丢弃 | ✅ BCE-20260624-001 扩展：移除哨兵，信任 generated_count |
 | 11 | graph/profile.rs:170 num_experts unwrap_or(0) | MoE 配置缺失 | 静默当 dense |
 | 12 | hip_backend.rs:208 PTX cache unwrap_or(0)+.max(1024) | PTX 缓存缺失 | 1KB stub 替代正确大小 |
 | 13 | executor_api.rs:416 session position unwrap_or(0) | 错误 session_id | 位置静默重置 |
@@ -212,3 +212,395 @@ GPU compile 路径有同类问题：`total_scratch` 计算同样只考虑 `vocab
 
 ### 归因时间
 2026-06-23
+
+---
+
+## BCE-20260623-004: tok==0 哨兵 — Token ID 0 被错误当作 EOS 终止符
+
+- **patternId**: BCE-20260623-004
+- **title**: Token ID 0 被错误当作 EOS 哨兵终止输出扫描
+- **layer**: 设计缺陷
+- **codePattern**:
+  - `if tok == req.eos_token_id || tok == 0 { break; }` — 将 token ID 0 硬编码为 EOS 哨兵
+  - Token ID 0 是合法 token（如 `<pad>` / `<unk>` 在许多 tokenizer 中），不应被特殊对待
+- **triggerCondition**: 任何模型生成 token ID 0 的场景（如 pad token、unk token、或某些 tokenizer 的第一个 token）
+- **detectionSignatures**:
+  - literal: `|| tok == 0` 或 `== 0 { break }` 在 token 扫描循环中
+  - structural: token 扫描循环中除 `tok == eos_token_id` 外的额外终止条件
+- **sameClassCriterion**: 任何将特定 token ID（非 eos_token_id）硬编码为终止条件的代码
+- **fixTemplate**: 移除 `|| tok == 0`，仅保留 `tok == req.eos_token_id` 作为唯一终止条件
+- **regressionAssertion**: 构造 output 包含 token ID 0 的测试 → 0 必须被收集为合法输出 token
+
+### 根因
+`collect_results` 中 `if tok == req.eos_token_id || tok == 0 { break; }` 将 token ID 0 硬编码为 EOS 哨兵。这源于 mega-kernel 输出 buffer 初始化为 0 的实现细节——未生成的 slot 为 0，用 0 作为"无更多 token"的标记。但 token ID 0 是合法 token，此哨兵导致模型无法正确输出 token 0。
+
+### 影响
+- 任何生成 token ID 0 的模型输出被截断
+- 测试中 4 个测试依赖 tok==0 哨兵行为，修复后需同步更新
+
+### 根治
+1. `src/engine/batch_executor.rs:320`: 移除 `|| tok == 0`，仅保留 `if tok == req.eos_token_id { break; }`
+2. 更新 4 个依赖 tok==0 哨兵的测试：
+   - `test_collect_results`: 输出数据改用 EOS=99 终止
+   - `collect_results_zero_token_terminates`: 改为验证 token 0 被收集为合法 token
+   - `collect_results_all_zeros_yields_empty`: EOS 改为 0（0 匹配 eos_token_id）
+   - `collect_results_first_token_is_zero`: EOS 改为 0（0 匹配 eos_token_id）
+   - `collect_results_one_seq_empty_generation_other_has_tokens`: seq 1 EOS 改为 0
+3. 新增 `collect_results_zero_token_not_sentinel` 测试：验证 token 0 被正确收集
+
+### 归因时间
+2026-06-24
+
+---
+
+## BCE-20260624-001: 跨侧 dtype 硬编码 — `* 4` 假设 F32 elem_bytes
+
+- **patternId**: BCE-20260624-001
+- **title**: Rust 侧 `* 4` 硬编码假设 compute dtype 为 F32，违反 ARCH-JIT-DATA-YIELDS 跨侧 dtype 独立推导铁律
+- **layer**: 设计缺陷
+- **codePattern**:
+  - `vocab_size * 4` — 假设 logits 每元素 4 字节（F32）
+  - `seq_len * hidden_size * 4` — 假设 activation 每元素 4 字节
+  - `output_elems * 4` — 假设 output 每元素 4 字节
+  - `DiagnosticScratchpad` 缺少 `elem_bytes` 字段，`last_token_logits()` 硬编码 `vocab_size * 4`
+  - `bytes_to_f32_vec` 假设 GPU 下载数据为 F32 格式，BF16 下载后转 f32 错误
+  - `sz / (hidden_size * 4)` 权重维度推导假设 F32 权重，BF16 权重推导出错
+  - `output_tokens[0] != 0` tok==0 哨兵（与 BCE-20260623-004 同类）
+- **triggerCondition**: 任何非 F32 compute dtype 的模型（如 BF16、F16、量化模型）使用这些代码路径
+- **detectionSignatures**:
+  - literal: `* 4` 在 buffer/stride/size 计算中（排除 RoPE cos/sin 的 `* 4`，RoPE 精度始终 F32）
+  - structural: buffer 大小计算未使用 `elem_bytes` / `compute_dtype.size_bytes()`
+  - literal: `bytes_to_f32_vec(&data)` 在 `elem_bytes != 4` 路径中
+  - literal: `/ (hidden_size * 4)` 权重维度推导
+  - literal: `output_tokens[0] != 0` token 0 哨兵
+- **sameClassCriterion**: 任何 Rust 侧 buffer/stride/size 计算硬编码 `* 4` 而非从 compute dtype 推导 elem_bytes；任何将 dtype-aware 数据传给 F32-only 转换函数的代码
+- **fixTemplate**: 用 `compute_dtype.size_bytes()` 或 `elem_bytes` 替代 `* 4`；`bytes_to_f32_vec_with_elem_bytes(&data, elem_bytes)` 替代 `bytes_to_f32_vec`；BF16→f32 转换用 `half::bf16::from_bits(bits).to_f32()`；`DiagnosticScratchpad` 增加 `elem_bytes` 字段
+- **regressionAssertion**: 对任何 compute dtype: `buffer_size == count * compute_dtype.size_bytes()`; GPU 下载后 `result.len() == expected_elem_count`
+
+### 根因
+Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），违反 ARCH-JIT-DATA-YIELDS 铁律"跨侧 dtype 硬编码对齐"禁令。JIT 侧已通过 `ctx.dtype.elem_bytes()` 正确感知 dtype，但 Rust 侧未同步。当 compute dtype 非 F32（如 BF16=2 bytes、F16=2 bytes）时，buffer 分配不足或 stride 错误。更深层：GPU 路径下载 BF16 字节后调用 `bytes_to_f32_vec` 将每 4 字节解释为 f32，返回半数错误值。权重维度推导 `sz / (hidden_size * 4)` 在 BF16 权重下返回维度/2。
+
+### 影响
+- `gpu_backend_macro.rs` 7 处 `* 4` 硬编码 + 4 处缺少 `let elem_bytes` 定义：GPU 路径 buffer 分配/stride 全部错误，4 处为潜伏编译错误
+- `gpu_backend_macro.rs` 6 处 `bytes_to_f32_vec` 在 BF16 下载路径上返回错误元素数量
+- `gpu_helpers.rs` 缺少 dtype-aware 字节→f32 转换函数
+- `executor_ops.inc.rs` 5 处 `* 4` 硬编码：logits stride / output copy / rerank offset / score_tokens offset / diagnostic logits
+- `executor_ops.inc.rs` 5 处 `copy_nonoverlapping` 读取 F32 但 scratchpad 可能为 BF16
+- `pack_observe.inc.rs` `embedding()` 总是 `read_f32_at`，BF16 scratchpad 返回垃圾
+- `pack_observe.inc.rs` `last_token_logits()`: logits row stride 硬编码 `vocab_size * 4`
+- `executor_core.inc.rs` `output_tokens[0] != 0` tok==0 哨兵丢弃合法 token 0
+- `executor_compile.rs` 2 处 `sz / (hidden_size * 4)` BF16 权重维度推导返回维度/2
+- `mid_layer_encode.rs` 生产路径 `hidden_state: vec![0u8; hidden_size * 4]` 假设 F32
+- `abi_types.inc.rs` `runtime_scratchpad_bytes()`: sampling workspace 硬编码 `vocab_bytes * 4`
+- ~57 处 `DiagnosticScratchpad` 构造缺少 `elem_bytes` 字段
+
+### 根治
+1. `gpu_backend_macro.rs`: 4 处添加 `let elem_bytes = config.geometry.compute_dtype.size_bytes();`; 7 处 `* 4` → `* elem_bytes`; 6 处 `bytes_to_f32_vec` → `bytes_to_f32_vec_with_elem_bytes(&data, elem_bytes)`
+2. `gpu_helpers.rs`: 新增 `bytes_to_f32_vec_with_elem_bytes(data, elem_bytes)` 函数，elem_bytes=2 时 BF16→f32 转换
+3. `executor_ops.inc.rs`: 5 处 `* 4` → `* mega.elem_bytes`; 5 处 `copy_nonoverlapping` → `match elem_bytes { 4 => direct copy, 2 => BF16→f32 }`; `diagnostic_prefill_logits` 同样添加 BF16 处理
+4. `pack_observe.inc.rs`: `embedding()` 添加 `match self.elem_bytes { 4 => read_f32_at, 2 => BF16→f32 }`; `last_token_logits()` 改用 `vocab_size * self.elem_bytes`
+5. `executor_core.inc.rs`: 移除 `output_tokens[0] != 0` 哨兵，直接用 `generated_count`
+6. `executor_compile.rs`: 2 处 `sz / (hidden_size * 4)` → `sz / (hidden_size * elem_bytes)`
+7. `mid_layer_encode.rs`: `hidden_state: vec![0u8; hidden_size * 4]` → `hidden_size * compute_dtype.size_bytes()`
+8. `abi_types.inc.rs`: 新增 `SAMPLING_WORKSPACE_MULTIPLIER = 4` 命名常量
+9. ~57 处测试 `DiagnosticScratchpad` 构造补 `elem_bytes: 4`（测试中 F32 是合理的）
+10. RoPE `* 4` 不修（RoPE cos/sin 精度始终 F32，与 compute dtype 无关）
+11. SG 共享内存 `* 4` 不修（JIT 侧 SgDetect/SgInject 接口规范为 F32）
+12. weight_blob 读取 `* 4` 不修（权重存储始终 F32）
+
+### 归因时间
+2026-06-24
+
+---
+
+## BCE-20260624-013 — 静默降级编解码不匹配
+
+**patternId**: BCE-20260624-013
+**title**: ZstdDict/NvcompAns 编解码静默降级到 LZ4
+**layer**: 设计
+
+**codePattern**:
+- `CompressionCodec::ZstdDict` 空字典时 `lz4_compress(data)` fallback → 存储 ZstdDict codec tag + LZ4 数据
+- `CompressionCodec::NvcompAns` CPU 不可用时 `lz4_compress(data)` fallback → 存储 NvcompAns codec tag + LZ4 数据
+- `compress_weight` 用 `.ok().flatten()` 静默丢弃错误
+
+**triggerCondition**: ZstdDict 字典未训练 / NvcompAns 在 CPU 环境
+
+**detectionSignatures**:
+- literal: `lz4_compress(data)` 在 ZstdDict/NvcompAns match arm 内
+- literal: `.ok().flatten()` 在 compress_weight 函数
+
+**sameClassCriterion**: 任何 codec 编码路径使用与 codec tag 不匹配的实际压缩算法
+
+**fixTemplate**:
+1. ZstdDict 空字典 → `Err(CodecError(...))` (NO-SILENT-FALLBACK)
+2. NvcompAns 不可用 → `Err(CodecError(...))` (NO-FALLBACK)
+3. `compress_weight` 用 `unwrap_or_else(|e| { log::warn!(...); None })` 替代 `.ok().flatten()`
+
+**regressionAssertion**: compress_weight_page(ZstdDict, empty_dict) → is_err(); compress_weight_page(NvcompAns, cpu) → is_err()
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-014 — AllGather 缓冲区分配不足
+
+**patternId**: BCE-20260624-014
+**title**: AllGather 缓冲区分配 elem_count 但写入 world_size*elem_count
+**layer**: 设计
+
+**codePattern**: `vec![0.0f32; sendcount]` 然后 `all_gather_inplace(&mut buf, sendcount)` — all_gather_inplace 文档要求 buffer 容量 = world_size * sendcount
+
+**triggerCondition**: 分布式推理，world_size > 1 时 OOB 写入
+
+**detectionSignatures**:
+- literal: `vec![0.0f32; elem_count]` 紧接 `all_gather_inplace`
+- structural: buffer 分配大小不含 world_size 因子
+
+**sameClassCriterion**: 任何 all_gather_inplace 调用的 buffer 分配大小不含 world_size 因子
+
+**fixTemplate**: `vec![0.0f32; elem_count * world_size]` + 显式提取 world_size 局部变量
+
+**regressionAssertion**: all_gather_inplace 调用时 buffer.len() >= world_size * sendcount
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-015 — AllGather sendcount 整数截断
+
+**patternId**: BCE-20260624-015
+**title**: buffer.len() / world_size 整数除法截断余数
+**layer**: 设计
+
+**codePattern**: `sendcount = buffer.len() / world_size` 无可整除性检查
+
+**triggerCondition**: buffer 大小不是 world_size 整数倍时 sendcount 截断 → 数据丢失
+
+**detectionSignatures**:
+- literal: `buffer.len() / .*world_size` 无 assert
+- structural: 除法前无可整除断言
+
+**sameClassCriterion**: 任何整数除法计算分布式参数时缺少可整除性检查
+
+**fixTemplate**: 除法前 `assert!(buffer.len() % world_size == 0, "...")`
+
+**regressionAssertion**: 不可整除时 panic 而非静默截断
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-016 — PageAddrTable current_tier 迁移后不更新
+
+**patternId**: BCE-20260624-016
+**title**: 页面迁移完成后 addr_table.current_tier 未更新导致重复迁移
+**layer**: 设计
+
+**codePattern**: `drain_completions_and_update` 接收 `&PageAddrTable` 参数但以下划线前缀忽略，只更新 PageMetadata 不更新 PageAddrEntry
+
+**triggerCondition**: 页面从 GpuHbm 驱逐到 CpuDram 后 addr_table 仍显示 GpuHbm → 重复驱逐；或换入后仍显示 CpuDram → 重复换入
+
+**detectionSignatures**:
+- literal: `_addr_table` 参数名（下划线前缀 = 未使用）
+- structural: 迁移完成处理只更新 metadata 不更新 addr_table
+
+**sameClassCriterion**: 任何迁移/状态变更操作只更新部分状态存储，导致状态不一致
+
+**fixTemplate**: 移除下划线前缀，在 MigrationResult::Ok 处理中同时更新 `addr_table` 的 `entry.current_tier = done.to_tier`
+
+**regressionAssertion**: 迁移后 addr_table[page_id].current_tier == new_tier
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-017 — poll_transfers 吞掉 KV transfer 失败
+
+**patternId**: BCE-20260624-017
+**title**: poll_transfers 失败时 log::warn 后丢弃，调用者无从得知
+**layer**: 设计
+
+**codePattern**: `future.wait()` 的 Err 分支只 `log::warn!`，不返回任何失败信息给调用者
+
+**triggerCondition**: 分布式 KV transfer 失败（网络/NCCL 错误）
+
+**detectionSignatures**:
+- literal: `log::warn!("[poll_transfers] async transfer failed` 后无 return/push
+- structural: 函数返回 `Vec<KvTransferResult>`（只有 Ok 结果，无 Err 空间）
+
+**sameClassCriterion**: 任何异步操作结果收集只返回成功结果，失败被静默丢弃
+
+**fixTemplate**: 返回 `Vec<Result<KvTransferResult, String>>`，让调用者决定如何处理失败
+
+**regressionAssertion**: poll_transfers 返回值包含 Err variant，调用者必须处理
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-018 — victim_id wrapping_sub 整数下溢出
+
+**patternId**: BCE-20260624-018
+**title**: expert group ID wrapping_sub 无下界检查
+**layer**: 设计
+
+**codePattern**: `victim_id.wrapping_sub(1_000_000) as usize` — victim_id < 1_000_000 时下溢出产生巨大索引
+
+**triggerCondition**: HGAL 返回非 expert group ID（ID < 1_000_000 基偏移）
+
+**detectionSignatures**:
+- literal: `wrapping_sub` 在 group ID 上
+- structural: 减法无下界检查
+
+**sameClassCriterion**: 任何从编码 ID 提取索引的减法缺少下界检查
+
+**fixTemplate**: `checked_sub().expect("...")` 替代 `wrapping_sub()`
+
+**regressionAssertion**: victim_id < base_offset 时 panic，不产生巨大索引
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-019 — Mutex poison 恢复掩盖数据不一致
+
+**patternId**: BCE-20260624-019
+**title**: Mutex poison 时 into_inner() 恢复数据继续推理，掩盖前一个线程 panic 导致的不一致
+**layer**: 设计
+
+**codePattern**: `.lock().unwrap_or_else(|e| e.into_inner())` — poison 时恢复内部数据继续使用
+
+**triggerCondition**: 持有锁的线程在修改数据过程中 panic → 数据可能不一致 → into_inner() 恢复后继续推理产生错误结果
+
+**detectionSignatures**:
+- literal: `into_inner()` 在 Mutex lock 之后
+- literal: `unwrap_or_else(|e| e.into_inner())` 或 `unwrap_or_else(|err| err.into_inner())`
+
+**sameClassCriterion**: 任何 Mutex poison 时恢复数据而非终止操作的代码
+
+**fixTemplate**: `.lock().expect("mutex poison — previous holder panicked, cannot continue inference")` — 推理引擎中任何 panic 都应终止推理
+
+**regressionAssertion**: Mutex poison 时 panic 传播，不恢复数据继续推理
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-020 — MoE Custom mapping 静默 RoundRobin fallback
+
+**patternId**: BCE-20260624-020
+**title**: Custom expert mapping 缺失时静默 fallback 到 RoundRobin
+**layer**: 设计
+
+**codePattern**: `mapping.get(id).copied().unwrap_or(id % world_size)` — 用户指定 Custom mapping 但未覆盖所有 expert 时，缺失项静默 RoundRobin 分配
+
+**triggerCondition**: Custom mapping 长度 < num_experts
+
+**detectionSignatures**:
+- literal: `unwrap_or(expert_id % self.world_size)` 在 placement match 中
+- structural: Option::unwrap_or 回退到不同分配策略
+
+**sameClassCriterion**: 任何用户指定的映射/配置缺失项静默 fallback 到默认策略而非报错
+
+**fixTemplate**: `.ok_or_else(|| format!("expert_id {} not found in Custom mapping...", id))` — Result 传播
+
+**regressionAssertion**: Custom mapping 缺失 expert → Err，不静默 RoundRobin
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-021 — TieredCache migration plan 丢弃 no-op
+
+**patternId**: BCE-20260624-021
+**title**: build_batch() 产出的 TierMigrationPlan 被 `_plan` 丢弃，tier migration 为空操作
+**layer**: 设计
+
+**codePattern**: `let _plan = coordinator.build_batch(&[], 0.5)` — 计算了迁移计划但不执行
+
+**triggerCondition**: TieredCache 模式下有 page 需要迁移
+
+**detectionSignatures**:
+- literal: `let _plan =` 或 `let _ =` 丢弃非 trivial 返回值
+- structural: 返回值包含 Vec/容器字段但被丢弃
+
+**sameClassCriterion**: 任何计算结果被 `_` 丢弃（尤其包含待执行操作的容器）
+
+**fixTemplate**: 执行 plan 或 log::warn! 标注为未执行（直到 scheduler 集成完成）
+
+**regressionAssertion**: TierMigrationPlan 非空时必须至少有日志输出
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-022 — f32→usize 负值环绕
+
+**patternId**: BCE-20260624-022
+**title**: f32 转 usize 无负值保护，负 f32 环绕为接近 usize::MAX 的巨大值
+**layer**: 设计
+
+**codePattern**: `(f32_value) as usize` — f32 为负时环绕为巨大 usize → 缓冲区过分配/索引 OOB
+
+**triggerCondition**: 算术运算产生负 f32（如 memory_pressure_ratio < 0、capacity_factor < 0、sparsity > 2.0）
+
+**detectionSignatures**:
+- literal: `as usize` 前置为 f32 表达式
+- structural: f32 算术结果无范围检查直接转 usize
+
+**sameClassCriterion**: 任何 f32→usize 转换无负值/上界保护
+
+**fixTemplate**: `.clamp(0.0, usize::MAX as f32) as usize` 或返回 Result 传播错误
+
+**regressionAssertion**: 负 f32 输入 → clamp 到 0 而非环绕到 usize::MAX
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-023 — GPU mem_free 错误静默丢弃
+
+**patternId**: BCE-20260624-023
+**title**: `let _ = driver.mem_free()` 吞掉 GPU 内存释放错误，导致 GPU 内存泄漏不可观测
+**layer**: 设计
+
+**codePattern**: `let _ = driver.mem_free(*ptr)` 或 `let _ = backend.free_gpu_page(gpu_ptr)` — 释放 GPU 内存失败被静默忽略
+
+**triggerCondition**: GPU 驱动返回内存释放错误
+
+**detectionSignatures**:
+- literal: `let _ =` 后跟 `mem_free`/`free_gpu_page`
+- structural: 资源释放返回值被丢弃
+
+**sameClassCriterion**: 任何资源释放错误被 `let _ =` 吞掉（GPU/CPU 内存、文件句柄、网络连接）
+
+**fixTemplate**: Drop 中用 `if let Err(e) = ... { log::error!(...) }`；非 Drop 函数用 `?` 传播
+
+**regressionAssertion**: GPU 内存释放失败时 log::error! 输出，不静默
+
+**归因时间**: 2026-06-24
+
+---
+
+## BCE-20260624-024 — decode 热路径 .unwrap() 无上下文 panic
+
+**patternId**: BCE-20260624-024
+**title**: 推理 decode 热路径中 .unwrap() 缺少诊断信息，panic 时无法定位根因
+**layer**: 设计
+
+**codePattern**: `self.eagle_config.as_ref().unwrap()` / `self.ngram_index.as_ref().unwrap()` — 推理路径 panic 无具体原因
+
+**triggerCondition**: 配置/状态不一致导致 Option 为 None
+
+**detectionSignatures**:
+- literal: `.unwrap()` 在 `as_ref()`/`as_mut()` 之后
+- structural: 推理热路径中 Option 解包无诊断
+
+**sameClassCriterion**: 任何推理热路径中的 .unwrap() 缺少 expect 诊断
+
+**fixTemplate**: `.expect("具体原因 — 调用什么方法修复")` 替代 `.unwrap()`
+
+**regressionAssertion**: panic 消息包含具体原因和修复建议
+
+**归因时间**: 2026-06-24

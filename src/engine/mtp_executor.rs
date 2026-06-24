@@ -101,7 +101,8 @@ pub fn verify_mtp_candidates(
     let k = mtp_candidates.len().min(verify_logits_per_position.len());
     let mut accepted = 0;
     for i in 0..k {
-        let target = argmax_token(&verify_logits_per_position[i]);
+        let target = argmax_token(&verify_logits_per_position[i])
+            .expect("all-NaN logits — computation error");
         if target == mtp_candidates[i] {
             accepted += 1;
         } else {
@@ -136,13 +137,15 @@ pub fn build_verify_result(
 }
 
 /// Extract the argmax token ID from a logits vector.
-fn argmax_token(logits: &[f32]) -> u32 {
+/// NaN values are excluded from comparison (treated as -inf), ensuring deterministic argmax.
+/// Returns `None` if logits is empty or all values are NaN (indicates upstream computation error).
+fn argmax_token(logits: &[f32]) -> Option<u32> {
     logits
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .filter(|(_, v)| !v.is_nan())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
         .map(|(i, _)| i as u32)
-        .unwrap_or(0)
 }
 
 /// EMA-based adaptive MTP controller.
@@ -705,20 +708,20 @@ mod tests {
 
     #[test]
     fn test_argmax_token_single_element() {
-        assert_eq!(argmax_token(&[7.0f32]), 0);
+        assert_eq!(argmax_token(&[7.0f32]), Some(0));
     }
 
     #[test]
     fn test_argmax_token_tie_returns_one_of_maxima() {
         // When values are equal, argmax picks one of the tied maxima
         let logits = vec![5.0f32, 5.0f32, 3.0f32];
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         assert!(result == 0 || result == 1);
     }
 
     #[test]
-    fn test_argmax_token_empty_returns_zero() {
-        assert_eq!(argmax_token(&[]), 0);
+    fn test_argmax_token_empty_returns_none() {
+        assert_eq!(argmax_token(&[]), None);
     }
 
     #[test]
@@ -1245,25 +1248,25 @@ mod tests {
     #[test]
     fn test_argmax_token_max_at_last_position() {
         let logits = vec![1.0f32, 2.0, 3.0, 10.0];
-        assert_eq!(argmax_token(&logits), 3);
+        assert_eq!(argmax_token(&logits), Some(3));
     }
 
     #[test]
     fn test_argmax_token_max_at_second_position() {
         let logits = vec![1.0f32, 99.0, 3.0];
-        assert_eq!(argmax_token(&logits), 1);
+        assert_eq!(argmax_token(&logits), Some(1));
     }
 
     #[test]
     fn test_argmax_token_all_negative() {
         let logits = vec![-5.0f32, -1.0, -10.0];
-        assert_eq!(argmax_token(&logits), 1);
+        assert_eq!(argmax_token(&logits), Some(1));
     }
 
     #[test]
     fn test_argmax_token_with_zero() {
         let logits = vec![0.0f32, -1.0, -2.0];
-        assert_eq!(argmax_token(&logits), 0);
+        assert_eq!(argmax_token(&logits), Some(0));
     }
 
     #[test]

@@ -167,7 +167,15 @@ impl MidLayerEncodeCallback {
                     }
                     return Some(out);
                 }
-                _ => {}
+                _ => {
+                    // F32 is handled by Candidate 1 above.
+                    // Quantized dtypes (Q4_0, Q8_0, etc.) cannot be decoded to f32
+                    // element-by-element — they require dequantization with block metadata.
+                    log::warn!(
+                        "mid_layer_encode: hidden state dtype {:?} unsupported — requires dequantization, returning None",
+                        declared_dtype
+                    );
+                }
             }
         }
 
@@ -479,7 +487,7 @@ mod tests {
                     },
                     callback_chain: crate::engine::coordinator::callback_slot::CallbackChainHandle::new(),
                 },
-                hidden_state: vec![0u8; hidden_size * 4],
+                hidden_state: vec![0u8; hidden_size * compute_dtype.size_bytes()],
             }
         }
 

@@ -323,7 +323,8 @@ impl SpecDecodingState {
                 // 通过 set_mtp_draft_logits() 传入 logits.
                 let draft_tokens = if !self.mtp_draft_logits.is_empty() {
                     // 有上一轮 EAGLE draft logits → build_eagle_tree
-                    let config = self.eagle_config.as_ref().unwrap();
+                    let config = self.eagle_config.as_ref()
+                        .expect("SpecDecodingMode::Eagle requires eagle_config — call set_eagle_config() first");
                     let flat_logits: Vec<f32> = self.mtp_draft_logits.iter().flat_map(|v| v.iter().copied()).collect();
                     let vocab_size = flat_logits.len().max(1);
                     eagle::build_eagle_tree(&flat_logits, vocab_size, config)
@@ -356,7 +357,9 @@ impl SpecDecodingState {
             _ => {
                 // EESD / SAGUARO: PLD n-gram 树
                 self.ngram_index = Some(NgramIndex::build(prompt_tokens, self.tree_config.pld_ngram_len));
-                let ngram_idx = self.ngram_index.as_ref().unwrap();
+                // SAFETY: ngram_index set 2 lines above — mode invariants guarantee it exists
+                let ngram_idx = self.ngram_index.as_ref()
+                    .expect("ngram_index must exist after build");
                 let tree = SpecTree::build(
                     self.tree_config.clone(),
                     top_k_tokens,
@@ -367,7 +370,9 @@ impl SpecDecodingState {
             }
         }
 
-        self.current_tree.as_ref().unwrap()
+        // SAFETY: current_tree set in all match arms above
+        self.current_tree.as_ref()
+            .expect("current_tree must exist after draft_phase")
     }
 
     /// Phase B: Verify — 使用 VerifyResult 更新状态

@@ -314,8 +314,10 @@ struct MegaKernelCompiled {
     vocab_size: usize,
     /// hidden_dim — SG scratchpad 需要
     hidden: usize,
-    /// 每元素字节数 (compute dtype)
-    elem_bytes: usize,
+    /// Compute dtype — drives scratchpad element size and dtype-aware decoding.
+    /// ARCH-JIT-DATA-YIELDS: dtype stored as DType (not just elem_bytes) so that
+    /// BF16 vs F16 bit patterns are decoded correctly (exponent bias differs).
+    compute_dtype: gllm_kernels::types::DType,
     /// Layer 6: JIT source map — VmInstr → 机器码偏移 → Op 标签映射。
     /// 仅当 debug_jit=true 时生成，供 DAP 调试器使用。
     source_map: Option<gllm_kernels::compiler::codegen::vm::debug_map::JitSourceMap>,
@@ -328,19 +330,53 @@ struct MegaKernelCompiled {
     mtp_depth: usize,
 }
 
+/// JIT sampling scratch workspace multiplier.
+///
+/// The JIT sampling code needs 4 vocab-sized buffers for its workspace:
+///   1x logits/probs       — softmax probabilities (f32 per vocab entry)
+///   1x sorted indices     — index array for nucleus sorting (usize per entry)
+///   1x CDF / copy buffer  — cumulative distribution function for top-p
+///   1x temp workspace     — scratch for sorting/shuffling intermediates
+///
+/// Total: `SAMPLING_WORKSPACE_MULTIPLIER * vocab_bytes` per sampling invocation.
+const SAMPLING_WORKSPACE_MULTIPLIER: usize = 4;
+
 impl MegaKernelCompiled {
+    /// Bytes per element for the compute dtype.
+    #[inline]
+    fn elem_bytes(&self) -> usize {
+        self.compute_dtype.size_bytes()
+    }
+
     /// 计算运行时 scratchpad 大小：固定部分 + logits(max_total 行) + sampling + MTP + SG
-    fn runtime_scratchpad_bytes(&self, max_total: usize) -> usize {
-        let vocab_bytes = self.vocab_size * self.elem_bytes;
-        let logits_bytes = max_total * vocab_bytes;
-        let sampling_bytes = vocab_bytes * 4;
+    ///
+    /// Returns `Err(String)` on overflow instead of silently saturating to `usize::MAX`,
+    /// which would produce confusing OOM instead of a clear error message.
+    fn runtime_scratchpad_bytes(&self, max_total: usize) -> Result<usize, String> {
+        let elem_bytes = self.elem_bytes();
+        let vocab_bytes = self.vocab_size.checked_mul(elem_bytes)
+            .ok_or_else(|| format!("scratchpad overflow: vocab_size({}) * elem_bytes({})", self.vocab_size, elem_bytes))?;
+        let logits_bytes = max_total.checked_mul(vocab_bytes)
+            .ok_or_else(|| format!("scratchpad overflow: max_total({}) * vocab_bytes({})", max_total, vocab_bytes))?;
+        let sampling_bytes = vocab_bytes.checked_mul(SAMPLING_WORKSPACE_MULTIPLIER)
+            .ok_or_else(|| format!("scratchpad overflow: vocab_bytes({}) * SAMPLING_WORKSPACE_MULTIPLIER({})", vocab_bytes, SAMPLING_WORKSPACE_MULTIPLIER))?;
         // MTP logits: depth additional vocab-sized rows for MTP candidate generation.
-        let mtp_logits_bytes = self.mtp_depth * vocab_bytes;
-        let mtp_sampling_bytes = self.mtp_depth * vocab_bytes * 4;
+        let mtp_logits_bytes = self.mtp_depth.checked_mul(vocab_bytes)
+            .ok_or_else(|| format!("scratchpad overflow: mtp_depth({}) * vocab_bytes({})", self.mtp_depth, vocab_bytes))?;
+        let mtp_sampling_bytes = self.mtp_depth.checked_mul(vocab_bytes)
+            .and_then(|v| v.checked_mul(SAMPLING_WORKSPACE_MULTIPLIER))
+            .ok_or_else(|| format!("scratchpad overflow: mtp_depth({}) * vocab_bytes({}) * SAMPLING_WORKSPACE_MULTIPLIER({})", self.mtp_depth, vocab_bytes, SAMPLING_WORKSPACE_MULTIPLIER))?;
         let sg_end = if self.buffer_layout.sg_data_bytes > 0 {
-            let sg_start = (self.logits_scratch_offset + logits_bytes + sampling_bytes
-                + mtp_logits_bytes + mtp_sampling_bytes + 63) & !63;
-            sg_start + self.hidden * self.elem_bytes * 2
+            let sg_start = (self.logits_scratch_offset
+                .checked_add(logits_bytes).ok_or_else(|| format!("scratchpad overflow: logits_scratch_offset({}) + logits_bytes({})", self.logits_scratch_offset, logits_bytes))?
+                .checked_add(sampling_bytes).ok_or_else(|| format!("scratchpad overflow: + sampling_bytes({})", sampling_bytes))?
+                .checked_add(mtp_logits_bytes).ok_or_else(|| format!("scratchpad overflow: + mtp_logits_bytes({})", mtp_logits_bytes))?
+                .checked_add(mtp_sampling_bytes).ok_or_else(|| format!("scratchpad overflow: + mtp_sampling_bytes({})", mtp_sampling_bytes))?
+                .checked_add(63).ok_or_else(|| "scratchpad overflow: + 63 (alignment padding)".to_string())?) & !63;
+            let sg_hidden = self.hidden.checked_mul(elem_bytes)
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| format!("scratchpad overflow: hidden({}) * elem_bytes({}) * 2", self.hidden, elem_bytes))?;
+            sg_start.checked_add(sg_hidden).ok_or_else(|| format!("scratchpad overflow: sg_start({}) + sg_hidden({})", sg_start, sg_hidden))?
         } else {
             0
         };
@@ -354,24 +390,36 @@ impl MegaKernelCompiled {
         //   it computes logits as max_seq_len * vocab * elem_bytes, which for large
         //   context models (Gemma 4 E2B: 131072 * 262144 * 4 = 128 GB) is grossly
         //   oversized. The alloc-based offsets already account for activation buffers.
-        (self.scratchpad_base_bytes + logits_bytes + sampling_bytes
-            + mtp_logits_bytes + mtp_sampling_bytes)
+        let total = self.scratchpad_base_bytes
+            .checked_add(logits_bytes).ok_or_else(|| format!("scratchpad overflow: scratchpad_base_bytes({}) + logits_bytes({})", self.scratchpad_base_bytes, logits_bytes))?
+            .checked_add(sampling_bytes).ok_or_else(|| format!("scratchpad overflow: + sampling_bytes({})", sampling_bytes))?
+            .checked_add(mtp_logits_bytes).ok_or_else(|| format!("scratchpad overflow: + mtp_logits_bytes({})", mtp_logits_bytes))?
+            .checked_add(mtp_sampling_bytes).ok_or_else(|| format!("scratchpad overflow: + mtp_sampling_bytes({})", mtp_sampling_bytes))?
             .max(sg_end)
-            .max(64)
+            .max(64);
+        Ok(total)
     }
 
     /// Bytes per row of K or V data (num_kv_heads * head_dim * elem_bytes).
     fn kv_row_stride(&self) -> usize {
-        self.num_kv_heads * self.head_dim * self.elem_bytes
+        self.num_kv_heads
+            .checked_mul(self.head_dim)
+            .and_then(|v| v.checked_mul(self.elem_bytes()))
+            .unwrap_or(usize::MAX)
     }
 
     /// Bytes per layer (K + V): 2 * max_seq_len * kv_row_stride.
     fn kv_layer_stride(&self) -> usize {
-        2 * self.max_seq_len * self.kv_row_stride()
+        self.max_seq_len
+            .checked_mul(self.kv_row_stride())
+            .and_then(|v| v.checked_mul(2))
+            .unwrap_or(usize::MAX)
     }
 
     /// Total KV cache buffer size: num_layers * kv_layer_stride.
     fn kv_cache_bytes(&self, num_layers: usize) -> usize {
-        num_layers * self.kv_layer_stride()
+        num_layers
+            .checked_mul(self.kv_layer_stride())
+            .unwrap_or(usize::MAX)
     }
 }

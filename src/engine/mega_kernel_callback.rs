@@ -184,7 +184,7 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
         as *const std::sync::Mutex<
             crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         >);
-    let cb = match mutex.lock() { Ok(cb) => cb, Err(_) => return 0 };
+    let cb = match mutex.lock() { Ok(cb) => cb, Err(e) => { log::error!("SG callback mutex poisoned — returning 0 (SG disabled): {e}"); return 0 } };
 
     // Alloc before vtable dispatch (works around allocator ordering issue).
     let _a64 = [0u8; 64];

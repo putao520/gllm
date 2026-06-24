@@ -753,7 +753,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let Some(ref swap) = self.model_ctx.three_tier_swap else { return };
         let coord = match swap.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                log::error!("three_tier_swap coordinator lock poisoned: {e}");
+                return;
+            }
         };
         coord.register_pages_from_hgal(
             &self.dispatch.scheduler.hgal.page_metadata,
@@ -788,7 +791,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         let coord = match swap.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                log::error!("three_tier_swap coordinator lock poisoned: {e}");
+                return;
+            }
         };
         let _plan = coord.build_batch(active_pages, hbm_pressure);
     }
@@ -804,7 +810,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         let coord = match swap.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                log::error!("three_tier_swap coordinator lock poisoned: {e}");
+                return;
+            }
         };
         let changed = coord.tier_changed_pages();
         let stats = coord.stats();

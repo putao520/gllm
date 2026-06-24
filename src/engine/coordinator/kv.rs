@@ -124,13 +124,33 @@ impl KvCoordinator {
                     // Trigger tier migration based on current hotness.
                     // ThreeTierSwapCoordinator.build_batch() evaluates eviction/swap-in
                     // and produces TierMigrationPlan for hot/cold page movement.
-                    // Use empty active_pages and moderate memory_pressure for
-                    // background tier migration; the scheduler provides the real
-                    // active page set during its own build_batch call.
-                    let _plan = coordinator.build_batch(&[], 0.5);
-                    log::trace!(
-                        "[kv_dist_dispatch] TieredCache — tier migration batch built"
-                    );
+                    let plan = coordinator.build_batch(&[], 0.5);
+                    // Apply the migration plan — execute eviction and swap-in requests.
+                    // Dropping the plan without execution would be a no-op (C-5.4: no stubs).
+                    if !plan.eviction_candidates.is_empty() || !plan.swap_in_requests.is_empty() || !plan.tier_migrations.is_empty() {
+                        log::trace!(
+                            "[kv_dist_dispatch] TieredCache — migration plan: \
+                             {} evictions, {} swap-in requests, {} tier migrations",
+                            plan.eviction_candidates.len(),
+                            plan.swap_in_requests.len(),
+                            plan.tier_migrations.len(),
+                        );
+                        // TODO: apply plan via coordinator.execute_plan(plan) —
+                        // pending scheduler integration (see ThreeTierSwapCoordinator).
+                        // Until integration, log::warn! to make the no-op observable.
+                        log::warn!(
+                            "[kv_dist_dispatch] TieredCache migration plan built but not yet \
+                             executed — {} evictions + {} swap-ins + {} tier migrations deferred \
+                             (requires scheduler integration)",
+                            plan.eviction_candidates.len(),
+                            plan.swap_in_requests.len(),
+                            plan.tier_migrations.len(),
+                        );
+                    } else {
+                        log::trace!(
+                            "[kv_dist_dispatch] TieredCache — no tier migration needed this batch"
+                        );
+                    }
                 } else {
                     log::warn!(
                         "[kv_dist_dispatch] TieredCache mode but no ThreeTierSwapCoordinator — tier migration skipped"
@@ -326,18 +346,15 @@ pub mod kv_transfer {
         ///
         /// Returns a vector of completed `KvTransferResult`s.
         // @trace REQ-DIST-012 [entity:ENT-DIST-KV-XFER]
-        pub fn poll_transfers(&mut self) -> Vec<KvTransferResult> {
+        pub fn poll_transfers(&mut self) -> Vec<Result<KvTransferResult, String>> {
             let mut completed = Vec::new();
             let mut still_pending = Vec::new();
 
             for future in self.transfers.drain(..) {
                 if future.is_done() {
-                    match future.wait() {
-                        Ok(result) => completed.push(result),
-                        Err(e) => {
-                            log::warn!("[poll_transfers] async transfer failed: {}", e);
-                        }
-                    }
+                    // NO-SILENT-FALLBACK: propagate transfer errors, don't swallow them.
+                    // Callers must handle Err (retry, report, or halt).
+                    completed.push(future.wait());
                 } else {
                     still_pending.push(future);
                 }
@@ -754,7 +771,8 @@ pub mod kv_transfer {
 
             let results = pt.poll_transfers();
             assert_eq!(results.len(), 1);
-            assert_eq!(results[0].pages_transferred, 4);
+            let result = results[0].as_ref().expect("completed transfer should succeed");
+            assert_eq!(result.pages_transferred, 4);
             assert!(pt.is_empty());
         }
 
@@ -775,6 +793,8 @@ pub mod kv_transfer {
             ));
             let results = pt.poll_transfers();
             assert_eq!(results.len(), 2);
+            assert!(results[0].is_ok());
+            assert!(results[1].is_ok());
             assert!(pt.is_empty());
         }
 
@@ -1016,8 +1036,9 @@ pub mod kv_distribution {
             }
             // AllGather: each rank contributes its local KV, all ranks receive full copy.
             // The actual AllGather is performed via CommHandleWrapper.all_gather_inplace.
-            // For KV pages, we use a gather of the full buffer.
-            let mut gather_buf = vec![0.0f32; elem_count];
+            // Buffer must hold world_size * sendcount elements (see all_gather_inplace doc).
+            let world_size = comm_handle.world_size() as usize;
+            let mut gather_buf = vec![0.0f32; elem_count * world_size];
             // Copy KV data to f32 gather buffer for AllGather.
             // In production, this would be a GPU-side AllGather via NCCL.
             comm_handle.all_gather_inplace(&mut gather_buf, elem_count)?;
@@ -1049,7 +1070,9 @@ pub mod kv_distribution {
                 return Err("partial_head_mirror_allgather: not in distributed mode".to_string());
             }
             // AllGather for head slices: each rank contributes local_head_elem_count elements.
-            let mut gather_buf = vec![0.0f32; local_head_elem_count];
+            // Buffer must hold world_size * sendcount elements (see all_gather_inplace doc).
+            let world_size = comm_handle.world_size() as usize;
+            let mut gather_buf = vec![0.0f32; local_head_elem_count * world_size];
             comm_handle.all_gather_inplace(&mut gather_buf, local_head_elem_count)?;
             log::trace!(
                 "[partial_head_mirror_allgather] AllGather completed: {} elements per rank, dtype={:?}",
@@ -1452,7 +1475,7 @@ pub mod kv_routing {
     ) -> bool {
         match resolve_page_for_rank(page_id, routing_table) {
             Ok(result) => result.owner_rank != requesting_rank,
-            Err(_) => false,
+            Err(e) => { log::error!("resolve_page_for_rank failed in needs_cross_node_transfer: {e} — treating as needing cross-node transfer for safety"); true }
         }
     }
 

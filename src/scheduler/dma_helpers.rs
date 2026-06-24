@@ -526,7 +526,9 @@ pub fn decompress_and_dma_to_gpu(
         backend
             .dma_h2d(decompressed.as_ptr(), gpu_ptr, bytes_to_copy)
             .map_err(|e| {
-                let _ = backend.free_gpu_page(gpu_ptr);
+                if let Err(fe) = backend.free_gpu_page(gpu_ptr) {
+                    log::error!("free_gpu_page({:?}) after HtoD failure also failed: {fe}", gpu_ptr);
+                }
                 DmaError::HtoD(format!("decompress_and_dma_to_gpu HtoD failed: {e}"))
             })?;
     }

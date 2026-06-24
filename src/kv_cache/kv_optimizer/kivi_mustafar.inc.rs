@@ -125,9 +125,15 @@ impl KiviStrategy {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> &[f32] {
-        let num_channels = num_kv_heads * head_dim;
+        let num_channels = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
 
-        if num_tokens == 0 || num_channels == 0 {
+        if num_tokens == 0 || num_channels == 0 || num_channels == usize::MAX {
+            self.k_channel_scales.clear();
+            return &self.k_channel_scales;
+        }
+
+        let total_elements = num_tokens.checked_mul(num_channels).unwrap_or(usize::MAX);
+        if total_elements == usize::MAX || total_elements > k_data.len() {
             self.k_channel_scales.clear();
             return &self.k_channel_scales;
         }
@@ -183,13 +189,27 @@ impl KiviStrategy {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> KiviQuantResult {
-        let num_channels = num_kv_heads * head_dim;
-        let total_elements = num_tokens * num_channels;
+        let num_channels = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
+        if num_channels == usize::MAX {
+            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.key_precision };
+        }
+        let total_elements = num_tokens.checked_mul(num_channels).unwrap_or(usize::MAX);
+        if total_elements == usize::MAX {
+            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.key_precision };
+        }
 
         match self.key_precision {
             PrecisionTier::FP16 => {
                 // FP16: pack f32 → f16 bits (2 bytes per element)
-                let mut packed = Vec::with_capacity(total_elements * 2);
+                if total_elements > k_data.len() {
+                    log::warn!(
+                        "quantize_k: total_elements ({}) > k_data.len() ({}) — KV data truncated, {} elements missing",
+                        total_elements, k_data.len(), total_elements - k_data.len()
+                    );
+                }
+                let byte_count = total_elements.checked_mul(2).unwrap_or(usize::MAX);
+                let capacity = byte_count.min(1 << 28); // cap at 256 MiB
+                let mut packed = Vec::with_capacity(capacity);
                 for &val in k_data.iter().take(total_elements) {
                     let bits = super::f32_to_f16_bits(val);
                     packed.extend_from_slice(&bits.to_le_bytes());
@@ -227,7 +247,21 @@ impl KiviStrategy {
             }
             _ => {
                 // Fallback for unsupported K precision: treat as FP16
-                let mut packed = Vec::with_capacity(total_elements * 2);
+                // This is a precision downgrade — log::warn! to make it observable
+                log::warn!(
+                    "KIVI quantize_k: unsupported key precision tier {:?} — \
+                     falling back to FP16 (precision downgrade)",
+                    self.key_precision
+                );
+                if total_elements > k_data.len() {
+                    log::warn!(
+                        "quantize_k: total_elements ({}) > k_data.len() ({}) — KV data truncated, {} elements missing",
+                        total_elements, k_data.len(), total_elements - k_data.len()
+                    );
+                }
+                let byte_count = total_elements.checked_mul(2).unwrap_or(usize::MAX);
+                let capacity = byte_count.min(1 << 28); // cap at 256 MiB
+                let mut packed = Vec::with_capacity(capacity);
                 for &val in k_data.iter().take(total_elements) {
                     let bits = super::f32_to_f16_bits(val);
                     packed.extend_from_slice(&bits.to_le_bytes());
@@ -252,9 +286,15 @@ impl KiviStrategy {
         num_kv_heads: usize,
         head_dim: usize,
         precision_tier: PrecisionTier,
-    ) -> Vec<f32> {
-        let num_channels = num_kv_heads * head_dim;
-        let total_elements = num_tokens * num_channels;
+    ) -> Result<Vec<f32>, String> {
+        let num_channels = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
+        if num_channels == usize::MAX {
+            return Err("KIVI dequantize_k: num_kv_heads * head_dim overflow".into());
+        }
+        let total_elements = num_tokens.checked_mul(num_channels).unwrap_or(usize::MAX);
+        if total_elements == usize::MAX {
+            return Err("KIVI dequantize_k: num_tokens * num_channels overflow".into());
+        }
         let mut out = vec![0.0f32; total_elements];
 
         match precision_tier {
@@ -287,13 +327,16 @@ impl KiviStrategy {
                     }
                 }
             }
-            _ => {
-                // Unsupported: return zeros
-                out.fill(0.0);
+            PrecisionTier::KIVI4 | PrecisionTier::KIVI2 | PrecisionTier::Sparse | PrecisionTier::Dictionary | PrecisionTier::Evicted => {
+                return Err(format!(
+                    "KIVI dequantize_k: unsupported precision tier {:?} — \
+                     zero-fill would produce garbage output silently",
+                    precision_tier
+                ));
             }
         }
 
-        out
+        Ok(out)
     }
 
     // ── V cache: Per-Token quantization ──
@@ -323,9 +366,13 @@ impl KiviStrategy {
             return &self.v_token_scales;
         }
 
-        self.v_token_scales.resize(num_tokens, 0.0f32);
+        let stride = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
+        if stride == usize::MAX {
+            self.v_token_scales.clear();
+            return &self.v_token_scales;
+        }
 
-        let stride = num_kv_heads * head_dim;
+        self.v_token_scales.resize(num_tokens, 0.0f32);
 
         // Per-token: for each token, find max abs across all (head, channel)
         for t in 0..num_tokens {
@@ -360,7 +407,14 @@ impl KiviStrategy {
     ) -> KiviQuantResult {
         let _ = num_kv_heads;
         let _ = head_dim;
-        let stride = num_kv_heads * head_dim;
+        let stride = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
+        if stride == usize::MAX {
+            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.val_precision };
+        }
+        let total_elements = num_tokens.checked_mul(stride).unwrap_or(usize::MAX);
+        if total_elements == usize::MAX {
+            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.val_precision };
+        }
         let scales = &self.v_token_scales;
 
         match self.val_precision {
@@ -442,12 +496,21 @@ impl KiviStrategy {
             }
             PrecisionTier::FP16 => {
                 // No quantization: store as FP16
-                let total_bytes = num_tokens * stride * 2;
-                let mut packed = vec![0u8; total_bytes];
-                for (i, &val) in v_data.iter().take(num_tokens * stride).enumerate() {
+                if total_elements > v_data.len() {
+                    log::warn!(
+                        "quantize_v: total_elements ({}) > v_data.len() ({}) — KV data truncated, {} elements missing",
+                        total_elements, v_data.len(), total_elements - v_data.len()
+                    );
+                }
+                let byte_count = total_elements.checked_mul(2).unwrap_or(usize::MAX);
+                if byte_count == usize::MAX || byte_count > (1 << 28) {
+                    return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 2, precision_tier: PrecisionTier::FP16 };
+                }
+                let mut packed = vec![0u8; byte_count];
+                for (i, &val) in v_data.iter().take(total_elements).enumerate() {
                     let bits = super::f32_to_f16_bits(val);
                     let byte_offset = i * 2;
-                    if byte_offset + 2 <= total_bytes {
+                    if byte_offset + 2 <= byte_count {
                         packed[byte_offset] = bits as u8;
                         packed[byte_offset + 1] = (bits >> 8) as u8;
                     }
@@ -460,9 +523,15 @@ impl KiviStrategy {
                 }
             }
             _ => {
-                // Fallback for unsupported V tiers: KIVI4
-                let total_bytes = (num_tokens * stride).div_ceil(2);
-                let packed = vec![0u8; total_bytes];
+                // Unsupported V precision tiers — return empty result instead of zero-fill
+                // (zero-fill in quantize would produce garbage silently when dequantized)
+                log::warn!(
+                    "KIVI quantize_v: unsupported val precision tier {:?} — \
+                     returning empty result (no silent zero-fill)",
+                    self.val_precision
+                );
+                let total_bytes = total_elements.div_ceil(2);
+                let packed = vec![0u8; total_bytes.min(1 << 28)]; // cap allocation
                 KiviQuantResult {
                     data: packed,
                     scales: scales.to_vec(),
@@ -484,9 +553,15 @@ impl KiviStrategy {
         num_kv_heads: usize,
         head_dim: usize,
         precision_tier: PrecisionTier,
-    ) -> Vec<f32> {
-        let stride = num_kv_heads * head_dim;
-        let total_elements = num_tokens * stride;
+    ) -> Result<Vec<f32>, String> {
+        let stride = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
+        if stride == usize::MAX {
+            return Err("KIVI dequantize_v: num_kv_heads * head_dim overflow".into());
+        }
+        let total_elements = num_tokens.checked_mul(stride).unwrap_or(usize::MAX);
+        if total_elements == usize::MAX {
+            return Err("KIVI dequantize_v: num_tokens * stride overflow".into());
+        }
         let mut out = vec![0.0f32; total_elements];
 
         match precision_tier {
@@ -555,13 +630,16 @@ impl KiviStrategy {
                     }
                 }
             }
-            _ => {
-                // Unsupported: return zeros
-                out.fill(0.0);
+            PrecisionTier::FP8 | PrecisionTier::Sparse | PrecisionTier::Dictionary | PrecisionTier::Evicted => {
+                return Err(format!(
+                    "KIVI dequantize_v: unsupported precision tier {:?} — \
+                     zero-fill would produce garbage output silently",
+                    precision_tier
+                ));
             }
         }
 
-        out
+        Ok(out)
     }
 
     // ── Page-level integration ──

@@ -50,7 +50,10 @@ impl ExpertRouteConfig {
 
     /// 每个专家的最大 token 容量
     pub fn expert_capacity(&self, total_tokens: usize) -> usize {
-        (self.capacity_factor * total_tokens as f32 / self.num_experts as f32).ceil() as usize
+        // Guard: negative capacity_factor or division edge → usize wrap
+        (self.capacity_factor * total_tokens as f32 / self.num_experts as f32)
+            .ceil()
+            .clamp(0.0, usize::MAX as f32) as usize
     }
 }
 

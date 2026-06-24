@@ -2,6 +2,40 @@
 // Weight Blob Packing (graph.weight_layout() driven)
 // ============================================================================
 
+/// Apply +1.0 in-place to each element of raw bytes, preserving original dtype.
+/// Used for Gemma q_norm/k_norm residual convention: gamma = 1.0 + weight.
+/// @trace REQ-DTYPE-CHAIN-001 REQ-DTYPE-CHAIN-003
+fn add_one_inplace(dst: &mut [u8], dtype: ::safetensors::Dtype) {
+    match dtype {
+        ::safetensors::Dtype::BF16 => {
+            for chunk in dst.chunks_exact_mut(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                let f = half::bf16::from_bits(bits).to_f32() + 1.0;
+                chunk.copy_from_slice(&half::bf16::from_f32(f).to_bits().to_le_bytes());
+            }
+        }
+        ::safetensors::Dtype::F16 => {
+            for chunk in dst.chunks_exact_mut(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                let f = half::f16::from_bits(bits).to_f32() + 1.0;
+                chunk.copy_from_slice(&half::f16::from_f32(f).to_bits().to_le_bytes());
+            }
+        }
+        ::safetensors::Dtype::F32 => {
+            for chunk in dst.chunks_exact_mut(4) {
+                let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                chunk.copy_from_slice(&(v + 1.0f32).to_le_bytes());
+            }
+        }
+        _ => {
+            log::warn!(
+                "add_one_inplace: dtype {:?} not supported for +1.0 residual — gemma_norm_residual weights will be incorrect",
+                dtype
+            );
+        }
+    }
+}
+
 /// 通用权重打包：按预解析的 (name, offset) 对将权重排列到连续 blob。
 ///
 /// 完全由图结构驱动，所有名字都是 canonical name。
@@ -114,13 +148,7 @@ fn pack_weights_from_graph(
     for (canonical_name, offset) in named_offsets {
         let ext_name = name_map.resolve_external_to_string(canonical_name);
         if let Some(raw) = raw_floats.get(&ext_name) {
-            let elem_size = match raw.dtype {
-                ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
-                ::safetensors::Dtype::F32 => 4,
-                _ => 4,
-            };
-            let numel = raw.data.len() / elem_size;
-            let f32_bytes = numel * 4;
+            // @trace REQ-DTYPE-CHAIN-001 REQ-DTYPE-CHAIN-003
 
             // Per-layer weights: compute absolute offsets and replicate for all layers.
             // Hetero mode: detect by template prefixes (graph tensor names); Homogeneous: detect by "L0." prefix.
@@ -176,12 +204,7 @@ fn pack_weights_from_graph(
                 let raw_ref = raw_floats.get(&ref_layer_ext)
                     .or_else(|| raw_floats.get(&ext_name));
                 if let Some(layer_raw) = raw_ref {
-                    let lelem_size = match layer_raw.dtype {
-                        ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
-                        _ => 4,
-                    };
-                    let lnumel = layer_raw.data.len() / lelem_size;
-                    let lf32_bytes = lnumel * 4;
+                    // @trace REQ-DTYPE-CHAIN-001
 
                     for layer_idx in 0..num_layers {
                         // In hetero mode, skip layers of different type
@@ -196,8 +219,11 @@ fn pack_weights_from_graph(
                         }
 
                         let abs_off = abs_off_fn(layer_idx);
-                        let copy_size = lf32_bytes.min(blob.len().saturating_sub(abs_off));
-                        if copy_size == 0 || abs_off >= blob.len() { continue; }
+                        // @trace REQ-DTYPE-CHAIN-001 REQ-DTYPE-CHAIN-003
+                        // Only q_norm and k_norm use Gemma residual convention (gamma = 1.0 + weight).
+                        let is_gemma_norm = gemma_norm_residual
+                            && (canonical_name.ends_with(".q_norm")
+                                || canonical_name.ends_with(".k_norm"));
 
                         // For non-reference layers, try per-layer lookup first
                         let layer_ext = if let Some(ref suffix) = hetero_suffix {
@@ -210,110 +236,16 @@ fn pack_weights_from_graph(
                             name_map.resolve_external_to_string(&lcn)
                         };
 
-                        // Gemma RMSNorm stores weights as residuals: gamma = 1.0 + weight.
-                        // Pre-shift during packing so the JIT RMSNorm code (which does x * weight)
-                        // applies the correct gamma.
-                        // Gemma RMSNorm stores q_norm/k_norm weights as residuals: gamma = 1.0 + weight.
-                        // Only q_norm and k_norm use residual convention.
-                        // input_norm/post_attn_norm use standard gamma (already the actual value).
-                        let is_gemma_norm = gemma_norm_residual
-                            && (canonical_name.ends_with(".q_norm")
-                                || canonical_name.ends_with(".k_norm"));
-
-                        if let Some(lr) = raw_floats.get(&layer_ext) {
-                            let dst = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    blob[abs_off..].as_mut_ptr() as *mut f32,
-                                    copy_size / 4,
-                                )
-                            };
-                            match lr.dtype {
-                                ::safetensors::Dtype::BF16 => {
-                                    let src = unsafe {
-                                        std::slice::from_raw_parts(lr.data.as_ptr() as *const half::bf16, lr.data.len() / 2)
-                                    };
-                                    for (i, &v) in src.iter().enumerate() {
-                                        if i >= dst.len() { break; }
-                                        let mut f = v.to_f32();
-                                        if is_gemma_norm { f += 1.0; }
-                                        dst[i] = f;
-                                    }
-                                }
-                                ::safetensors::Dtype::F16 => {
-                                    let src = unsafe {
-                                        std::slice::from_raw_parts(lr.data.as_ptr() as *const half::f16, lr.data.len() / 2)
-                                    };
-                                    for (i, &v) in src.iter().enumerate() {
-                                        if i >= dst.len() { break; }
-                                        let mut f = v.to_f32();
-                                        if is_gemma_norm { f += 1.0; }
-                                        dst[i] = f;
-                                    }
-                                }
-                                _ => {
-                                    let cs = lr.data.len().min(blob.len().saturating_sub(abs_off));
-                                    blob[abs_off..abs_off + cs].copy_from_slice(&lr.data[..cs]);
-                                    // Pre-shift F32 norm weights in-place
-                                    if is_gemma_norm && cs >= 4 {
-                                        let f32_dst = unsafe {
-                                            std::slice::from_raw_parts_mut(
-                                                blob[abs_off..].as_mut_ptr() as *mut f32,
-                                                cs / 4,
-                                            )
-                                        };
-                                        for v in f32_dst.iter_mut() {
-                                            *v += 1.0;
-                                        }
-                                    }
-                                }
-                            }
+                        let (src_data, src_dtype) = if let Some(lr) = raw_floats.get(&layer_ext) {
+                            (lr.data.as_slice(), lr.dtype)
                         } else {
-                            // Fallback: reuse reference layer data
-                            let dst = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    blob[abs_off..].as_mut_ptr() as *mut f32,
-                                    copy_size / 4,
-                                )
-                            };
-                            match layer_raw.dtype {
-                                ::safetensors::Dtype::BF16 => {
-                                    let src = unsafe {
-                                        std::slice::from_raw_parts(layer_raw.data.as_ptr() as *const half::bf16, lnumel)
-                                    };
-                                    for (i, &v) in src.iter().enumerate() {
-                                        if i >= dst.len() { break; }
-                                        let mut f = v.to_f32();
-                                        if is_gemma_norm { f += 1.0; }
-                                        dst[i] = f;
-                                    }
-                                }
-                                ::safetensors::Dtype::F16 => {
-                                    let src = unsafe {
-                                        std::slice::from_raw_parts(layer_raw.data.as_ptr() as *const half::f16, lnumel)
-                                    };
-                                    for (i, &v) in src.iter().enumerate() {
-                                        if i >= dst.len() { break; }
-                                        let mut f = v.to_f32();
-                                        if is_gemma_norm { f += 1.0; }
-                                        dst[i] = f;
-                                    }
-                                }
-                                _ => {
-                                    let cs = layer_raw.data.len().min(blob.len().saturating_sub(abs_off));
-                                    blob[abs_off..abs_off + cs].copy_from_slice(&layer_raw.data[..cs]);
-                                    if is_gemma_norm && cs >= 4 {
-                                        let f32_dst = unsafe {
-                                            std::slice::from_raw_parts_mut(
-                                                blob[abs_off..].as_mut_ptr() as *mut f32,
-                                                cs / 4,
-                                            )
-                                        };
-                                        for v in f32_dst.iter_mut() {
-                                            *v += 1.0;
-                                        }
-                                    }
-                                }
-                            }
+                            (layer_raw.data.as_slice(), layer_raw.dtype)
+                        };
+                        let copy_size = src_data.len().min(blob.len().saturating_sub(abs_off));
+                        if copy_size == 0 || abs_off >= blob.len() { continue; }
+                        blob[abs_off..abs_off + copy_size].copy_from_slice(&src_data[..copy_size]);
+                        if is_gemma_norm {
+                            add_one_inplace(&mut blob[abs_off..abs_off + copy_size], src_dtype);
                         }
                     }
                 }
@@ -343,58 +275,14 @@ fn pack_weights_from_graph(
                 } else {
                     *offset
                 };
-                let copy_size = f32_bytes.min(blob.len().saturating_sub(blob_off));
+                // @trace REQ-DTYPE-CHAIN-001 REQ-DTYPE-CHAIN-003
+                let copy_size = raw.data.len().min(blob.len().saturating_sub(blob_off));
                 if copy_size == 0 || blob_off >= blob.len() {
                     continue;
                 }
-                let dst_f32s = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        blob[blob_off..].as_mut_ptr() as *mut f32,
-                        copy_size / 4,
-                    )
-                };
-                match raw.dtype {
-                    ::safetensors::Dtype::BF16 => {
-                        let src = unsafe {
-                            std::slice::from_raw_parts(raw.data.as_ptr() as *const half::bf16, numel)
-                        };
-                        for (i, &v) in src.iter().enumerate() {
-                            if i >= dst_f32s.len() {
-                                break;
-                            }
-                            let mut f = v.to_f32();
-                            if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) { f += 1.0; }
-                            dst_f32s[i] = f;
-                        }
-                    }
-                    ::safetensors::Dtype::F16 => {
-                        let src = unsafe {
-                            std::slice::from_raw_parts(raw.data.as_ptr() as *const half::f16, numel)
-                        };
-                        for (i, &v) in src.iter().enumerate() {
-                            if i >= dst_f32s.len() {
-                                break;
-                            }
-                            let mut f = v.to_f32();
-                            if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) { f += 1.0; }
-                            dst_f32s[i] = f;
-                        }
-                    }
-                    _ => {
-                        let copy_size = raw.data.len().min(blob.len().saturating_sub(blob_off));
-                        blob[blob_off..blob_off + copy_size].copy_from_slice(&raw.data[..copy_size]);
-                        if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) && copy_size >= 4 {
-                            let f32_dst = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    blob[blob_off..].as_mut_ptr() as *mut f32,
-                                    copy_size / 4,
-                                )
-                            };
-                            for v in f32_dst.iter_mut() {
-                                *v += 1.0;
-                            }
-                        }
-                    }
+                blob[blob_off..blob_off + copy_size].copy_from_slice(&raw.data[..copy_size]);
+                if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) {
+                    add_one_inplace(&mut blob[blob_off..blob_off + copy_size], raw.dtype);
                 }
             }
             packed_count += 1;
@@ -687,14 +575,123 @@ pub struct DiagnosticScratchpad {
     pub vocab_size: usize,
     pub prompt_len: usize,
     pub hidden_size: usize,
+    /// Compute dtype — needed to distinguish BF16 vs F16 decoding (exponent bias differs).
+    /// ARCH-JIT-DATA-YIELDS: dtype stored as DType, not just elem_bytes, so that
+    /// BF16 (8-bit exponent) and F16 (5-bit exponent) bit patterns decode correctly.
+    pub compute_dtype: gllm_kernels::types::DType,
 }
 
 impl DiagnosticScratchpad {
+    /// Bytes per element for the compute dtype.
+    #[inline]
+    pub fn elem_bytes(&self) -> usize {
+        self.compute_dtype.size_bytes()
+    }
+
+    /// Read `count` elements from scratchpad at `byte_offset`, converting from
+    /// the scratchpad's native dtype to f32. ARCH-JIT-DATA-YIELDS: dtype-aware read.
+    /// Panics on unsupported DType (NO-SILENT-FALLBACK).
+    pub fn read_dtype_aware(&self, byte_offset: usize, count: usize) -> Vec<f32> {
+        let elem_bytes = self.elem_bytes();
+        let byte_end = byte_offset + count * elem_bytes;
+        if byte_end > self.data.len() {
+            panic!(
+                "read_dtype_aware: byte_end {} > data len {}, offset={}, count={}, dtype={:?}",
+                byte_end, self.data.len(), byte_offset, count, self.compute_dtype
+            );
+        }
+        match self.compute_dtype {
+            gllm_kernels::types::DType::F32 => {
+                // F32: direct read
+                self.read_f32_at(byte_offset, count)
+            }
+            gllm_kernels::types::DType::BF16 => {
+                // BF16: read raw bytes and convert (8-bit exponent, bias=127)
+                let src = &self.data[byte_offset..byte_end];
+                let mut result = Vec::with_capacity(count);
+                for i in 0..count {
+                    let off = i * 2;
+                    let bits = u16::from_le_bytes([src[off], src[off + 1]]);
+                    result.push(half::bf16::from_bits(bits).to_f32());
+                }
+                result
+            }
+            gllm_kernels::types::DType::F16 => {
+                // F16: read raw bytes and convert (5-bit exponent, bias=15)
+                let src = &self.data[byte_offset..byte_end];
+                let mut result = Vec::with_capacity(count);
+                for i in 0..count {
+                    let off = i * 2;
+                    let bits = u16::from_le_bytes([src[off], src[off + 1]]);
+                    result.push(half::f16::from_bits(bits).to_f32());
+                }
+                result
+            }
+            _ => panic!(
+                "DiagnosticScratchpad::read_dtype_aware: unsupported compute_dtype={:?}, only F32/BF16/F16 supported",
+                self.compute_dtype
+            ),
+        }
+    }
+
+    /// Read a single f32 element from scratchpad at `byte_offset`.
+    /// Panics on unsupported DType (NO-SILENT-FALLBACK).
+    pub fn read_single_element(&self, byte_offset: usize) -> f32 {
+        match self.compute_dtype {
+            gllm_kernels::types::DType::F32 => {
+                if byte_offset + 4 <= self.data.len() {
+                    unsafe {
+                        let ptr = self.data.as_ptr().add(byte_offset) as *const f32;
+                        *ptr
+                    }
+                } else {
+                    panic!(
+                        "read_single_element: byte_offset {} out of bounds (len {}), dtype={:?}",
+                        byte_offset, self.data.len(), self.compute_dtype
+                    );
+                }
+            }
+            gllm_kernels::types::DType::BF16 => {
+                if byte_offset + 2 <= self.data.len() {
+                    let b0 = self.data[byte_offset];
+                    let b1 = self.data[byte_offset + 1];
+                    let bits = u16::from_le_bytes([b0, b1]);
+                    half::bf16::from_bits(bits).to_f32()
+                } else {
+                    panic!(
+                        "read_single_element: byte_offset {} out of bounds (len {}), dtype={:?}",
+                        byte_offset, self.data.len(), self.compute_dtype
+                    );
+                }
+            }
+            gllm_kernels::types::DType::F16 => {
+                if byte_offset + 2 <= self.data.len() {
+                    let b0 = self.data[byte_offset];
+                    let b1 = self.data[byte_offset + 1];
+                    let bits = u16::from_le_bytes([b0, b1]);
+                    half::f16::from_bits(bits).to_f32()
+                } else {
+                    panic!(
+                        "read_single_element: byte_offset {} out of bounds (len {}), dtype={:?}",
+                        byte_offset, self.data.len(), self.compute_dtype
+                    );
+                }
+            }
+            _ => panic!(
+                "DiagnosticScratchpad::read_single_element: unsupported compute_dtype={:?}",
+                self.compute_dtype
+            ),
+        }
+    }
+
     /// Read f32 values from scratchpad at given byte offset and count.
     pub fn read_f32_at(&self, byte_offset: usize, count: usize) -> Vec<f32> {
         let end = byte_offset + count * 4;
         if end > self.data.len() {
-            return vec![];
+            panic!(
+                "read_f32_at: byte_offset {} + count*4 = {} out of bounds (data len {})",
+                byte_offset, end, self.data.len()
+            );
         }
         let mut out = vec![0.0f32; count];
         unsafe {
@@ -708,15 +705,25 @@ impl DiagnosticScratchpad {
     }
 
     /// Read embedding output from scratchpad (at offset 0).
+    ///
+    /// ARCH-JIT-DATA-YIELDS: Embedding data is stored in compute dtype.
+    /// This method returns f32 values regardless of the underlying dtype.
     pub fn embedding(&self) -> Vec<f32> {
         let count = self.prompt_len * self.hidden_size;
-        self.read_f32_at(0, count)
+        self.read_dtype_aware(0, count)
     }
 
     /// Read logits for the last prompt token.
+    ///
+    /// ARCH-JIT-DATA-YIELDS: Logits are stored in compute dtype.
+    /// This method returns f32 values regardless of the underlying dtype.
     pub fn last_token_logits(&self) -> Vec<f32> {
-        let row_bytes = self.vocab_size * 4;
+        if self.prompt_len == 0 {
+            log::warn!("last_token_logits: prompt_len=0 — no tokens processed, returning empty logits");
+            return Vec::new();
+        }
+        let row_bytes = self.vocab_size * self.elem_bytes();
         let off = self.logits_offset + (self.prompt_len - 1) * row_bytes;
-        self.read_f32_at(off, self.vocab_size)
+        self.read_dtype_aware(off, self.vocab_size)
     }
 }

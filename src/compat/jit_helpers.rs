@@ -2,17 +2,33 @@
 
 use gllm_kernels::types::DType;
 
-/// Zero-copy reinterpret `&[u8]` as `&[f32]`.
+/// Copy `&[u8]` into an aligned `Vec<f32>`.
+///
+/// SAFETY: `f32` requires 4-byte alignment. The input `&[u8]` may not be aligned
+/// (e.g. a sub-slice starting at an odd offset), so we cannot safely cast directly.
+/// Instead, we copy into a properly-aligned `Vec<f32>` via `copy_nonoverlapping`.
+/// This is only used for GPU DtoH result download (small to medium sizes).
+/// For hot paths, JIT code reads directly from properly-aligned scratchpad.
 #[inline]
-fn bytes_as_f32(s: &[u8]) -> &[f32] {
+fn bytes_to_f32_vec(s: &[u8]) -> Vec<f32> {
     if s.is_empty() {
-        return &[];
+        return Vec::new();
     }
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / std::mem::size_of::<f32>()) }
+    let count = s.len() / std::mem::size_of::<f32>();
+    let mut result = Vec::with_capacity(count);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            s.as_ptr(),
+            result.as_mut_ptr() as *mut u8,
+            count * std::mem::size_of::<f32>(),
+        );
+        result.set_len(count);
+    }
+    result
 }
 
 /// Convert typed bytes (F16/BF16/F32) to Vec<f32>.
-/// F32: zero-copy reinterpret. F16/BF16: element-wise conversion.
+/// F32: aligned copy. F16/BF16: element-wise conversion.
 // ARCH-JIT-DATA-YIELDS: BUILD-stage dtype conversion — weight preprocessing
 // at model load time. Different source dtypes require different conversion logic.
 // This is NOT a JIT compile-time branch.
@@ -21,7 +37,7 @@ pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
         return Vec::new();
     }
     match dtype {
-        DType::F32 => bytes_as_f32(data).to_vec(),
+        DType::F32 => bytes_to_f32_vec(data),
         DType::F16 => {
             data.chunks_exact(2)
                 .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
@@ -32,7 +48,10 @@ pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
                 .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
                 .collect()
         }
-        _ => bytes_as_f32(data).to_vec(),
+        _ => panic!(
+            "typed_bytes_to_f32: unsupported dtype {:?}. Only F32, F16, BF16 are supported for GPU output conversion.",
+            dtype
+        ),
     }
 }
 
@@ -140,30 +159,29 @@ mod tests {
         assert!((result[2] - (-0.25)).abs() < 0.01);
     }
 
-    // ── typed_bytes_to_f32: fallback path (non-F32/F16/BF16 dtypes) ──
+    // ── typed_bytes_to_f32: unsupported dtype panics ──
 
     #[test]
-    fn typed_bytes_to_f32_u8_falls_back_to_f32_reinterpret() {
-        let values: Vec<f32> = vec![1.0, 2.0];
-        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let result = typed_bytes_to_f32(&bytes, DType::U8);
-        assert_eq!(result, values);
+    #[should_panic(expected = "unsupported dtype")]
+    fn typed_bytes_to_f32_u8_panics() {
+        let bytes: [u8; 4] = [0u8, 0, 0x80, 0x3f]; // 1.0f32
+        let _ = typed_bytes_to_f32(&bytes, DType::U8);
     }
 
     #[test]
-    fn typed_bytes_to_f32_f8e4m3_falls_back_to_f32_reinterpret() {
+    #[should_panic(expected = "unsupported dtype")]
+    fn typed_bytes_to_f32_f8e4m3_panics() {
         let values: Vec<f32> = vec![0.5, -0.5];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let result = typed_bytes_to_f32(&bytes, DType::F8E4M3);
-        assert_eq!(result, values);
+        let _ = typed_bytes_to_f32(&bytes, DType::F8E4M3);
     }
 
     #[test]
-    fn typed_bytes_to_f32_f8e5m2_falls_back_to_f32_reinterpret() {
+    #[should_panic(expected = "unsupported dtype")]
+    fn typed_bytes_to_f32_f8e5m2_panics() {
         let values: Vec<f32> = vec![100.0];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let result = typed_bytes_to_f32(&bytes, DType::F8E5M2);
-        assert_eq!(result, values);
+        let _ = typed_bytes_to_f32(&bytes, DType::F8E5M2);
     }
 
     // ── typed_bytes_to_f32: truncated input (odd bytes for F16/BF16) ──
@@ -324,33 +342,31 @@ mod tests {
         assert_eq!(result[0].to_bits(), nan_bits);
     }
 
-    // ── bytes_as_f32: slice reinterpret tests ──
-    // Note: bytes_as_f32 is unsafe and requires 4-byte aligned input for
-    // correctness. Tests use Vec<u8>-backed data which is heap-aligned.
+    // ── bytes_to_f32_vec: aligned copy tests ──
 
     #[test]
-    fn bytes_as_f32_single_element() {
+    fn bytes_to_f32_vec_single_element() {
         let value: f32 = 3.14159;
         let bytes: Vec<u8> = value.to_le_bytes().to_vec();
-        let result = bytes_as_f32(&bytes);
+        let result = bytes_to_f32_vec(&bytes);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], value);
     }
 
     #[test]
-    fn bytes_as_f32_multiple_elements() {
+    fn bytes_to_f32_vec_multiple_elements() {
         let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let result = bytes_as_f32(&bytes);
+        let result = bytes_to_f32_vec(&bytes);
         assert_eq!(result.len(), 5);
-        assert_eq!(result, values.as_slice());
+        assert_eq!(result, values);
     }
 
     #[test]
-    fn bytes_as_f32_preserves_negative_and_large() {
+    fn bytes_to_f32_vec_preserves_negative_and_large() {
         let values: Vec<f32> = vec![-1e10, f32::MAX, f32::MIN];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let result = bytes_as_f32(&bytes);
+        let result = bytes_to_f32_vec(&bytes);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], -1e10);
         assert_eq!(result[1], f32::MAX);
@@ -358,13 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn bytes_as_f32_roundtrip_through_typed_bytes_to_f32() {
+    fn bytes_to_f32_vec_roundtrip_through_typed_bytes_to_f32() {
         let values: Vec<f32> = vec![0.0, 1.0, -1.0, 42.5];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        // bytes_as_f32 gives zero-copy view, typed_bytes_to_f32 copies
-        let view = bytes_as_f32(&bytes);
-        let copied = typed_bytes_to_f32(&bytes, DType::F32);
-        assert_eq!(view, copied.as_slice());
+        let direct = bytes_to_f32_vec(&bytes);
+        let via_typed = typed_bytes_to_f32(&bytes, DType::F32);
+        assert_eq!(direct, via_typed);
     }
 
     // ── New tests (TEST-JH-31 through TEST-JH-43) ──
@@ -527,14 +542,13 @@ mod tests {
 
     // @trace TEST-JH-42 [req:REQ-JIT] [level:unit]
     #[test]
-    fn typed_bytes_to_f32_f4e2m1_fallback_reinterpret() {
-        // Arrange: F4E2M1 (sub-byte) hits the fallback path — reinterpreted as f32 bytes
+    #[should_panic(expected = "unsupported dtype")]
+    fn typed_bytes_to_f32_f4e2m1_panics() {
+        // Arrange: F4E2M1 (sub-byte) is unsupported — must panic, not silently reinterpret
         let values: Vec<f32> = vec![1.5, -3.0, 0.25];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        // Act
-        let result = typed_bytes_to_f32(&bytes, DType::F4E2M1);
-        // Assert: fallback path does zero-copy f32 reinterpret
-        assert_eq!(result, values);
+        // Act: should panic
+        let _ = typed_bytes_to_f32(&bytes, DType::F4E2M1);
     }
 
     // @trace TEST-JH-43 [req:REQ-JIT] [level:unit]
@@ -554,71 +568,92 @@ mod tests {
 
     // @trace TEST-JH-44 [req:REQ-JIT] [level:unit]
     #[test]
-    fn bytes_as_f32_empty_slice_yields_empty() {
+    fn bytes_to_f32_vec_empty_slice_yields_empty() {
         // Arrange: zero-length byte slice
         let bytes: &[u8] = &[];
         // Act
-        let result = bytes_as_f32(bytes);
+        let result = bytes_to_f32_vec(bytes);
         // Assert: 0 bytes / 4 = 0 elements
         assert!(result.is_empty());
     }
 
     // @trace TEST-JH-45 [req:REQ-JIT] [level:unit]
     #[test]
-    fn bytes_as_f32_sub_f32_length_yields_empty() {
+    fn bytes_to_f32_vec_sub_f32_length_yields_empty() {
         // Arrange: 3 bytes — not enough for a complete f32 (needs 4)
         let bytes: Vec<u8> = vec![0x01, 0x02, 0x03];
         // Act
-        let result = bytes_as_f32(&bytes);
+        let result = bytes_to_f32_vec(&bytes);
         // Assert: integer division 3/4 = 0 elements
         assert!(result.is_empty());
     }
 
     // @trace TEST-JH-46 [req:REQ-JIT] [level:unit]
     #[test]
-    fn bytes_as_f32_length_calculation_matches_byte_count() {
+    fn bytes_to_f32_vec_length_calculation_matches_byte_count() {
         // Arrange: 20 bytes should yield exactly 5 f32 elements
         let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         assert_eq!(bytes.len(), 20);
         // Act
-        let result = bytes_as_f32(&bytes);
+        let result = bytes_to_f32_vec(&bytes);
         // Assert
         assert_eq!(result.len(), 5);
-        assert_eq!(result, values.as_slice());
+        assert_eq!(result, values);
+    }
+
+    // Verify that bytes_to_f32_vec works correctly with unaligned input.
+    // This is the core UB fix: the old bytes_as_f32 would cast an unaligned
+    // &[u8] pointer to *const f32, which is UB when the pointer is not
+    // 4-byte aligned. bytes_to_f32_vec uses copy_nonoverlapping into an
+    // aligned Vec, so it handles any alignment correctly.
+    #[test]
+    fn bytes_to_f32_vec_works_with_unaligned_input() {
+        // Arrange: 8 bytes (2 f32s) preceded by 1 byte to create misalignment
+        let values: Vec<f32> = vec![1.5, -3.25];
+        let f32_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut padded = vec![0xAAu8]; // 1-byte prefix -> offset 1 is NOT 4-byte aligned
+        padded.extend_from_slice(&f32_bytes);
+        // Act: pass a sub-slice starting at offset 1 (unaligned for f32)
+        let unaligned_slice = &padded[1..];
+        assert_ne!(unaligned_slice.as_ptr() as usize % 4, 0,
+            "test setup error: slice should be unaligned");
+        let result = bytes_to_f32_vec(unaligned_slice);
+        // Assert: values preserved despite unaligned input
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], 1.5);
+        assert_eq!(result[1], -3.25);
     }
 
     // @trace TEST-JH-47 [req:REQ-JIT] [level:unit]
     #[test]
-    fn typed_bytes_to_f32_f6e3m2_fallback_reinterpret() {
-        // Arrange: F6E3M2 is a sub-byte dtype that hits the fallback path
+    #[should_panic(expected = "unsupported dtype")]
+    fn typed_bytes_to_f32_f6e3m2_panics() {
+        // Arrange: F6E3M2 is a sub-byte dtype that is unsupported
         let values: Vec<f32> = vec![2.0, -4.5];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        // Act
-        let result = typed_bytes_to_f32(&bytes, DType::F6E3M2);
-        // Assert: fallback path reinterprets bytes as f32
-        assert_eq!(result, values);
+        // Act: should panic
+        let _ = typed_bytes_to_f32(&bytes, DType::F6E3M2);
     }
 
     // @trace TEST-JH-48 [req:REQ-JIT] [level:unit]
     #[test]
-    fn typed_bytes_to_f32_f6e2m3_fallback_reinterpret() {
-        // Arrange: F6E2M3 is a sub-byte dtype that hits the fallback path
+    #[should_panic(expected = "unsupported dtype")]
+    fn typed_bytes_to_f32_f6e2m3_panics() {
+        // Arrange: F6E2M3 is a sub-byte dtype that is unsupported
         let values: Vec<f32> = vec![0.125, -0.75];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        // Act
-        let result = typed_bytes_to_f32(&bytes, DType::F6E2M3);
-        // Assert: fallback path reinterprets bytes as f32
-        assert_eq!(result, values);
+        // Act: should panic
+        let _ = typed_bytes_to_f32(&bytes, DType::F6E2M3);
     }
 
     // @trace TEST-JH-49 [req:REQ-JIT] [level:unit]
     #[test]
-    fn typed_bytes_to_f32_fallback_dtype_empty_input() {
-        // Arrange: empty byte slice with U8 dtype (fallback path)
-        // Act
+    fn typed_bytes_to_f32_unsupported_dtype_empty_input() {
+        // Arrange: empty byte slice with U8 dtype (unsupported)
+        // Act: early return produces empty Vec regardless of dtype — no panic
         let result = typed_bytes_to_f32(&[], DType::U8);
-        // Assert: early return produces empty Vec regardless of dtype
+        // Assert
         assert!(result.is_empty());
     }
 

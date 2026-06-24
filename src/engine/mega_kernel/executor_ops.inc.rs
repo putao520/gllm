@@ -18,14 +18,14 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..(prompt_len + 1) as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?];
 
         // Pre-fill RoPE cache
         // PERF: RoPE cos/sin table 用 F32 精度(三角函数标准精度),非统一精度假设
         // (具体 compute dtype 由 JIT codegen 按 op inputs 推导,RoPE table 是独立预处理)
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = (prompt_len + 1) * rc.head_dim;
-            let rope_bytes = rope_elems * 4; // F32 elem_bytes = 4
+            let rope_bytes = rope_elems * std::mem::size_of::<f32>(); // RoPE cos/sin always F32 (math precision)
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -80,20 +80,21 @@ impl MegaKernelExecutor {
         // Read logits for last prompt token from scratchpad
         let logits_off = mega.logits_scratch_offset;
         let vocab = self.vocab_size;
-        let row_bytes = vocab * 4;
+        let row_bytes = vocab * mega.elem_bytes();
         // Last prompt token's logits are at row (prompt_len - 1)
-        let last_row_off = logits_off + (prompt_len - 1) * row_bytes;
+        // saturating_sub prevents underflow when prompt_len=0 (empty prompt)
+        let last_row_off = logits_off + prompt_len.saturating_sub(1) * row_bytes;
 
-        let mut logits = vec![0.0f32; vocab];
-        if last_row_off + row_bytes <= scratchpad.len() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    scratchpad[last_row_off..].as_ptr() as *const f32,
-                    logits.as_mut_ptr(),
-                    vocab,
-                );
-            }
-        }
+        // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
+        let sp = DiagnosticScratchpad {
+            data: scratchpad,
+            logits_offset: logits_off,
+            vocab_size: vocab,
+            prompt_len,
+            hidden_size: self.hidden_size,
+            compute_dtype: mega.compute_dtype,
+        };
+        let logits = sp.read_dtype_aware(last_row_off, vocab);
 
         Ok(logits)
     }
@@ -113,11 +114,11 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..(prompt_len + 1) as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?];
 
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = (prompt_len + 1) * rc.head_dim;
-            let rope_bytes = rope_elems * 4; // F32 elem_bytes = 4 (RoPE 数学精度)
+            let rope_bytes = rope_elems * std::mem::size_of::<f32>(); // RoPE cos/sin always F32 (math precision) (RoPE 数学精度)
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -174,6 +175,7 @@ impl MegaKernelExecutor {
             vocab_size: self.vocab_size,
             prompt_len,
             hidden_size: self.hidden_size,
+            compute_dtype: mega.compute_dtype,
         })
     }
 
@@ -200,12 +202,12 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..prompt_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
 
         // Pre-fill RoPE cache
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = prompt_len * rc.head_dim;
-            let rope_bytes = rope_elems * 4;
+            let rope_bytes = rope_elems * std::mem::size_of::<f32>();
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -258,18 +260,16 @@ impl MegaKernelExecutor {
 
         // The graph output tensor (MeanPool/classifier result) is redirected to the Output region
         // at scratchpad + logits_scratch_offset (same mechanism as logits-producer output for 含 Argmax 的图).
-        let mut output = vec![0.0f32; output_elems];
-        let offset = mega.logits_scratch_offset;
-        let copy_bytes = output_elems * 4;
-        if offset + copy_bytes <= scratchpad.len() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    scratchpad[offset..].as_ptr() as *const f32,
-                    output.as_mut_ptr(),
-                    output_elems,
-                );
-            }
-        }
+        // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
+        let sp = DiagnosticScratchpad {
+            data: scratchpad,
+            logits_offset: mega.logits_scratch_offset,
+            vocab_size: self.vocab_size,
+            prompt_len,
+            hidden_size: self.hidden_size,
+            compute_dtype: mega.compute_dtype,
+        };
+        let output = sp.read_dtype_aware(mega.logits_scratch_offset, output_elems);
         Ok(output)
     }
 
@@ -295,12 +295,12 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..prompt_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
 
         // Pre-fill RoPE cache
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = prompt_len * rc.head_dim;
-            let rope_bytes = rope_elems * 4;
+            let rope_bytes = rope_elems * std::mem::size_of::<f32>();
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -356,26 +356,24 @@ impl MegaKernelExecutor {
         // Although this is the decode step (based on Argmax token + KV cache),
         // it still reflects the model's assessment of yes/no given the context,
         // which is sufficient for reranking discrimination.
+        // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
+        let sp = DiagnosticScratchpad {
+            data: scratchpad,
+            logits_offset: mega.logits_scratch_offset,
+            vocab_size: self.vocab_size,
+            prompt_len,
+            hidden_size: self.hidden_size,
+            compute_dtype: mega.compute_dtype,
+        };
         let logits_off = mega.logits_scratch_offset;
 
-        let yes_logit = if logits_off + (yes_token_id as usize + 1) * 4 <= scratchpad.len() {
-            unsafe {
-                let ptr = scratchpad[logits_off..].as_ptr() as *const f32;
-                let val = *ptr.add(yes_token_id as usize);
-                val
-            }
-        } else {
-            0.0f32
+        let read_logit = |token_id: u32, sp: &DiagnosticScratchpad| -> f32 {
+            let byte_off = logits_off + token_id as usize * sp.elem_bytes();
+            sp.read_single_element(byte_off)
         };
 
-        let no_logit = if logits_off + (no_token_id as usize + 1) * 4 <= scratchpad.len() {
-            unsafe {
-                let ptr = scratchpad[logits_off..].as_ptr() as *const f32;
-                *ptr.add(no_token_id as usize)
-            }
-        } else {
-            0.0f32
-        };
+        let yes_logit = read_logit(yes_token_id, &sp);
+        let no_logit = read_logit(no_token_id, &sp);
         // Softmax: score = exp(yes) / (exp(yes) + exp(no))
         let max_logit = yes_logit.max(no_logit);
         let exp_yes = (yes_logit - max_logit).exp();
@@ -402,11 +400,11 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?];
 
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = seq_len * rc.head_dim;
-            if rc.cache_offset + rope_elems * 4 <= scratchpad.len() {
+            if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
                         scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
@@ -451,21 +449,24 @@ impl MegaKernelExecutor {
 
         let logits_off = mega.logits_scratch_offset;
         let vocab = self.vocab_size;
-        let row_bytes = vocab * 4;
-        let logits_row_off = logits_off + (seq_len - 1) * row_bytes;
+        let elem_bytes = mega.elem_bytes();
+        let row_bytes = vocab * elem_bytes;
+        let logits_row_off = logits_off + seq_len.saturating_sub(1) * row_bytes;
+
+        // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
+        let sp = DiagnosticScratchpad {
+            data: scratchpad,
+            logits_offset: logits_off,
+            vocab_size: vocab,
+            prompt_len: seq_len,
+            hidden_size: self.hidden_size,
+            compute_dtype: mega.compute_dtype,
+        };
 
         let mut scores = Vec::with_capacity(target_token_ids.len());
         for &tid in target_token_ids {
-            let offset = logits_row_off + (tid as usize) * 4;
-            let score = if offset + 4 <= scratchpad.len() {
-                unsafe {
-                    let ptr = scratchpad[offset..].as_ptr() as *const f32;
-                    *ptr
-                }
-            } else {
-                0.0f32
-            };
-            scores.push(score);
+            let byte_off = logits_row_off + tid as usize * elem_bytes;
+            scores.push(sp.read_single_element(byte_off));
         }
 
         Ok(scores)
@@ -492,11 +493,11 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?];
 
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = seq_len * rc.head_dim;
-            if rc.cache_offset + rope_elems * 4 <= scratchpad.len() {
+            if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
                         scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
@@ -540,17 +541,16 @@ impl MegaKernelExecutor {
         };
 
         let output_elems = seq_len * hidden_size;
-        let mut output = vec![0.0f32; output_elems];
-        let copy_bytes = output_elems * 4;
-        if copy_bytes <= scratchpad.len() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    scratchpad.as_ptr() as *const f32,
-                    output.as_mut_ptr(),
-                    output_elems,
-                );
-            }
-        }
+        // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
+        let sp = DiagnosticScratchpad {
+            data: scratchpad,
+            logits_offset: 0,
+            vocab_size: self.vocab_size,
+            prompt_len: seq_len,
+            hidden_size,
+            compute_dtype: mega.compute_dtype,
+        };
+        let output = sp.read_dtype_aware(0, output_elems);
 
         Ok(output)
     }
@@ -640,7 +640,11 @@ impl MegaKernelExecutor {
             .map(|m| m.named_offsets.as_slice())
     }
 
-    /// Read F32 weight data at a given blob offset + row offset.
+    /// Read weight data at a given blob offset + row offset.
+    /// Returns F32 values regardless of storage dtype (BF16/F16 are widened on read).
+    /// TODO(ARCH-JIT-DATA-YIELDS): This function assumes F32 blob layout. When blob
+    /// preserves original dtype, this must use per-tensor dtype for offset calculation
+    /// and dtype-aware decoding.
     pub fn read_weight_row(&self, tensor_name: &str, row: usize, cols: usize) -> Option<Vec<f32>> {
         let mega = self.mega_compiled.as_ref()?;
         let offset = mega
@@ -648,10 +652,16 @@ impl MegaKernelExecutor {
             .iter()
             .find(|(n, _)| n == tensor_name)
             .map(|(_, off)| *off)?;
-        let row_offset = offset + row * cols * 4;
-        if row_offset + cols * 4 > mega.weight_blob.len() {
+        // ARCH-BLOB-YIELDS-WEIGHT: offset 计算 follow 数据实际 dtype。
+        // 当前 blob 打包时 BF16→F32 转换是违宪的（数据迁就代码），WF 重构中。
+        // 一旦 blob 保留原始 dtype，此处的 compute_dtype.size_bytes() 自然正确。
+        let elem_bytes = mega.compute_dtype.size_bytes();
+        let row_offset = offset + row * cols * elem_bytes;
+        if row_offset + cols * elem_bytes > mega.weight_blob.len() {
             return None;
         }
+        // TODO(ARCH-JIT-DATA-YIELDS): When blob preserves original dtype, decode
+        // based on actual tensor dtype (BF16→F32 widen, F16→F32 widen, F32→direct).
         let data = unsafe {
             std::slice::from_raw_parts(mega.weight_blob[row_offset..].as_ptr() as *const f32, cols)
         };
@@ -834,12 +844,12 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..prompt_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
 
         // Pre-fill RoPE cache
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = prompt_len * rc.head_dim;
-            let rope_bytes = rope_elems * 4;
+            let rope_bytes = rope_elems * std::mem::size_of::<f32>();
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -894,19 +904,20 @@ impl MegaKernelExecutor {
         // Read logits from scratchpad (same offset as generate mode)
         let logits_off = mega.logits_scratch_offset;
         let vocab = self.vocab_size;
-        let row_bytes = vocab * 4;
-        let last_row_off = logits_off + (prompt_len - 1) * row_bytes;
+        let elem_bytes = mega.elem_bytes();
+        let row_bytes = vocab * elem_bytes;
+        let last_row_off = logits_off + prompt_len.saturating_sub(1) * row_bytes;
 
-        let mut logits = vec![0.0f32; vocab];
-        if last_row_off + row_bytes <= scratchpad.len() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    scratchpad[last_row_off..].as_ptr() as *const f32,
-                    logits.as_mut_ptr(),
-                    vocab,
-                );
-            }
-        }
+        // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
+        let sp = DiagnosticScratchpad {
+            data: scratchpad,
+            logits_offset: logits_off,
+            vocab_size: vocab,
+            prompt_len,
+            hidden_size: self.hidden_size,
+            compute_dtype: mega.compute_dtype,
+        };
+        let logits = sp.read_dtype_aware(last_row_off, vocab);
 
         Ok(logits)
     }

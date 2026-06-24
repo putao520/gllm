@@ -422,7 +422,9 @@ fn execute_promote_to_hbm(
     let dma_result =
         unsafe { backend.dma_h2d(decompressed.as_ptr(), new_gpu_ptr, bytes_to_copy) };
     if let Err(e) = dma_result {
-        let _ = backend.free_gpu_page(new_gpu_ptr);
+        if let Err(fe) = backend.free_gpu_page(new_gpu_ptr) {
+            log::error!("free_gpu_page({:?}) after DMA failure for page {page_id} also failed: {fe}", new_gpu_ptr);
+        }
         return MigrationResult::Failed {
             reason: format!("HtoD DMA failed for page {page_id}: {e}"),
         };
@@ -435,7 +437,9 @@ fn execute_promote_to_hbm(
     let mut table = match addr_table.write() {
         Ok(t) => t,
         Err(e) => {
-            let _ = backend.free_gpu_page(new_gpu_ptr);
+            if let Err(fe) = backend.free_gpu_page(new_gpu_ptr) {
+                log::error!("free_gpu_page({:?}) after lock failure for page {page_id} also failed: {fe}", new_gpu_ptr);
+            }
             return MigrationResult::Failed {
                 reason: format!("addr_table write lock poisoned: {e}"),
             }
@@ -537,6 +541,21 @@ fn execute_evict_to_nvme(
         },
     };
 
+    if compressed.len() > ZSTD_LEN_MASK as usize {
+        // Cannot fit compressed length in 31-bit prefix — page too large for this format.
+        // Restore host_buffer in addr_table and return error.
+        if let Ok(mut table) = addr_table.write() {
+            if let Some(entry) = table.get_mut(&page_id) {
+                entry.host_buffer = Some(host_buf);
+            }
+        }
+        return MigrationResult::Failed {
+            reason: format!(
+                "zstd compress page {}: compressed size {} exceeds 31-bit limit ({}) — page too large for NVMe slot format",
+                page_id, compressed.len(), ZSTD_LEN_MASK
+            ),
+        };
+    }
     let len_with_flag = (compressed.len() as u32 & ZSTD_LEN_MASK) | dict_flag;
     let mut slot_data = Vec::with_capacity(4 + compressed.len());
     slot_data.extend_from_slice(&len_with_flag.to_le_bytes());
@@ -665,7 +684,7 @@ fn execute_promote_to_dram(
             host_buffer: None,
             current_tier: StorageTier::CpuDram,
             original_bytes: page_bytes,
-            codec: CompressionCodec::ZstdDict,
+            codec: CompressionCodec::None, // data is now uncompressed in DRAM after decompression
         });
         entry.host_buffer = Some(decompressed);
         entry.current_tier = StorageTier::CpuDram;

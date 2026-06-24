@@ -2513,9 +2513,9 @@ mod tests {
             destination: ExpertWeightLocation::GpuVram,
             bytes: 0,
             estimated_latency_us: f32::MAX,
-            priority: u32::MAX,
+            priority: u64::MAX,
         };
-        assert_eq!(req.priority, u32::MAX);
+        assert_eq!(req.priority, u64::MAX);
     }
 
     // ── ExpertPrefetchRequest: Debug format ──────────────────────────────
@@ -4870,11 +4870,11 @@ mod tests {
             destination: ExpertWeightLocation::GpuVram,
             bytes: usize::MAX,
             estimated_latency_us: f32::MAX,
-            priority: u32::MAX,
+            priority: u64::MAX,
         };
         assert_eq!(req.expert_idx, usize::MAX);
         assert_eq!(req.bytes, usize::MAX);
-        assert_eq!(req.priority, u32::MAX);
+        assert_eq!(req.priority, u64::MAX);
     }
 
     #[test]

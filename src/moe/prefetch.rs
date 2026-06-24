@@ -81,7 +81,7 @@ pub struct ExpertPrefetchRequest {
     /// 估算预取延迟 (μs)
     pub estimated_latency_us: f32,
     /// 优先级 (0 = 最高)
-    pub priority: u32,
+    pub priority: u64,
 }
 
 /// 专家权重预取调度器
@@ -175,7 +175,10 @@ impl ExpertWeightPrefetcher {
             }
 
             let layout = &self.weight_layouts[expert_idx];
-            let heat = heat_levels.get(expert_idx).copied().unwrap_or(ExpertHeatLevel::Warm);
+            let heat = heat_levels.get(expert_idx).copied().unwrap_or_else(|| {
+                log::warn!("expert_id {} not found in heat_levels table — defaulting to Warm", expert_idx);
+                ExpertHeatLevel::Warm
+            });
 
             // 热专家: 权重已在 GPU L2，无需预取
             if heat == ExpertHeatLevel::Hot {
@@ -203,7 +206,7 @@ impl ExpertWeightPrefetcher {
                 destination,
                 bytes: layout.compressed_bytes,
                 estimated_latency_us: transfer_time_us,
-                priority: priority as u32,
+                priority: priority as u64,
             });
         }
 
@@ -272,7 +275,7 @@ impl ExpertWeightPrefetcher {
             // - HostLocal → CpuRam（需 PCIe 传输）
             // - DiskMmap → 远程（需 RDMA）
             // 低 step = 更紧迫，优先预取即将在更早 step 中用到的专家权重
-            let priority = (step as u32) * (expert_ids.len() as u32) + (i as u32);
+            let priority = (step as u64) * (expert_ids.len() as u64) + (i as u64);
 
             requests.push(ExpertPrefetchRequest {
                 expert_idx,
@@ -1353,9 +1356,9 @@ mod tests {
             destination: ExpertWeightLocation::GpuVram,
             bytes: 1024,
             estimated_latency_us: 999.0,
-            priority: u32::MAX,
+            priority: u64::MAX,
         };
-        assert_eq!(req.priority, u32::MAX);
+        assert_eq!(req.priority, u64::MAX);
     }
 
     // --- ExpertPrefetchRequest: source equals destination is valid structurally ---
@@ -2725,9 +2728,9 @@ mod tests {
             destination: ExpertWeightLocation::GpuVram,
             bytes: 0,
             estimated_latency_us: 0.0,
-            priority: u32::MAX,
+            priority: u64::MAX,
         };
-        assert_eq!(req.priority, u32::MAX);
+        assert_eq!(req.priority, u64::MAX);
     }
 
     // --- prefetch_step: GpuVram location skips correctly ---

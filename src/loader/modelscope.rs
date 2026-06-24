@@ -518,7 +518,7 @@ fn find_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            log::debug!("cannot read directory {}: {e}", dir.display());
+            log::warn!("cannot read directory {}: {e}", dir.display());
             return files;
         }
     };

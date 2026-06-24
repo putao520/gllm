@@ -4,6 +4,13 @@
 //! Thread-safe via `AtomicPtr` with Acquire/Release ordering.
 //! JIT reads the pointer on another thread (GPU kernel callback);
 //! Rust sets/clears it while holding the Executor's `Mutex`.
+//!
+//! # TOCTOU safety
+//!
+//! Do NOT call `is_set()` followed by `as_ffi_ptr()` — another thread can clear
+//! the pointer between the two calls, yielding a stale/dangling pointer (UB).
+//! Use [`CallbackChainHandle::get_or_err`] instead, which performs a single
+//! atomic load so the check and the pointer retrieval are inseparable.
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -11,7 +18,7 @@ pub type CallbackChain = crate::graph::layer_callback::CallbackChain;
 
 /// Safe wrapper for the callback chain pointer passed to JIT FFI.
 ///
-/// Lifetime model: `set()` before FFI call → JIT reads `as_ffi_ptr()` → `clear()` after return.
+/// Lifetime model: `set()` before FFI call → JIT reads pointer via `get_or_err()` → `clear()` after return.
 /// All mutations happen while the Executor's `Mutex` is held, so there is no concurrent
 /// `set`/`clear` race. JIT reads use `Acquire` to see the `Release`-written value.
 #[derive(Debug)]
@@ -26,9 +33,21 @@ impl CallbackChainHandle {
         }
     }
 
-    /// Temporarily borrow the chain as a raw pointer for FFI call.
-    pub fn as_ffi_ptr(&self) -> *mut CallbackChain {
-        self.inner.load(Ordering::Acquire)
+    /// Atomically check if a chain is set and return the pointer in a single load.
+    ///
+    /// This is the **only** correct way to obtain the pointer for use. The check
+    /// and the pointer value come from the same atomic load, so there is no
+    /// TOCTOU window where another thread could clear the pointer between the
+    /// check and the use.
+    ///
+    /// Returns `Ok(ptr)` if a non-null chain is set, `Err` otherwise.
+    pub fn get_or_err(&self) -> Result<*mut CallbackChain, String> {
+        let ptr = self.inner.load(Ordering::Acquire);
+        if ptr.is_null() {
+            Err("CallbackChainHandle: no chain is set (pointer is null)".to_string())
+        } else {
+            Ok(ptr)
+        }
     }
 
     /// Set the chain pointer. Must be called while Executor mutex is held.
@@ -42,8 +61,28 @@ impl CallbackChainHandle {
     }
 
     /// Check if a chain is currently set.
+    ///
+    /// **Warning (TOCTOU):** Do NOT combine this with [`as_ffi_ptr`]. Another thread
+    /// can clear the pointer between `is_set()` returning `true` and your call to
+    /// `as_ffi_ptr()`. Use [`get_or_err`] instead for any check-then-use pattern.
+    ///
+    /// This method is safe for diagnostic/logging purposes only.
+    #[inline]
     pub fn is_set(&self) -> bool {
         !self.inner.load(Ordering::Acquire).is_null()
+    }
+
+    /// Return the raw pointer value without checking if it is null.
+    ///
+    /// **Warning (TOCTOU):** If you need to verify the pointer is set *and* use it,
+    /// do NOT call `is_set()` then `as_ffi_ptr()`. Use [`get_or_err`] instead.
+    ///
+    /// This method exists for low-level FFI interop where the caller already
+    /// knows the pointer is valid (e.g. immediately after `set()` within the
+    /// same mutex-held section), or where a null pointer is acceptable.
+    #[inline]
+    pub fn as_ffi_ptr(&self) -> *mut CallbackChain {
+        self.inner.load(Ordering::Acquire)
     }
 }
 
@@ -113,6 +152,131 @@ mod tests {
         let handle = CallbackChainHandle::new();
         handle.set(std::ptr::null_mut());
         assert!(!handle.is_set());
+    }
+
+    // --- get_or_err tests (TOCTOU-safe combined check+use) ---
+
+    #[test]
+    fn get_or_err_returns_err_on_null_handle() {
+        let handle = CallbackChainHandle::new();
+        let result = handle.get_or_err();
+        assert!(result.is_err(), "get_or_err on null handle should return Err");
+        assert!(result.unwrap_err().contains("null"));
+    }
+
+    #[test]
+    fn get_or_err_returns_ok_when_set() {
+        let handle = CallbackChainHandle::new();
+        let ptr = 0xbeef as *mut CallbackChain;
+        handle.set(ptr);
+        let result = handle.get_or_err();
+        assert!(result.is_ok(), "get_or_err on set handle should return Ok");
+        assert_eq!(result.unwrap(), ptr);
+    }
+
+    #[test]
+    fn get_or_err_returns_err_after_clear() {
+        let handle = CallbackChainHandle::new();
+        let ptr = 0x1234 as *mut CallbackChain;
+        handle.set(ptr);
+        assert!(handle.get_or_err().is_ok());
+
+        handle.clear();
+        assert!(handle.get_or_err().is_err(), "get_or_err after clear should return Err");
+    }
+
+    #[test]
+    fn get_or_err_single_load_no_toctou_window() {
+        // Demonstrate that get_or_err performs exactly one atomic load,
+        // so the check and the pointer value are inseparable.
+        let handle = CallbackChainHandle::new();
+        let ptr = 0xface as *mut CallbackChain;
+        handle.set(ptr);
+
+        // In a single-threaded context this is trivially correct,
+        // but the key property is that get_or_err cannot observe
+        // a state where is_set==true but the pointer is null.
+        match handle.get_or_err() {
+            Ok(p) => assert_eq!(p, ptr),
+            Err(_) => panic!("get_or_err should not fail when pointer is set"),
+        }
+
+        // After clear, the same method immediately returns Err.
+        handle.clear();
+        match handle.get_or_err() {
+            Ok(_) => panic!("get_or_err should fail after clear"),
+            Err(msg) => assert!(msg.contains("null")),
+        }
+    }
+
+    #[test]
+    fn get_or_err_with_real_callback_chain_pointer() {
+        let chain = CallbackChain::empty();
+        let handle = CallbackChainHandle::new();
+        let ptr = &chain as *const CallbackChain as *mut CallbackChain;
+        handle.set(ptr);
+
+        let result = handle.get_or_err();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ptr);
+
+        handle.clear();
+        assert!(handle.get_or_err().is_err());
+    }
+
+    #[test]
+    fn get_or_err_consistent_with_is_set_and_as_ffi_ptr() {
+        let handle = CallbackChainHandle::new();
+        let ptr = 0x5678 as *mut CallbackChain;
+
+        // Null state: is_set=false, as_ffi_ptr=null, get_or_err=Err
+        assert!(!handle.is_set());
+        assert!(handle.as_ffi_ptr().is_null());
+        assert!(handle.get_or_err().is_err());
+
+        // Set state: is_set=true, as_ffi_ptr=ptr, get_or_err=Ok(ptr)
+        handle.set(ptr);
+        assert!(handle.is_set());
+        assert_eq!(handle.as_ffi_ptr(), ptr);
+        assert_eq!(handle.get_or_err().unwrap(), ptr);
+
+        // Clear state: back to null
+        handle.clear();
+        assert!(!handle.is_set());
+        assert!(handle.as_ffi_ptr().is_null());
+        assert!(handle.get_or_err().is_err());
+    }
+
+    #[test]
+    fn concurrent_get_or_err_observes_consistent_state() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let handle = Arc::new(CallbackChainHandle::new());
+        let addr: usize = 0xc0de;
+
+        let h_writer = Arc::clone(&handle);
+        let writer = thread::spawn(move || {
+            h_writer.set(addr as *mut CallbackChain);
+        });
+
+        let h_reader = Arc::clone(&handle);
+        let reader = thread::spawn(move || {
+            // Spin until get_or_err returns Ok (pointer visible via Acquire).
+            // Cast to usize to avoid sending *mut across threads.
+            for _ in 0..1000 {
+                if let Ok(ptr) = h_reader.get_or_err() {
+                    return Some(ptr as usize);
+                }
+                thread::yield_now();
+            }
+            None
+        });
+
+        writer.join().unwrap();
+        let ptr_val = reader.join().unwrap();
+        assert!(ptr_val.is_some(), "Reader should observe the set pointer via get_or_err");
+        assert_eq!(ptr_val.unwrap(), addr);
     }
 
     #[test]

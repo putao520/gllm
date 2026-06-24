@@ -42,14 +42,16 @@ fn extract_top_k_token_ids(logits: &[f32], k: usize) -> Vec<u32> {
 
 /// Return the token ID with the highest logit (greedy argmax).
 ///
-/// Used by speculative decode verification to determine the target model's prediction.
-fn argmax_token(logits: &[f32]) -> u32 {
+/// Extract the argmax token ID from a logits vector.
+/// NaN values are excluded from comparison (treated as -inf), ensuring deterministic argmax.
+/// Returns `None` if logits is empty or all values are NaN (indicates upstream computation error).
+fn argmax_token(logits: &[f32]) -> Option<u32> {
     logits
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .filter(|(_, v)| !v.is_nan())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
         .map(|(i, _)| i as u32)
-        .unwrap_or(0)
 }
 
 /// Shannon entropy of a logits distribution (in nats).
@@ -434,7 +436,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 let mut seq_results = Vec::with_capacity(verify_req_indices.len());
                 for (vi, &req_id) in verify_req_indices.iter().enumerate() {
                     let target_tokens: Vec<u32> = if vi < verify_logits.len() {
-                        vec![argmax_token(&verify_logits[vi].data)]
+                        vec![argmax_token(&verify_logits[vi].data)
+                            .expect("all-NaN logits — computation error")]
                     } else {
                         Vec::new()
                     };
@@ -2103,12 +2106,12 @@ mod tests {
     #[test]
     fn argmax_token_basic() {
         let logits = [0.1, 0.2, 0.5, 0.9, 0.3];
-        assert_eq!(argmax_token(&logits), 3);
+        assert_eq!(argmax_token(&logits), Some(3));
     }
 
     #[test]
     fn argmax_token_single() {
-        assert_eq!(argmax_token(&[42.0]), 0);
+        assert_eq!(argmax_token(&[42.0]), Some(0));
     }
 
     // =======================================================================
@@ -2184,16 +2187,16 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn argmax_token_empty_returns_zero() {
-        // Empty slice: unwrap_or(0) kicks in.
-        assert_eq!(argmax_token(&[]), 0);
+    fn argmax_token_empty_returns_none() {
+        // Empty slice: no valid tokens, returns None.
+        assert_eq!(argmax_token(&[]), None);
     }
 
     #[test]
     fn argmax_token_tie_returns_last() {
         // Tied maximum values: max_by with partial_cmp(Equal) returns last occurrence.
         let logits = [1.0, 5.0, 5.0, 2.0];
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         assert_eq!(result, 2, "last occurrence of max wins with partial_cmp Equal");
     }
 
@@ -2201,35 +2204,40 @@ mod tests {
     fn argmax_token_all_equal() {
         // All equal: max_by returns the last index.
         let logits = [3.0, 3.0, 3.0];
-        assert_eq!(argmax_token(&logits), 2, "last index when all equal");
+        assert_eq!(argmax_token(&logits), Some(2), "last index when all equal");
     }
 
     #[test]
     fn argmax_token_last_is_max() {
         let logits = [0.1, 0.2, 0.3, 0.4, 99.0];
-        assert_eq!(argmax_token(&logits), 4);
+        assert_eq!(argmax_token(&logits), Some(4));
     }
 
     #[test]
     fn argmax_token_with_negative() {
         let logits = [-10.0, -5.0, -20.0];
-        assert_eq!(argmax_token(&logits), 1, "least negative wins");
+        assert_eq!(argmax_token(&logits), Some(1), "least negative wins");
     }
 
     #[test]
     fn argmax_token_with_nan() {
-        // NaN partial_cmp with anything is None -> Equal via unwrap_or.
-        // max_by returns the last element when all compare as Equal.
+        // NaN filtered out, valid element at index 1 wins.
         let logits = [f32::NAN, 1.0];
-        let result = argmax_token(&logits);
-        assert_eq!(result, 1, "last element wins when NaN compares as Equal");
+        assert_eq!(argmax_token(&logits), Some(1), "valid element wins over NaN");
+    }
+
+    #[test]
+    fn argmax_token_all_nan_returns_none() {
+        // All NaN: no valid values, returns None.
+        let logits = [f32::NAN, f32::NAN, f32::NAN];
+        assert_eq!(argmax_token(&logits), None, "all-NaN logits must return None");
     }
 
     #[test]
     fn argmax_token_large_slice() {
         let mut logits = vec![0.0; 10000];
         logits[7777] = 1.0;
-        assert_eq!(argmax_token(&logits), 7777);
+        assert_eq!(argmax_token(&logits), Some(7777));
     }
 
     // =======================================================================
@@ -2885,38 +2893,38 @@ mod tests {
     #[test]
     fn argmax_token_first_is_max() {
         let logits = [99.0, 0.1, 0.2, 0.3];
-        assert_eq!(argmax_token(&logits), 0);
+        assert_eq!(argmax_token(&logits), Some(0));
     }
 
     #[test]
     fn argmax_token_middle_is_max() {
         let logits = [0.1, 99.0, 0.2, 0.3];
-        assert_eq!(argmax_token(&logits), 1);
+        assert_eq!(argmax_token(&logits), Some(1));
     }
 
     #[test]
     fn argmax_token_with_neg_infinity() {
         let logits = [f32::NEG_INFINITY, 5.0, f32::NEG_INFINITY];
-        assert_eq!(argmax_token(&logits), 1);
+        assert_eq!(argmax_token(&logits), Some(1));
     }
 
     #[test]
     fn argmax_token_with_positive_infinity() {
         let logits = [1.0, f32::INFINITY, 3.0];
-        assert_eq!(argmax_token(&logits), 1);
+        assert_eq!(argmax_token(&logits), Some(1));
     }
 
     #[test]
     fn argmax_token_all_zeros() {
         let logits = [0.0, 0.0, 0.0, 0.0];
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         assert_eq!(result, 3, "all equal: last index wins");
     }
 
     #[test]
     fn argmax_token_two_elements() {
         let logits = [3.0, 7.0];
-        assert_eq!(argmax_token(&logits), 1);
+        assert_eq!(argmax_token(&logits), Some(1));
     }
 
     // =======================================================================
@@ -4386,13 +4394,13 @@ mod tests {
     fn argmax_token_alternating_pattern() {
         let logits = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
         // Last max (index 5) wins due to max_by + partial_cmp(Equal)
-        assert_eq!(argmax_token(&logits), 5);
+        assert_eq!(argmax_token(&logits), Some(5));
     }
 
     #[test]
     fn argmax_token_very_small_positive() {
         let logits = [f32::MIN_POSITIVE, 0.0, 0.0];
-        assert_eq!(argmax_token(&logits), 0);
+        assert_eq!(argmax_token(&logits), Some(0));
     }
 
     // =======================================================================
@@ -5194,7 +5202,7 @@ mod tests {
     #[test]
     fn argmax_token_returns_valid_index() {
         let logits = [0.5, -0.3, 1.7, 0.1];
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         assert!(result < logits.len() as u32, "result must be a valid index");
         // The returned index should point to a value >= all others.
         for (i, &v) in logits.iter().enumerate() {
@@ -5388,7 +5396,7 @@ mod tests {
         // Arrange: all entries are f32 minimum (most negative finite value).
         let logits = [f32::MIN; 5];
         // Act: argmax on all-equal minimal values.
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         // Assert: last index wins for tied values.
         assert_eq!(
             result, 4,
@@ -5710,7 +5718,7 @@ mod tests {
         // Arrange: one positive infinity, one negative infinity, one finite.
         let logits = [f32::NEG_INFINITY, f32::INFINITY, 0.0];
         // Act: argmax should find the positive infinity.
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         // Assert: index 1 has positive infinity.
         assert_eq!(result, 1, "positive infinity should win at index 1");
     }
@@ -6036,7 +6044,7 @@ mod tests {
         // Arrange: mix of negative values where -0.001 is the maximum.
         let logits = [-1000.0, -500.0, -0.001, -999.0];
         // Act: argmax should find the least negative value.
-        let result = argmax_token(&logits);
+        let result = argmax_token(&logits).unwrap();
         // Assert: index 2 has value -0.001 which is the largest.
         assert_eq!(result, 2, "least negative should win, got {result}");
     }

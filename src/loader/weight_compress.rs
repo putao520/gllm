@@ -167,11 +167,13 @@ pub fn select_weight_codec(
                     CompressionCodec::Lz4
                 }
                 WeightClass::ExpertWeight => {
-                    // Expert weights in DRAM: BitPackRle (SPEC §6.2)
+                    // Expert weights in DRAM (SPEC §6.2):
+                    // Cold experts: BitPackRle — rarely accessed, compression saves memory
+                    // Warm experts: None — frequently accessed, no compression to preserve accuracy
                     if config.is_cold_layer(layer_idx) {
                         CompressionCodec::BitPackRle
                     } else {
-                        CompressionCodec::BitPackRle
+                        CompressionCodec::None
                     }
                 }
             }
@@ -221,22 +223,21 @@ pub fn compress_weight_page(
         CompressionCodec::BitPackRle => compress_bitpack_rle(data),
         CompressionCodec::ZstdDict => {
             if config.zstd_dictionary.is_empty() {
-                // No dictionary trained yet; fall back to raw zstd without dict
-                
-                lz4_compress(data)
+                // NO-SILENT-FALLBACK: ZstdDict requested but no dictionary — must error,
+                // not silently fall back to LZ4 with wrong codec tag (causes decompress corruption)
+                return Err(CodecError(
+                    "ZstdDict codec requested but zstd_dictionary is empty — train dictionary first".into(),
+                ));
             } else {
                 compress_zstd_dict(data, &config.zstd_dictionary)?
             }
         }
         CompressionCodec::NvcompAns => {
-            // NvcompAns is GPU-only; try GPU ANS first, fallback to LZ4
-            match compress_nvcomp_ans(data) {
-                Ok(compressed) => compressed,
-                Err(NvcompAnsError(ref msg)) => {
-                    log::debug!("NvcompAns GPU compression unavailable ({}), falling back to LZ4", msg);
-                    lz4_compress(data)
-                }
-            }
+            // NO-FALLBACK: NvcompAns is GPU-only; failure must propagate, not silently use LZ4
+            // (would store NvcompAns codec tag but LZ4 data → decompress corruption)
+            compress_nvcomp_ans(data).map_err(|e| CodecError(
+                format!("NvcompAns GPU compression unavailable: {} — use Lz4 codec explicitly instead", e)
+            ))?
         }
         CompressionCodec::None => unreachable!(),
     };
@@ -279,7 +280,10 @@ pub fn compress_weight(
 ) -> Option<CompressedWeightPage> {
     let weight_class = classify_weight(tensor_name, config.has_moe_experts);
     let codec = select_weight_codec(tier, weight_class, config, layer_idx, is_quantized);
-    compress_weight_page(data, codec, config).ok().flatten()
+    compress_weight_page(data, codec, config).unwrap_or_else(|e| {
+        log::warn!("compress compression failed for {}: {:?}, storing uncompressed", tensor_name, e);
+        None
+    })
 }
 
 /// Decompress a weight page that was compressed during loading.
@@ -477,11 +481,12 @@ mod tests {
     #[test]
     fn expert_dram_is_bitpack_rle() {
         let config = test_config();
+        // Cold expert in DRAM uses BitPackRle (SPEC §6.2)
         let codec = select_weight_codec(
             WeightTier::HostLocal,
             WeightClass::ExpertWeight,
             &config,
-            Some(10),
+            Some(28), // cold layer: 28 + cold_layer_count(4) >= total_layers(32)
             false,
         );
         assert_eq!(codec, CompressionCodec::BitPackRle);
@@ -1368,31 +1373,30 @@ mod tests {
     #[test]
     fn expert_dram_non_cold_layer_bitpack_rle() {
         let config = test_config();
-        // Both cold and non-cold expert DRAM paths return BitPackRle
+        // Non-cold (warm) expert in DRAM uses None (SPEC §6.2) —
+        // frequently-activated experts should not be compressed to preserve accuracy.
         let codec = select_weight_codec(
             WeightTier::HostLocal,
             WeightClass::ExpertWeight,
             &config,
-            Some(5), // non-cold layer
+            Some(5), // non-cold layer: 5 + 4 < 32
             false,
         );
-        assert_eq!(codec, CompressionCodec::BitPackRle);
+        assert_eq!(codec, CompressionCodec::None);
     }
 
     // --- compress_weight_page: ZstdDict with empty dictionary fallback ---
 
     #[test]
-    fn compress_weight_page_zstd_dict_empty_dict_uses_lz4_fallback() {
+    fn compress_weight_page_zstd_dict_empty_dict_returns_err() {
         let config = test_config(); // zstd_dictionary is empty
         let data = vec![0x77u8; 512];
         let result = compress_weight_page(&data, CompressionCodec::ZstdDict, &config);
-        // Should succeed (falls back to LZ4 internally)
-        assert!(result.is_ok());
-        if let Some(page) = result.unwrap() {
-            // codec field is still ZstdDict (original requested codec)
-            assert_eq!(page.codec, CompressionCodec::ZstdDict);
-            assert!(page.compressed_size < page.decompressed_size);
-        }
+        // NO-SILENT-FALLBACK: ZstdDict with empty dictionary must return Err,
+        // not silently fall back to LZ4 (would store wrong codec tag → decompress corruption)
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("zstd_dictionary is empty"), "expected empty dict error, got: {}", err_msg);
     }
 
     // --- compress_weight_page: empty input data ---
@@ -1474,6 +1478,8 @@ mod tests {
     fn compress_weight_expert_weight_dram() {
         let config = test_config(); // has_moe_experts=8
         let data = vec![0x33u8; 1024];
+        // Warm expert (layer 5) in DRAM → None codec (no compression)
+        // None codec means no compressed page is produced — data stays uncompressed
         let result = compress_weight(
             &data,
             WeightTier::HostLocal,
@@ -1482,12 +1488,13 @@ mod tests {
             false,
             &config,
         );
-        let page = result.expect("should produce compressed page");
-        assert_eq!(page.codec, CompressionCodec::BitPackRle);
+        // None codec returns None — no compression, raw data used directly
+        assert!(result.is_none(), "warm expert in DRAM should not be compressed");
     }
 
     #[test]
     fn compress_weight_expert_weight_nvme() {
+        // NVMe expert weight → ZstdDict; with empty dict returns None
         let config = test_config();
         let data = vec![0x22u8; 1024];
         let result = compress_weight(
@@ -1498,8 +1505,7 @@ mod tests {
             false,
             &config,
         );
-        let page = result.expect("should produce compressed page");
-        assert_eq!(page.codec, CompressionCodec::ZstdDict);
+        assert!(result.is_none(), "ZstdDict with empty dict → compress_weight returns None");
     }
 
     #[test]
@@ -1537,19 +1543,12 @@ mod tests {
     // --- decompress_weight_page: ZstdDict with empty dict falls back to LZ4 ---
 
     #[test]
-    fn decompress_zstd_dict_empty_dict_roundtrip() {
+    fn decompress_zstd_dict_empty_dict_returns_compress_err() {
+        // NO-SILENT-FALLBACK: compress with ZstdDict + empty dict now returns Err
         let config = test_config(); // empty zstd_dictionary
         let data = vec![0xDDu8; 1024];
-        let compressed = compress_weight_page(&data, CompressionCodec::ZstdDict, &config)
-            .expect("should succeed")
-            .expect("should compress");
-        let restored = decompress_weight_page(
-            &compressed.data,
-            CompressionCodec::ZstdDict,
-            compressed.decompressed_size as usize,
-            &[], // empty dictionary → LZ4 fallback path
-        ).expect("should decompress via fallback");
-        assert_eq!(restored, data);
+        let result = compress_weight_page(&data, CompressionCodec::ZstdDict, &config);
+        assert!(result.is_err(), "ZstdDict with empty dict must return Err");
     }
 
     // --- decompress_weight_page: invalid compressed data returns error ---
@@ -1822,16 +1821,15 @@ mod tests {
     // --- compress_weight_page: NvcompAns codec (will fallback to LZ4 on CPU) ---
 
     #[test]
-    fn compress_weight_page_nvcomp_ans_fallback() {
+    fn compress_weight_page_nvcomp_ans_returns_err_on_cpu() {
         let config = test_config();
         let data = vec![0u8; 1024];
         let result = compress_weight_page(&data, CompressionCodec::NvcompAns, &config);
-        // Should succeed (falls back to LZ4)
-        assert!(result.is_ok());
-        if let Some(page) = result.unwrap() {
-            // codec is still NvcompAns (original requested)
-            assert_eq!(page.codec, CompressionCodec::NvcompAns);
-        }
+        // NO-FALLBACK: NvcompAns is GPU-only; on CPU must return Err,
+        // not silently fall back to LZ4 (codec/data mismatch → decompress corruption)
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("NvcompAns"), "expected NvcompAns error, got: {}", err_msg);
     }
 
     // --- compress_weight_page: decompressed_size equals input length ---
@@ -2077,21 +2075,12 @@ mod tests {
     // --- compress_weight_page: NvcompAns roundtrip (CPU fallback LZ4) ---
 
     #[test]
-    fn nvcomp_ans_roundtrip_cpu_fallback() {
+    fn nvcomp_ans_returns_err_on_cpu() {
+        // NO-FALLBACK: NvcompAns compress on CPU returns Err
         let config = test_config();
         let data = vec![0x55u8; 2048];
-        let compressed = compress_weight_page(&data, CompressionCodec::NvcompAns, &config)
-            .expect("should succeed")
-            .expect("should compress");
-        // On CPU, NvcompAns falls back to LZ4 for compression
-        // decompress_weight_page with NvcompAns also falls back to LZ4
-        let restored = decompress_weight_page(
-            &compressed.data,
-            CompressionCodec::NvcompAns,
-            compressed.decompressed_size as usize,
-            &[],
-        ).expect("should decompress");
-        assert_eq!(restored, data);
+        let result = compress_weight_page(&data, CompressionCodec::NvcompAns, &config);
+        assert!(result.is_err(), "NvcompAns on CPU must return Err");
     }
 
     // --- CompressionCodec: PartialEq symmetry ---
@@ -2404,7 +2393,8 @@ mod tests {
     // --- compress_weight: NVMe tier uses ZstdDict even for experts ---
 
     #[test]
-    fn compress_weight_nvme_expert_uses_zstd_dict() {
+    fn compress_weight_nvme_expert_zstd_dict_empty_dict_returns_none() {
+        // NVMe expert → ZstdDict; with empty dict, compress_weight returns None
         let config = test_config();
         let data = vec![0u8; 1024];
         let result = compress_weight(
@@ -2415,8 +2405,7 @@ mod tests {
             false,
             &config,
         );
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().codec, CompressionCodec::ZstdDict);
+        assert!(result.is_none(), "ZstdDict with empty dict → compress_weight returns None");
     }
 
     // --- WeightTier: Ord-like comparison via derive ---
@@ -2671,24 +2660,14 @@ mod tests {
     // ─── 13 additional tests: further edge cases and uncovered paths ──────
 
     #[test]
-    fn decompress_nvcomp_ans_fallback_to_lz4_roundtrip() {
-        // Arrange: compress with NvcompAns (which falls back to LZ4 on CPU),
-        // then decompress with NvcompAns codec (which also falls back to LZ4).
+    fn decompress_nvcomp_ans_not_applicable_on_cpu() {
+        // NO-FALLBACK: NvcompAns compress on CPU returns Err,
+        // so there's no valid compressed payload to decompress.
+        // This test verifies the compress error path.
         let config = test_config();
         let data = vec![0x77u8; 1536];
-        let compressed = compress_weight_page(&data, CompressionCodec::NvcompAns, &config)
-            .expect("compress should succeed")
-            .expect("should produce compressed output");
-        // Act
-        let restored = decompress_weight_page(
-            &compressed.data,
-            CompressionCodec::NvcompAns,
-            compressed.decompressed_size as usize,
-            &[],
-        )
-        .expect("decompress should succeed");
-        // Assert
-        assert_eq!(restored, data);
+        let result = compress_weight_page(&data, CompressionCodec::NvcompAns, &config);
+        assert!(result.is_err(), "NvcompAns on CPU must return Err");
     }
 
     #[test]
@@ -2740,21 +2719,24 @@ mod tests {
 
     #[test]
     fn decompress_zstd_dict_with_real_dictionary_roundtrip() {
-        // Arrange: create a config with a trained zstd dictionary
-        let samples: Vec<&[u8]> = vec![&[0xAAu8; 256]; 4];
-        let dict = train_weight_compression_dict(&samples, 512);
+        // Use zstd::dict::from_samples to train a real dictionary with sufficient data
+        let samples: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8; 4096]).collect();
+        let sample_refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
+        let dict = zstd::dict::from_samples(&sample_refs, 4096)
+            .expect("should train dictionary from sufficient samples");
+        assert!(!dict.is_empty(), "trained dictionary must not be empty");
         let mut config = test_config();
-        config.zstd_dictionary = dict;
-        let data = vec![0xAAu8; 512];
+        config.zstd_dictionary = dict.clone();
+        let data = vec![0x00u8; 4096];
         let compressed = compress_weight_page(&data, CompressionCodec::ZstdDict, &config)
-            .expect("compress should succeed")
+            .expect("ZstdDict compress with real dict should succeed")
             .expect("should compress with real dict");
         // Act
         let restored = decompress_weight_page(
             &compressed.data,
             CompressionCodec::ZstdDict,
             compressed.decompressed_size as usize,
-            &config.zstd_dictionary,
+            &dict,
         )
         .expect("decompress with dict should succeed");
         // Assert
@@ -2859,10 +2841,10 @@ mod tests {
 
     #[test]
     fn compress_weight_dense_disk_mmap_non_hot() {
-        // Arrange
+        // NVMe tier selects ZstdDict; with empty dictionary, compress_weight
+        // returns None (error caught and logged, not propagated).
         let config = test_config();
         let data = vec![0u8; 1024];
-        // Act
         let result = compress_weight(
             &data,
             WeightTier::DiskMmap,
@@ -2871,9 +2853,8 @@ mod tests {
             false,
             &config,
         );
-        // Assert: NVMe tier always uses ZstdDict
-        let page = result.expect("should compress");
-        assert_eq!(page.codec, CompressionCodec::ZstdDict);
+        // With empty zstd_dictionary, ZstdDict compress fails → compress_weight returns None
+        assert!(result.is_none(), "ZstdDict with empty dict → compress_weight returns None");
     }
 
     #[test]
@@ -2922,24 +2903,13 @@ mod tests {
     }
 
     #[test]
-    fn decompress_zstd_dict_empty_dict_lz4_fallback_roundtrip() {
-        // Arrange: compress with ZstdDict but empty dictionary (uses LZ4 fallback),
-        // decompress with ZstdDict and empty dictionary (also LZ4 fallback).
+    fn decompress_zstd_dict_empty_dict_via_compress_weight_returns_none() {
+        // NO-SILENT-FALLBACK: compress_weight_page with ZstdDict + empty dict returns Err;
+        // compress_weight wraps it and returns None
         let config = test_config(); // zstd_dictionary is empty
         let data: Vec<u8> = (0..512).map(|i| (i % 53) as u8).collect();
-        let compressed = compress_weight_page(&data, CompressionCodec::ZstdDict, &config)
-            .expect("should succeed")
-            .expect("should compress");
-        // Act
-        let restored = decompress_weight_page(
-            &compressed.data,
-            CompressionCodec::ZstdDict,
-            compressed.decompressed_size as usize,
-            &[], // empty dict → LZ4 fallback path
-        )
-        .expect("should decompress");
-        // Assert
-        assert_eq!(restored, data);
+        let result = compress_weight_page(&data, CompressionCodec::ZstdDict, &config);
+        assert!(result.is_err(), "ZstdDict with empty dict must return Err");
     }
 
     // ─── 10 additional tests: uncovered paths and boundary conditions ──────
@@ -2981,11 +2951,11 @@ mod tests {
 
     #[test]
     fn select_weight_codec_all_tiers_for_expert_non_hot() {
-        // Arrange: expert weight in all three tiers, non-hot layer
+        // Arrange: expert weight in all three tiers, non-hot (warm) layer
         let config = test_config();
         let expected = [
             (WeightTier::DeviceLocal, CompressionCodec::None),
-            (WeightTier::HostLocal, CompressionCodec::BitPackRle),
+            (WeightTier::HostLocal, CompressionCodec::None),   // warm expert in DRAM: no compression (SPEC §6.2)
             (WeightTier::DiskMmap, CompressionCodec::ZstdDict),
         ];
         for (tier, exp) in expected {

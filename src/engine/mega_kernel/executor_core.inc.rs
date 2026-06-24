@@ -213,7 +213,7 @@ impl MegaKernelExecutor {
             scratchpad_base_bytes: output.logits_scratch_offset,
             vocab_size: output.vocab_size,
             hidden: output.hidden,
-            elem_bytes: geometry.compute_dtype.size_bytes(),
+            compute_dtype: geometry.compute_dtype,
 
             gpu_code,
             source_map: output.source_map,
@@ -284,8 +284,8 @@ impl MegaKernelExecutor {
         table: crate::scheduler::fault_recovery::WeightPageTable,
         handler: crate::scheduler::fault_recovery::FaultRecoveryHandler,
     ) {
-        *self.weight_page_table.lock().unwrap() = Some(table);
-        *self.fault_handler.lock().unwrap() = Some(handler);
+        *self.weight_page_table.lock().expect("weight_page_table Mutex poisoned — previous holder panicked") = Some(table);
+        *self.fault_handler.lock().expect("fault_handler Mutex poisoned — previous holder panicked") = Some(handler);
     }
 
     /// REQ-WP-009: Ensure all weight pages for the current step are in GpuHbm (Tier::L1).
@@ -299,7 +299,7 @@ impl MegaKernelExecutor {
 
         // Phase 1: Collect faults (immutable borrow of table)
         let faults: Vec<PageFault> = {
-            let table_lock = self.weight_page_table.lock().unwrap();
+            let table_lock = self.weight_page_table.lock().expect("weight_page_table Mutex poisoned in ensure_weight_pages_resident — previous holder panicked");
             let Some(table) = table_lock.as_ref() else { return };
             let mut faults = Vec::new();
             for layer_idx in 0..self.num_layers {
@@ -327,9 +327,9 @@ impl MegaKernelExecutor {
         }
 
         // Phase 2: Recover faults (mutable borrow of table + handler)
-        let mut table_lock = self.weight_page_table.lock().unwrap();
+        let mut table_lock = self.weight_page_table.lock().expect("weight_page_table Mutex poisoned in ensure_weight_pages_resident (phase 2) — previous holder panicked");
         let table = table_lock.as_mut().unwrap();
-        let mut handler_lock = self.fault_handler.lock().unwrap();
+        let mut handler_lock = self.fault_handler.lock().expect("fault_handler Mutex poisoned in ensure_weight_pages_resident — previous holder panicked");
         let handler = handler_lock.as_mut().unwrap();
 
         for fault in faults {
@@ -418,13 +418,13 @@ impl MegaKernelExecutor {
         // [max_new_tokens..max_new_tokens + max_new_tokens * mtp_depth) = MTP candidates.
         let output_size = max_new_tokens * (1 + mtp_depth);
         let mut output_tokens = vec![0u32; output_size];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total).map_err(|e| MegaKernelError::Execution(e))?];
 
         // Pre-fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
             // Primary cache
             let rope_elems = max_total * rc.head_dim;
-            let rope_bytes = rope_elems * 4;
+            let rope_bytes = rope_elems * std::mem::size_of::<f32>();
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -444,7 +444,7 @@ impl MegaKernelExecutor {
             // Secondary cache (for heterogeneous models with 2 head_dim values)
             if let Some(ref sec) = rc.secondary_cache {
                 let sec_elems = max_total * sec.head_dim;
-                let sec_bytes = sec_elems * 4;
+                let sec_bytes = sec_elems * std::mem::size_of::<f32>();
                 if sec.cache_offset + sec_bytes <= scratchpad.len() {
                     let sec_slice = unsafe {
                         std::slice::from_raw_parts_mut(
@@ -475,7 +475,7 @@ impl MegaKernelExecutor {
                     let half = rc.head_dim / 2;
                     // Primary cache
                     let rope_elems = max_total * rc.head_dim;
-                    if rc.cache_offset + rope_elems * 4 <= scratchpad.len() {
+                    if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                         let rope_slice = unsafe {
                             std::slice::from_raw_parts_mut(
                                 scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
@@ -498,7 +498,7 @@ impl MegaKernelExecutor {
                     if let Some(ref sec) = rc.secondary_cache {
                         let sec_half = sec.head_dim / 2;
                         let sec_elems = max_total * sec.head_dim;
-                        if sec.cache_offset + sec_elems * 4 <= scratchpad.len() {
+                        if sec.cache_offset + sec_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                             let sec_slice = unsafe {
                                 std::slice::from_raw_parts_mut(
                                     scratchpad[sec.cache_offset..].as_mut_ptr() as *mut f32,
@@ -621,11 +621,11 @@ impl MegaKernelExecutor {
             self.eos_token_id,
             output_tokens.first().copied().unwrap_or(0),
         );
-        let actual_count = if generated_count == 0 && max_new_tokens > 0 && output_tokens[0] != 0 {
-            1
-        } else {
-            generated_count
-        };
+        // BCE-20260623-004: Removed output_tokens[0] != 0 heuristic.
+        // Token ID 0 is a valid token; using it as a sentinel discards legitimate output.
+        // Trust generated_count from the JIT kernel — if it reports 0, no tokens were generated.
+        // If generated_count is wrong, that's a JIT bug to fix in the kernel, not here.
+        let actual_count = generated_count;
         // Build output: main tokens followed by MTP candidate tokens (if enabled).
         // MTP candidates layout: output_tokens[max_new_tokens + step * mtp_depth + k]
         let mut result = Vec::with_capacity(actual_count * (1 + mtp_depth));
@@ -707,12 +707,12 @@ impl MegaKernelExecutor {
         let num_seqs = batch_ctx.num_seqs;
         let max_decode_tokens = max_decode_steps.max(1) * num_seqs;
         let max_total = total_prefill_tokens + max_decode_tokens;
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total)];
+        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total).map_err(|e| MegaKernelError::Execution(e))?];
 
         // Fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = max_total * rc.head_dim;
-            if rc.cache_offset + rope_elems * 4 <= scratchpad.len() {
+            if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
                         scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
@@ -731,7 +731,7 @@ impl MegaKernelExecutor {
             }
             if let Some(ref sec) = rc.secondary_cache {
                 let sec_elems = max_total * sec.head_dim;
-                if sec.cache_offset + sec_elems * 4 <= scratchpad.len() {
+                if sec.cache_offset + sec_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                     let sec_slice = unsafe {
                         std::slice::from_raw_parts_mut(
                             scratchpad[sec.cache_offset..].as_mut_ptr() as *mut f32,

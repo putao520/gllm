@@ -538,7 +538,7 @@ fn swap_in_loop(
 fn drain_completions_and_update(
     actor: &PageMigrationActor,
     page_metadata: &Arc<RwLock<HashMap<PageId, PageMetadata>>>,
-    _addr_table: &PageAddrTable,
+    addr_table: &PageAddrTable,
     stats: &Arc<Mutex<SwapInWorkerStats>>,
     observer: &Arc<Mutex<BasicObserver>>,
 ) {
@@ -586,6 +586,13 @@ fn drain_completions_and_update(
                                 meta.swap_in_time = Some(Instant::now());
                             }
                         }
+                    }
+                }
+
+                // Update addr_table current_tier to reflect the new tier.
+                if let Ok(mut addr_guard) = addr_table.write() {
+                    if let Some(entry) = addr_guard.get_mut(&done.page_id) {
+                        entry.current_tier = done.to_tier;
                     }
                 }
 

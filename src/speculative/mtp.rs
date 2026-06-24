@@ -101,19 +101,35 @@ pub fn mtp_draft(
 }
 
 /// 从 MTP logits 中提取 top-1 候选 token 序列
+///
+/// # Panics
+///
+/// - If any depth level has empty logits (len=0). MTP must produce at least
+///   1 candidate per depth; empty logits always indicates a bug.
+/// - If any logit contains NaN, which indicates severe numerical error
 pub fn mtp_candidates(mtp_logits: &[Vec<f32>]) -> Vec<u32> {
     mtp_logits
         .iter()
-        .map(|logits| {
+        .enumerate()
+        .map(|(depth, logits)| {
+            if logits.iter().any(|l| l.is_nan()) {
+                panic!(
+                    "NaN in logits at MTP depth {} — numerical error in speculative decoding, cannot select token",
+                    depth
+                );
+            }
+            if logits.is_empty() {
+                panic!(
+                    "mtp_candidates: empty logits at depth {} — MTP must produce at least 1 candidate per depth",
+                    depth
+                );
+            }
             logits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| {
-                    a.partial_cmp(b)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i as u32)
-                .unwrap_or(0)
+                .expect("max_by on non-empty iterator always returns Some")
         })
         .collect()
 }
@@ -477,13 +493,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mtp_candidates_with_nan_selects_first_valid() {
-        // NaN comparisons yield Equal via unwrap_or, so the first max-by ordering wins
+    #[should_panic(expected = "NaN in logits at MTP depth")]
+    fn test_mtp_candidates_with_nan_panics() {
+        // NaN in logits must be detected and reported, not silently defaulted to token 0
         let logits = vec![vec![f32::NAN, 5.0, f32::NAN, 5.0]];
-        let candidates = mtp_candidates(&logits);
-        // max_by with NaN will use partial_cmp → None → Equal, so it keeps first max found
-        assert_eq!(candidates.len(), 1);
-        assert!(candidates[0] == 1 || candidates[0] == 3 || candidates[0] == 0);
+        let _candidates = mtp_candidates(&logits);
     }
 
     #[test]
@@ -743,10 +757,10 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "mtp_candidates: empty logits at depth")]
     fn test_mtp_candidates_empty_inner_vector() {
         let logits = vec![vec![]];
-        let candidates = mtp_candidates(&logits);
-        assert_eq!(candidates, vec![0]); // unwrap_or(0) for empty iterator
+        let _candidates = mtp_candidates(&logits);
     }
 
     #[test]
@@ -1306,15 +1320,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mtp_candidates_with_mixed_nan_and_real() {
-        // NaN partial_cmp with anything returns None → unwrap_or(Equal) → keeps current max
-        // [NaN, 5.0, NaN, 3.0]: NaN stays as "max" since no Greater is ever returned
-        // The result depends on max_by's behavior with all-Equal comparisons
+    #[should_panic(expected = "NaN in logits at MTP depth")]
+    fn test_mtp_candidates_with_mixed_nan_panics() {
+        // NaN in logits must be detected and reported, not silently accepted
         let logits = vec![vec![f32::NAN, 5.0, f32::NAN, 3.0]];
-        let candidates = mtp_candidates(&logits);
-        assert_eq!(candidates.len(), 1);
-        // Result is valid (no panic), exact index depends on iterator behavior
-        assert!(candidates[0] < 4);
+        let _candidates = mtp_candidates(&logits);
     }
 
     #[test]

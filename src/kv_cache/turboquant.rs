@@ -209,7 +209,13 @@ impl TurboQuantRuntime {
         kv_dim: usize,
     ) -> QuantResult<Vec<u8>> {
         let scales = self.k_scales.get(&layer).cloned().unwrap_or_else(|| {
-            // Fallback: compute scales from K data itself
+            // Scales missing for this layer — likely corruption or incomplete initialization.
+            // Recompute from K data as fallback, but log a warning so data integrity issues
+            // are visible (NO-SILENT-FALLBACK).
+            log::warn!(
+                "TurboQuant: K scales missing for layer {layer}, recomputing from K data. \
+                 This may indicate corruption or incomplete scale initialization."
+            );
             let mut scales = vec![0.0f32; kv_dim];
             for t in 0..seq_len {
                 for d in 0..kv_dim {

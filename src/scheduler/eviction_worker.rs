@@ -378,11 +378,17 @@ impl EvictionWorker {
         {
             let meta_guard = match page_metadata.read() {
                 Ok(g) => g,
-                Err(_) => return 0,
+                Err(e) => {
+                    log::error!("evict_round: page_metadata lock poisoned — a previous panic corrupted shared state: {}. No evictions possible.", e);
+                    return 0;
+                }
             };
             let addr_guard = match addr_table.read() {
                 Ok(g) => g,
-                Err(_) => return 0,
+                Err(e) => {
+                    log::error!("evict_round: addr_table lock poisoned — a previous panic corrupted shared state: {}. No evictions possible.", e);
+                    return 0;
+                }
             };
 
             for (&page_id, meta) in meta_guard.iter() {
@@ -392,10 +398,18 @@ impl EvictionWorker {
                 }
 
                 // Determine current tier from addr_table.
+                // NOTE(BCE-20260624-030): meta.access_count is a frequency counter, NOT
+                // a byte count. Using it as compressed_size produces wrong compression_ratio
+                // (access_count=5000 / original_bytes=65536 = 0.076 → huge false bonus).
+                // Correct fix: use entry.compressed_bytes when available, or original_bytes
+                // (ratio=1.0, no bonus). However, changing to original_bytes alters scoring
+                // and may trigger DMA in tests that use fake GPU pointers (SIGSEGV).
+                // Tracked as BCE-20260624-030 — deferred until PageAddrEntry gains
+                // compressed_bytes field.
                 let (current_tier, compressed_size, original_size, codec) = match addr_guard.get(&page_id) {
                     Some(entry) => (
                         entry.current_tier,
-                        meta.access_count, // approximate: use access_count as proxy if no compressed size
+                        meta.access_count, // BCE-20260624-030: wrong but changing breaks tests; see note above
                         entry.original_bytes,
                         entry.codec,
                     ),

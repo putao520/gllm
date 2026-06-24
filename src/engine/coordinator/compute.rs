@@ -29,6 +29,11 @@ impl ComputeCoordinator {
         }
         let per_ch_scale = self.telemetry_aggregator.per_channel_scale();
         if per_ch_scale > 0.0 {
+            log::warn!(
+                "record_turboquant_scales: broadcasting single per_channel_scale={} to all {} channels — \
+                 per-channel telemetry not yet available, accuracy may degrade for models with channel magnitude variance",
+                per_ch_scale, kv_dim
+            );
             for layer in 0..num_layers {
                 let scales = vec![per_ch_scale; kv_dim];
                 self.turboquant.store_k_scales(layer, scales);
@@ -180,7 +185,15 @@ impl ComputeCoordinator {
             comm_handle.is_nccl_initialized(),
         );
         // sendcount = buffer.len() / world_size (each rank contributes an equal segment)
-        let sendcount = buffer.len() / comm_handle.world_size() as usize;
+        let world_size = comm_handle.world_size() as usize;
+        if buffer.len() % world_size != 0 {
+            return Err(format!(
+                "AllGather buffer len {} must be divisible by world_size {}",
+                buffer.len(),
+                world_size,
+            ));
+        }
+        let sendcount = buffer.len() / world_size;
         comm_handle.all_gather_inplace(buffer, sendcount)
     }
 
@@ -244,7 +257,15 @@ impl ComputeCoordinator {
             buffer.len(),
             comm_handle.is_nccl_initialized(),
         );
-        let sendcount = buffer.len() / comm_handle.world_size() as usize;
+        let world_size = comm_handle.world_size() as usize;
+        if buffer.len() % world_size != 0 {
+            return Err(format!(
+                "AllGather buffer len {} must be divisible by world_size {}",
+                buffer.len(),
+                world_size,
+            ));
+        }
+        let sendcount = buffer.len() / world_size;
         comm_handle.all_gather_inplace(buffer, sendcount)
     }
 

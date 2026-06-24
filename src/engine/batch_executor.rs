@@ -317,7 +317,7 @@ impl BatchInferenceState {
             let mut output = Vec::new();
             if gen_start < gen_end {
                 for &tok in &self.output_tokens_flat[gen_start..gen_end] {
-                    if tok == req.eos_token_id || tok == 0 {
+                    if tok == req.eos_token_id {
                         break;
                     }
                     output.push(tok);
@@ -673,12 +673,46 @@ mod tests {
 
         let mut state = BatchInferenceState::build_from_requests(&requests);
 
-        // Simulate mega-kernel output: [prompt: 1,2,3, gen: 10, 20, 30, 0, 0]
-        state.output_tokens_flat = vec![1, 2, 3, 10, 20, 30, 0, 0];
+        // Simulate mega-kernel output: [prompt: 1,2,3, gen: 10, 20, 30, 99(eos), 0]
+        // EOS token 99 terminates scanning; token ID 0 is a valid token, not a sentinel.
+        state.output_tokens_flat = vec![1, 2, 3, 10, 20, 30, 99, 0];
 
         let results = state.collect_results(&requests);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].output_tokens, vec![10, 20, 30]);
+        assert!(results[0].finished);
+    }
+
+    /// BCE-20260623-004: Token ID 0 must NOT be treated as EOS sentinel.
+    /// The tok==0 sentinel was removed from production code; this test ensures
+    /// token ID 0 is correctly collected as a valid generated token.
+    #[test]
+    fn collect_results_zero_token_not_sentinel() {
+        let requests = vec![
+            GenerateRequest {
+                request_id: 2u64,
+                prompt_tokens: vec![5, 6],
+                max_new_tokens: 4,
+                temperature: 1.0,
+                top_k: 0,
+                top_p: 1.0,
+                session_id: None,
+                eos_token_id: 99,
+                hook_ctx_ptr: std::ptr::null(),
+                callback_table_ptr: std::ptr::null(),
+            },
+        ];
+
+        let mut state = BatchInferenceState::build_from_requests(&requests);
+
+        // Simulate mega-kernel output: [prompt: 5,6, gen: 7, 0(valid!), 8, 99(eos)]
+        // Token 0 is a legitimate generated token and must appear in output.
+        state.output_tokens_flat = vec![5, 6, 7, 0, 8, 99];
+
+        let results = state.collect_results(&requests);
+        assert_eq!(results.len(), 1);
+        // 0 must be collected as a valid token, not treated as EOS
+        assert_eq!(results[0].output_tokens, vec![7, 0, 8]);
         assert!(results[0].finished);
     }
 
@@ -812,6 +846,9 @@ mod tests {
         assert_eq!(results[0].output_tokens, vec![10, 20]);
     }
 
+    /// BCE-20260623-004: Token ID 0 is NOT a sentinel. Zero-terminated scanning
+    /// was removed. This test now verifies that when EOS=999 and generated tokens
+    /// contain zeros, those zeros are collected as valid tokens (not treated as EOS).
     #[test]
     fn collect_results_zero_token_terminates() {
         let req = GenerateRequest {
@@ -828,9 +865,11 @@ mod tests {
         };
         let mut state = BatchInferenceState::build_from_requests(&[req.clone()]);
         // prompt_len=1, max_new=5 → 6 slots
-        state.output_tokens_flat = vec![1, 10, 20, 0, 0, 0];
+        // Token 0 is valid; EOS=999 terminates scanning.
+        state.output_tokens_flat = vec![1, 10, 20, 0, 999, 0];
         let results = state.collect_results(std::slice::from_ref(&req));
-        assert_eq!(results[0].output_tokens, vec![10, 20]);
+        // 0 is collected as a valid token; 999 (EOS) stops scanning
+        assert_eq!(results[0].output_tokens, vec![10, 20, 0]);
     }
 
     #[test]
@@ -1030,11 +1069,13 @@ mod tests {
         assert_eq!(results[1].output_tokens, vec![40, 50]);
     }
 
+    /// BCE-20260623-004: All-zero generation output with EOS=0 means first token
+    /// hits eos_token_id, yielding empty output (0 is NOT a sentinel, it matches EOS).
     #[test]
     fn collect_results_all_zeros_yields_empty() {
-        let req = make_req_with_eos(1, vec![1], 5, 999);
-        let state = BatchInferenceState::build_from_requests(&[req.clone()]);
-        // output_tokens_flat is all zeros from build
+        let req = make_req_with_eos(1, vec![1], 5, 0);
+        let mut state = BatchInferenceState::build_from_requests(&[req.clone()]);
+        // output_tokens_flat is all zeros from build; EOS=0 means first token is EOS
         let results = state.collect_results(&[req]);
         assert!(results[0].output_tokens.is_empty());
     }
@@ -1372,11 +1413,13 @@ mod tests {
         assert!(results[0].output_tokens.is_empty());
     }
 
+    /// BCE-20260623-004: First generated token is 0 with EOS=0 → correctly stops
+    /// because 0 matches eos_token_id, not because 0 is a sentinel.
     #[test]
     fn collect_results_first_token_is_zero() {
-        let req = make_req_with_eos(1, vec![1], 5, 999);
+        let req = make_req_with_eos(1, vec![1], 5, 0);
         let mut state = BatchInferenceState::build_from_requests(&[req.clone()]);
-        // First generated token is 0 (sentinel)
+        // First generated token is 0 which equals eos_token_id=0
         state.output_tokens_flat = vec![1, 0, 10, 20, 30, 40];
         let results = state.collect_results(&[req]);
         assert!(results[0].output_tokens.is_empty());
@@ -1606,15 +1649,18 @@ mod tests {
 
     // ── collect_results edge cases ──
 
+    /// BCE-20260623-004: Token 0 is not a sentinel. For a sequence with all-zero
+    /// generation output and EOS=99, zeros are valid tokens, not terminators.
+    /// To test "one seq has no real generation", use EOS=0 so 0 matches eos_token_id.
     #[test]
     fn collect_results_one_seq_empty_generation_other_has_tokens() {
         let reqs = vec![
-            make_req_with_eos(1, vec![1], 3, 99), // seq 0: prompt=1, max_new=3
-            make_req_with_eos(2, vec![2], 3, 99), // seq 1: prompt=1, max_new=3
+            make_req_with_eos(1, vec![1], 3, 99), // seq 0: prompt=1, max_new=3, EOS=99
+            make_req_with_eos(2, vec![2], 3, 0),  // seq 1: prompt=1, max_new=3, EOS=0
         ];
         let mut state = BatchInferenceState::build_from_requests(&reqs);
         // seq 0: [prompt=1, gen=10, 20, 30] → 4 slots
-        // seq 1: [prompt=2, gen=0, 0, 0]    → 4 slots (no generation, first gen token is 0)
+        // seq 1: [prompt=2, gen=0, 0, 0]    → 4 slots (0 = EOS for seq 1)
         state.output_tokens_flat = vec![1, 10, 20, 30, 2, 0, 0, 0];
         let results = state.collect_results(&reqs);
         assert_eq!(results[0].output_tokens, vec![10, 20, 30]);
@@ -1951,6 +1997,8 @@ mod tests {
 
     // ── eos_token_id = 0 behavior ──
 
+    /// When eos_token_id=0, token 0 correctly stops generation via
+    /// `tok == req.eos_token_id` (not via a sentinel).
     #[test]
     fn collect_results_eos_zero_stops_on_first_zero() {
         let req = GenerateRequest {
@@ -1966,7 +2014,7 @@ mod tests {
             callback_table_ptr: std::ptr::null(),
         };
         let mut state = BatchInferenceState::build_from_requests(&[req.clone()]);
-        // eos=0 and zero-tokens both stop — first gen token is 0 → empty
+        // eos=0 → first gen token is 0 which matches eos_token_id → empty output
         state.output_tokens_flat = vec![1, 2, 0, 10, 20, 30, 40];
         let results = state.collect_results(&[req]);
         assert!(results[0].output_tokens.is_empty());

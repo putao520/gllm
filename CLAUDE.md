@@ -2,6 +2,33 @@
 
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
+## 🚨 宪法
+
+### 🚨 宪法 1: 权重内存布局顺从权重文件（ARCH-BLOB-YIELDS-WEIGHT）
+
+**Weight blob 的内存布局必须与权重文件中的原始布局完全一致，禁止任何格式转换。**
+
+- ❌ 禁止 BF16→F32 转换后存入 blob — 这是数据迁就代码，违反 ARCH-JIT-DATA-YIELDS
+- ❌ 禁止假设 blob 有统一 dtype — 混合精度模型中不同张量可以是不同 dtype
+- ❌ 禁止为了复用同一段读取代码而统一化数据格式 — 代码必须顺从数据的实际格式
+- ✅ Blob 保留原始 dtype 原始字节，每个张量的 dtype 从 TensorMeta 推断
+- ✅ Blob 应支持多段布局（per-tensor dtype），因为混合精度模型的权重本身就是不同精度
+- ✅ 读取代码跟着每个张量的实际 dtype 走，用 `compute_dtype.size_bytes()` / per-tensor dtype 计算偏移和解码
+- ✅ JIT codegen 在编译时看到什么 dtype 就生成什么解码代码 — 代码顺从数据
+
+**核心思维**：我们以内存视角和布局来理解这个项目，而非用高级编程语言的概念。内存中是什么格式，代码就按什么格式操作。
+
+### 🚨 宪法 2: 内存视角优先（ARCH-MEMORY-FIRST）
+
+**理解和开发这个项目时，必须以内存布局和数据流动为第一视角，而非高级编程语言抽象。**
+
+- ❌ 禁止用"类型转换"思维理解数据流 — 应理解为内存字节的解读方式改变
+- ❌ 禁止脱离实际内存布局谈 dtype/precision — dtype = 字节宽度 + 解码规则，不是"类型"
+- ✅ 先理解物理内存布局（对齐、步幅、字节宽度、段间关系），再写代码
+- ✅ 偏移量计算 = 字节级地址算术，elem_bytes 决定步幅，dtype 决定解码语义
+- ✅ Scratchpad / KV Cache / Weight Blob 都是内存区域，代码只是按既定布局读写这片内存
+- ✅ "BF16→F32"不是类型转换，是"2 字节宽内存重解释为 4 字节宽" — 这是布局违宪
+
 ## SPEC Location
 - `./SPEC/` (SSOT, 76 documents, ~1350 REQs)
 - `../gllm-kernels/SPEC/` (JIT codegen + VmInstr SSOT)

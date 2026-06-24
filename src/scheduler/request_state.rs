@@ -224,10 +224,16 @@ impl RequestState {
     }
 
     /// Convert to a `LayeredRequestControl` for use by PolymorphicExecutor.
+    /// Convert to LayeredRequestControl for graph execution.
+    ///
+    /// **Thread safety**: Caller must ensure no concurrent modification of
+    /// `target_layer` or `exit_flag` during this call (typically under Executor
+    /// Mutex). `exit_flag` is read with Acquire ordering to synchronize with
+    /// the Release-ordered store that sets the exit condition.
     pub fn to_layered_control(&self) -> crate::graph::types::LayeredRequestControl {
         crate::graph::types::LayeredRequestControl {
             target_layer: self.target_layer,
-            exit_flag: AtomicU32::new(self.exit_flag.load(Ordering::Relaxed)),
+            exit_flag: AtomicU32::new(self.exit_flag.load(Ordering::Acquire)),
         }
     }
 }
@@ -483,16 +489,46 @@ impl Drop for RequestStateTable {
                 #[cfg(feature = "cuda")]
                 DeviceMemory::Cuda { ptr, .. } => {
                     if let Ok(driver) = gllm_kernels::gpu::cuda::CudaDriver::load() {
-                        let _ = driver.mem_free(*ptr);
+                        if let Err(e) = driver.mem_free(*ptr) {
+                            log::error!("Drop RequestStateTable: cuda mem_free({:?}) failed: {}", ptr, e);
+                        }
                     }
                 }
                 #[cfg(feature = "hip")]
                 DeviceMemory::Hip { ptr, .. } => {
                     if let Ok(driver) = gllm_kernels::gpu::hip::HipDriver::load() {
-                        let _ = driver.mem_free(*ptr);
+                        if let Err(e) = driver.mem_free(*ptr) {
+                            log::error!("Drop RequestStateTable: hip mem_free({:?}) failed: {}", ptr, e);
+                        }
                     }
                 }
-                _ => {}
+                #[cfg(feature = "metal")]
+                DeviceMemory::Metal { buffer_id, .. } => {
+                    // Metal buffer release via MetalDriver when available
+                    // TODO(port): implement MetalDriver::mem_free once metal feature is complete
+                    let _ = buffer_id;
+                }
+                DeviceMemory::Host { ptr, .. } => {
+                    // SAFETY: Host variant is a CPU-only fallback. In production, GPU
+                    // backends use Cuda/Hip/Metal variants. The Host ptr is currently
+                    // always null (only used in tests). If real host allocation is needed
+                    // in the future, must add Layout field to Host variant and use
+                    // std::alloc::dealloc. DO NOT use libc::free — it's UB if ptr came
+                    // from Rust's allocator.
+                    if !ptr.is_null() {
+                        log::error!(
+                            "DeviceMemory::Host with non-null ptr ({:?}) requires Layout for safe dealloc; \
+                             add layout field and use std::alloc::dealloc — leaking memory to avoid UB",
+                            ptr
+                        );
+                        // Intentionally leak: dealloc without Layout is UB, leaking is safe.
+                    }
+                }
+                #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+                _ => {
+                    // When no GPU features are enabled, only Host variant should exist
+                    // Other variants are impossible at runtime, so this is unreachable
+                }
             }
         }
     }

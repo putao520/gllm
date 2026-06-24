@@ -66,6 +66,12 @@ pub fn eagle_draft(
 ///
 /// 高置信 (max_prob > threshold): 单分支深探 — 只取 top-1
 /// 低置信 (max_prob <= threshold): 多分支宽探 — 取 top-3
+///
+/// # Panics
+///
+/// 如果 `draft_logits` 包含 NaN，则 panic 并附带明确的错误信息。
+/// NaN 在 logits 中表明严重的数值错误（溢出、坏权重等），
+/// 静默默认选择 token 0 会掩盖问题并产生垃圾输出。
 pub fn build_eagle_tree(
     draft_logits: &[f32],
     vocab_size: usize,
@@ -73,6 +79,14 @@ pub fn build_eagle_tree(
 ) -> Vec<u32> {
     if draft_logits.is_empty() || vocab_size == 0 {
         return vec![];
+    }
+
+    // NaN detection: NaN in logits indicates a serious numerical error.
+    // We must not silently default to token 0 (NO-SILENT-FALLBACK).
+    if draft_logits.iter().any(|l| l.is_nan()) {
+        panic!(
+            "NaN in logits — numerical error in EAGLE speculative decoding, cannot select token"
+        );
     }
 
     // Numerically stable softmax: subtract max before exp
@@ -1344,19 +1358,15 @@ mod tests {
     // ── build_eagle_tree: f32 NaN input ──
 
     #[test]
-    fn test_build_eagle_tree_handles_nan_logits() {
+    #[should_panic(expected = "NaN in logits")]
+    fn test_build_eagle_tree_panics_on_nan_logits() {
+        // NaN in logits must be detected and reported, not silently defaulted
         let config = EagleConfig {
             confidence_threshold: 0.5,
             ..EagleConfig::default()
         };
-        // NaN mixed in — the function should not panic
         let logits = vec![1.0, f32::NAN, 2.0, 3.0];
-        let result = build_eagle_tree(&logits, 4, &config);
-        // Result must not be empty and indices must be valid
-        assert!(!result.is_empty());
-        for &idx in &result {
-            assert!((idx as usize) < 4);
-        }
+        let _result = build_eagle_tree(&logits, 4, &config);
     }
 
     #[test]
@@ -1386,23 +1396,15 @@ mod tests {
     // ── Round 3: 15 additional tests ──
 
     #[test]
-    fn test_build_eagle_tree_all_nan_logits_returns_valid_indices() {
-        // Arrange: all-NaN logits should not panic; max_logit = NEG_INFINITY,
-        // so all exp values become 0.0, sum=0.0, max_prob=0.0.
+    #[should_panic(expected = "NaN in logits")]
+    fn test_build_eagle_tree_all_nan_logits_panics() {
+        // All-NaN logits must be detected and reported, not silently defaulted
         let config = EagleConfig {
             confidence_threshold: 0.5,
             ..EagleConfig::default()
         };
         let logits = vec![f32::NAN, f32::NAN, f32::NAN];
-
-        // Act
-        let result = build_eagle_tree(&logits, 3, &config);
-
-        // Assert: must not panic, result contains valid indices
-        assert!(!result.is_empty());
-        for &idx in &result {
-            assert!((idx as usize) < 3, "index {} out of range", idx);
-        }
+        let _result = build_eagle_tree(&logits, 3, &config);
     }
 
     #[test]

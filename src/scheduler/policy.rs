@@ -73,7 +73,11 @@ impl SchedulingPolicy for AbsolutePolicy {
 
         // Phase 2: attention sparsity → reduce batch to exploit sparsity (fewer active tokens)
         let sparsity_cap = if state.attention_sparsity > 0.7 {
-            let reduced = (self.config.batch_safe as f32 * (1.0 - state.attention_sparsity * 0.5)) as usize;
+            // Clamp reduction factor to [0.0, 1.0] so extreme sparsity (>2.0)
+            // still produces a meaningful (but small) batch size instead of
+            // clamping the final product to 0 and falling back to current_running_len.
+            let reduction_factor = (1.0 - state.attention_sparsity * 0.5).clamp(0.0, 1.0);
+            let reduced = (self.config.batch_safe as f32 * reduction_factor) as usize;
             reduced.max(state.current_running_len.max(1))
         } else {
             self.config.batch_safe
@@ -85,7 +89,8 @@ impl SchedulingPolicy for AbsolutePolicy {
             SchedulerDecision {
                 max_batch_size: state.current_running_len.max(1),
                 admit_new_prefill: false,
-                force_swap_out_count: (state.memory_pressure * 3.0).ceil() as usize,
+                // Guard: negative memory_pressure → usize wrap
+                force_swap_out_count: (state.memory_pressure * 3.0).ceil().clamp(0.0, 1000.0) as usize,
             }
         } else if state.kv_fragmentation > self.config.frag_defrag_threshold {
             SchedulerDecision {

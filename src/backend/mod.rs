@@ -522,6 +522,7 @@ impl<E: Element> BackendExecutor<E> {
                 vocab_size,
                 prompt_len,
                 hidden_size: 0,
+                compute_dtype: gllm_kernels::types::DType::F32,
             }
         }
         match self {
@@ -1212,7 +1213,7 @@ impl BackendContext {
     }
 
     pub fn executor(&self) -> MutexGuard<'_, BackendExecutor<f32>> {
-        self.executor.lock().unwrap_or_else(|err| err.into_inner()) // LEGAL: Mutex poison 时恢复内部数据
+        self.executor.lock().expect("mutex poison — previous holder panicked, cannot continue inference")
     }
 
     pub fn executor_mut(&self) -> MutexGuard<'_, BackendExecutor<f32>> {
@@ -1369,7 +1370,7 @@ impl DynBackendContext {
     }
 
     pub fn executor(&self) -> MutexGuard<'_, DynBackendExecutor> {
-        self.executor.lock().unwrap_or_else(|err| err.into_inner()) // LEGAL: Mutex poison 时恢复内部数据
+        self.executor.lock().expect("mutex poison — previous holder panicked, cannot continue inference")
     }
 
     pub fn executor_mut(&self) -> MutexGuard<'_, DynBackendExecutor> {
@@ -2136,6 +2137,7 @@ mod tests {
     // ── DiagnosticScratchpad: read_f32_at boundary checks ──
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn diagnostic_scratchpad_read_f32_out_of_bounds_returns_empty() {
         use crate::engine::mega_kernel::DiagnosticScratchpad;
         let pad = DiagnosticScratchpad {
@@ -2144,10 +2146,10 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Request 5 f32s from offset 0 but only 4 available
-        let result = pad.read_f32_at(0, 5);
-        assert!(result.is_empty(), "Out-of-bounds read should return empty vec");
+        // Request 5 f32s from offset 0 but only 4 available — OOB panics (NO-SILENT-FALLBACK)
+        let _ = pad.read_f32_at(0, 5);
     }
 
     #[test]
@@ -2165,6 +2167,7 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let result = pad.read_f32_at(0, 1);
         assert_eq!(result.len(), 1);
@@ -2185,6 +2188,7 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let result = pad.read_f32_at(12, 1);
         assert_eq!(result.len(), 1);
@@ -2758,6 +2762,7 @@ mod tests {
             vocab_size: 0,
             prompt_len: 1,
             hidden_size: 3,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let emb = pad.embedding();
         assert_eq!(emb.len(), 3);
@@ -2786,6 +2791,7 @@ mod tests {
             vocab_size: 3,
             prompt_len: 2,
             hidden_size: 3,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let logits = pad.last_token_logits();
         assert_eq!(logits.len(), 3);
@@ -3469,11 +3475,14 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         assert!(pad.embedding().is_empty());
     }
 
-    #[test]    fn diagnostic_scratchpad_read_f32_at_offset_beyond_data_returns_empty() {
+    #[test]
+    #[should_panic(expected = "read_f32_at")]
+    fn diagnostic_scratchpad_read_f32_at_offset_beyond_data_returns_empty() {
         use crate::engine::mega_kernel::DiagnosticScratchpad;
         let pad = DiagnosticScratchpad {
             data: vec![0u8; 16], // 4 x f32
@@ -3481,9 +3490,10 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        let result = pad.read_f32_at(16, 1);
-        assert!(result.is_empty(), "Offset at data boundary should return empty");
+        // Offset at data boundary — OOB panics (NO-SILENT-FALLBACK)
+        let _ = pad.read_f32_at(16, 1);
     }
 
     #[test]
@@ -3495,6 +3505,7 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let result = pad.read_f32_at(0, 0);
         assert!(result.is_empty(), "Count=0 should return empty vec");
@@ -3514,6 +3525,7 @@ mod tests {
             vocab_size: 3,
             prompt_len: 1,
             hidden_size: 3,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let emb = pad.embedding();
         assert_eq!(emb.len(), 3);
@@ -5005,6 +5017,7 @@ mod tests {
             vocab_size: 3,
             prompt_len: 1,
             hidden_size: 3,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let logits = pad.last_token_logits();
         assert_eq!(logits.len(), 3);
@@ -5016,6 +5029,7 @@ mod tests {
     // ── DiagnosticScratchpad: read_f32_at partial boundary ──
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn diagnostic_scratchpad_read_f32_at_partial_boundary() {
         use crate::engine::mega_kernel::DiagnosticScratchpad;
         let mut data = vec![0u8; 16]; // exactly 4 x f32
@@ -5028,10 +5042,10 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Request 2 f32s starting at byte offset 12, but only 1 fits
-        let result = pad.read_f32_at(12, 2);
-        assert!(result.is_empty(), "Partial read should return empty vec");
+        // Request 2 f32s starting at byte offset 12, but only 1 fits — OOB panics (NO-SILENT-FALLBACK)
+        let _ = pad.read_f32_at(12, 2);
     }
 
     // ── WeightPageJitConfig: different configs are not equal ──
@@ -5480,6 +5494,7 @@ mod tests {
             vocab_size: 0,
             prompt_len: 0,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Offset 32 is exactly at end, even count=0 returns empty
         let result = pad.read_f32_at(32, 0);

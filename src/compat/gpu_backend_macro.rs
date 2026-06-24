@@ -115,6 +115,7 @@ macro_rules! impl_gpu_backend {
 
                     let mut all_logits = Vec::with_capacity(input.sequences.len());
                     let vocab_size = config.geometry.vocab_size;
+                    let elem_bytes = config.geometry.compute_dtype.size_bytes();
 
                     for (seq_idx, seq) in input.sequences.iter().enumerate() {
                         let seq_len = seq.tokens.len();
@@ -125,7 +126,7 @@ macro_rules! impl_gpu_backend {
                             .map_err(|e| BE::$upload_err_variant(e))?;
                         let sp_gpu = bf.alloc_scratchpad_gpu(scratch_bytes.max(1024))
                             .map_err(|e| BE::$upload_err_variant(e))?;
-                        let out_bytes = vocab_size * 4;
+                        let out_bytes = vocab_size * elem_bytes;
                         let out_gpu = bf.alloc_scratchpad_gpu(out_bytes)
                             .map_err(|e| BE::$upload_err_variant(e))?;
                         let kv_ptr = kv_caches.get(seq_idx).map(|h| h.0).unwrap_or(0);
@@ -149,7 +150,7 @@ macro_rules! impl_gpu_backend {
                         let data = bf.download_from_gpu(out_gpu, out_bytes)
                             .map_err(|e| BE::$upload_err_variant(e))?;
                         all_logits.push(LogitsHandle {
-                            data: super::gpu_helpers::bytes_to_f32_vec(&data),
+                            data: super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype),
                         });
                     }
                     Ok((all_logits, 0.0, Vec::new()))
@@ -253,6 +254,7 @@ macro_rules! impl_gpu_backend {
                         .ok_or_else(|| BE::$upload_err_variant("weight blob not uploaded".into()))?;
                     let scratch_bytes = bf.get_cached_scratchpad_bytes();
                     let vocab_size = config.geometry.vocab_size;
+                    let elem_bytes = config.geometry.compute_dtype.size_bytes();
 
                     let seq_len = tokens.len();
                     let ids_gpu = bf.upload_to_gpu(tokens).map_err(|e| BE::$upload_err_variant(e))?;
@@ -260,7 +262,7 @@ macro_rules! impl_gpu_backend {
                     let pos_gpu = bf.upload_to_gpu(&positions).map_err(|e| BE::$upload_err_variant(e))?;
                     let sp_gpu = bf.alloc_scratchpad_gpu(scratch_bytes.max(1024))
                         .map_err(|e| BE::$upload_err_variant(e))?;
-                    let logits_bytes = vocab_size * 4;
+                    let logits_bytes = vocab_size * elem_bytes;
                     let out_gpu = bf.alloc_scratchpad_gpu(logits_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
@@ -277,10 +279,18 @@ macro_rules! impl_gpu_backend {
 
                     let data = bf.download_from_gpu(out_gpu, logits_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
-                    let all_logits = super::gpu_helpers::bytes_to_f32_vec(&data);
+                    let all_logits = super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype);
                     let offset = all_logits.len().saturating_sub(vocab_size);
                     Ok(target_token_ids.iter()
-                        .map(|&id| *all_logits.get(offset + id as usize).unwrap_or(&0.0))
+                        .map(|&id| {
+                            let idx = offset + id as usize;
+                            if idx < all_logits.len() {
+                                all_logits[idx]
+                            } else {
+                                log::warn!("score_tokens_gpu: token id {} at offset {} exceeds logits len {} — defaulting to 0.0", id, offset, all_logits.len());
+                                0.0
+                            }
+                        })
                         .collect())
                 }
                 #[cfg(not( $($cfg_pred)+ ))]
@@ -315,6 +325,7 @@ macro_rules! impl_gpu_backend {
 
                     let seq_len = tokens.len();
                     let hidden_size = config.geometry.hidden_size;
+                    let elem_bytes = config.geometry.compute_dtype.size_bytes();
                     let ids_gpu = bf.upload_to_gpu(tokens).map_err(|e| BE::$upload_err_variant(e))?;
                     let positions: Vec<u32> = (0..seq_len as u32).collect();
                     let pos_gpu = bf.upload_to_gpu(&positions).map_err(|e| BE::$upload_err_variant(e))?;
@@ -332,10 +343,10 @@ macro_rules! impl_gpu_backend {
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
-                    let out_bytes = (seq_len * hidden_size * 4).min(scratch_bytes);
+                    let out_bytes = (seq_len * hidden_size * elem_bytes).min(scratch_bytes);
                     let data = bf.download_from_gpu(sp_gpu, out_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
-                    Ok(super::gpu_helpers::bytes_to_f32_vec(&data))
+                    Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))
                 }
                 #[cfg(not( $($cfg_pred)+ ))]
                 {
@@ -364,6 +375,7 @@ macro_rules! impl_gpu_backend {
 
                     let seq_len = tokens.len();
                     let hidden_size = config.geometry.hidden_size;
+                    let elem_bytes = config.geometry.compute_dtype.size_bytes();
                     let ids_gpu = bf.upload_to_gpu(tokens).map_err(|e| BE::$upload_err_variant(e))?;
                     let positions: Vec<u32> = (0..seq_len as u32).collect();
                     let pos_gpu = bf.upload_to_gpu(&positions).map_err(|e| BE::$upload_err_variant(e))?;
@@ -381,10 +393,10 @@ macro_rules! impl_gpu_backend {
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
-                    let out_bytes = (seq_len * hidden_size * 4).min(scratch_bytes);
+                    let out_bytes = (seq_len * hidden_size * elem_bytes).min(scratch_bytes);
                     let data = bf.download_from_gpu(sp_gpu, out_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
-                    Ok(super::gpu_helpers::bytes_to_f32_vec(&data))
+                    Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))
                 }
                 #[cfg(not( $($cfg_pred)+ ))]
                 {
@@ -596,7 +608,8 @@ impl GpuEncoderOps for super::cuda_backend::CudaBackend<f32> {
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let pos_gpu = self.upload_to_gpu(&positions)?;
         let sp_gpu = self.alloc_scratchpad_gpu(scratch_bytes.max(1024))?;
-        let out_bytes = output_elems * 4;
+        let elem_bytes = config.geometry.compute_dtype.size_bytes();
+        let out_bytes = output_elems * elem_bytes;
         let out_gpu = self.alloc_scratchpad_gpu(out_bytes)?;
 
         let args = super::gpu_helpers::build_mega_kernel_args(
@@ -610,7 +623,7 @@ impl GpuEncoderOps for super::cuda_backend::CudaBackend<f32> {
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
         let data = self.download_from_gpu(out_gpu, out_bytes)?;
-        Ok(super::gpu_helpers::bytes_to_f32_vec(&data))
+        Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))
     }
 }
 
@@ -633,7 +646,8 @@ impl GpuEncoderOps for super::hip_backend::HipBackend<f32> {
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let pos_gpu = self.upload_to_gpu(&positions)?;
         let sp_gpu = self.alloc_scratchpad_gpu(scratch_bytes.max(1024))?;
-        let out_bytes = output_elems * 4;
+        let elem_bytes = config.geometry.compute_dtype.size_bytes();
+        let out_bytes = output_elems * elem_bytes;
         let out_gpu = self.alloc_scratchpad_gpu(out_bytes)?;
 
         let args = super::gpu_helpers::build_mega_kernel_args(
@@ -647,7 +661,7 @@ impl GpuEncoderOps for super::hip_backend::HipBackend<f32> {
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
         let data = self.download_from_gpu(out_gpu, out_bytes)?;
-        Ok(super::gpu_helpers::bytes_to_f32_vec(&data))
+        Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))
     }
 }
 
@@ -670,7 +684,8 @@ impl GpuEncoderOps for super::metal_backend::MetalBackend<f32> {
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let pos_gpu = self.upload_to_gpu(&positions)?;
         let sp_gpu = self.alloc_scratchpad_gpu(scratch_bytes.max(1024))?;
-        let out_bytes = output_elems * 4;
+        let elem_bytes = config.geometry.compute_dtype.size_bytes();
+        let out_bytes = output_elems * elem_bytes;
         let out_gpu = self.alloc_scratchpad_gpu(out_bytes)?;
 
         let args = super::gpu_helpers::build_mega_kernel_args(
@@ -684,6 +699,6 @@ impl GpuEncoderOps for super::metal_backend::MetalBackend<f32> {
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
         let data = self.download_from_gpu(out_gpu, out_bytes)?;
-        Ok(super::gpu_helpers::bytes_to_f32_vec(&data))
+        Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))
     }
 }

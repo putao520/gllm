@@ -132,7 +132,7 @@ impl WeightTierManager {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.allocations.lock().unwrap().insert(
+                    self.allocations.lock().expect("allocations Mutex poisoned in decide (device) — previous holder panicked").insert(
                         name.to_string(),
                         WeightAllocation { tier: WeightTier::DeviceLocal, size },
                     );
@@ -155,7 +155,7 @@ impl WeightTierManager {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.allocations.lock().unwrap().insert(
+                    self.allocations.lock().expect("allocations Mutex poisoned in decide (host) — previous holder panicked").insert(
                         name.to_string(),
                         WeightAllocation { tier: WeightTier::HostLocal, size },
                     );
@@ -169,7 +169,7 @@ impl WeightTierManager {
         }
 
         // Degrade to mmap — data already lives in mmap'd file, no new allocation
-        self.allocations.lock().unwrap().insert(
+        self.allocations.lock().expect("allocations Mutex poisoned in decide (mmap) — previous holder panicked").insert(
             name.to_string(),
             WeightAllocation { tier: WeightTier::DiskMmap, size },
         );
@@ -183,7 +183,7 @@ impl WeightTierManager {
     pub fn tier_of(&self, name: &str) -> Option<WeightTier> {
         self.allocations
             .lock()
-            .unwrap()
+            .expect("allocations Mutex poisoned in tier_of — previous holder panicked")
             .get(name)
             .map(|a| a.tier)
     }
@@ -209,7 +209,7 @@ impl WeightTierManager {
 
     /// Number of tensors tracked.
     pub fn tensor_count(&self) -> usize {
-        self.allocations.lock().unwrap().len()
+        self.allocations.lock().expect("allocations Mutex poisoned in tensor_count — previous holder panicked").len()
     }
 
     /// Decide upload tier by querying GlobalMemoryManager's TierUsage (REQ-WP-001).
@@ -225,7 +225,7 @@ impl WeightTierManager {
     ) -> UploadDecision {
         let l1 = gmm.tier_usage(Tier::L1);
         if l1.available() >= size_pages {
-            self.allocations.lock().unwrap().insert(
+            self.allocations.lock().expect("allocations Mutex poisoned in decide_via_gmm_capacity (device) — previous holder panicked").insert(
                 name.to_string(),
                 WeightAllocation { tier: WeightTier::DeviceLocal, size: size_pages },
             );
@@ -237,7 +237,7 @@ impl WeightTierManager {
 
         let l2 = gmm.tier_usage(Tier::L2);
         if l2.available() >= size_pages {
-            self.allocations.lock().unwrap().insert(
+            self.allocations.lock().expect("allocations Mutex poisoned in decide_via_gmm_capacity (host) — previous holder panicked").insert(
                 name.to_string(),
                 WeightAllocation { tier: WeightTier::HostLocal, size: size_pages },
             );
@@ -247,7 +247,7 @@ impl WeightTierManager {
             };
         }
 
-        self.allocations.lock().unwrap().insert(
+        self.allocations.lock().expect("allocations Mutex poisoned in decide_via_gmm_capacity (mmap) — previous holder panicked").insert(
             name.to_string(),
             WeightAllocation { tier: WeightTier::DiskMmap, size: size_pages },
         );

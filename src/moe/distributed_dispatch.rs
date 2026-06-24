@@ -178,20 +178,29 @@ pub mod distributed_dispatch {
         /// 根据 placement 决策确定 expert 所在的 GPU rank
         ///
         /// 用于 dispatch_experts 中的 token 分组。
-        pub fn expert_target_rank(&self, expert_id: u32) -> u32 {
+        /// Custom mapping 下 expert_id 不在映射表中 → 返回 Err（禁止静默 RoundRobin fallback）。
+        pub fn expert_target_rank(&self, expert_id: u32) -> Result<u32, String> {
             match &self.placement {
-                MoePlacementDecision::Auto => 0, // 单机全部在本地
-                MoePlacementDecision::RoundRobin => expert_id % self.world_size,
+                MoePlacementDecision::Auto => Ok(0), // 单机全部在本地
+                MoePlacementDecision::RoundRobin => Ok(expert_id % self.world_size),
                 MoePlacementDecision::Custom { mapping } => {
-                    mapping.get(expert_id as usize).copied().unwrap_or(expert_id % self.world_size)
+                    mapping.get(expert_id as usize).copied().ok_or_else(|| {
+                        format!(
+                            "expert_id {} not found in Custom mapping (len={}): \
+                             every expert must have an explicit rank assignment — \
+                             use RoundRobin placement if you want automatic distribution",
+                            expert_id,
+                            mapping.len()
+                        )
+                    })
                 }
                 MoePlacementDecision::HotCold { hot_count, .. } => {
                     // 前 hot_count 个 expert 镜像到所有 GPU → 本地处理
                     // 后续 expert 按 RoundRobin 分配
                     if (expert_id as usize) < *hot_count {
-                        0 // 热 expert 在所有 GPU 都有副本，本 rank 可本地处理
+                        Ok(0) // 热 expert 在所有 GPU 都有副本，本 rank 可本地处理
                     } else {
-                        expert_id % self.world_size
+                        Ok(expert_id % self.world_size)
                     }
                 },
             }
@@ -217,7 +226,7 @@ pub mod distributed_dispatch {
             let mut send_indices: Vec<Vec<u32>> = vec![vec![]; num_ranks];
 
             for (i, &expert_id) in expert_ids.iter().enumerate() {
-                let target_rank = self.expert_target_rank(expert_id) as usize;
+                let target_rank = self.expert_target_rank(expert_id)? as usize;
                 if target_rank < num_ranks {
                     send_counts[target_rank] += 1;
                     send_indices[target_rank].push(token_indices[i]);
@@ -257,7 +266,17 @@ pub mod distributed_dispatch {
 
             for peer in 0..num_ranks {
                 let offset = peer * num_ranks;
-                result.recv_counts[peer] = gathered[offset + my_rank] as u32;
+                let val_f32 = gathered[offset + my_rank];
+                let val_u32 = val_f32 as u32;
+                // Detect f32 precision loss for large counts (f32 mantissa = 24 bits,
+                // u32 values > 2^24 lose precision when round-tripped through f32).
+                if val_f32 > 0.0 && (val_u32 as f32 - val_f32).abs() > 1.0 {
+                    log::warn!(
+                        "all_to_all_exchange_counts: f32 precision loss for peer {} count: original_f32={}, rounded_u32={}",
+                        peer, val_f32, val_u32
+                    );
+                }
+                result.recv_counts[peer] = val_u32;
             }
 
             Ok(())
@@ -551,12 +570,12 @@ pub mod distributed_dispatch {
                 num_experts: 8,
                 world_size: 4,
             };
-            assert_eq!(decision.expert_target_rank(0), 0);
-            assert_eq!(decision.expert_target_rank(1), 1);
-            assert_eq!(decision.expert_target_rank(2), 2);
-            assert_eq!(decision.expert_target_rank(3), 3);
-            assert_eq!(decision.expert_target_rank(4), 0);
-            assert_eq!(decision.expert_target_rank(7), 3);
+            assert_eq!(decision.expert_target_rank(0).unwrap(), 0);
+            assert_eq!(decision.expert_target_rank(1).unwrap(), 1);
+            assert_eq!(decision.expert_target_rank(2).unwrap(), 2);
+            assert_eq!(decision.expert_target_rank(3).unwrap(), 3);
+            assert_eq!(decision.expert_target_rank(4).unwrap(), 0);
+            assert_eq!(decision.expert_target_rank(7).unwrap(), 3);
         }
 
         #[test]
@@ -569,10 +588,12 @@ pub mod distributed_dispatch {
                 num_experts: 4,
                 world_size: 4,
             };
-            assert_eq!(decision.expert_target_rank(0), 2);
-            assert_eq!(decision.expert_target_rank(1), 3);
-            assert_eq!(decision.expert_target_rank(2), 0);
-            assert_eq!(decision.expert_target_rank(3), 1);
+            assert_eq!(decision.expert_target_rank(0).unwrap(), 2);
+            assert_eq!(decision.expert_target_rank(1).unwrap(), 3);
+            assert_eq!(decision.expert_target_rank(2).unwrap(), 0);
+            assert_eq!(decision.expert_target_rank(3).unwrap(), 1);
+            // expert_id beyond mapping → Err (no silent RoundRobin fallback)
+            assert!(decision.expert_target_rank(4).is_err());
         }
 
         #[test]
@@ -587,12 +608,12 @@ pub mod distributed_dispatch {
                 world_size: 4,
             };
             // hot expert (id < hot_count) → local (rank 0)
-            assert_eq!(decision.expert_target_rank(0), 0);
-            assert_eq!(decision.expert_target_rank(1), 0);
+            assert_eq!(decision.expert_target_rank(0).unwrap(), 0);
+            assert_eq!(decision.expert_target_rank(1).unwrap(), 0);
             // cold expert → RoundRobin
-            assert_eq!(decision.expert_target_rank(2), 2);
-            assert_eq!(decision.expert_target_rank(3), 3);
-            assert_eq!(decision.expert_target_rank(4), 0);
+            assert_eq!(decision.expert_target_rank(2).unwrap(), 2);
+            assert_eq!(decision.expert_target_rank(3).unwrap(), 3);
+            assert_eq!(decision.expert_target_rank(4).unwrap(), 0);
         }
 
         // ── dispatch_experts ────────────────────────────────────────────────────

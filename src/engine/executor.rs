@@ -621,7 +621,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Enable mega-kernel SG shared memory (control bit 0 = 1).
         if let Some(ref mx) = self.model_ctx.sg_shared_memory {
-            let mut sg = mx.lock().unwrap_or_else(|e| e.into_inner());
+            let mut sg = mx.lock().expect("mutex poison — previous holder panicked, cannot continue inference");
             sg.enable();
 
             let hidden_size = sg.hidden_size();
@@ -639,7 +639,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     .unwrap()
                     .inner
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .expect("mutex poison — previous holder panicked, cannot continue inference")
                     .alpha()
             };
 
@@ -654,7 +654,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     .unwrap()
                     .inner
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                    .expect("mutex poison — previous holder panicked, cannot continue inference");
                 cb_lock
                     .text_encoder()
                     .encode("Paris")
@@ -713,7 +713,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Disable SG shared memory.
         if let Some(ref mx) = self.model_ctx.sg_shared_memory {
-            let mut sg = mx.lock().unwrap_or_else(|e| e.into_inner());
+            let mut sg = mx.lock().expect("mutex poison — previous holder panicked, cannot continue inference");
             sg.disable();
         }
     }
@@ -974,7 +974,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         let is_expert = group.payload_kind
                             == Some(crate::scheduler::types::PagePayloadKind::ExpertWeight);
                         if is_expert && !group.pages.is_empty() {
-                            let layer_idx = victim_id.wrapping_sub(1_000_000) as usize;
+                            let layer_idx = victim_id.checked_sub(1_000_000)
+                                .expect("expert group ID must be >= 1_000_000 (base offset)")
+                                as usize;
                             for &page_id in &group.pages {
                                 match self.dispatch.scheduler.memory_manager.migrate_page(
                                     crate::scheduler::memory_manager::Tier::L1,
@@ -1015,7 +1017,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         if let Some(ref coordinator) = self.model_ctx.three_tier_swap {
             let active_pages = self.collect_active_page_ids();
-            coordinator.lock().unwrap().build_batch(&active_pages, pressure);
+            if let Ok(coord) = coordinator.lock() {
+                coord.build_batch(&active_pages, pressure);
+            } else {
+                log::error!("three_tier_swap coordinator lock poisoned in check_memory_pressure — skipping swap cycle");
+            }
         } else {
             let needed_blocks = swap_cfg.lru_granularity.max(1);
             while pressure > threshold {

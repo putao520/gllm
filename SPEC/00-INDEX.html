@@ -7,8 +7,8 @@
   <title>SPEC 设计文档目录</title>
   <script type="application/ld+json">
   { "@context":"https://spec.gsc.local/v1", "@type":"SpecIndex",
-    "generated":"2026-06-22",
-    "stats":{"reqs":713,"entities":255,"apis":49,"tests":788,"bugs":0},
+    "generated":"2026-06-24",
+    "stats":{"reqs":726,"entities":257,"apis":50,"tests":801,"bugs":0},
     "documents":[
       {"id":"00-INDEX","category":"index","title":"SPEC 目录索引"},
       {"id":"00-PHILOSOPHY","category":"other","title":"00-PHILOSOPHY"},
@@ -23,7 +23,7 @@
       {"id":"05-OPTIMIZATIONS","category":"other","title":"05-OPTIMIZATIONS","reqs":12,"tests":12},
       {"id":"06-RUNTIME","category":"other","title":"06-RUNTIME","reqs":10,"tests":10},
       {"id":"06-TESTING-STRATEGY","category":"other","title":"06-TESTING-STRATEGY","reqs":13,"entities":7,"tests":13},
-      {"id":"07-LOADER","category":"other","title":"07-LOADER","reqs":8,"entities":5,"apis":1,"tests":8},
+      {"id":"07-LOADER","category":"other","title":"07-LOADER","reqs":21,"entities":8,"apis":2,"tests":21},
       {"id":"07-OBSERVABILITY","category":"other","title":"07-OBSERVABILITY","reqs":7,"tests":7},
       {"id":"08-EXECUTOR","category":"other","title":"08-EXECUTOR","reqs":8,"apis":1,"tests":8},
       {"id":"09-API","category":"other","title":"09-API","reqs":11,"tests":11},
@@ -61,7 +61,7 @@
       {"id":"41-COMPILER-DIAGNOSTICS","category":"other","title":"41-COMPILER-DIAGNOSTICS","reqs":6,"tests":6},
       {"id":"42-CPU-GPU-HETERO-ATTENTION","category":"other","title":"42-CPU-GPU-HETERO-ATTENTION","reqs":12,"entities":3,"apis":3,"tests":12},
       {"id":"42-LOW-LEVEL-IR","category":"other","title":"42-LOW-LEVEL-IR","reqs":26,"entities":17,"apis":1,"tests":28},
-      {"id":"43-DISTRIBUTED-IMPLEMENTATION","category":"other","title":"43-DISTRIBUTED-IMPLEMENTATION","reqs":34,"entities":33,"tests":51},
+      {"id":"43-DISTRIBUTED-IMPLEMENTATION","category":"other","title":"43-DISTRIBUTED-IMPLEMENTATION","reqs":34,"entities":32,"tests":51},
       {"id":"ai-development-guideline","category":"other","title":"ai-development-guideline"},
       {"id":"algorithm-path-coverage","category":"other","title":"algorithm-path-coverage"},
       {"id":"ARCH-DATA-FLOW-CONTRACT","category":"other","title":"ARCH-DATA-FLOW-CONTRACT","reqs":20,"entities":1,"tests":20},
@@ -96,7 +96,7 @@
 <body>
   <header data-spec-header>
     <h1>SPEC 设计文档目录</h1>
-    <p>共 79 个主文件、18 个子文件 | REQ: 713 | Entity: 255 | API: 49 | TEST: 788 | BUG: 0</p>
+    <p>共 79 个主文件、18 个子文件 | REQ: 726 | Entity: 257 | API: 50 | TEST: 801 | BUG: 0</p>
   </header>
   <main data-spec-content>
     <section id="s1">
@@ -185,7 +185,7 @@
         <tr>
   <td><a href="./07-LOADER.html" data-xref-type="spec-file">07-LOADER</a></td>
   <td>other</td>
-  <td>REQ ×8、Entity ×5、API ×1、TEST ×8</td>
+  <td>REQ ×21、Entity ×8、API ×2、TEST ×21</td>
   <td>—</td>
 </tr>
         <tr>
@@ -413,7 +413,7 @@
         <tr>
   <td><a href="./43-DISTRIBUTED-IMPLEMENTATION.html" data-xref-type="spec-file">43-DISTRIBUTED-IMPLEMENTATION</a></td>
   <td>other</td>
-  <td>REQ ×34、Entity ×33、TEST ×51</td>
+  <td>REQ ×34、Entity ×32、TEST ×51</td>
   <td>—</td>
 </tr>
         <tr>
@@ -582,7 +582,7 @@
     </section>
   </main>
   <footer data-spec-footer>
-    <p>自动生成于 2026-06-22</p>
+    <p>自动生成于 2026-06-24</p>
   </footer>
 </body>
 </html>

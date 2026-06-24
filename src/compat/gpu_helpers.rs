@@ -429,18 +429,6 @@ pub(super) fn build_mega_kernel_args(
     config.to_mega_kernel_args()
 }
 
-/// Extract f32 array from raw bytes (for DtoH results).
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
-pub(super) fn bytes_to_f32_vec(data: &[u8]) -> Vec<f32> {
-    let count = data.len() / 4;
-    let mut result = Vec::with_capacity(count);
-    for i in 0..count {
-        let bytes = [data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]];
-        result.push(f32::from_le_bytes(bytes));
-    }
-    result
-}
-
 // ---------------------------------------------------------------------------
 // GpuPagedKvPool — GPU device memory pool for paged KV cache (SPEC 18 REQ-PA-006)
 // ---------------------------------------------------------------------------

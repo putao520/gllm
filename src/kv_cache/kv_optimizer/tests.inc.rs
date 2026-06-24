@@ -85,7 +85,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             PrecisionTier::FP16,
-        );
+        ).unwrap();
         assert_eq!(recovered.len(), k_data.len());
 
         // FP16 has limited precision, check within tolerance
@@ -123,7 +123,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             PrecisionTier::FP8,
-        );
+        ).unwrap();
 
         // FP8: looser tolerance (~1.5% per element due to 8-bit quantization)
         for (i, (&orig, &rec)) in k_data.iter().zip(recovered.iter()).enumerate() {
@@ -162,7 +162,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             PrecisionTier::KIVI4,
-        );
+        ).unwrap();
 
         // 4-bit: ~7% per-element error (7 levels per side)
         for (i, (&orig, &rec)) in v_data.iter().zip(recovered.iter()).enumerate() {
@@ -201,7 +201,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             PrecisionTier::KIVI2,
-        );
+        ).unwrap();
 
         // 2-bit: only 3 levels (-scale, 0, +scale), coarse approximation
         for (i, (&orig, &rec)) in v_data.iter().zip(recovered.iter()).enumerate() {

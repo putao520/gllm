@@ -326,10 +326,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 if sz != ref_q {
                     full_indices.push(layer_idx);
                     if q_dim_full == 0 {
-                        q_dim_full = sz / (geometry.hidden_size * 4);
+                        let elem_bytes = geometry.compute_dtype.size_bytes();
+                        q_dim_full = sz / (geometry.hidden_size * elem_bytes);
                         let k_canon = format!("L{}.k_proj", layer_idx);
                         if let Some(k_sz) = find_size(&k_canon) {
-                            kv_dim_full = k_sz / (geometry.hidden_size * 4);
+                            kv_dim_full = k_sz / (geometry.hidden_size * elem_bytes);
                         }
                     }
                 }
@@ -373,7 +374,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return None;
         }
 
-        let ref_q_dim = ref_q / (geometry.hidden_size * 4);
+        let elem_bytes = geometry.compute_dtype.size_bytes();
+        let ref_q_dim = ref_q / (geometry.hidden_size * elem_bytes);
         let q_dim_full_val = q_dim_full;
 
         // Use head_dim from model config (SSOT). Weight-size derivation is unreliable
@@ -398,7 +400,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             if let Some(fl) = Self::find_first_large_layer(find_size, ref_gate_val, geometry) {
                 let gk = format!("L{}.gate_proj", fl);
                 let large_gate = find_size(&gk).unwrap_or(ref_gate_val);
-                large_intermediate = large_gate / (geometry.hidden_size * 4);
+                large_intermediate = large_gate / (geometry.hidden_size * elem_bytes);
                 large_ffn_start_segment = fl / (sliding_per_segment + 1);
             }
         }
@@ -1503,7 +1505,7 @@ mod tests {
         let find_size = |c: &str| -> Option<usize> { sizes.get(c).copied() };
 
         // ref_q = hidden_size * q_dim * elem_bytes = 1024 * 1024 * 4 = 4194304
-        // ref_q_dim = ref_q / (hidden_size * 4) = 1024
+        // ref_q_dim = ref_q / (hidden_size * elem_bytes) = 1024
         // sliding_num_q_heads = ref_q_dim / head_dim = 1024 / 64 = 16
         // full_num_q_heads = q_dim_full / head_dim = 512 / 64 = 8
         // full_num_kv_heads = kv_dim_full / head_dim = 128 / 64 = 2
@@ -6298,7 +6300,7 @@ mod tests {
 
     // ======================================================================
     // Boundary: hidden_size=0 in scan_hetero_layer_diffs
-    // When hidden_size is 0, the division `sz / (hidden_size * 4)` panics.
+    // When hidden_size is 0, the division `sz / (hidden_size * elem_bytes)` panics.
     // This is a known boundary — geometry with hidden_size=0 is invalid.
     // ======================================================================
 

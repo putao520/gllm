@@ -46,7 +46,7 @@ fn phi4_name_map_full() {
         // NO lm_head.weight — tied to embed_tokens
     ];
 
-    let map = TensorNameMap::build_from_names(&names, true);
+    let map = TensorNameMap::build_from_names(&names, Some(gllm::manifest::ModelKind::Chat));
 
     // Check fused QKV mapping
     let qkv_canonical = map.to_canonical("model.layers.0.self_attn.qkv_proj.weight");

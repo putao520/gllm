@@ -190,6 +190,7 @@ mod tests {
             logits_offset: 0,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
             vocab_size: 8,
         };
         let vals = sp.read_f32_at(0, 4);
@@ -572,12 +573,14 @@ mod tests {
             vocab_size: 8,
             prompt_len: 2,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let debug_str = format!("{sp:?}");
         assert!(debug_str.contains("DiagnosticScratchpad"));
     }
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn scratchpad_read_f32_at_out_of_bounds_returns_empty() {
         let buf = vec![0u8; 16]; // only 4 f32s worth
         let sp = DiagnosticScratchpad {
@@ -586,13 +589,14 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Request 5 f32s starting at offset 0 — needs 20 bytes, only 16 available
-        let vals = sp.read_f32_at(0, 5);
-        assert!(vals.is_empty());
+        // Request 5 f32s starting at offset 0 — needs 20 bytes, only 16 available — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(0, 5);
     }
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn scratchpad_read_f32_at_offset_out_of_bounds() {
         let buf = vec![0u8; 16];
         let sp = DiagnosticScratchpad {
@@ -601,10 +605,10 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Start at byte 16 — beyond buffer
-        let vals = sp.read_f32_at(16, 1);
-        assert!(vals.is_empty());
+        // Start at byte 16 — beyond buffer — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(16, 1);
     }
 
     #[test]
@@ -623,6 +627,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let vals = sp.read_f32_at(0, 2);
         assert_eq!(vals.len(), 2);
@@ -639,6 +644,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 3,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // embedding = prompt_len * hidden_size = 3 * 4 = 12 f32s
         let emb = sp.embedding();
@@ -647,6 +653,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "read_dtype_aware")]
     fn scratchpad_embedding_buffer_too_small_returns_empty() {
         let buf = vec![0u8; 8]; // only 2 f32s, but need prompt_len=2 * hidden_size=4 = 8 f32s
         let sp = DiagnosticScratchpad {
@@ -655,9 +662,10 @@ mod tests {
             vocab_size: 8,
             prompt_len: 2,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        let emb = sp.embedding();
-        assert!(emb.is_empty());
+        // Buffer too small — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.embedding();
     }
 
     #[test]
@@ -678,6 +686,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 2,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 2);
@@ -686,6 +695,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "read_dtype_aware")]
     fn scratchpad_last_token_logits_out_of_bounds_returns_empty() {
         // logits_offset near end of buffer so (prompt_len-1)*row overflows
         let buf = vec![0u8; 8];
@@ -695,9 +705,10 @@ mod tests {
             vocab_size: 8,
             prompt_len: 2,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        let logits = sp.last_token_logits();
-        assert!(logits.is_empty());
+        // OOB — panics (NO-SILENT-FALLBACK)
+        let _ = sp.last_token_logits();
     }
 
     // ── MegaKernelError: source chain (std::error::Error) ──
@@ -913,6 +924,7 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Read 4 f32s starting at offset 0 — exactly fits the buffer
         let vals = sp.read_f32_at(0, 4);
@@ -931,6 +943,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 0,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // prompt_len=0 → count=0 → empty vec
         let emb = sp.embedding();
@@ -954,6 +967,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 2);
@@ -974,6 +988,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 1,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let vals = sp.read_f32_at(4, 1);
         assert_eq!(vals.len(), 1);
@@ -1045,6 +1060,7 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let vals = sp.read_f32_at(0, 0);
         assert!(vals.is_empty());
@@ -1065,6 +1081,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let vals = sp.read_f32_at(8, 1);
         assert_eq!(vals.len(), 1);
@@ -1220,9 +1237,10 @@ mod tests {
     // @trace TEST-MKO-071 [req:REQ-MEGA-001] [level:unit]
 
     #[test]
-    #[should_panic]
-    fn scratchpad_last_token_logits_prompt_len_zero_panics() {
-        // prompt_len=0 → (prompt_len-1) underflows to usize::MAX → arithmetic overflow panic
+    fn scratchpad_last_token_logits_prompt_len_zero_no_panic() {
+        // prompt_len=0 → no tokens processed → returns empty Vec with log::warn.
+        // Old behavior: saturating_sub(1) yielded 0 → silently read first row (wrong logits).
+        // New behavior: early return with empty Vec — no tokens means no valid logits.
         let buf = vec![0u8; 64];
         let sp = DiagnosticScratchpad {
             data: buf,
@@ -1230,9 +1248,12 @@ mod tests {
             vocab_size: 4,
             prompt_len: 0,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // This must panic due to underflow in (prompt_len - 1) * row_bytes
-        let _ = sp.last_token_logits();
+        // Should not panic — prompt_len=0 returns empty Vec
+        let logits = sp.last_token_logits();
+        // Returns empty Vec instead of silently reading row 0 (which would be wrong)
+        assert_eq!(logits.len(), 0);
     }
 
     // ── MegaKernelObservation: is_bypass with zero thresholds ──
@@ -1394,6 +1415,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 5,
             hidden_size: 0,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // prompt_len * hidden_size = 5 * 0 = 0 → empty vec
         let emb = sp.embedding();
@@ -1414,6 +1436,7 @@ mod tests {
             vocab_size: 1,
             prompt_len: 1,
             hidden_size: 1,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let emb = sp.embedding();
         assert_eq!(emb.len(), 1);
@@ -1653,6 +1676,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 3,
             hidden_size: 1,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // 3 tokens * 1 hidden = 3 f32s
         let emb = sp.embedding();
@@ -1680,6 +1704,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 3,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 2);
@@ -1808,6 +1833,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Read 2 f32s starting at offset 0 (aligned) — should get both values
         let vals = sp.read_f32_at(0, 2);
@@ -1820,6 +1846,7 @@ mod tests {
     // @trace TEST-MKO-097 [req:REQ-OBS] [level:unit]
 
     #[test]
+    #[should_panic(expected = "read_dtype_aware")]
     fn scratchpad_embedding_large_prompt_len_tiny_buffer() {
         let buf = vec![0u8; 8]; // Only 2 f32s
         let sp = DiagnosticScratchpad {
@@ -1828,10 +1855,10 @@ mod tests {
             vocab_size: 4,
             prompt_len: 100, // Wants 100 * 4 = 400 f32s = 1600 bytes
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        let emb = sp.embedding();
-        // Buffer too small for the request => returns empty
-        assert!(emb.is_empty());
+        // Buffer too small for the request — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.embedding();
     }
 
     // ── MegaKernelObservation: from_buffer with all telemetry offsets populated ──
@@ -2033,6 +2060,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 2,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
 
         // Verify embedding reads correctly
@@ -2063,6 +2091,7 @@ mod tests {
             vocab_size: 1,
             prompt_len: 3,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 1);
@@ -2180,6 +2209,7 @@ mod tests {
     // @trace TEST-MKO-111 [req:REQ-OBS] [level:unit]
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn scratchpad_read_f32_at_zero_count_large_offset() {
         let buf = vec![0u8; 16];
         let sp = DiagnosticScratchpad {
@@ -2188,9 +2218,10 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        let vals = sp.read_f32_at(1000, 0);
-        assert!(vals.is_empty());
+        // count=0 but offset 1000 + 0*4 = 1000 > 16 — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(1000, 0);
     }
 
     // ── WeightPageJitConfig: clone independence ──
@@ -2490,6 +2521,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 8,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Read 3 f32s starting at offset 8 (the middle of the buffer)
         let result = sp.read_f32_at(8, 3);
@@ -2520,15 +2552,29 @@ mod tests {
             vocab_size: 2,
             prompt_len: 1,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Request exactly the buffer capacity
         let vals = sp.read_f32_at(0, 2);
         assert_eq!(vals.len(), 2);
         assert!((vals[0] - 1.0).abs() < f32::EPSILON);
         assert!((vals[1] - 2.0).abs() < f32::EPSILON);
-        // One more should fail
-        let overflow = sp.read_f32_at(0, 3);
-        assert!(overflow.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "read_f32_at")]
+    fn scratchpad_read_f32_exact_buffer_size_overflow() {
+        let buf = vec![0u8; 8]; // exactly 2 f32s
+        let sp = DiagnosticScratchpad {
+            data: buf,
+            logits_offset: 0,
+            vocab_size: 2,
+            prompt_len: 1,
+            hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
+        };
+        // One more than buffer capacity — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(0, 3);
     }
 
     // ── MegaKernelObservation: dead_neuron_ratio with large hidden_size ──
@@ -2636,13 +2682,27 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Offset 16 == buffer length, even count=0 should return empty
+        // Offset 16 == buffer length, count=0: end=16, not > 16 => returns empty vec
         let vals = sp.read_f32_at(16, 0);
         assert!(vals.is_empty());
-        // Offset 16 with count=1 also out of bounds
-        let vals2 = sp.read_f32_at(16, 1);
-        assert!(vals2.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "read_f32_at")]
+    fn scratchpad_read_f32_at_offset_equals_buffer_len_with_count() {
+        let buf = vec![0u8; 16]; // exactly 4 f32s
+        let sp = DiagnosticScratchpad {
+            data: buf,
+            logits_offset: 0,
+            vocab_size: 4,
+            prompt_len: 1,
+            hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
+        };
+        // Offset 16 with count=1: end=20 > 16 — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(16, 1);
     }
 
     // ── KernelContext: build with inject flags at u32::MAX ──
@@ -2785,6 +2845,7 @@ mod tests {
             vocab_size: 0,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // last_token_logits: row_bytes = 0 * 4 = 0, off = 0 + 0 * 0 = 0
         // read_f32_at(0, 0) returns empty vec
@@ -2976,14 +3037,28 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Read 1 f32 starting at offset 12 — exactly at end of buffer
         let vals = sp.read_f32_at(12, 1);
         assert_eq!(vals.len(), 1);
         assert!((vals[0] - (-88.5)).abs() < f32::EPSILON);
-        // Reading 2 f32s at offset 12 would overflow
-        let overflow = sp.read_f32_at(12, 2);
-        assert!(overflow.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "read_f32_at")]
+    fn scratchpad_read_f32_at_last_aligned_position_overflow() {
+        let buf = vec![0u8; 16]; // exactly 4 f32s
+        let sp = DiagnosticScratchpad {
+            data: buf,
+            logits_offset: 0,
+            vocab_size: 4,
+            prompt_len: 1,
+            hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
+        };
+        // Reading 2 f32s at offset 12 would overflow — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(12, 2);
     }
 
     // ── MegaKernelObservation: from_buffer dead_neuron and sink both non-zero ──
@@ -3152,6 +3227,7 @@ mod tests {
     // @trace TEST-MKO-155 [req:REQ-OBS] [level:unit]
 
     #[test]
+    #[should_panic(expected = "read_dtype_aware")]
     fn scratchpad_last_token_logits_large_vocab_small_buffer() {
         let buf = vec![0u8; 32];
         let sp = DiagnosticScratchpad {
@@ -3160,10 +3236,10 @@ mod tests {
             vocab_size: 1000, // needs 4000 bytes per row, but buffer is only 32 bytes
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        let logits = sp.last_token_logits();
-        // read_f32_at(0, 1000) requires 4000 bytes, buffer has 32 => returns empty
-        assert!(logits.is_empty());
+        // read_dtype_aware(0, 1000) requires 4000 bytes, buffer has 32 — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.last_token_logits();
     }
 
     // ── MegaKernelError: both variants are Send + Sync ──
@@ -3314,6 +3390,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 8,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Read from offset 8 onwards — these are unwritten (zero)
         let vals = sp.read_f32_at(8, 4);
@@ -3368,6 +3445,7 @@ mod tests {
             vocab_size: 1,
             prompt_len: 1,
             hidden_size: 1,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         let emb = sp.embedding();
         assert_eq!(emb.len(), 1);
@@ -3563,6 +3641,7 @@ mod tests {
             vocab_size: 4,
             prompt_len: 3,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act
         let emb = sp.embedding();
@@ -3684,6 +3763,7 @@ mod tests {
     // ── Test 181: DiagnosticScratchpad read_f32_at with 1-byte buffer ──
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn scratchpad_read_f32_at_one_byte_buffer() {
         // Arrange: 1-byte buffer — too small for any f32
         let buf = vec![0xFF; 1];
@@ -3693,12 +3773,24 @@ mod tests {
             vocab_size: 1,
             prompt_len: 1,
             hidden_size: 1,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Act: request even a single f32 (needs 4 bytes)
-        let vals = sp.read_f32_at(0, 1);
-        // Assert: buffer too small, returns empty
-        assert!(vals.is_empty());
-        // count=0 at offset 0 still returns empty (count is 0)
+        // Act: request even a single f32 (needs 4 bytes) — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(0, 1);
+    }
+
+    #[test]
+    fn scratchpad_read_f32_at_one_byte_buffer_count_zero() {
+        // count=0 at offset 0: end=0+0=0, 0 > 1 is false => returns empty vec
+        let buf = vec![0xFF; 1];
+        let sp = DiagnosticScratchpad {
+            data: buf,
+            logits_offset: 0,
+            vocab_size: 1,
+            prompt_len: 1,
+            hidden_size: 1,
+            compute_dtype: gllm_kernels::types::DType::F32,
+        };
         let zero_vals = sp.read_f32_at(0, 0);
         assert!(zero_vals.is_empty());
     }
@@ -3891,6 +3983,7 @@ mod tests {
             vocab_size: 8,
             prompt_len: 1,
             hidden_size: 8,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act: read all 8 f32s
         let all = sp.read_f32_at(0, 8);
@@ -4018,6 +4111,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 2,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act: embedding = prompt_len * hidden_size = 2 * 2 = 4 f32s
         let emb = sp.embedding();
@@ -4267,6 +4361,7 @@ mod tests {
             vocab_size: 4,
             prompt_len: 2,
             hidden_size: 3,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act
         let emb = sp.embedding();
@@ -4388,6 +4483,7 @@ mod tests {
     // @trace TEST-MKO-208 [req:REQ-OBS] [level:unit]
 
     #[test]
+    #[should_panic(expected = "read_dtype_aware")]
     fn scratchpad_last_token_logits_offset_at_buffer_end() {
         // Arrange: logits_offset points to the very end of the buffer
         let buf = vec![0u8; 16];
@@ -4397,12 +4493,11 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act: last_token_logits at offset = 16 + 0 = 16, read 4 f32s needs 16 bytes
-        // but buffer is only 16 bytes so offset 16 is out of bounds
-        let logits = sp.last_token_logits();
-        // Assert: out of bounds, returns empty
-        assert!(logits.is_empty());
+        // but buffer is only 16 bytes so offset 16 is out of bounds — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.last_token_logits();
     }
 
     // ── Test 209: TelemetryFlagsBitmask individual bit enable check pattern ──
@@ -4641,6 +4736,7 @@ mod tests {
             vocab_size: 4,
             prompt_len: 2,
             hidden_size: 2, // embedding = 2 * 2 = 4 f32s from offset 0
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act
         let emb = sp.embedding();
@@ -4669,6 +4765,7 @@ mod tests {
             vocab_size: 4,
             prompt_len: 1,
             hidden_size: 4,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act
         let vals = sp.read_f32_at(0, 1);

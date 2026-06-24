@@ -175,7 +175,10 @@ impl MoeHardwareDispatcher {
         for route in &route_table.token_routes {
             for &expert_idx in &route.expert_indices {
                 if expert_idx < expert_token_counts.len() {
-                    let heat = heat_levels.get(expert_idx).copied().unwrap_or(ExpertHeatLevel::Warm);
+                    let heat = heat_levels.get(expert_idx).copied().unwrap_or_else(|| {
+                        log::warn!("expert_id {} not found in heat_levels table — defaulting to Warm", expert_idx);
+                        ExpertHeatLevel::Warm
+                    });
                     if matches!(heat, ExpertHeatLevel::Evicted) {
                         // §15.4: Evicted 专家 token 不计入分配
                         continue;
@@ -201,7 +204,10 @@ impl MoeHardwareDispatcher {
                 continue;
             }
 
-            let heat = heat_levels.get(expert_idx).copied().unwrap_or(ExpertHeatLevel::Warm);
+            let heat = heat_levels.get(expert_idx).copied().unwrap_or_else(|| {
+                log::warn!("expert_id {} not found in heat_levels table — defaulting to Warm", expert_idx);
+                ExpertHeatLevel::Warm
+            });
             // §15.4: 跳过 evicted 专家
             if matches!(heat, ExpertHeatLevel::Evicted) {
                 skipped_experts.push(expert_idx);

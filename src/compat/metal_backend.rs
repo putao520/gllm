@@ -53,7 +53,7 @@ impl<E: Element> Clone for MetalBackend<E> {
             gpu_profile: self.gpu_profile.clone(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             compiled_ptx: std::sync::Mutex::new(
-                self.compiled_ptx.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                self.compiled_ptx.lock().expect("mutex poison — previous holder panicked, cannot continue inference").clone(),
             ),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             swap_store: self.swap_store.clone(),

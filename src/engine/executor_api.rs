@@ -127,7 +127,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Collect all immutable data before mutable operations
         let sg_hook_ptr = match self.model_ctx.sg_shared_memory {
-            Some(ref mx) => mx.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+            Some(ref mx) => mx.lock().expect("mutex poison — previous holder panicked, cannot continue inference").as_ptr(),
             None => std::ptr::null(),
         };
         let callback_ptr = if variant_skip_guardrail { std::ptr::null() }
@@ -224,7 +224,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Collect immutable data before mutable operations
         let sg_hook_ptr = match self.model_ctx.sg_shared_memory {
-            Some(ref mx) => mx.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+            Some(ref mx) => mx.lock().expect("mutex poison — previous holder panicked, cannot continue inference").as_ptr(),
             None => std::ptr::null(),
         };
         let callback_ptr = if self.model_ctx.callback_table.has_any_callback() {
@@ -379,7 +379,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ))));
         }
         let sg_hook_ptr = match self.model_ctx.sg_shared_memory {
-            Some(ref mx) => mx.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+            Some(ref mx) => mx.lock().expect("mutex poison — previous holder panicked, cannot continue inference").as_ptr(),
             None => std::ptr::null(),
         };
         let pool_base = self.kv.paged_kv_pool.as_ref().map(|p| p.as_ptr()).unwrap_or(std::ptr::null());
@@ -420,7 +420,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Collect immutable data
         let sg_hook_ptr = match self.model_ctx.sg_shared_memory {
-            Some(ref mx) => mx.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+            Some(ref mx) => mx.lock().expect("mutex poison — previous holder panicked, cannot continue inference").as_ptr(),
             None => std::ptr::null(),
         };
         let pool_base = self.kv.paged_kv_pool.as_ref().map(|p| p.as_ptr()).unwrap_or(std::ptr::null());
@@ -2768,6 +2768,7 @@ mod tests {
     // ── DiagnosticScratchpad: read_f32_at edge cases ──
 
     #[test]
+    #[should_panic(expected = "read_f32_at")]
     fn diagnostic_scratchpad_read_f32_at_out_of_bounds_returns_empty() {
         // Arrange: minimal scratchpad with 8 bytes (2 f32s)
         let sp = crate::engine::mega_kernel::DiagnosticScratchpad {
@@ -2776,11 +2777,10 @@ mod tests {
             vocab_size: 2,
             prompt_len: 1,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
-        // Act: request beyond data length
-        let result = sp.read_f32_at(0, 100);
-        // Assert: returns empty vec (end > data.len())
-        assert!(result.is_empty());
+        // Act: request beyond data length — OOB panics (NO-SILENT-FALLBACK)
+        let _ = sp.read_f32_at(0, 100);
     }
 
     #[test]
@@ -2796,6 +2796,7 @@ mod tests {
             vocab_size: 2,
             prompt_len: 1,
             hidden_size: 2,
+            compute_dtype: gllm_kernels::types::DType::F32,
         };
         // Act
         let result = sp.read_f32_at(0, 2);

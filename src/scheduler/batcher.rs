@@ -319,10 +319,14 @@ impl ContinuousBatcher {
         // 填充基本可从 Sequence 获取的信息
         for (idx, &req_id) in batch.requests.iter().enumerate() {
             if let Some(seq) = self.running.get(&req_id) {
-                prep.prompt_lens[idx] = seq.prompt_tokens.len() as u32;
-                prep.kv_lens[idx] = seq.position as u32; // KV 长度 = 当前 position
-                prep.gen_counts[idx] = seq.generated_tokens.len() as u32;
-                prep.seq_positions[idx] = seq.position as u32;
+                prep.prompt_lens[idx] = u32::try_from(seq.prompt_tokens.len())
+                    .expect("prompt_tokens length exceeds u32::MAX");
+                prep.kv_lens[idx] = u32::try_from(seq.position)
+                    .expect("position exceeds u32::MAX");
+                prep.gen_counts[idx] = u32::try_from(seq.generated_tokens.len())
+                    .expect("generated_tokens length exceeds u32::MAX");
+                prep.seq_positions[idx] = u32::try_from(seq.position)
+                    .expect("position exceeds u32::MAX");
                 prep.last_sampled_tokens[idx] = seq.generated_tokens.last().copied().unwrap_or(0);
             }
         }

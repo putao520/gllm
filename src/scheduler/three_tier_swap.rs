@@ -402,11 +402,11 @@ impl ThreeTierSwapCoordinator {
     ) -> Vec<crate::scheduler::weight_paging::PcieDmaTransfer> {
         let mut gmm = match self.memory_manager.lock() {
             Ok(g) => g,
-            Err(_) => return Vec::new(),
+            Err(e) => { log::error!("memory_manager lock poisoned in migrate_expert_pages: {e}"); return Vec::new(); }
         };
         let mut migrator = match self.gpu_migrator.lock() {
             Ok(m) => m,
-            Err(_) => return Vec::new(),
+            Err(e) => { log::error!("gpu_migrator lock poisoned in migrate_expert_pages: {e}"); return Vec::new(); }
         };
         migrator.step(prefetch_requests, current_device, &mut gmm, weight_table)
     }
@@ -419,7 +419,7 @@ impl ThreeTierSwapCoordinator {
     pub fn run_defrag_cycle(&self) -> usize {
         let mm = match self.memory_manager.lock() {
             Ok(g) => g,
-            Err(_) => return 0,
+            Err(e) => { log::error!("memory_manager lock poisoned in run_defrag_cycle: {e}"); return 0; }
         };
         let l1 = mm.tier_usage(crate::scheduler::memory_manager::Tier::L1);
         let l2 = mm.tier_usage(crate::scheduler::memory_manager::Tier::L2);
@@ -509,7 +509,8 @@ impl ThreeTierSwapCoordinator {
         // ── Read current state ─────────────────────────────────────────────
         let meta_guard = match self.page_metadata.read() {
             Ok(g) => g,
-            Err(_) => {
+            Err(e) => {
+                log::error!("page_metadata RwLock poisoned in build_batch: {e}");
                 return TierMigrationPlan {
                     eviction_candidates,
                     swap_in_requests,
@@ -520,7 +521,8 @@ impl ThreeTierSwapCoordinator {
         };
         let addr_guard = match self.addr_table.read() {
             Ok(g) => g,
-            Err(_) => {
+            Err(e) => {
+                log::error!("addr_table RwLock poisoned in build_batch: {e}");
                 return TierMigrationPlan {
                     eviction_candidates,
                     swap_in_requests,
@@ -602,8 +604,9 @@ impl ThreeTierSwapCoordinator {
             }
 
             // Compute importance score.
-            let compressed_size = entry.original_bytes as u32; // proxy
-            let original_size = entry.original_bytes as u32;
+            // Saturating cast: pages > 4GB are scored as u32::MAX (unlikely for single page).
+            let compressed_size = entry.original_bytes.min(u32::MAX as usize) as u32; // proxy
+            let original_size = entry.original_bytes.min(u32::MAX as usize) as u32;
             let score = EvictionWorker::compute_importance_score(
                 meta,
                 payload_kind,
