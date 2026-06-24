@@ -321,6 +321,14 @@ fn pack_weights_from_graph(
                     && (suffix.ends_with(".q_norm")
                         || suffix.ends_with(".k_norm"));
 
+                // ARCH-BLOB-YIELDS-WEIGHT: +1.0 residual must respect actual dtype.
+                // Resolve dtype from raw_floats (same as standard path at L247-248).
+                // Fallback to F32 only when raw_floats has no entry (synthetic weights).
+                let ref_ext = name_map.resolve_external_to_string(&ref_cn);
+                let norm_dtype = raw_floats.get(&ref_ext)
+                    .map(|r| r.dtype)
+                    .unwrap_or(::safetensors::Dtype::F32);
+
                 for layer_idx in 0..num_layers {
                     if hetero_type_index(layer_idx, hcfg) != type_idx { continue; }
                     let abs_off = hetero_layer_offset(layer_idx, hcfg) + rel_off;
@@ -339,16 +347,9 @@ fn pack_weights_from_graph(
                     blob[abs_off..abs_off + copy_size].copy_from_slice(src);
 
                     // Post-copy: pre-shift norm weights (+1.0 for Gemma residual convention)
-                    if is_gemma_norm_hetero && copy_size >= 4 {
-                        let f32_dst = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                blob[abs_off..].as_mut_ptr() as *mut f32,
-                                copy_size / 4,
-                            )
-                        };
-                        for v in f32_dst.iter_mut() {
-                            *v += 1.0;
-                        }
+                    // Uses add_one_inplace which handles BF16/F16/F32 correctly.
+                    if is_gemma_norm_hetero {
+                        add_one_inplace(&mut blob[abs_off..abs_off + copy_size], norm_dtype);
                     }
                 }
                 packed_count += 1;

@@ -4,6 +4,24 @@
 
 ---
 
+## BCE-042: 权重打包 +1.0 残差硬编码 F32 解读 — BF16/F16 权重数据损坏
+
+| 字段 | 值 |
+|------|-----|
+| patternId | BCE-20260624-042 |
+| title | Gemma norm residual +1.0 hetero 路径硬编码 f32 解读，BF16/F16 权重数据损坏 |
+| layer | 设计 |
+| codePattern | `as *mut f32` + `*v += 1.0` 硬编码 f32 字节解读做 Gemma residual +1.0，而非用 `add_one_inplace` dtype 感知函数 |
+| triggerCondition | 权重文件中 q_norm/k_norm 为 BF16 或 F16 dtype（如 Gemma 4 BF16 模型） |
+| detectionSignatures | literal: `as *mut f32` + `+= 1.0` in weight packing code |
+| sameClassCriterion | 任何权重操作按硬编码 dtype 解读字节而非从 TensorMeta/dtype 参数推断 |
+| fixTemplate | 替换为 `add_one_inplace(&mut blob[off..off+size], actual_dtype)` — dtype 感知函数 |
+| regressionAssertion | BF16 q_norm 权重 +1.0 残差：`add_one_inplace` 后每元素正确，非 f32 误读 |
+| 发现 | R9 代码审计，pack_observe.inc.rs L341-352 |
+| 根治 | L341-352 整段替换为 `add_one_inplace(blob, norm_dtype)`，norm_dtype 从 raw_floats 解析 |
+
+---
+
 ## ⚡ 综合归因 — 范式级缺陷模式
 
 ### 范式：场景覆盖不全（Partial Scenario Coverage, PSC）
