@@ -343,7 +343,12 @@ macro_rules! impl_gpu_backend {
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
-                    let out_bytes = (seq_len * hidden_size * elem_bytes).min(scratch_bytes);
+                    let out_bytes = seq_len * hidden_size * elem_bytes;
+                    if scratch_bytes < out_bytes {
+                        return Err(BE::$upload_err_variant(format!(
+                            "scratchpad too small for hidden output: need {out_bytes} bytes (seq_len={seq_len} * hidden_size={hidden_size} * elem_bytes={elem_bytes}), have {scratch_bytes} bytes"
+                        )));
+                    }
                     let data = bf.download_from_gpu(sp_gpu, out_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
                     Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))
@@ -393,7 +398,12 @@ macro_rules! impl_gpu_backend {
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
-                    let out_bytes = (seq_len * hidden_size * elem_bytes).min(scratch_bytes);
+                    let out_bytes = seq_len * hidden_size * elem_bytes;
+                    if scratch_bytes < out_bytes {
+                        return Err(BE::$upload_err_variant(format!(
+                            "scratchpad too small for guardrail output: need {out_bytes} bytes (seq_len={seq_len} * hidden_size={hidden_size} * elem_bytes={elem_bytes}), have {scratch_bytes} bytes"
+                        )));
+                    }
                     let data = bf.download_from_gpu(sp_gpu, out_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
                     Ok(super::jit_helpers::typed_bytes_to_f32(&data, config.geometry.compute_dtype))

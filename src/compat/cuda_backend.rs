@@ -416,7 +416,7 @@ impl<E: Element> CudaBackend<E> {
                 let arr: [u8; 8] = v[..8].try_into().unwrap_or([0u8; 8]);
                 usize::from_le_bytes(arr)
             }))
-            .unwrap_or(0)
+            .expect("get_cached_scratchpad_bytes: __scratchpad_bytes__ not cached — prepare_gpu_mega_kernel was not called")
     }
 
     #[cfg(feature = "cuda")]

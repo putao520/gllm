@@ -624,7 +624,7 @@ impl MegaKernelExecutor {
             max_new_tokens,
             generated_count,
             self.eos_token_id,
-            output_tokens.first().copied().unwrap_or(0),
+            output_tokens.first().copied().unwrap_or(0), // [LEGAL-PSC10+25] debug log only — NOT a generation sentinel
         );
         // BCE-20260623-004: Removed output_tokens[0] != 0 heuristic.
         // Token ID 0 is a valid token; using it as a sentinel discards legitimate output.

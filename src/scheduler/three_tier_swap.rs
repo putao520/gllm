@@ -88,10 +88,14 @@ pub struct ThreeTierSwapStats {
     pub evictions_gpu_to_dram: u64,
     /// Total pages evicted from CPU DRAM → NVMe.
     pub evictions_dram_to_nvme: u64,
+    /// Total pages evicted directly from GPU HBM → NVMe (bypassing DRAM).
+    pub evictions_gpu_to_nvme: u64,
     /// Total pages swapped in from CPU DRAM → GPU HBM.
     pub swap_ins_dram_to_gpu: u64,
     /// Total pages swapped in from NVMe → CPU DRAM (first hop).
     pub swap_ins_nvme_to_dram: u64,
+    /// Total pages swapped in directly from NVMe → GPU HBM (bypassing DRAM).
+    pub swap_ins_nvme_to_gpu: u64,
     /// Total bytes evicted across all tiers.
     pub total_bytes_evicted: u64,
     /// Total bytes swapped in across all tiers.
@@ -113,7 +117,7 @@ pub struct ThreeTierSwapStats {
 impl ThreeTierSwapStats {
     /// Average eviction latency in microseconds.
     pub fn avg_eviction_latency_us(&self) -> f64 {
-        let total = self.evictions_gpu_to_dram + self.evictions_dram_to_nvme;
+        let total = self.evictions_gpu_to_dram + self.evictions_dram_to_nvme + self.evictions_gpu_to_nvme;
         if total == 0 {
             return 0.0;
         }
@@ -122,7 +126,7 @@ impl ThreeTierSwapStats {
 
     /// Average swap-in latency in microseconds.
     pub fn avg_swap_in_latency_us(&self) -> f64 {
-        let total = self.swap_ins_dram_to_gpu + self.swap_ins_nvme_to_dram;
+        let total = self.swap_ins_dram_to_gpu + self.swap_ins_nvme_to_dram + self.swap_ins_nvme_to_gpu;
         if total == 0 {
             return 0.0;
         }
@@ -133,8 +137,10 @@ impl ThreeTierSwapStats {
     pub fn total_migrations(&self) -> u64 {
         self.evictions_gpu_to_dram
             + self.evictions_dram_to_nvme
+            + self.evictions_gpu_to_nvme
             + self.swap_ins_dram_to_gpu
             + self.swap_ins_nvme_to_dram
+            + self.swap_ins_nvme_to_gpu
     }
 }
 
@@ -822,12 +828,15 @@ impl ThreeTierSwapCoordinator {
                 (StorageTier::CpuDram, StorageTier::Nvme) => {
                     s.evictions_dram_to_nvme += 1;
                 }
+                (StorageTier::GpuHbm, StorageTier::Nvme) => {
+                    s.evictions_gpu_to_nvme += 1;
+                }
                 _ => {}
             }
             s.total_bytes_evicted += bytes;
             s.total_eviction_latency_us += latency_us;
-            total_evictions = s.evictions_gpu_to_dram + s.evictions_dram_to_nvme;
-            total_swap_ins = s.swap_ins_dram_to_gpu + s.swap_ins_nvme_to_dram;
+            total_evictions = s.evictions_gpu_to_dram + s.evictions_dram_to_nvme + s.evictions_gpu_to_nvme;
+            total_swap_ins = s.swap_ins_dram_to_gpu + s.swap_ins_nvme_to_dram + s.swap_ins_nvme_to_gpu;
         } else {
             return;
         }
@@ -860,12 +869,15 @@ impl ThreeTierSwapCoordinator {
                 (StorageTier::Nvme, StorageTier::CpuDram) => {
                     s.swap_ins_nvme_to_dram += 1;
                 }
+                (StorageTier::Nvme, StorageTier::GpuHbm) => {
+                    s.swap_ins_nvme_to_gpu += 1;
+                }
                 _ => {}
             }
             s.total_bytes_swapped_in += bytes;
             s.total_swap_in_latency_us += latency_us;
-            total_swap_ins = s.swap_ins_dram_to_gpu + s.swap_ins_nvme_to_dram;
-            total_evictions = s.evictions_gpu_to_dram + s.evictions_dram_to_nvme;
+            total_swap_ins = s.swap_ins_dram_to_gpu + s.swap_ins_nvme_to_dram + s.swap_ins_nvme_to_gpu;
+            total_evictions = s.evictions_gpu_to_dram + s.evictions_dram_to_nvme + s.evictions_gpu_to_nvme;
         } else {
             return;
         }
@@ -2321,8 +2333,10 @@ mod tests {
         let stats = ThreeTierSwapStats {
             evictions_gpu_to_dram: 42,
             evictions_dram_to_nvme: 10,
+            evictions_gpu_to_nvme: 0,
             swap_ins_dram_to_gpu: 30,
             swap_ins_nvme_to_dram: 5,
+            swap_ins_nvme_to_gpu: 0,
             total_bytes_evicted: 1024,
             total_bytes_swapped_in: 512,
             total_eviction_latency_us: 200,
@@ -2335,6 +2349,8 @@ mod tests {
         };
         let dbg = format!("{:?}", stats);
         assert!(dbg.contains("evictions_gpu_to_dram"));
+        assert!(dbg.contains("evictions_gpu_to_nvme"));
+        assert!(dbg.contains("swap_ins_nvme_to_gpu"));
         assert!(dbg.contains("42"));
         assert!(dbg.contains("pages_on_hbm"));
         assert!(dbg.contains("100"));
@@ -3331,8 +3347,10 @@ mod tests {
         let a = ThreeTierSwapStats {
             evictions_gpu_to_dram: 1,
             evictions_dram_to_nvme: 2,
+            evictions_gpu_to_nvme: 0,
             swap_ins_dram_to_gpu: 3,
             swap_ins_nvme_to_dram: 4,
+            swap_ins_nvme_to_gpu: 0,
             total_bytes_evicted: 100,
             total_bytes_swapped_in: 200,
             total_eviction_latency_us: 50,
@@ -5976,8 +5994,10 @@ mod tests {
         let stats = ThreeTierSwapStats {
             evictions_gpu_to_dram: 1,
             evictions_dram_to_nvme: 2,
+            evictions_gpu_to_nvme: 0,
             swap_ins_dram_to_gpu: 3,
             swap_ins_nvme_to_dram: 4,
+            swap_ins_nvme_to_gpu: 0,
             total_bytes_evicted: 5,
             total_bytes_swapped_in: 6,
             total_eviction_latency_us: 7,
@@ -5993,8 +6013,10 @@ mod tests {
         // Assert
         assert!(dbg.contains("evictions_gpu_to_dram"));
         assert!(dbg.contains("evictions_dram_to_nvme"));
+        assert!(dbg.contains("evictions_gpu_to_nvme"));
         assert!(dbg.contains("swap_ins_dram_to_gpu"));
         assert!(dbg.contains("swap_ins_nvme_to_dram"));
+        assert!(dbg.contains("swap_ins_nvme_to_gpu"));
         assert!(dbg.contains("eviction_rounds"));
         assert!(dbg.contains("swap_in_rounds"));
         assert!(dbg.contains("pages_on_hbm"));
@@ -11882,7 +11904,7 @@ mod tests {
         c.record_swap_in_completed(1, StorageTier::CpuDram, StorageTier::GpuHbm, 4096, 150);
         // Act.
         let stats = c.stats();
-        // Assert: all four migration directions counted.
+        // Assert: all four adjacent-tier migration directions counted.
         assert_eq!(stats.evictions_gpu_to_dram, 1);
         assert_eq!(stats.evictions_dram_to_nvme, 1);
         assert_eq!(stats.swap_ins_nvme_to_dram, 1);
@@ -12117,7 +12139,7 @@ mod tests {
         // Arrange.
         let (c, _backend) = make_coordinator(false);
 
-        // Act: record all four legal tier pairs.
+        // Act: record all four adjacent-tier pairs.
         c.record_eviction_completed(1, StorageTier::GpuHbm, StorageTier::CpuDram, 4096, 100);
         c.record_eviction_completed(2, StorageTier::CpuDram, StorageTier::Nvme, 8192, 200);
         c.record_swap_in_completed(3, StorageTier::CpuDram, StorageTier::GpuHbm, 4096, 150);
@@ -14432,8 +14454,10 @@ mod tests {
         let original = ThreeTierSwapStats {
             evictions_gpu_to_dram: 1,
             evictions_dram_to_nvme: 2,
+            evictions_gpu_to_nvme: 0,
             swap_ins_dram_to_gpu: 3,
             swap_ins_nvme_to_dram: 4,
+            swap_ins_nvme_to_gpu: 0,
             total_bytes_evicted: 100,
             total_bytes_swapped_in: 200,
             total_eviction_latency_us: 50,
@@ -14896,19 +14920,21 @@ mod tests {
     // ── Wave 14 additional tests (+13, 729→742) ─────────────────────────────────
 
     #[test]
-    fn three_tier_stats_total_migrations_counts_only_four_fields() {
-        // Arrange: set all four migration counters to distinct values
+    fn three_tier_stats_total_migrations_counts_all_six_fields() {
+        // Arrange: set all six migration counters to distinct values
         let stats = ThreeTierSwapStats {
             evictions_gpu_to_dram: 100,
             evictions_dram_to_nvme: 200,
+            evictions_gpu_to_nvme: 50,
             swap_ins_dram_to_gpu: 300,
             swap_ins_nvme_to_dram: 400,
+            swap_ins_nvme_to_gpu: 25,
             ..Default::default()
         };
         // Act
         let total = stats.total_migrations();
-        // Assert: sum is exactly 100+200+300+400 = 1000
-        assert_eq!(total, 1000, "total_migrations must sum all four counters");
+        // Assert: sum is exactly 100+200+50+300+400+25 = 1075
+        assert_eq!(total, 1075, "total_migrations must sum all six counters");
     }
 
     #[test]

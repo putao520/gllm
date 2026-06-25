@@ -216,7 +216,7 @@ impl<E: Element> MetalBackend<E> {
             .ok()
             .and_then(|cache| cache.get("__scratchpad_bytes__")
                 .and_then(|v| usize::from_le_bytes(v[..8].try_into().ok()?)))
-            .unwrap_or(0)
+            .expect("get_cached_scratchpad_bytes: __scratchpad_bytes__ not cached — prepare_gpu_mega_kernel was not called")
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]

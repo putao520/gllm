@@ -562,6 +562,19 @@ pub const EXT_KV_PAGE_HEADER_STRIDE: usize = 96;
 pub const EXT_KV_EXT_ID_BASE_PTR: usize = 104;
 
 /// 扩展区总大小 (REQ-KV-EXT-001: 14 fields, aligned to 128 bytes).
+///
+/// LEGAL-FIXED: This is a GPU kernel ABI layout constant — the extension area
+/// is a fixed-size memory region whose layout (14 offset constants above) is
+/// baked into PTX codegen. All EXT_* offsets are compile-time constants that
+/// the GPU kernel reads via fixed-address loads/stores. Changing this at
+/// runtime would require recompiling the PTX kernel with different offsets,
+/// which is the JIT pipeline's job — but the extension layout itself is a
+/// stable ABI contract, not a hardware-tunable parameter.
+///
+/// Current layout: 14 fields occupy 112 bytes (last field at offset 104 + 8B),
+/// padded to 128 bytes (16-byte alignment, 16 bytes reserved for future fields).
+/// If new extension fields are added that exceed 128 bytes, this constant AND
+/// all GPU codegen that references EXT_* offsets must be updated together.
 pub const BATCH_CTX_EXTENSION_SIZE: usize = 128;
 
 // ═══════════════════════════════════════════════════════════
@@ -624,8 +637,24 @@ pub struct PhaseConfig {
 // ═══════════════════════════════════════════════════════════
 
 /// 超过此值走 dedicated prefill_path (SPEC 32 §1.4).
+///
+/// LEGAL-FIXED: SPEC 32 §1.4 defines this as "编译时常量，默认 512".
+/// This value is baked into GPU PTX codegen as a branch condition in the
+/// mega-kernel dispatch logic. Different SM versions may benefit from
+/// different thresholds (e.g., SM90 with TMA can handle larger chunks),
+/// but such hardware-aware tuning requires a SPEC change to make this
+/// a DeviceProfile-derived parameter, not a silent code-level override.
+/// TODO(PSC-20): If SPEC 32 evolves to allow hardware-derived chunk sizes,
+/// replace with `GpuDeviceProfile::prefill_chunk_threshold()`.
 pub const PREFILL_CHUNK_THRESHOLD: u32 = 512;
 /// 每次 mixed_path 消化的 prefill token 上限 (SPEC 32 §1.4).
+///
+/// LEGAL-FIXED: Same rationale as PREFILL_CHUNK_THRESHOLD — SPEC-specified
+/// compile-time constant. The optimal chunk size depends on shared memory
+/// budget and Tensor Core throughput, which vary by SM version, but the
+/// SPEC currently mandates a fixed default.
+/// TODO(PSC-20): If SPEC 32 evolves to allow hardware-derived chunk sizes,
+/// replace with `GpuDeviceProfile::prefill_chunk_size()`.
 pub const PREFILL_CHUNK_SIZE: u32 = 512;
 
 // ═══════════════════════════════════════════════════════════
@@ -633,6 +662,18 @@ pub const PREFILL_CHUNK_SIZE: u32 = 512;
 // ═══════════════════════════════════════════════════════════
 
 /// Per-CTA 私有池大小 (page slots).
+///
+/// LEGAL-FIXED: SPEC 32 §3.2 specifies "pool_local: Per-CTA Private Pool
+/// (32 page slots, register/local memory)". This value is baked into GPU
+/// PTX codegen — the per-CTA local pool is allocated in registers/local
+/// memory, and its size directly affects register pressure. A larger pool
+/// reduces global atomics but may cause register spilling on SM versions
+/// with lower register budgets. The SPEC-mandated 32 is a conservative
+/// default that works across SM70–SM90+.
+/// TODO(PSC-21): If SPEC 32 evolves to allow hardware-derived pool sizes,
+/// replace with `GpuDeviceProfile::pool_local_capacity()` — SM90+ with
+/// 255 regs/thread and 227KB shared mem could use 64 slots, while SM70
+/// with 128 regs/thread should stay at 32.
 pub const POOL_LOCAL_CAPACITY: u32 = 32;
 /// 从 pool_cluster 批量取的页数.
 pub const POOL_CLUSTER_BATCH: u32 = 64;
