@@ -69,7 +69,7 @@ grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 
 **PSC 横扫结果（2026-06-23）**：gllm + gllm-kernels 双仓全量横扫，发现 33 个嫌疑点。
 
-已根治（3 个）：
+已根治（3 + 30 = 33 个，PSC 全部根治 ✅）：
 
 | patternId | 位置 | 修复 |
 |-----------|------|------|
@@ -77,40 +77,40 @@ grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 | PSC-采样scratch | gllm/abi_types.inc.rs runtime_scratchpad_bytes | 补回 sampling_bytes |
 | PSC-测试 | gllm/compat/sampling.rs top_p_one_is_no_op | greedy(T=0) 替代 stochastic(T=1) |
 
-待根治（30 个，全部须根治，无遗漏）：
+待根治（0 个）— 全部已根治 ✅：
 
-| # | 位置 | 模式 | 失效表现 |
-|---|------|------|---------|
-| 1 | executor_ops.inc.rs:676 mega_compiled.unwrap_or(0) | 未编译时 scratchpad=0 | buffer overrun |
-| 2 | gpu_backend_macro.rs:131 kv_caches.get().unwrap_or(0) | KV 指针=null | GPU fault |
-| 3 | mtp_executor.rs:145 / executor_step.rs:52 logits.max_by().unwrap_or(0) | 空 logits→token 0; NaN→Equal | 错误 token |
-| 4 | request_state.rs:484 DeviceMemory Drop 只释放 Cuda/Hip | Metal/Host 变体未释放 | 内存泄漏 |
-| 5 | gllm-kernels/compiler/mod.rs GPU 路径缺少 sg_end/dwc_end | CPU/GPU 不一致 | 有 SG/DWC 时越界 |
-| 6 | gllm/convert.rs:112 / reader.rs:218 模型元数据 unwrap_or(0) | 缺失字段静默为 0 | 后续崩溃难定位 |
-| 7 | mid_layer_encode.rs:170 match dtype 只处理 F16/BF16 | FP8/INT8 走空分支 | 数据静默丢弃 |
-| 8 | hgal.rs:314 PagePayloadKind 只处理 2/5 变体 | KvContext/PromptSystem/RAG 优先级=0 | 逐出优先级错误 |
-| 9 | safetensors.rs:681 AWQ group_size fallback=128 | 非标准 AWQ 模型 | 静默错误反量化 |
+| # | 位置 | 模式 | 失效表现 | 状态 |
+|---|------|------|---------|------|
+| 1 | executor_ops.inc.rs:676 mega_compiled.unwrap_or(0) | 未编译时 scratchpad=0 | buffer overrun | ✅ |
+| 2 | gpu_backend_macro.rs:131 kv_caches.get().unwrap_or(0) | KV 指针=null | GPU fault | ✅ |
+| 3 | mtp_executor.rs:145 / executor_step.rs:52 logits.max_by().unwrap_or(0) | 空 logits→token 0; NaN→Equal | 错误 token | ✅ |
+| 4 | request_state.rs:484 DeviceMemory Drop 只释放 Cuda/Hip | Metal/Host 变体未释放 | 内存泄漏 | ✅ |
+| 5 | gllm-kernels/compiler/mod.rs GPU 路径缺少 sg_end/dwc_end | CPU/GPU 不一致 | 有 SG/DWC 时越界 | ✅ |
+| 6 | gllm/convert.rs:112 / reader.rs:218 模型元数据 unwrap_or(0) | 缺失字段静默为 0 | 后续崩溃难定位 | ✅ |
+| 7 | mid_layer_encode.rs:170 match dtype 只处理 F16/BF16 | FP8/INT8 走空分支 | 数据静默丢弃 | ✅ |
+| 8 | hgal.rs:314 PagePayloadKind 只处理 2/5 变体 | KvContext/PromptSystem/RAG 优先级=0 | 逐出优先级错误 | ✅ |
+| 9 | safetensors.rs:681 AWQ group_size fallback=128 | 非标准 AWQ 模型 | 静默错误反量化 | ✅ |
 | 10 | executor_core.inc.rs:624 output_tokens[0]!=0 判断生成 | token 0 是合法 token | 合法 token 被丢弃 | ✅ BCE-20260624-001 扩展：移除哨兵，信任 generated_count |
-| 11 | graph/profile.rs:170 num_experts unwrap_or(0) | MoE 配置缺失 | 静默当 dense |
-| 12 | hip_backend.rs:208 PTX cache unwrap_or(0)+.max(1024) | PTX 缓存缺失 | 1KB stub 替代正确大小 |
-| 13 | executor_api.rs:416 session position unwrap_or(0) | 错误 session_id | 位置静默重置 |
-| 14 | cpu_backend.rs:150 attention_pattern unwrap_or(0) | 配置不匹配 | 层类型错误 |
-| 15 | weight_tier.rs:96 GPU capacity unwrap_or(0) | 无 GPU | 容量=0 |
-| 16 | three_tier_swap.rs:822 StorageTier 只统计 4/6 对 | GPU↔NVMe 直接换页 | 统计缺失 |
-| 17 | hgal.rs:193 PageState 只给 Protected/Warm 加分 | Active/Standby 与 Free 同权 | 逐出优先级错误 |
-| 18 | abi_types.inc.rs:336 sampling_bytes=vocab_bytes*4 | 硬编码乘数 | 新采样策略溢出 |
-| 19 | gpu_backend_macro.rs:335 out_bytes=(N*4).min(scratch) | scratch 错误时截断输出 | 输出截断 |
-| 20 | mega_kernel_gpu.rs:627 PREFILL_CHUNK_SIZE=512 | 固定分块 | 设备差异未感知 |
-| 21 | mega_kernel_gpu.rs:636 POOL_LOCAL_CAPACITY=32 | 固定池大小 | 并发不足/浪费 |
-| 22 | batch_context.rs:24 MAX_DECODE_STEPS_OFFSET=4 | ~~固定步数上限~~ 误报：是字节偏移量，非值限制 | ~~MTP depth>4 截断~~ MTP 与 max_decode_steps 正交 |
-| 23 | mega_kernel_gpu.rs:565 BATCH_CTX_EXTENSION_SIZE=128 | 固定扩展区 | 新字段可能溢出 |
-| 24 | weight_tier.rs:47/51 容量分数硬编码 70%/60% | 固定比例 | KV 小/大时浪费/不足 |
-| 25 | executor_core.inc.rs:624 output_tokens[0]!=0 | token 0 判断 | 合法 token 丢弃（同 #10） |
-| 26 | weight_tier.rs:99 L3*100 估算主机容量 | 启发式 | 偏差大 |
-| 27 | gllm-kernels compiler/mod.rs kv_bytes=hidden*2 | 硬编码 hidden | GQA/MQA 浪费内存 |
-| 28 | gllm-kernels compiler/mod.rs activation_bytes=hidden*4 | 硬编码 F32 | BF16/F16 浪费 |
-| 29 | gllm-kernels BufferLayout 无条件分配 SG 空间 | 注释说 0 when disabled 实际 >0 | 非 SG 模型浪费 |
-| 30 | gllm-kernels mega_kernel_emit.rs hdim*4 硬编码 F32 | 与同函数其他位置不一致 | BF16/F16 偏移错误 |
+| 11 | graph/profile.rs:170 num_experts unwrap_or(0) | MoE 配置缺失 | 静默当 dense | ✅ |
+| 12 | hip_backend.rs:208 PTX cache unwrap_or(0)+.max(1024) | PTX 缓存缺失 | 1KB stub 替代正确大小 | ✅ |
+| 13 | executor_api.rs:416 session position unwrap_or(0) | 错误 session_id | 位置静默重置 | ✅ |
+| 14 | cpu_backend.rs:150 attention_pattern unwrap_or(0) | 配置不匹配 | 层类型错误 | ✅ |
+| 15 | weight_tier.rs:96 GPU capacity unwrap_or(0) | 无 GPU | 容量=0 | ✅ |
+| 16 | three_tier_swap.rs:822 StorageTier 只统计 4/6 对 | GPU↔NVMe 直接换页 | 统计缺失 | ✅ |
+| 17 | hgal.rs:193 PageState 只给 Protected/Warm 加分 | Active/Standby 与 Free 同权 | 逐出优先级错误 | ✅ |
+| 18 | abi_types.inc.rs:336 sampling_bytes=vocab_bytes*4 | 硬编码乘数 | 新采样策略溢出 | ✅ |
+| 19 | gpu_backend_macro.rs:335 out_bytes=(N*4).min(scratch) | scratch 错误时截断输出 | 输出截断 | ✅ |
+| 20 | mega_kernel_gpu.rs:627 PREFILL_CHUNK_SIZE=512 | 固定分块 | 设备差异未感知 | ✅ |
+| 21 | mega_kernel_gpu.rs:636 POOL_LOCAL_CAPACITY=32 | 固定池大小 | 并发不足/浪费 | ✅ |
+| 22 | batch_context.rs:24 MAX_DECODE_STEPS_OFFSET=4 | ~~固定步数上限~~ 误报：是字节偏移量，非值限制 | ~~MTP depth>4 截断~~ MTP 与 max_decode_steps 正交 | ✅ |
+| 23 | mega_kernel_gpu.rs:565 BATCH_CTX_EXTENSION_SIZE=128 | 固定扩展区 | 新字段可能溢出 | ✅ |
+| 24 | weight_tier.rs:47/51 容量分数硬编码 70%/60% | 固定比例 | KV 小/大时浪费/不足 | ✅ |
+| 25 | executor_core.inc.rs:624 output_tokens[0]!=0 | token 0 判断 | 合法 token 丢弃（同 #10） | ✅ |
+| 26 | weight_tier.rs:99 L3*100 估算主机容量 | 启发式 | 偏差大 | ✅ |
+| 27 | gllm-kernels compiler/mod.rs kv_bytes=hidden*2 | 硬编码 hidden | GQA/MQA 浪费内存 | ✅ |
+| 28 | gllm-kernels compiler/mod.rs activation_bytes=hidden*4 | 硬编码 F32 | BF16/F16 浪费 | ✅ |
+| 29 | gllm-kernels BufferLayout 无条件分配 SG 空间 | 注释说 0 when disabled 实际 >0 | 非 SG 模型浪费 | ✅ |
+| 30 | gllm-kernels mega_kernel_emit.rs hdim*4 硬编码 F32 | 与同函数其他位置不一致 | BF16/F16 偏移错误 | ✅ |
 
 ---
 
