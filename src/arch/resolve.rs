@@ -301,6 +301,8 @@ fn resolve_from_tensors<P: TensorProvider>(
                 TensorRole::AttentionKey => {
                     k_proj_shape = Some(shape.clone());
                 }
+                // [BCE-025] Only Embedding/AttentionQuery/AttentionKey are needed for
+                // config derivation; all other TensorRole variants are intentionally skipped
                 _ => {}
             }
         }

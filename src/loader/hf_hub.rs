@@ -934,6 +934,7 @@ impl HfModelMetadata {
                         return Some(repo.to_string());
                     }
                 }
+                // [BCE-025] Single("") with empty/whitespace repo string — nothing to return
                 _ => {}
             }
         }

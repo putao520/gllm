@@ -629,14 +629,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
             // Clone + leak Arc<Mutex<SemanticGatekeeperCallback>> for potential future
             // C ABI callback use (e.g., KnowledgeProvider retrieve via retrieve_fn).
-            let inner = self.model_ctx.sg_callback_shim.as_ref().unwrap().inner.clone();
+            // [BCE-024] sg_callback_shim is set just above (line ~620) —
+            // None here means register_sg_callback() logic is broken.
+            let inner = self.model_ctx.sg_callback_shim.as_ref()
+                .expect("sg_callback_shim must be set before SG shared memory registration — register_sg_callback() bug")
+                .inner.clone();
             let provider_ptr = Arc::into_raw(inner) as *const u8;
 
-            // Read alpha from the callback for SgSharedMemory signal.
+            // [BCE-024] Read alpha from the callback for SgSharedMemory signal.
             let alpha = {
                 self.model_ctx.sg_callback_shim
                     .as_ref()
-                    .unwrap()
+                    .expect("sg_callback_shim must be set before SG shared memory registration — register_sg_callback() bug")
                     .inner
                     .lock()
                     .expect("mutex poison — previous holder panicked, cannot continue inference")
@@ -651,7 +655,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 let cb_lock = self
                     .model_ctx.sg_callback_shim
                     .as_ref()
-                    .unwrap()
+                    .expect("sg_callback_shim must be set before SG shared memory registration — register_sg_callback() bug")
                     .inner
                     .lock()
                     .expect("mutex poison — previous holder panicked, cannot continue inference");

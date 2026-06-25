@@ -86,6 +86,7 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
                 let k_out = projection_out_dim(k, hidden_size, "K projection")?;
                 layer_qk_dims.push((q_out, k_out));
             }
+            // [BCE-025] Skip layers missing Q or K projection — not an error, just incomplete role map
             _ => {}
         }
     }

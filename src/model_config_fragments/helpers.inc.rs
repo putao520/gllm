@@ -222,6 +222,8 @@ fn derive_dtype(metas: &[TensorMeta]) -> ModelConfigResult<DType> {
             safetensors::Dtype::F16 => f16_count += 1,
             safetensors::Dtype::F32 => f32_count += 1,
             safetensors::Dtype::F64 => f32_count += 1, // f64 降级到 f32
+            // [BCE-025] safetensors::Dtype is #[non_exhaustive]; non-float dtypes already
+            // filtered by is_floating_dtype() above, so this only catches future variants
             _ => {}
         }
     }

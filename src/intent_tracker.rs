@@ -98,10 +98,11 @@ pub struct Classification {
 
 impl Classification {
     /// Predicted task type via argmax on task_logits.
-    /// Falls back to [`TaskType::Debugging`] when logits is empty or all-NaN
-    /// (should not occur in practice — indicates upstream computation error).
+    /// Panics when logits is empty or all-NaN — indicates upstream computation error.
+    /// [BCE-028] replaced silent .unwrap_or(0) with .expect() to avoid silently
+    /// selecting token/class 0 on empty input.
     pub fn task_type(&self) -> TaskType {
-        let idx = argmax(&self.task_logits).unwrap_or(0);
+        let idx = argmax(&self.task_logits).expect("task_logits empty or all-NaN — upstream computation error");
         TaskType::from_index(idx).unwrap_or(TaskType::Debugging)
     }
 
@@ -111,9 +112,11 @@ impl Classification {
     }
 
     /// Predicted difficulty level (0-3) via argmax.
-    /// Falls back to 0 when logits is empty or all-NaN.
+    /// Panics when logits is empty or all-NaN — indicates upstream computation error.
+    /// [BCE-028] replaced silent .unwrap_or(0) with .expect() to avoid silently
+    /// selecting difficulty 0 on empty input.
     pub fn difficulty(&self) -> u8 {
-        argmax(&self.difficulty_logits).unwrap_or(0) as u8
+        argmax(&self.difficulty_logits).expect("difficulty_logits empty or all-NaN — upstream computation error") as u8
     }
 
     /// Difficulty prediction confidence.
@@ -1312,13 +1315,16 @@ mod tests {
     // --- Classification::task_type fallback on malformed logits ---
 
     #[test]
-    fn classification_task_type_with_empty_logits() {
-        // Empty logits → argmax returns 0 → from_index(0) → ArchRefactor
+    /// [BCE-028] Empty task_logits now panics (was silently returning default).
+    /// Test that it panics rather than silently choosing class 0.
+    #[test]
+    #[should_panic(expected = "task_logits empty or all-NaN")]
+    fn classification_task_type_with_empty_logits_panics() {
         let c = Classification {
             task_logits: vec![],
             difficulty_logits: vec![0.0; 4],
         };
-        assert_eq!(c.task_type(), TaskType::ArchRefactor);
+        let _ = c.task_type();
     }
 
     #[test]
@@ -6918,24 +6924,16 @@ mod tests {
 
     // @trace TEST-SIT [level:unit]
     #[test]
-    fn classification_empty_difficulty_logits_argmax_returns_zero() {
-        // Arrange: empty difficulty_logits vector
+    /// [BCE-028] Empty difficulty_logits now panics (was silently returning 0).
+    /// Test that it panics rather than silently choosing difficulty 0.
+    #[test]
+    #[should_panic(expected = "difficulty_logits empty or all-NaN")]
+    fn classification_empty_difficulty_logits_panics() {
         let cls = Classification {
             task_logits: vec![1.0, 0.0, 0.0],
             difficulty_logits: vec![],
         };
-        // Act
-        let diff = cls.difficulty();
-        let conf = cls.difficulty_confidence();
-        // Assert: argmax on empty returns 0, softmax_max on empty: fold with NEG_INF → max_exp=0/exp_sum=0 → NaN
-        assert_eq!(diff, 0, "argmax on empty slice returns 0");
-        // confidence for empty logits: fold yields NEG_INF, exp_sum=0, max_exp/0 = +inf, but
-        // actual result is -inf because NEG_INF is the max and 1.0/0.0 may vary.
-        // The key requirement is that it does not panic.
-        assert!(
-            conf.is_nan() || conf == f32::INFINITY || conf == f32::NEG_INFINITY || conf == 0.0,
-            "empty logits confidence is undefined but should not panic, got {conf}"
-        );
+        let _ = cls.difficulty();
     }
 
     // @trace TEST-SIT [level:unit]

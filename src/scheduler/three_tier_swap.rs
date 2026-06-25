@@ -860,7 +860,9 @@ impl ThreeTierSwapCoordinator {
                 (StorageTier::GpuHbm, StorageTier::Nvme) => {
                     s.evictions_gpu_to_nvme += 1;
                 }
-                _ => {}
+                // [BCE-025] Same-tier or reverse-direction evictions are logically impossible;
+                // log if observed to detect invariant violations
+                _ => { log::warn!("[BCE-025] impossible eviction direction: {:?} -> {:?}", from_tier, to_tier); }
             }
             s.total_bytes_evicted += bytes;
             s.total_eviction_latency_us += latency_us;
@@ -901,7 +903,9 @@ impl ThreeTierSwapCoordinator {
                 (StorageTier::Nvme, StorageTier::GpuHbm) => {
                     s.swap_ins_nvme_to_gpu += 1;
                 }
-                _ => {}
+                // [BCE-025] Same-tier or reverse-direction swap-ins are logically impossible;
+                // log if observed to detect invariant violations
+                _ => { log::warn!("[BCE-025] impossible swap-in direction: {:?} -> {:?}", from_tier, to_tier); }
             }
             s.total_bytes_swapped_in += bytes;
             s.total_swap_in_latency_us += latency_us;

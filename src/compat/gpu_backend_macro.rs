@@ -129,7 +129,11 @@ macro_rules! impl_gpu_backend {
                         let out_bytes = vocab_size * elem_bytes;
                         let out_gpu = bf.alloc_scratchpad_gpu(out_bytes)
                             .map_err(|e| BE::$upload_err_variant(e))?;
-                        let kv_ptr = kv_caches.get(seq_idx).map(|h| h.0).unwrap_or(0);
+                        // [PSC-2] kv_caches must contain entry for each sequence —
+                        // seq_idx out of bounds is a caller bug, must not silently return 0.
+                        let kv_ptr = kv_caches.get(seq_idx)
+                            .map(|h| h.0)
+                            .expect("kv_caches must contain entry for each sequence — seq_idx out of bounds");
                         let page_table_gpu = match &seq.page_table {
                             Some(pt) => bf.upload_to_gpu(pt.as_slice())
                                 .map_err(|e| BE::$upload_err_variant(e))?,

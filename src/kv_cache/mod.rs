@@ -283,7 +283,9 @@ pub fn select_codec(
 }
 
 /// 选择 cold-tier codec (NVMe 强制 ZstdDict).
+/// [BCE-037] warm/cold differentiation not yet implemented — tier parameter is ignored
 pub fn select_cold_codec(_tier: PrecisionTier) -> CompressionCodec {
+    log::warn!("[BCE-037] select_cold_codec: tier {:?} ignored, always returning ZstdDict — warm/cold differentiation not yet implemented", _tier);
     CompressionCodec::ZstdDict
 }
 

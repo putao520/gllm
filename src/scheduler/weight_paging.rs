@@ -804,7 +804,8 @@ mod tests {
                 assert_eq!(source_tier, Tier::L3);
             }
             FaultAction::Retry => {}
-            _ => {}
+            // [BCE-025] Abort is unexpected in this test scenario — log if hit
+            _ => { log::warn!("[BCE-025] unexpected FaultAction in test: {:?}", action); }
         }
     }
 

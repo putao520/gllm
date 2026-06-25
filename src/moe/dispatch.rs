@@ -196,7 +196,8 @@ impl MoeHardwareDispatcher {
         }
 
         let total_tokens: usize = expert_token_counts.iter().sum();
-        let max_cpu_tokens = (total_tokens as f32 * self.max_cpu_ratio) as usize;
+        // [BCE-022] clamp before f32→usize: negative ratio or NaN could wrap to huge usize
+        let max_cpu_tokens = (total_tokens as f32 * self.max_cpu_ratio).max(0.0) as usize;
         let mut cpu_tokens_used = 0usize;
 
         for (expert_idx, &token_count) in expert_token_counts.iter().enumerate() {
