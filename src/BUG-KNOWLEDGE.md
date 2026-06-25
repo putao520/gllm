@@ -4,7 +4,7 @@
 
 ---
 
-## BCE-042: 权重打包 +1.0 残差硬编码 F32 解读 — BF16/F16 权重数据损坏
+## BCE-042: 权重打包 +1.0 残差硬编码 F32 解读 — BF16/F16 权重数据损坏 ✅
 
 | 字段 | 值 |
 |------|-----|
@@ -114,7 +114,7 @@ grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 
 ---
 
-## BCE-20260622-001: WF SDK "exists but failed to launch" — cwd 指向不存在目录
+## BCE-20260622-001: WF SDK "exists but failed to launch" — cwd 指向不存在目录 ✅
 
 ### BUG 模式签名
 - **patternId**: BCE-20260622-001
@@ -148,7 +148,7 @@ wflib.mjs resolveProjectRoot() 对 sourceDir 直接返回 abs（如 /path/to/pro
 
 ---
 
-## BCE-20260622-002: LSP Coupling Matrix 对非 JS/TS 语言失效 — import 路径解析缺失
+## BCE-20260622-002: LSP Coupling Matrix 对非 JS/TS 语言失效 — import 路径解析缺失 ✅
 
 ### BUG 模式签名
 - **patternId**: BCE-20260622-002
@@ -190,7 +190,7 @@ wflib.mjs resolveProjectRoot() 对 sourceDir 直接返回 abs（如 /path/to/pro
 
 ---
 
-## BCE-20260623-001: cargo test SIGSEGV — vision_forward scratchpad logits 区域不足
+## BCE-20260623-001: cargo test SIGSEGV — vision_forward scratchpad logits 区域不足 ✅
 
 ### BUG 模式签名
 - **patternId**: BCE-20260623-001
@@ -233,7 +233,7 @@ GPU compile 路径有同类问题：`total_scratch` 计算同样只考虑 `vocab
 
 ---
 
-## BCE-20260623-004: tok==0 哨兵 — Token ID 0 被错误当作 EOS 终止符
+## BCE-20260623-004: tok==0 哨兵 — Token ID 0 被错误当作 EOS 终止符 ✅
 
 - **patternId**: BCE-20260623-004
 - **title**: Token ID 0 被错误当作 EOS 哨兵终止输出扫描
@@ -271,7 +271,7 @@ GPU compile 路径有同类问题：`total_scratch` 计算同样只考虑 `vocab
 
 ---
 
-## BCE-20260624-001: 跨侧 dtype 硬编码 — `* 4` 假设 F32 elem_bytes
+## BCE-20260624-001: 跨侧 dtype 硬编码 — `* 4` 假设 F32 elem_bytes ✅
 
 - **patternId**: BCE-20260624-001
 - **title**: Rust 侧 `* 4` 硬编码假设 compute dtype 为 F32，违反 ARCH-JIT-DATA-YIELDS 跨侧 dtype 独立推导铁律
@@ -331,7 +331,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-013 — 静默降级编解码不匹配
+## BCE-20260624-013 — 静默降级编解码不匹配 ✅
 
 **patternId**: BCE-20260624-013
 **title**: ZstdDict/NvcompAns 编解码静默降级到 LZ4
@@ -361,7 +361,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-014 — AllGather 缓冲区分配不足
+## BCE-20260624-014 — AllGather 缓冲区分配不足 ✅
 
 **patternId**: BCE-20260624-014
 **title**: AllGather 缓冲区分配 elem_count 但写入 world_size*elem_count
@@ -385,7 +385,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-015 — AllGather sendcount 整数截断
+## BCE-20260624-015 — AllGather sendcount 整数截断 ✅
 
 **patternId**: BCE-20260624-015
 **title**: buffer.len() / world_size 整数除法截断余数
@@ -409,7 +409,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-016 — PageAddrTable current_tier 迁移后不更新
+## BCE-20260624-016 — PageAddrTable current_tier 迁移后不更新 ✅
 
 **patternId**: BCE-20260624-016
 **title**: 页面迁移完成后 addr_table.current_tier 未更新导致重复迁移
@@ -433,7 +433,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-017 — poll_transfers 吞掉 KV transfer 失败
+## BCE-20260624-017 — poll_transfers 吞掉 KV transfer 失败 ✅
 
 **patternId**: BCE-20260624-017
 **title**: poll_transfers 失败时 log::warn 后丢弃，调用者无从得知
@@ -457,7 +457,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-018 — victim_id wrapping_sub 整数下溢出
+## BCE-20260624-018 — victim_id wrapping_sub 整数下溢出 ✅
 
 **patternId**: BCE-20260624-018
 **title**: expert group ID wrapping_sub 无下界检查
@@ -481,7 +481,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-019 — Mutex poison 恢复掩盖数据不一致
+## BCE-20260624-019 — Mutex poison 恢复掩盖数据不一致 ✅
 
 **patternId**: BCE-20260624-019
 **title**: Mutex poison 时 into_inner() 恢复数据继续推理，掩盖前一个线程 panic 导致的不一致
@@ -505,7 +505,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-020 — MoE Custom mapping 静默 RoundRobin fallback
+## BCE-20260624-020 — MoE Custom mapping 静默 RoundRobin fallback ✅
 
 **patternId**: BCE-20260624-020
 **title**: Custom expert mapping 缺失时静默 fallback 到 RoundRobin
@@ -529,7 +529,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-021 — TieredCache migration plan 丢弃 no-op
+## BCE-20260624-021 — TieredCache migration plan 丢弃 no-op ✅
 
 **patternId**: BCE-20260624-021
 **title**: build_batch() 产出的 TierMigrationPlan 被 `_plan` 丢弃，tier migration 为空操作
@@ -553,7 +553,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-022 — f32→usize 负值环绕
+## BCE-20260624-022 — f32→usize 负值环绕 ✅
 
 **patternId**: BCE-20260624-022
 **title**: f32 转 usize 无负值保护，负 f32 环绕为接近 usize::MAX 的巨大值
@@ -577,7 +577,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-023 — GPU mem_free 错误静默丢弃
+## BCE-20260624-023 — GPU mem_free 错误静默丢弃 (N/A: 不存在生产代码中) ✅
 
 **patternId**: BCE-20260624-023
 **title**: `let _ = driver.mem_free()` 吞掉 GPU 内存释放错误，导致 GPU 内存泄漏不可观测
@@ -601,7 +601,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-024 — decode 热路径 .unwrap() 无上下文 panic
+## BCE-20260624-024 — decode 热路径 .unwrap() 无上下文 panic ✅
 
 **patternId**: BCE-20260624-024
 **title**: 推理 decode 热路径中 .unwrap() 缺少诊断信息，panic 时无法定位根因
@@ -623,7 +623,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-025 — match _ => {} 静默吞掉合法枚举值
+## BCE-20260624-025 — match _ => {} 静默吞掉合法枚举值 ✅
 
 **patternId**: BCE-20260624-025
 **title**: match 通配符 `_ => {}` 静默跳过合法枚举值，无日志无错误
@@ -645,7 +645,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-026 — checked_mul().unwrap_or(usize::MAX) 产生荒谬分配大小
+## BCE-20260624-026 — checked_mul().unwrap_or(usize::MAX) 产生荒谬分配大小 ✅
 
 **patternId**: BCE-20260624-026
 **title**: 整数溢出后 saturating 到 usize::MAX 产生荒谬分配大小，导致混淆 OOM
@@ -667,7 +667,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-027 — Drop impl 中 assert! 可致 double-panic abort
+## BCE-20260624-027 — Drop impl 中 assert! 可致 double-panic abort (N/A: 不存在生产代码中) ✅
 
 **patternId**: BCE-20260624-027
 **title**: Drop trait impl 中 assert! 可在 panic-in-progress 时触发 double-panic 导致进程 abort
@@ -688,7 +688,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-028 — 空 logits 静默选择 token 0
+## BCE-20260624-028 — 空 logits 静默选择 token 0 ✅
 
 **patternId**: BCE-20260624-028
 **title**: 空 logits vec 经 max_by 返回 None 后 .unwrap_or(0) 静默选择 token ID 0
@@ -710,7 +710,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-029 — .take(N) 静默截断超长数据
+## BCE-20260624-029 — .take(N) 静默截断超长数据 ✅
 
 **patternId**: BCE-20260624-029
 **title**: .take(total_elements) 在源数据不足时静默截断，无错误无日志
@@ -761,7 +761,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-031 — ZSTD_LEN_MASK 截断 31 位压缩长度
+## BCE-20260624-031 — ZSTD_LEN_MASK 截断 31 位压缩长度 ✅
 
 **patternId**: BCE-20260624-031
 **title**: NVMe slot 格式中 (compressed.len() as u32 & ZSTD_LEN_MASK) 截断高位，>2GB 压缩数据长度丢失导致永久页损坏
@@ -785,7 +785,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-032 — u32→f32→u32 AllToAll 精度丢失
+## BCE-20260624-032 — u32→f32→u32 AllToAll 精度丢失 ✅
 
 **patternId**: BCE-20260624-032
 **title**: MoE AllToAll send_counts 经 f32 AllGather 往返后 >2^24 的计数值精度丢失
@@ -809,7 +809,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-033 — PromoteToDram 硬编码 codec=ZstdDict
+## BCE-20260624-033 — PromoteToDram 硬编码 codec=ZstdDict ✅
 
 **patternId**: BCE-20260624-033
 **title**: PromoteToDram 写入 addr_table 时硬编码 codec=ZstdDict，不反映实际解压后状态
@@ -833,7 +833,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-034 — RwLock poison 静默丢弃错误
+## BCE-20260624-034 — RwLock poison 静默丢弃错误 ✅
 
 **patternId**: BCE-20260624-034
 **title**: eviction_worker 中 RwLock poison 被静默丢弃（`Err(_) => return 0`），完全掩盖导致 poison 的 panic
@@ -857,7 +857,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-035 — TurboQuant 单标量广播到所有通道
+## BCE-20260624-035 — TurboQuant 单标量广播到所有通道 ✅
 
 **patternId**: BCE-20260624-035
 **title**: record_turboquant_scales 将单一 per_channel_scale 广播到所有 kv_dim 通道，击败逐通道量化
@@ -881,7 +881,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-036 — sparsity 公式负值退化
+## BCE-20260624-036 — sparsity 公式负值退化 ✅
 
 **patternId**: BCE-20260624-036
 **title**: 稀疏度调度公式 (1.0 - sparsity*0.5) 在 sparsity>2.0 时产生负值，clamp 到 0 导致批大小退化
@@ -905,7 +905,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-037 — ExpertWeight DRAM warm 分支死代码
+## BCE-20260624-037 — ExpertWeight DRAM warm 分支死代码 ✅
 
 **patternId**: BCE-20260624-037
 **title**: weight_compress ExpertWeight DRAM 中 if/else 冷热分支返回相同 codec (BitPackRle)，warm 专家被过度压缩
@@ -927,7 +927,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-038 — mutex poison 静默丢弃（同一结构体不一致）
+## BCE-20260624-038 — mutex poison 静默丢弃（同一结构体不一致） ✅
 
 **patternId**: BCE-20260624-038
 **title**: three_tier_swap 中 mutex poison 静默返回空 Vec/0，同一结构体 fault recovery 路径正确返回 Abort
@@ -951,7 +951,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-039 — 路由解析失败返回 false 导致跨节点读错误数据
+## BCE-20260624-039 — 路由解析失败返回 false 导致跨节点读错误数据 (N/A: 仅测试代码) ✅
 
 **patternId**: BCE-20260624-039
 **title**: needs_cross_node_transfer 路由解析失败返回 false（本地页），导致失败页被当作本地页处理，可能在错误节点读数据
@@ -975,7 +975,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-040 — usize::MAX as f32 = +inf 导致 clamp 上界无效
+## BCE-20260624-040 — usize::MAX as f32 = +inf 导致 clamp 上界无效 ✅
 
 **patternId**: BCE-20260624-040
 **title**: `(x * 3.0).ceil().clamp(0.0, usize::MAX as f32) as usize` — usize::MAX as f32 = +inf，clamp 上界无效；NaN 传播
@@ -999,7 +999,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-041 — mutex/RwLock poison 处理不完整（静默/panic）
+## BCE-20260624-041 — mutex/RwLock poison 处理不完整（静默/panic） ✅
 
 **patternId**: BCE-20260624-041
 **title**: 多处 mutex/RwLock poison 静默丢弃错误或 panic，应统一用 log::error! + 防御性返回

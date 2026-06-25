@@ -164,6 +164,14 @@ impl Loader {
             }
         }
 
+        // #5: Inject runtime-extensible suffix patterns into global registry.
+        // OnceLock is safe under ARCH-SINGLE-MODEL-INSTANCE (one model per process).
+        if !loader.extra_suffix_patterns.is_empty() {
+            let _ = set_extra_suffix_patterns(
+                loader.extra_suffix_patterns.clone()
+            );
+        }
+
         Ok(loader)
     }
 
