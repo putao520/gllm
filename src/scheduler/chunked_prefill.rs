@@ -227,13 +227,17 @@ impl ChunkedPrefillScheduler {
         memory_pressure_ratio: f32,
     ) -> BatchManifest {
         // Step 0: 计算 total_budget
-        // Guard: memory_pressure_ratio < 0 would wrap to huge usize; clamp to [0, usize::MAX as f32]
+        // [BCE-040] Guard: memory_pressure_ratio < 0 would wrap to huge usize.
+        // Use a reasonable business upper bound (1 billion tokens) instead of
+        // usize::MAX as f32 which equals +inf on 64-bit platforms, making the
+        // clamp upper bound ineffective against NaN/overflow.
+        const MAX_BATCH_TOKENS_F32: f32 = 1_000_000_000.0;
         let total_budget = (self.config.max_batch_tokens as f32 * memory_pressure_ratio)
-            .clamp(0.0, usize::MAX as f32) as usize;
+            .clamp(0.0, MAX_BATCH_TOKENS_F32) as usize;
 
         // Step 1-2: 填充 decode slots (优先, 按 decode_ratio_cap 上限)
         let max_decode = (total_budget as f32 * self.config.decode_ratio_cap)
-            .clamp(0.0, usize::MAX as f32) as usize;
+            .clamp(0.0, MAX_BATCH_TOKENS_F32) as usize;
         let decode_count = decode_ready.len().min(max_decode);
 
         let mut slots = Vec::with_capacity(total_budget);

@@ -347,7 +347,12 @@ impl EvictionWorker {
         let (hbm_usage, dram_usage) = {
             let mm = match memory_manager.lock() {
                 Ok(guard) => guard,
-                Err(_) => return 0,
+                #[allow(unused_variables)]
+                Err(e) => {
+                    // [BCE-034] Log lock poison instead of silently returning 0
+                    log::error!("memory_manager lock poisoned in eviction tick: {e}");
+                    return 0;
+                }
             };
             let hbm = mm.tier_usage(Tier::L1);
             let dram = mm.tier_usage(Tier::L2);
@@ -593,7 +598,7 @@ fn infer_payload_kind(meta: &PageMetadata) -> Option<PagePayloadKind> {
 fn drain_completions_and_update(
     actor: &PageMigrationActor,
     page_metadata: &Arc<RwLock<HashMap<PageId, PageMetadata>>>,
-    _addr_table: &PageAddrTable,
+    addr_table: &PageAddrTable, // [BCE-016] Removed underscore prefix — must update current_tier on migration completion
 ) {
     let completions: Vec<MigrationDone> = {
         let mut completions = Vec::new();
@@ -622,6 +627,14 @@ fn drain_completions_and_update(
                             meta.swap_in_time = None;
                         }
                     }
+                }
+            }
+
+            // [BCE-016] Update addr_table current_tier to reflect the new tier.
+            // Without this, addr_table entries retain stale tier info after migration.
+            if let Ok(mut addr_guard) = addr_table.write() {
+                if let Some(entry) = addr_guard.get_mut(&done.page_id) {
+                    entry.current_tier = done.to_tier;
                 }
             }
         }

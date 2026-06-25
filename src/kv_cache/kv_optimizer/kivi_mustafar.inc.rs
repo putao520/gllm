@@ -125,15 +125,19 @@ impl KiviStrategy {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> &[f32] {
-        let num_channels = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
+        // [BCE-026] overflow in channel calculation = corrupt model config, must fail loudly
+        let num_channels = num_kv_heads.checked_mul(head_dim)
+            .expect("overflow: num_kv_heads * head_dim exceeds usize — corrupt model config");
 
-        if num_tokens == 0 || num_channels == 0 || num_channels == usize::MAX {
+        if num_tokens == 0 || num_channels == 0 {
             self.k_channel_scales.clear();
             return &self.k_channel_scales;
         }
 
-        let total_elements = num_tokens.checked_mul(num_channels).unwrap_or(usize::MAX);
-        if total_elements == usize::MAX || total_elements > k_data.len() {
+        // [BCE-026] overflow in element count = corrupt model config, must fail loudly
+        let total_elements = num_tokens.checked_mul(num_channels)
+            .expect("overflow: num_tokens * num_channels exceeds usize — corrupt model config");
+        if total_elements > k_data.len() {
             self.k_channel_scales.clear();
             return &self.k_channel_scales;
         }
@@ -189,14 +193,12 @@ impl KiviStrategy {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> KiviQuantResult {
-        let num_channels = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
-        if num_channels == usize::MAX {
-            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.key_precision };
-        }
-        let total_elements = num_tokens.checked_mul(num_channels).unwrap_or(usize::MAX);
-        if total_elements == usize::MAX {
-            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.key_precision };
-        }
+        // [BCE-026] overflow in channel calculation = corrupt model config, must fail loudly
+        let num_channels = num_kv_heads.checked_mul(head_dim)
+            .expect("overflow: num_kv_heads * head_dim exceeds usize — corrupt model config");
+        // [BCE-026] overflow in element count = corrupt model config, must fail loudly
+        let total_elements = num_tokens.checked_mul(num_channels)
+            .expect("overflow: num_tokens * num_channels exceeds usize — corrupt model config");
 
         match self.key_precision {
             PrecisionTier::FP16 => {
@@ -207,9 +209,18 @@ impl KiviStrategy {
                         total_elements, k_data.len(), total_elements - k_data.len()
                     );
                 }
-                let byte_count = total_elements.checked_mul(2).unwrap_or(usize::MAX);
+                // [BCE-026] overflow in byte count = corrupt model config, must fail loudly
+                let byte_count = total_elements.checked_mul(2)
+                    .expect("overflow: total_elements * 2 exceeds usize — corrupt model config");
                 let capacity = byte_count.min(1 << 28); // cap at 256 MiB
                 let mut packed = Vec::with_capacity(capacity);
+                // [BCE-029] log when data is silently truncated by .take()
+                if total_elements > k_data.len() {
+                    log::warn!(
+                        "kivi_mustafar quantize_k FP16: {} elements requested but only {} available, truncating",
+                        total_elements, k_data.len()
+                    );
+                }
                 for &val in k_data.iter().take(total_elements) {
                     let bits = super::f32_to_f16_bits(val);
                     packed.extend_from_slice(&bits.to_le_bytes());
@@ -259,9 +270,18 @@ impl KiviStrategy {
                         total_elements, k_data.len(), total_elements - k_data.len()
                     );
                 }
-                let byte_count = total_elements.checked_mul(2).unwrap_or(usize::MAX);
+                // [BCE-026] overflow in byte count = corrupt model config, must fail loudly
+                let byte_count = total_elements.checked_mul(2)
+                    .expect("overflow: total_elements * 2 exceeds usize — corrupt model config");
                 let capacity = byte_count.min(1 << 28); // cap at 256 MiB
                 let mut packed = Vec::with_capacity(capacity);
+                // [BCE-029] log when data is silently truncated by .take()
+                if total_elements > k_data.len() {
+                    log::warn!(
+                        "kivi_mustafar quantize_k fallback: {} elements requested but only {} available, truncating",
+                        total_elements, k_data.len()
+                    );
+                }
                 for &val in k_data.iter().take(total_elements) {
                     let bits = super::f32_to_f16_bits(val);
                     packed.extend_from_slice(&bits.to_le_bytes());
@@ -287,14 +307,12 @@ impl KiviStrategy {
         head_dim: usize,
         precision_tier: PrecisionTier,
     ) -> Result<Vec<f32>, String> {
-        let num_channels = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
-        if num_channels == usize::MAX {
-            return Err("KIVI dequantize_k: num_kv_heads * head_dim overflow".into());
-        }
-        let total_elements = num_tokens.checked_mul(num_channels).unwrap_or(usize::MAX);
-        if total_elements == usize::MAX {
-            return Err("KIVI dequantize_k: num_tokens * num_channels overflow".into());
-        }
+        // [BCE-026] overflow in channel calculation = corrupt model config, propagate error
+        let num_channels = num_kv_heads.checked_mul(head_dim)
+            .ok_or_else(|| format!("overflow: num_kv_heads({}) * head_dim({}) exceeds usize", num_kv_heads, head_dim))?;
+        // [BCE-026] overflow in element count = corrupt model config, propagate error
+        let total_elements = num_tokens.checked_mul(num_channels)
+            .ok_or_else(|| format!("overflow: num_tokens({}) * num_channels({}) exceeds usize", num_tokens, num_channels))?;
         let mut out = vec![0.0f32; total_elements];
 
         match precision_tier {
@@ -366,11 +384,9 @@ impl KiviStrategy {
             return &self.v_token_scales;
         }
 
-        let stride = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
-        if stride == usize::MAX {
-            self.v_token_scales.clear();
-            return &self.v_token_scales;
-        }
+        // [BCE-026] overflow in stride calculation = corrupt model config, must fail loudly
+        let stride = num_kv_heads.checked_mul(head_dim)
+            .expect("overflow: num_kv_heads * head_dim exceeds usize — corrupt model config");
 
         self.v_token_scales.resize(num_tokens, 0.0f32);
 
@@ -407,14 +423,12 @@ impl KiviStrategy {
     ) -> KiviQuantResult {
         let _ = num_kv_heads;
         let _ = head_dim;
-        let stride = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
-        if stride == usize::MAX {
-            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.val_precision };
-        }
-        let total_elements = num_tokens.checked_mul(stride).unwrap_or(usize::MAX);
-        if total_elements == usize::MAX {
-            return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 0, precision_tier: self.val_precision };
-        }
+        // [BCE-026] overflow in stride calculation = corrupt model config, must fail loudly
+        let stride = num_kv_heads.checked_mul(head_dim)
+            .expect("overflow: num_kv_heads * head_dim exceeds usize — corrupt model config");
+        // [BCE-026] overflow in element count = corrupt model config, must fail loudly
+        let total_elements = num_tokens.checked_mul(stride)
+            .expect("overflow: num_tokens * stride exceeds usize — corrupt model config");
         let scales = &self.v_token_scales;
 
         match self.val_precision {
@@ -502,11 +516,20 @@ impl KiviStrategy {
                         total_elements, v_data.len(), total_elements - v_data.len()
                     );
                 }
-                let byte_count = total_elements.checked_mul(2).unwrap_or(usize::MAX);
-                if byte_count == usize::MAX || byte_count > (1 << 28) {
+                // [BCE-026] overflow in byte count = corrupt model config, must fail loudly
+                let byte_count = total_elements.checked_mul(2)
+                    .expect("overflow: total_elements * 2 exceeds usize — corrupt model config");
+                if byte_count > (1 << 28) {
                     return KiviQuantResult { data: Vec::new(), scales: Vec::new(), bytes_per_element: 2, precision_tier: PrecisionTier::FP16 };
                 }
                 let mut packed = vec![0u8; byte_count];
+                // [BCE-029] log when data is silently truncated by .take()
+                if total_elements > v_data.len() {
+                    log::warn!(
+                        "kivi_mustafar quantize_v FP16: {} elements requested but only {} available, truncating",
+                        total_elements, v_data.len()
+                    );
+                }
                 for (i, &val) in v_data.iter().take(total_elements).enumerate() {
                     let bits = super::f32_to_f16_bits(val);
                     let byte_offset = i * 2;
@@ -554,14 +577,12 @@ impl KiviStrategy {
         head_dim: usize,
         precision_tier: PrecisionTier,
     ) -> Result<Vec<f32>, String> {
-        let stride = num_kv_heads.checked_mul(head_dim).unwrap_or(usize::MAX);
-        if stride == usize::MAX {
-            return Err("KIVI dequantize_v: num_kv_heads * head_dim overflow".into());
-        }
-        let total_elements = num_tokens.checked_mul(stride).unwrap_or(usize::MAX);
-        if total_elements == usize::MAX {
-            return Err("KIVI dequantize_v: num_tokens * stride overflow".into());
-        }
+        // [BCE-026] overflow in stride calculation = corrupt model config, propagate error
+        let stride = num_kv_heads.checked_mul(head_dim)
+            .ok_or_else(|| format!("overflow: num_kv_heads({}) * head_dim({}) exceeds usize", num_kv_heads, head_dim))?;
+        // [BCE-026] overflow in element count = corrupt model config, propagate error
+        let total_elements = num_tokens.checked_mul(stride)
+            .ok_or_else(|| format!("overflow: num_tokens({}) * stride({}) exceeds usize", num_tokens, stride))?;
         let mut out = vec![0.0f32; total_elements];
 
         match precision_tier {

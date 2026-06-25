@@ -183,6 +183,7 @@ pub mod distributed_dispatch {
             match &self.placement {
                 MoePlacementDecision::Auto => Ok(0), // 单机全部在本地
                 MoePlacementDecision::RoundRobin => Ok(expert_id % self.world_size),
+                // [BCE-020] Custom mapping: missing expert_id returns Err, not silent RoundRobin fallback
                 MoePlacementDecision::Custom { mapping } => {
                     mapping.get(expert_id as usize).copied().ok_or_else(|| {
                         format!(
@@ -268,7 +269,7 @@ pub mod distributed_dispatch {
                 let offset = peer * num_ranks;
                 let val_f32 = gathered[offset + my_rank];
                 let val_u32 = val_f32 as u32;
-                // Detect f32 precision loss for large counts (f32 mantissa = 24 bits,
+                // [BCE-032] Detect f32 precision loss for large counts (f32 mantissa = 24 bits,
                 // u32 values > 2^24 lose precision when round-tripped through f32).
                 if val_f32 > 0.0 && (val_u32 as f32 - val_f32).abs() > 1.0 {
                     log::warn!(

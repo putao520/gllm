@@ -1475,6 +1475,8 @@ pub mod kv_routing {
     ) -> bool {
         match resolve_page_for_rank(page_id, routing_table) {
             Ok(result) => result.owner_rank != requesting_rank,
+            // [BCE-039] Route resolution failure returns true (conservative: needs cross-node transfer)
+            // instead of false (which would silently skip transfer and read wrong data)
             Err(e) => { log::error!("resolve_page_for_rank failed in needs_cross_node_transfer: {e} — treating as needing cross-node transfer for safety"); true }
         }
     }

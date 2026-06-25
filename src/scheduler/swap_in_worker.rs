@@ -307,7 +307,12 @@ impl SwapInWorker {
     pub fn stats(&self) -> SwapInWorkerStats {
         match self.stats.lock() {
             Ok(s) => s.clone(),
-            Err(_) => SwapInWorkerStats::default(),
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning default
+                log::error!("stats lock poisoned in SwapInWorker::stats: {e}");
+                SwapInWorkerStats::default()
+            }
         }
     }
 
@@ -366,7 +371,10 @@ impl SwapInWorker {
             let current_tier = {
                 let table = match addr_table.read() {
                     Ok(t) => t,
-                    Err(_) => {
+                    #[allow(unused_variables)]
+                    Err(e) => {
+                        // [BCE-038] Log lock poison instead of silently skipping
+                        log::error!("addr_table read lock poisoned in swap_in_round: {e}");
                         if let Ok(mut s) = stats.lock() {
                             s.skipped += 1;
                         }

@@ -974,6 +974,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         let is_expert = group.payload_kind
                             == Some(crate::scheduler::types::PagePayloadKind::ExpertWeight);
                         if is_expert && !group.pages.is_empty() {
+                            // [BCE-018] checked_sub replaces wrapping_sub — integer underflow on expert group ID is now a hard error
                             let layer_idx = victim_id.checked_sub(1_000_000)
                                 .expect("expert group ID must be >= 1_000_000 (base offset)")
                                 as usize;

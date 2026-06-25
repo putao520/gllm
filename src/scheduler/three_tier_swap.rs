@@ -472,14 +472,18 @@ impl ThreeTierSwapCoordinator {
     ) -> crate::scheduler::fault_recovery::FaultAction {
         let gmm = match self.memory_manager.lock() {
             Ok(g) => g,
-            Err(_) => return crate::scheduler::fault_recovery::FaultAction::Abort {
-                reason: "memory manager lock poisoned".to_string(),
+            #[allow(unused_variables)]
+            Err(e) => return crate::scheduler::fault_recovery::FaultAction::Abort {
+                // [BCE-019] Include poison error in abort reason for diagnosability
+                reason: format!("memory manager lock poisoned: {e}"),
             },
         };
         let mut handler = match self.dtype_handler.lock() {
             Ok(h) => h,
-            Err(_) => return crate::scheduler::fault_recovery::FaultAction::Abort {
-                reason: "dtype handler lock poisoned".to_string(),
+            #[allow(unused_variables)]
+            Err(e) => return crate::scheduler::fault_recovery::FaultAction::Abort {
+                // [BCE-019] Include poison error in abort reason for diagnosability
+                reason: format!("dtype handler lock poisoned: {e}"),
             },
         };
         handler.handle_weight_fault(page_id, current_weight_tier, &gmm, weight_table)
@@ -691,7 +695,12 @@ impl ThreeTierSwapCoordinator {
     pub fn stats(&self) -> ThreeTierSwapStats {
         let mut stats = match self.stats.lock() {
             Ok(s) => s.clone(),
-            Err(_) => return ThreeTierSwapStats::default(),
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning default
+                log::error!("stats lock poisoned in ThreeTierSwap::stats: {e}");
+                return ThreeTierSwapStats::default();
+            }
         };
 
         // Count pages by tier.
@@ -720,7 +729,12 @@ impl ThreeTierSwapCoordinator {
     ) {
         let mut table = match self.addr_table.write() {
             Ok(t) => t,
-            Err(_) => return,
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning
+                log::error!("addr_table lock poisoned in register_page: {e}");
+                return;
+            }
         };
         table.entry(page_id).or_insert_with(|| PageAddrEntry {
             gpu_ptr,
@@ -739,7 +753,12 @@ impl ThreeTierSwapCoordinator {
     pub fn update_page_gpu_ptr(&self, page_id: PageId, gpu_ptr: u64) {
         let mut table = match self.addr_table.write() {
             Ok(t) => t,
-            Err(_) => return,
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning
+                log::error!("addr_table lock poisoned in update_page_gpu_ptr: {e}");
+                return;
+            }
         };
         if let Some(entry) = table.get_mut(&page_id) {
             entry.gpu_ptr = Some(gpu_ptr);
@@ -783,11 +802,21 @@ impl ThreeTierSwapCoordinator {
     pub fn tier_changed_pages(&self) -> Vec<(PageId, StorageTier)> {
         let addr_guard = match self.addr_table.read() {
             Ok(g) => g,
-            Err(_) => return Vec::new(),
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning empty
+                log::error!("addr_table read lock poisoned in tier_changed_pages: {e}");
+                return Vec::new();
+            }
         };
         let meta_guard = match self.page_metadata.read() {
             Ok(g) => g,
-            Err(_) => return Vec::new(),
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning empty
+                log::error!("page_metadata read lock poisoned in tier_changed_pages: {e}");
+                return Vec::new();
+            }
         };
         addr_guard
             .iter()
@@ -896,7 +925,12 @@ impl ThreeTierSwapCoordinator {
     fn dram_pressure_ratio(&self) -> f32 {
         let mm = match self.memory_manager.lock() {
             Ok(g) => g,
-            Err(_) => return 0.0,
+            #[allow(unused_variables)]
+            Err(e) => {
+                // [BCE-038] Log lock poison instead of silently returning 0.0
+                log::error!("memory_manager lock poisoned in dram_pressure_ratio: {e}");
+                return 0.0;
+            }
         };
         let dram = mm.tier_usage(crate::scheduler::memory_manager::Tier::L2);
         if dram.capacity > 0 {

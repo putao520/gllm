@@ -455,6 +455,8 @@ fn execute_promote_to_hbm(
     entry.gpu_ptr = Some(new_gpu_ptr);
     entry.host_buffer = None; // GPU is now authoritative
     entry.current_tier = StorageTier::GpuHbm;
+    // [BCE-033] Reset codec — data is uncompressed on GPU now.
+    entry.codec = CompressionCodec::None;
     drop(table);
 
     MigrationResult::Ok { compressed_bytes, checksum }
@@ -556,6 +558,10 @@ fn execute_evict_to_nvme(
             ),
         };
     }
+    // [BCE-031] Safety: compressed.len() is guaranteed ≤ ZSTD_LEN_MASK (0x7FFFFFFF)
+    // by the guard above, so the `as u32` cast cannot truncate on any platform
+    // (usize > u32 on 64-bit, but the check ensures the value fits in 31 bits).
+    // The `& ZSTD_LEN_MASK` is a defensive mask that is a no-op given the check.
     let len_with_flag = (compressed.len() as u32 & ZSTD_LEN_MASK) | dict_flag;
     let mut slot_data = Vec::with_capacity(4 + compressed.len());
     slot_data.extend_from_slice(&len_with_flag.to_le_bytes());
@@ -689,6 +695,10 @@ fn execute_promote_to_dram(
         entry.host_buffer = Some(decompressed);
         entry.current_tier = StorageTier::CpuDram;
         entry.original_bytes = page_bytes;
+        // [BCE-033] Must reset codec to None — data is decompressed in DRAM now.
+        // If the entry already existed (e.g. from a prior eviction with ZstdDict),
+        // the old codec value would be stale and misleading.
+        entry.codec = CompressionCodec::None;
     }
 
     MigrationResult::Ok { compressed_bytes, checksum }
@@ -14475,11 +14485,11 @@ mod tests {
         // Act
         let result = execute_promote_to_hbm(99, page_bytes, &*backend, &addr_table);
         assert!(matches!(result, MigrationResult::Ok { .. }), "promote must succeed");
-        // Assert — Note: promote_to_hbm does NOT update codec (it clears host_buffer, sets gpu_ptr).
-        // The codec field remains BitPackRle on the entry.
+        // Assert — promote_to_hbm moves data to GPU (uncompressed), so codec must be None.
+        // [BCE-033] After promote to HBM, data is uncompressed on GPU; old codec is stale.
         let t = addr_table.read().unwrap();
         let entry = t.get(&99).unwrap();
-        assert_eq!(entry.codec, CompressionCodec::BitPackRle, "codec must be preserved after promote");
+        assert_eq!(entry.codec, CompressionCodec::None, "codec must be None after promote to HBM — data is uncompressed on GPU");
     }
 
     /// @trace REQ-COMP-012

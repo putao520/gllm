@@ -72,11 +72,12 @@ impl SchedulingPolicy for AbsolutePolicy {
         };
 
         // Phase 2: attention sparsity → reduce batch to exploit sparsity (fewer active tokens)
-        let sparsity_cap = if state.attention_sparsity > 0.7 {
-            // Clamp reduction factor to [0.0, 1.0] so extreme sparsity (>2.0)
-            // still produces a meaningful (but small) batch size instead of
-            // clamping the final product to 0 and falling back to current_running_len.
-            let reduction_factor = (1.0 - state.attention_sparsity * 0.5).clamp(0.0, 1.0);
+        // [BCE-036] Clamp sparsity to [0.0, 1.0] at the usage site so that the formula
+        // (1.0 - sparsity * 0.5) never produces negative values even if the observer
+        // receives out-of-range telemetry. The reduction_factor clamp is kept as defense-in-depth.
+        let sparsity = state.attention_sparsity.clamp(0.0, 1.0);
+        let sparsity_cap = if sparsity > 0.7 {
+            let reduction_factor = (1.0 - sparsity * 0.5).clamp(0.0, 1.0);
             let reduced = (self.config.batch_safe as f32 * reduction_factor) as usize;
             reduced.max(state.current_running_len.max(1))
         } else {
