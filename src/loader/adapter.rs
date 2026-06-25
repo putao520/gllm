@@ -59,6 +59,51 @@ use gllm_kernels::quant::QuantType;
 
 use super::gguf::{GgmlDType, GgufError, GgufReader, TensorInfo};
 
+/// Reverse mapping: gllm-kernels' QuantType → GGUF parser's GgmlDType.
+/// Returns `None` for QuantType variants that have no GGUF/GgmlDType equivalent
+/// (native floats Bf16/F16/F32, FP8 E4M3/E5M2).
+pub fn quant_type_to_ggml_dtype(qt: QuantType) -> Option<GgmlDType> {
+    match qt {
+        // K-Quant family
+        QuantType::Q2K => Some(GgmlDType::Q2_K),
+        QuantType::Q3K => Some(GgmlDType::Q3_K),
+        QuantType::Q4K => Some(GgmlDType::Q4_K),
+        QuantType::Q5K => Some(GgmlDType::Q5_K),
+        QuantType::Q6K => Some(GgmlDType::Q6_K),
+        QuantType::Q8K => Some(GgmlDType::Q8_K),
+        // Classic GGML family
+        QuantType::Q4_0 => Some(GgmlDType::Q4_0),
+        QuantType::Q4_1 => Some(GgmlDType::Q4_1),
+        QuantType::Q5_0 => Some(GgmlDType::Q5_0),
+        QuantType::Q5_1 => Some(GgmlDType::Q5_1),
+        QuantType::Q8_0 => Some(GgmlDType::Q8_0),
+        QuantType::Q8_1 => Some(GgmlDType::Q8_1),
+        // IQ family
+        QuantType::IQ1S => Some(GgmlDType::IQ1_S),
+        QuantType::IQ1M => Some(GgmlDType::IQ1_M),
+        QuantType::IQ2XXS => Some(GgmlDType::IQ2_XXS),
+        QuantType::IQ2XS => Some(GgmlDType::IQ2_XS),
+        QuantType::IQ2S => Some(GgmlDType::IQ2_S),
+        QuantType::IQ3XXS => Some(GgmlDType::IQ3_XXS),
+        QuantType::IQ3S => Some(GgmlDType::IQ3_S),
+        QuantType::IQ4NL => Some(GgmlDType::IQ4_NL),
+        QuantType::IQ4XS => Some(GgmlDType::IQ4_XS),
+        // Vendor / custom types
+        QuantType::AWQ4 => Some(GgmlDType::AWQ4),
+        QuantType::GPTQ4 => Some(GgmlDType::GPTQ4),
+        QuantType::Squeeze => Some(GgmlDType::SQUEEZE),
+        QuantType::Nvfp4 => Some(GgmlDType::NVFP4),
+        QuantType::TQ1_0 => Some(GgmlDType::TQ1_0),
+        QuantType::TQ2_0 => Some(GgmlDType::TQ2_0),
+        QuantType::Mxfp4 { block_size: 32 } => Some(GgmlDType::MXFP4),
+        QuantType::Mxfp4 { .. } => None, // non-standard block_size has no GgmlDType
+        // Native float types — no GgmlDType equivalent in GGUF
+        QuantType::Bf16 | QuantType::F16 | QuantType::F32 => None,
+        // FP8 — no GgmlDType equivalent
+        QuantType::Fp8E4M3 | QuantType::Fp8E5M2 => None,
+    }
+}
+
 /// Maps GGUF parser's GgmlDType to gllm-kernels' QuantType for kernel dispatch.
 /// Returns `None` for native float/integer types (F32, F16, BF16, F64, I8, I16, I32, I64).
 pub fn ggml_dtype_to_quant_type(dtype: GgmlDType) -> Option<QuantType> {
@@ -2354,5 +2399,52 @@ mod tests {
         assert_eq!(GgmlDType::IQ2_XXS.block_size(), 256);
         assert_eq!(GgmlDType::IQ2_XS.block_size(), 256);
         assert_eq!(GgmlDType::IQ2_S.block_size(), 256);
+    }
+
+    /// Round-trip: GgmlDType → QuantType → GgmlDType must be identity
+    /// for every quantized GgmlDType variant.
+    #[test]
+    fn roundtrip_ggml_dtype_to_quant_type_and_back() {
+        let quantized_dtypes = [
+            GgmlDType::Q2_K, GgmlDType::Q3_K, GgmlDType::Q4_K, GgmlDType::Q5_K,
+            GgmlDType::Q6_K, GgmlDType::Q8_K,
+            GgmlDType::Q4_0, GgmlDType::Q4_1, GgmlDType::Q5_0, GgmlDType::Q5_1,
+            GgmlDType::Q8_0, GgmlDType::Q8_1,
+            GgmlDType::IQ1_S, GgmlDType::IQ1_M,
+            GgmlDType::IQ2_XXS, GgmlDType::IQ2_XS, GgmlDType::IQ2_S,
+            GgmlDType::IQ3_XXS, GgmlDType::IQ3_S,
+            GgmlDType::IQ4_NL, GgmlDType::IQ4_XS,
+            GgmlDType::MXFP4,
+            GgmlDType::AWQ4, GgmlDType::GPTQ4, GgmlDType::SQUEEZE, GgmlDType::NVFP4,
+            GgmlDType::TQ1_0, GgmlDType::TQ2_0,
+        ];
+        for dt in &quantized_dtypes {
+            let qt = ggml_dtype_to_quant_type(*dt)
+                .unwrap_or_else(|| panic!("{:?} should map to QuantType", dt));
+            let back = quant_type_to_ggml_dtype(qt)
+                .unwrap_or_else(|| panic!("QuantType {:?} (from {:?}) should map back to GgmlDType", qt, dt));
+            assert_eq!(back, *dt, "round-trip failed: {:?} → {:?} → {:?}", dt, qt, back);
+        }
+    }
+
+    /// quant_type_to_ggml_dtype returns None for native float QuantType variants.
+    #[test]
+    fn quant_type_to_ggml_dtype_native_floats_return_none() {
+        assert!(quant_type_to_ggml_dtype(QuantType::Bf16).is_none());
+        assert!(quant_type_to_ggml_dtype(QuantType::F16).is_none());
+        assert!(quant_type_to_ggml_dtype(QuantType::F32).is_none());
+    }
+
+    /// quant_type_to_ggml_dtype returns None for FP8 QuantType variants.
+    #[test]
+    fn quant_type_to_ggml_dtype_fp8_returns_none() {
+        assert!(quant_type_to_ggml_dtype(QuantType::Fp8E4M3).is_none());
+        assert!(quant_type_to_ggml_dtype(QuantType::Fp8E5M2).is_none());
+    }
+
+    /// quant_type_to_ggml_dtype returns None for Mxfp4 with non-standard block_size.
+    #[test]
+    fn quant_type_to_ggml_dtype_mxfp4_nonstandard_block_size() {
+        assert!(quant_type_to_ggml_dtype(QuantType::Mxfp4 { block_size: 64 }).is_none());
     }
 }

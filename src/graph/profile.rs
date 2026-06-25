@@ -167,8 +167,11 @@ impl GraphProfiler {
     pub fn profile(config: &ModelConfig) -> GraphProfile {
         let hidden_dim = config.hidden_size;
         let num_layers = config.num_hidden_layers;
-        let num_experts = config.num_experts.unwrap_or(0);
-        let moe_top_k = config.num_experts_per_tok.unwrap_or(0);
+        // MoE fields: None = dense model (no MoE), Some(N>0) = MoE model.
+        // Parser guarantees num_experts is never Some(0) (rejected at parse time),
+        // so None→0 is the correct dense-model sentinel (SPEC §3.1: "Dense 模型 = 0").
+        let num_experts = config.num_experts.unwrap_or(0); // LEGAL: None=dense, Some(N>0)=MoE
+        let moe_top_k = config.num_experts_per_tok.unwrap_or(0); // LEGAL: None=dense, Some(N>0)=MoE
         let vocab_size = config.vocab_size;
         let head_dim = config.head_dim;
         let tied_embeddings = config.tie_word_embeddings.unwrap_or(false);

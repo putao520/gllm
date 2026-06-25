@@ -254,8 +254,11 @@ fn bus_port_tag_to_bit(tag: BusPortTag) -> u32 {
 /// Device memory handle (unified abstraction).
 #[derive(Debug)]
 pub enum DeviceMemory {
-    /// CPU: host memory pointer
-    Host { ptr: *mut u8, size: usize },
+    /// CPU: host memory pointer + optional layout for safe dealloc.
+    /// When `layout` is `Some`, `ptr` was allocated via `std::alloc::alloc` and must be
+    /// freed with `std::alloc::dealloc(ptr, layout)`. When `None`, `ptr` is either null
+    /// or externally managed (e.g., memory-mapped) and must not be freed by Drop.
+    Host { ptr: *mut u8, size: usize, layout: Option<std::alloc::Layout> },
     /// CUDA: device pointer
     Cuda { ptr: u64, size: usize },
     /// HIP: device pointer
@@ -504,30 +507,71 @@ impl Drop for RequestStateTable {
                 }
                 #[cfg(feature = "metal")]
                 DeviceMemory::Metal { buffer_id, .. } => {
-                    // Metal buffer release via MetalDriver when available
+                    // Metal buffer release: when buffer_id is non-zero, the buffer
+                    // was allocated via MetalDevice and must be released via
+                    // [MTLBuffer release]. Currently MetalDriver does not expose
+                    // mem_free — once available, call it here.
                     // TODO(port): implement MetalDriver::mem_free once metal feature is complete
-                    let _ = buffer_id;
-                }
-                DeviceMemory::Host { ptr, .. } => {
-                    // SAFETY: Host variant is a CPU-only fallback. In production, GPU
-                    // backends use Cuda/Hip/Metal variants. The Host ptr is currently
-                    // always null (only used in tests). If real host allocation is needed
-                    // in the future, must add Layout field to Host variant and use
-                    // std::alloc::dealloc. DO NOT use libc::free — it's UB if ptr came
-                    // from Rust's allocator.
-                    if !ptr.is_null() {
+                    if *buffer_id != 0 {
                         log::error!(
-                            "DeviceMemory::Host with non-null ptr ({:?}) requires Layout for safe dealloc; \
-                             add layout field and use std::alloc::dealloc — leaking memory to avoid UB",
-                            ptr
+                            "DeviceMemory::Metal with non-zero buffer_id ({}) cannot be freed — \
+                             MetalDriver::mem_free not yet available; leaking to avoid UB",
+                            buffer_id
                         );
-                        // Intentionally leak: dealloc without Layout is UB, leaking is safe.
+                        // Intentionally leak: freeing without proper API is UB.
                     }
                 }
-                #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
-                _ => {
-                    // When no GPU features are enabled, only Host variant should exist
-                    // Other variants are impossible at runtime, so this is unreachable
+                DeviceMemory::Host { ptr, layout, .. } => {
+                    if !ptr.is_null() {
+                        if let Some(layout) = layout {
+                            // SAFETY: ptr was allocated via std::alloc::alloc with this layout.
+                            // layout is stored at allocation time, ensuring dealloc correctness.
+                            unsafe {
+                                std::alloc::dealloc(*ptr, *layout);
+                            }
+                        } else {
+                            log::error!(
+                                "DeviceMemory::Host with non-null ptr ({:?}) has no Layout — \
+                                 cannot safely dealloc; leaking to avoid UB. \
+                                 Fix: provide layout at construction time",
+                                ptr
+                            );
+                            // Intentionally leak: dealloc without Layout is UB.
+                        }
+                    }
+                }
+                // Catch-all for GPU variants when their feature is disabled.
+                // These variants should never be constructed at runtime without the
+                // corresponding feature, but the enum variant always exists.
+                #[cfg(not(feature = "cuda"))]
+                DeviceMemory::Cuda { ptr, .. } => {
+                    if *ptr != 0 {
+                        log::error!(
+                            "DeviceMemory::Cuda with non-zero ptr ({}) dropped without cuda feature — \
+                             leaking GPU memory; enable cuda feature or fix construction site",
+                            ptr
+                        );
+                    }
+                }
+                #[cfg(not(feature = "hip"))]
+                DeviceMemory::Hip { ptr, .. } => {
+                    if *ptr != 0 {
+                        log::error!(
+                            "DeviceMemory::Hip with non-zero ptr ({}) dropped without hip feature — \
+                             leaking GPU memory; enable hip feature or fix construction site",
+                            ptr
+                        );
+                    }
+                }
+                #[cfg(not(feature = "metal"))]
+                DeviceMemory::Metal { buffer_id, .. } => {
+                    if *buffer_id != 0 {
+                        log::error!(
+                            "DeviceMemory::Metal with non-zero buffer_id ({}) dropped without metal feature — \
+                             leaking GPU memory; enable metal feature or fix construction site",
+                            buffer_id
+                        );
+                    }
                 }
             }
         }
@@ -822,7 +866,7 @@ mod tests {
 
     #[test]
     fn device_memory_host() {
-        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 1024 };
+        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 1024, layout: None };
         if let DeviceMemory::Host { size, .. } = dm {
             assert_eq!(size, 1024);
         }
@@ -894,7 +938,7 @@ mod tests {
 
     #[test]
     fn device_memory_debug_output() {
-        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 512 };
+        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 512, layout: None };
         let debug_str = format!("{:?}", dm);
         assert!(debug_str.contains("Host"));
     }
@@ -1309,8 +1353,8 @@ mod tests {
 
     #[test]
     fn device_memory_host_null_ptr() {
-        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 0 };
-        if let DeviceMemory::Host { ptr, size } = dm {
+        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 0, layout: None };
+        if let DeviceMemory::Host { ptr, size, .. } = dm {
             assert!(ptr.is_null());
             assert_eq!(size, 0);
         }
@@ -1944,7 +1988,7 @@ mod tests {
 
     #[test]
     fn device_memory_host_positive_size() {
-        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 4096 };
+        let dm = DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 4096, layout: None };
         if let DeviceMemory::Host { size, .. } = dm {
             assert_eq!(size, 4096);
         }
@@ -2015,7 +2059,21 @@ mod tests {
     #[test]
     fn request_state_table_drop_with_host_memory() {
         let mut rst = RequestStateTable::new(BackendType::Cpu);
-        rst.device_memory = Some(DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 256 });
+        rst.device_memory = Some(DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 256, layout: None });
+        drop(rst);
+    }
+
+    #[test]
+    fn request_state_table_drop_with_host_allocated_memory() {
+        // Verify that Host variant with a real allocation and Layout is correctly freed.
+        let size = 256usize;
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        assert!(!ptr.is_null(), "allocation should succeed");
+
+        let mut rst = RequestStateTable::new(BackendType::Cpu);
+        rst.device_memory = Some(DeviceMemory::Host { ptr, size, layout: Some(layout) });
+        // Drop should call std::alloc::dealloc(ptr, layout) — no leak, no UB.
         drop(rst);
     }
 
@@ -2451,6 +2509,7 @@ mod tests {
         rst.device_memory = Some(DeviceMemory::Host {
             ptr: std::ptr::null_mut(),
             size: std::mem::size_of::<RequestState>(),
+            layout: None,
         });
 
         // Act: CPU sync is a no-op regardless of device_memory
@@ -2524,7 +2583,7 @@ mod tests {
     fn device_memory_exhaustive_variant_match() {
         // Arrange: one of each variant
         let variants: Vec<DeviceMemory> = vec![
-            DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 100 },
+            DeviceMemory::Host { ptr: std::ptr::null_mut(), size: 100, layout: None },
             DeviceMemory::Cuda { ptr: 1, size: 200 },
             DeviceMemory::Hip { ptr: 2, size: 300 },
             DeviceMemory::Metal { buffer_id: 3, size: 400 },

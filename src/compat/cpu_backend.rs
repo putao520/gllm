@@ -147,10 +147,15 @@ impl KvCacheBuffer {
 
         for layer_i in shared_start..num_layers {
             // 找到同类型的最近非共享层
-            let layer_type = attention_pattern.get(layer_i).copied().unwrap_or(0);
+            // INVARIANT: num_kv_shared > 0 requires attention_pattern.len() >= num_layers.
+            // unwrap_or(0) silently treats missing entries as "sliding" (0), which can
+            // cause wrong-type KV sharing (PSC-14). expect() enforces the invariant.
+            let layer_type = *attention_pattern.get(layer_i)
+                .expect("attention_pattern must cover all layers when num_kv_shared > 0");
             let mut donor = None;
             for j in (0..shared_start).rev() {
-                let j_type = attention_pattern.get(j).copied().unwrap_or(0);
+                let j_type = *attention_pattern.get(j)
+                    .expect("attention_pattern must cover all layers when num_kv_shared > 0");
                 if j_type == layer_type {
                     donor = Some(j);
                     break;
@@ -1527,17 +1532,14 @@ mod tests {
     }
 
     #[test]
-    fn kv_donor_map_pattern_shorter_than_layers() {
-        // pattern=[0,1] means layer 0=type 0, layer 1=type 1, layers 2-4 default to type 0
-        let (effective, map) = KvCacheBuffer::build_kv_donor_map(5, 2, &[0, 1]);
-        assert_eq!(effective, 3);
-        assert_eq!(map[0], None);
-        assert_eq!(map[1], None);
-        assert_eq!(map[2], None);
-        // Layer 3 (type 0 default) → closest non-shared type 0 = layer 2
-        assert_eq!(map[3], Some(2));
-        // Layer 4 (type 0 default) → closest non-shared type 0 = layer 2
-        assert_eq!(map[4], Some(2));
+    /// PSC-14: pattern shorter than layers is an invariant violation when num_kv_shared > 0.
+    /// Old behavior: `unwrap_or(0)` silently defaulted to type 0, causing KV donor mismatches.
+    /// New behavior: `expect()` panics to surface the misconfiguration.
+    #[test]
+    #[should_panic(expected = "attention_pattern must cover all layers")]
+    fn kv_donor_map_pattern_shorter_than_layers_panics() {
+        // pattern=[0,1] only covers 2 layers but num_layers=5 → invariant violation
+        let (_effective, _map) = KvCacheBuffer::build_kv_donor_map(5, 2, &[0, 1]);
     }
 
     #[test]
@@ -4238,17 +4240,14 @@ mod tests {
 
     // @trace TEST-CPU-BE-025 [req:REQ-SHARED-KV-REF] [level:unit]
     #[test]
-    fn kv_donor_map_shared_with_empty_pattern() {
-        // Arrange: 4 layers, 2 shared, empty attention pattern
-        // Act
-        let (effective, map) = KvCacheBuffer::build_kv_donor_map(4, 2, &[]);
-        // Assert: all layers default to type 0, shared_start=2
-        assert_eq!(effective, 2);
-        assert_eq!(map[0], None);
-        assert_eq!(map[1], None);
-        // Layers 2,3 need type 0 donor, closest = layer 1 (last non-shared)
-        assert_eq!(map[2], Some(1));
-        assert_eq!(map[3], Some(1));
+    /// PSC-14: empty pattern with num_kv_shared > 0 is an invariant violation.
+    /// Old behavior: `unwrap_or(0)` silently defaulted all layers to type 0.
+    /// New behavior: `expect()` panics to surface misconfiguration.
+    #[test]
+    #[should_panic(expected = "attention_pattern must cover all layers")]
+    fn kv_donor_map_shared_with_empty_pattern_panics() {
+        // 4 layers, 2 shared, empty attention pattern → invariant violation
+        let (_effective, _map) = KvCacheBuffer::build_kv_donor_map(4, 2, &[]);
     }
 
     // ── PagedKvPool: page_size accessor ──

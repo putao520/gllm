@@ -325,6 +325,11 @@ impl TensorProvider for GllmReader {
         })?;
         Ok(Cow::Borrowed(&self.mmap[t.abs_data_offset..t.abs_data_offset + t.data_size]))
     }
+
+    fn ggml_dtype(&self, name: &str) -> Option<crate::loader::gguf::GgmlDType> {
+        let qt = self.quant_type(name)?;
+        crate::loader::adapter::quant_type_to_ggml_dtype(qt)
+    }
 }
 
 #[cfg(test)]

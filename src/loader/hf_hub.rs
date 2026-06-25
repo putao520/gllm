@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::manifest::{FileMap, EMPTY_FILE_MAP};
 
-use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
+
 use super::{parallel::ParallelLoader, LoaderError, Result};
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
@@ -69,6 +69,7 @@ pub enum WeightFormat {
     SafeTensors,
     Gguf,
     Onnx,
+    PyTorch,
 }
 
 #[derive(Debug, PartialEq)]
@@ -220,6 +221,9 @@ impl HfHubClient {
         if let Some(files) = self.try_download_onnx(&repo, &aux_files)? {
             return Ok(files);
         }
+        if let Some(files) = self.try_download_pytorch_bins(&repo, file_map, parallel, &aux_files)? {
+            return Ok(files);
+        }
 
         Err(LoaderError::MissingWeights)
     }
@@ -327,6 +331,7 @@ impl HfHubClient {
             }
             WeightFormat::Gguf => self.try_download_gguf(repo, aux_files),
             WeightFormat::Onnx => self.try_download_onnx(repo, aux_files),
+            WeightFormat::PyTorch => self.try_download_pytorch_bins(repo, file_map, parallel, aux_files),
         }
     }
 
@@ -357,21 +362,6 @@ impl HfHubClient {
                 weights: vec![path],
                 format: WeightFormat::SafeTensors,
                 aux_files: aux_files.to_vec(),
-            }));
-        }
-
-        if let Some((weights, index_path)) =
-            self.try_download_pytorch_bins(repo, file_map, parallel)?
-        {
-            let mut aux = aux_files.to_vec();
-            if let Some(index_path) = index_path {
-                aux.push(index_path);
-            }
-            return Ok(Some(HfModelFiles {
-                repo: repo.to_string(),
-                weights,
-                format: WeightFormat::SafeTensors,
-                aux_files: aux,
             }));
         }
 
@@ -742,21 +732,29 @@ impl HfHubClient {
         repo: &str,
         file_map: FileMap,
         parallel: ParallelLoader,
-    ) -> Result<Option<(Vec<PathBuf>, Option<PathBuf>)>> {
+        aux_files: &[PathBuf],
+    ) -> Result<Option<HfModelFiles>> {
         if let Ok(index_path) = self.get_file_any(repo, file_map, "pytorch_model.bin.index.json") {
             let shard_index = ShardIndex::from_path(&index_path)?;
             let shard_files = shard_index.shard_files();
             let bin_paths = self.download_shards(repo, &shard_files, parallel)?;
-            let config = PytorchConversionConfig::default();
-            let output = convert_bins_to_safetensors(&bin_paths, Some(&index_path), &config)?;
-            return Ok(Some((output.safetensors, output.index)));
+            let mut aux = aux_files.to_vec();
+            aux.push(index_path);
+            return Ok(Some(HfModelFiles {
+                repo: repo.to_string(),
+                weights: bin_paths,
+                format: WeightFormat::PyTorch,
+                aux_files: aux,
+            }));
         }
 
         if let Ok(bin_path) = self.get_file_any(repo, file_map, "pytorch_model.bin") {
-            let config = PytorchConversionConfig::default();
-            let output =
-                convert_bins_to_safetensors(std::slice::from_ref(&bin_path), None, &config)?;
-            return Ok(Some((output.safetensors, output.index)));
+            return Ok(Some(HfModelFiles {
+                repo: repo.to_string(),
+                weights: vec![bin_path],
+                format: WeightFormat::PyTorch,
+                aux_files: aux_files.to_vec(),
+            }));
         }
 
         Ok(None)

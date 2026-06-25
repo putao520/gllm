@@ -128,8 +128,11 @@ impl ModelGeometry {
             }
             None => config.hidden_size * 4,
         };
-        let num_experts = moe_config.map(|c| c.num_experts).unwrap_or(0);
-        let moe_top_k = moe_config.map(|c| c.num_experts_per_tok).unwrap_or(0);
+        // MoE fields: moe_config=None means dense model → num_experts=0, moe_top_k=0.
+        // moe_config is built by ModelConfig::build_moe_config() which guarantees
+        // num_experts > 1 when present (MoE), so None→0 is the correct dense sentinel.
+        let num_experts = moe_config.map(|c| c.num_experts).unwrap_or(0); // LEGAL: None=dense
+        let moe_top_k = moe_config.map(|c| c.num_experts_per_tok).unwrap_or(0); // LEGAL: None=dense
         let expert_intermediate_size = config.expert_intermediate_size.unwrap_or(intermediate_size);
 
         Self {
@@ -246,9 +249,14 @@ impl ModelGeometry {
             return layer.min(self.effective_kv_layers().saturating_sub(1));
         }
         // Shared layer: find the nearest non-shared layer of the same type.
-        let this_type = self.attention_pattern.get(layer).copied().unwrap_or(0);
+        // INVARIANT: num_kv_shared_layers > 0 requires attention_pattern.len() >= num_layers.
+        // unwrap_or(0) silently treats missing entries as "sliding" (0), which can
+        // cause wrong-type KV sharing (PSC-14). expect() enforces the invariant.
+        let this_type = *self.attention_pattern.get(layer)
+            .expect("attention_pattern must cover all layers when num_kv_shared_layers > 0");
         for j in (0..shared_start).rev() {
-            let j_type = self.attention_pattern.get(j).copied().unwrap_or(0);
+            let j_type = *self.attention_pattern.get(j)
+                .expect("attention_pattern must cover all layers when num_kv_shared_layers > 0");
             if j_type == this_type {
                 return j;
             }

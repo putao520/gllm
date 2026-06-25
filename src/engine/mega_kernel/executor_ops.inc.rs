@@ -620,8 +620,14 @@ impl MegaKernelExecutor {
     }
 
     /// Returns the MTP depth (0 = MTP disabled, >0 = candidate tokens per decode step).
+    ///
+    /// INVARIANT: `mega_compiled` is always `Some` after successful construction.
+    /// PSC-1 root cause: returning 0 here (via `unwrap_or(0)`) silently hides an
+    /// invariant violation — a None mega_compiled means no compilation happened,
+    /// not "MTP is disabled". Fail loudly instead.
     pub fn mtp_depth(&self) -> usize {
-        self.mega_compiled.as_ref().map(|m| m.mtp_depth).unwrap_or(0)
+        self.mega_compiled.as_ref().map(|m| m.mtp_depth)
+            .expect("mtp_depth: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
     /// Returns the byte offset of a named weight tensor in the weight blob.
@@ -679,11 +685,16 @@ impl MegaKernelExecutor {
     }
 
     /// Returns total scratchpad bytes needed.
+    ///
+    /// INVARIANT: `mega_compiled` is always `Some` after successful construction.
+    /// PSC-1 root cause: returning 0 here (via `unwrap_or(0)`) silently hides an
+    /// invariant violation and leads to a zero-sized scratchpad allocation, causing
+    /// a heap-buffer-overflow during JIT execution. Fail loudly instead.
     pub fn scratchpad_bytes(&self) -> usize {
         self.mega_compiled
             .as_ref()
             .map(|m| m.scratchpad_base_bytes)
-            .unwrap_or(0)
+            .expect("scratchpad_bytes: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
     /// Layer 6: 将 JIT source map 写入文本文件（供 DAP 调试器使用）。
@@ -780,11 +791,16 @@ impl MegaKernelExecutor {
     }
 
     /// Get the compiled layer's code size (for bounds checking).
+    ///
+    /// INVARIANT: `mega_compiled` is always `Some` after successful construction.
+    /// PSC-1 root cause: returning 0 here (via `unwrap_or(0)`) silently hides an
+    /// invariant violation and makes bounds checks pass on an empty code buffer.
+    /// Fail loudly instead.
     pub fn mega_code_size(&self) -> usize {
         self.mega_compiled
             .as_ref()
             .map(|m| m.exec_code.code_size())
-            .unwrap_or(0)
+            .expect("mega_code_size: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
     pub fn select_variant_for_batch(

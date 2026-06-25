@@ -35,8 +35,9 @@ impl ModelScopeClient {
         repo: &str,
         file_map: FileMap,
         parallel: ParallelLoader,
+        gguf_file_filter: Option<&str>,
     ) -> Result<MsModelFiles> {
-        self.download_model_files_with_format(repo, file_map, parallel, None)
+        self.download_model_files_with_format(repo, file_map, parallel, None, gguf_file_filter)
     }
 
     pub fn download_model_files_with_format(
@@ -45,6 +46,7 @@ impl ModelScopeClient {
         file_map: FileMap,
         parallel: ParallelLoader,
         format_hint: Option<WeightFormat>,
+        gguf_file_filter: Option<&str>,
     ) -> Result<MsModelFiles> {
         let _ = parallel;
         let repo = repo.to_string();
@@ -56,7 +58,7 @@ impl ModelScopeClient {
 
         if let Some(format) = format_hint {
             let result =
-                self.download_by_format(&repo, file_map, &downloader, &aux_files, format)?;
+                self.download_by_format(&repo, file_map, &downloader, &aux_files, format, gguf_file_filter)?;
             return result.ok_or(LoaderError::MissingWeights);
         }
 
@@ -65,7 +67,7 @@ impl ModelScopeClient {
         {
             return Ok(files);
         }
-        if let Some(files) = self.try_download_gguf(&repo, file_map, &downloader, &aux_files)? {
+        if let Some(files) = self.try_download_gguf(&repo, file_map, &downloader, &aux_files, gguf_file_filter)? {
             return Ok(files);
         }
         if let Some(files) = self.try_download_onnx(&repo, file_map, &downloader, &aux_files)? {
@@ -120,12 +122,13 @@ impl ModelScopeClient {
         downloader: &ModelScopeDownloader,
         aux_files: &[PathBuf],
         format: WeightFormat,
+        gguf_file_filter: Option<&str>,
     ) -> Result<Option<MsModelFiles>> {
         match format {
             WeightFormat::SafeTensors => {
                 self.try_download_safetensors(repo, file_map, downloader, aux_files)
             }
-            WeightFormat::Gguf => self.try_download_gguf(repo, file_map, downloader, aux_files),
+            WeightFormat::Gguf => self.try_download_gguf(repo, file_map, downloader, aux_files, gguf_file_filter),
             WeightFormat::Onnx => self.try_download_onnx(repo, file_map, downloader, aux_files),
             WeightFormat::PyTorch => Ok(None),
             WeightFormat::Gllm => Ok(None), // .gllm is created offline, not downloaded
@@ -173,8 +176,14 @@ impl ModelScopeClient {
         file_map: FileMap,
         downloader: &ModelScopeDownloader,
         aux_files: &[PathBuf],
+        gguf_file_filter: Option<&str>,
     ) -> Result<Option<MsModelFiles>> {
         for candidate in self.gguf_candidate_names(repo) {
+            if let Some(filter) = gguf_file_filter {
+                if !candidate.to_ascii_lowercase().contains(&filter.to_ascii_lowercase()) {
+                    continue;
+                }
+            }
             if let Some(path) = self.try_get_file_any(repo, file_map, &candidate, downloader) {
                 return Ok(Some(MsModelFiles {
                     repo: repo.to_string(),
@@ -1586,6 +1595,7 @@ mod tests {
             &ModelScopeDownloader::new(PathBuf::from("/tmp"), Some("https://example.com".to_string())).unwrap(),
             &[],
             WeightFormat::PyTorch,
+            None,
         ).unwrap();
         assert!(result.is_none(), "PyTorch format should return None (not downloadable)");
     }
@@ -1600,6 +1610,7 @@ mod tests {
             &downloader,
             &[],
             WeightFormat::Gllm,
+            None,
         ).unwrap();
         assert!(result.is_none(), ".gllm format should return None (created offline)");
     }

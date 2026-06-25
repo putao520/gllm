@@ -98,8 +98,10 @@ pub struct Classification {
 
 impl Classification {
     /// Predicted task type via argmax on task_logits.
+    /// Falls back to [`TaskType::Debugging`] when logits is empty or all-NaN
+    /// (should not occur in practice — indicates upstream computation error).
     pub fn task_type(&self) -> TaskType {
-        let idx = argmax(&self.task_logits);
+        let idx = argmax(&self.task_logits).unwrap_or(0);
         TaskType::from_index(idx).unwrap_or(TaskType::Debugging)
     }
 
@@ -109,8 +111,9 @@ impl Classification {
     }
 
     /// Predicted difficulty level (0-3) via argmax.
+    /// Falls back to 0 when logits is empty or all-NaN.
     pub fn difficulty(&self) -> u8 {
-        argmax(&self.difficulty_logits) as u8
+        argmax(&self.difficulty_logits).unwrap_or(0) as u8
     }
 
     /// Difficulty prediction confidence.
@@ -528,11 +531,15 @@ fn linear_forward(input: &[f32], weight: &[f32], bias: &[f32]) -> Result<Vec<f32
 }
 
 /// Argmax index.
-fn argmax(v: &[f32]) -> usize {
-    v.iter().enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+///
+/// NaN values are excluded from comparison (treated as -inf), ensuring deterministic argmax.
+/// Returns `None` if the slice is empty or all values are NaN (indicates upstream computation error).
+fn argmax(v: &[f32]) -> Option<usize> {
+    v.iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_nan())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
         .map(|(i, _)| i)
-        .unwrap_or(0)
 }
 
 /// Max softmax probability.
@@ -579,8 +586,8 @@ mod tests {
 
     #[test]
     fn argmax_works() {
-        assert_eq!(argmax(&[0.1, 0.5, 0.3]), 1);
-        assert_eq!(argmax(&[0.9, 0.1, 0.2]), 0);
+        assert_eq!(argmax(&[0.1, 0.5, 0.3]), Some(1));
+        assert_eq!(argmax(&[0.9, 0.1, 0.2]), Some(0));
     }
 
     #[test]
@@ -1181,20 +1188,20 @@ mod tests {
 
     #[test]
     fn argmax_single_element() {
-        assert_eq!(argmax(&[42.0]), 0);
+        assert_eq!(argmax(&[42.0]), Some(0));
     }
 
     #[test]
     fn argmax_all_equal_returns_last_index() {
         // max_by with partial_cmp(Equal) on ties keeps the last seen value,
         // so all-equal inputs yield the last index.
-        assert_eq!(argmax(&[3.0, 3.0, 3.0]), 2);
+        assert_eq!(argmax(&[3.0, 3.0, 3.0]), Some(2));
     }
 
     #[test]
     fn argmax_negative_values() {
-        assert_eq!(argmax(&[-5.0, -1.0, -3.0]), 1);
-        assert_eq!(argmax(&[-10.0, -10.0, -2.0]), 2);
+        assert_eq!(argmax(&[-5.0, -1.0, -3.0]), Some(1));
+        assert_eq!(argmax(&[-10.0, -10.0, -2.0]), Some(2));
     }
 
     #[test]
@@ -1204,12 +1211,13 @@ mod tests {
         // With partial_cmp returning Equal for NaN, the first element (index 0) wins ties.
         // However, max_by scans left-to-right and keeps the larger, but NaN comparisons
         // return Equal so it depends on iteration order. Verify it does not panic.
-        assert!(result < 3);
+        assert!(result.is_some());
+        assert!(result.unwrap() < 3);
     }
 
     #[test]
     fn argmax_last_element_wins() {
-        assert_eq!(argmax(&[1.0, 2.0, 9.0]), 2);
+        assert_eq!(argmax(&[1.0, 2.0, 9.0]), Some(2));
     }
 
     // --- softmax_max edge cases ---
@@ -1569,14 +1577,14 @@ mod tests {
 
     #[test]
     fn argmax_ascending_sequence() {
-        assert_eq!(argmax(&[1.0, 2.0, 3.0, 4.0, 5.0]), 4);
+        assert_eq!(argmax(&[1.0, 2.0, 3.0, 4.0, 5.0]), Some(4));
     }
 
     // 12. argmax with descending sequence
 
     #[test]
     fn argmax_descending_sequence() {
-        assert_eq!(argmax(&[5.0, 4.0, 3.0, 2.0, 1.0]), 0);
+        assert_eq!(argmax(&[5.0, 4.0, 3.0, 2.0, 1.0]), Some(0));
     }
 
     // 13. linear_forward with empty output (bias len = 0)
@@ -2091,24 +2099,24 @@ mod tests {
 
     #[test]
     fn argmax_with_two_elements() {
-        assert_eq!(argmax(&[1.0, 2.0]), 1);
-        assert_eq!(argmax(&[2.0, 1.0]), 0);
+        assert_eq!(argmax(&[1.0, 2.0]), Some(1));
+        assert_eq!(argmax(&[2.0, 1.0]), Some(0));
     }
 
     #[test]
     fn argmax_with_zero_values() {
-        assert_eq!(argmax(&[0.0, 0.0, 0.0]), 2); // ties → last index
+        assert_eq!(argmax(&[0.0, 0.0, 0.0]), Some(2)); // ties → last index
     }
 
     #[test]
     fn argmax_with_large_array() {
         let v: Vec<f32> = (0..1000).map(|i| i as f32).collect();
-        assert_eq!(argmax(&v), 999);
+        assert_eq!(argmax(&v), Some(999));
     }
 
     #[test]
     fn argmax_with_negative_infinity() {
-        assert_eq!(argmax(&[f32::NEG_INFINITY, 0.0, f32::NEG_INFINITY]), 1);
+        assert_eq!(argmax(&[f32::NEG_INFINITY, 0.0, f32::NEG_INFINITY]), Some(1));
     }
 
     // --- softmax_max: more edge cases ---
@@ -2466,7 +2474,7 @@ mod tests {
 
     #[test]
     fn argmax_with_large_negative() {
-        assert_eq!(argmax(&[-1e30, -1e20, -1e10]), 2);
+        assert_eq!(argmax(&[-1e30, -1e20, -1e10]), Some(2));
     }
 
     // --- linear_forward weight dimension mismatch (too many elements) ---
@@ -2781,7 +2789,7 @@ mod tests {
 
     #[test]
     fn argmax_with_positive_infinity() {
-        assert_eq!(argmax(&[1.0, f32::INFINITY, 3.0]), 1);
+        assert_eq!(argmax(&[1.0, f32::INFINITY, 3.0]), Some(1));
     }
 
     // 9. argmax with mixed NaN and real: does not panic
@@ -2789,7 +2797,8 @@ mod tests {
     #[test]
     fn argmax_mixed_nan_and_real_no_panic() {
         let result = argmax(&[1.0, f32::NAN, f32::NAN, 2.0]);
-        assert!(result < 4, "result should be a valid index, got {result}");
+        assert!(result.is_some());
+        assert!(result.unwrap() < 4, "result should be a valid index, got {:?}", result);
     }
 
     // 10. softmax_max with all NaN: does not panic
@@ -3477,14 +3486,14 @@ mod tests {
 
     #[test]
     fn argmax_maximum_at_first_position() {
-        assert_eq!(argmax(&[100.0, 1.0, 2.0, 3.0]), 0);
+        assert_eq!(argmax(&[100.0, 1.0, 2.0, 3.0]), Some(0));
     }
 
     // 48. argmax with maximum at middle position
 
     #[test]
     fn argmax_maximum_at_middle_position() {
-        assert_eq!(argmax(&[1.0, 2.0, 100.0, 3.0, 4.0]), 2);
+        assert_eq!(argmax(&[1.0, 2.0, 100.0, 3.0, 4.0]), Some(2));
     }
 
     // 49. linear_forward output size matches bias length
@@ -3519,7 +3528,7 @@ mod tests {
 
     #[test]
     fn argmax_with_f32_max_value() {
-        assert_eq!(argmax(&[1.0, f32::MAX, 0.0]), 1);
+        assert_eq!(argmax(&[1.0, f32::MAX, 0.0]), Some(1));
     }
 
     // 2. softmax_max uniform confidence equals 1/n for n=1..7
@@ -4171,15 +4180,15 @@ mod tests {
 
     #[test]
     fn argmax_with_f32_min_value() {
-        assert_eq!(argmax(&[-1.0, f32::MIN, 0.0]), 2);
-        assert_eq!(argmax(&[f32::MIN, f32::MIN, -1.0]), 2);
+        assert_eq!(argmax(&[-1.0, f32::MIN, 0.0]), Some(2));
+        assert_eq!(argmax(&[f32::MIN, f32::MIN, -1.0]), Some(2));
     }
 
     // 12. argmax with single negative infinity
 
     #[test]
     fn argmax_single_negative_infinity() {
-        assert_eq!(argmax(&[f32::NEG_INFINITY]), 0);
+        assert_eq!(argmax(&[f32::NEG_INFINITY]), Some(0));
     }
 
     // 13. softmax_max uniform confidence equals 1/n for n=8..12
@@ -4268,13 +4277,13 @@ mod tests {
     // ── Wave 12x81 additional tests ──
 
     #[test]
-    fn argmax_empty_slice_returns_zero() {
+    fn argmax_empty_slice_returns_none() {
         // Arrange: empty slice
         let data: &[f32] = &[];
         // Act
         let idx = argmax(data);
-        // Assert: unwrap_or(0) returns 0 for empty
-        assert_eq!(idx, 0);
+        // Assert: empty input returns None (PSC-3 fix: argmax returns Option<usize>)
+        assert_eq!(idx, None);
     }
 
     #[test]
@@ -4420,7 +4429,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: returns last occurrence of max (index 2)
-        assert_eq!(idx, 2);
+        assert_eq!(idx, Some(2));
     }
 
     #[test]
@@ -4449,13 +4458,13 @@ mod tests {
     }
 
     #[test]
-    fn argmax_all_nan_returns_last_index() {
+    fn argmax_all_nan_returns_none() {
         // Arrange: all NaN values
         let data = &[f32::NAN, f32::NAN, f32::NAN];
         // Act
         let idx = argmax(data);
-        // Assert: all partial_cmp yield Equal, max_by returns last
-        assert_eq!(idx, 2);
+        // Assert: all values are NaN → filtered out → None (indicates upstream computation error)
+        assert_eq!(idx, None);
     }
 
     // ── Additional unit tests ──
@@ -4691,7 +4700,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: positive infinity wins
-        assert_eq!(idx, 2);
+        assert_eq!(idx, Some(2));
     }
 
     #[test]
@@ -4970,7 +4979,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: ties resolved by returning last index
-        assert_eq!(idx, 4);
+        assert_eq!(idx, Some(4));
     }
 
     // @trace TEST-SIT [level:unit]
@@ -5224,7 +5233,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: 3.0 at index 4 is the maximum
-        assert_eq!(idx, 4);
+        assert_eq!(idx, Some(4));
     }
 
     // @trace TEST-SIT [level:unit]
@@ -5592,7 +5601,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert
-        assert_eq!(idx, 0);
+        assert_eq!(idx, Some(0));
     }
 
     // @trace TEST-SIT [level:unit]
@@ -5759,7 +5768,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: smallest positive subnormal > 0 > 0
-        assert_eq!(idx, 1, "smallest positive subnormal should be the max among zeros");
+        assert_eq!(idx, Some(1), "smallest positive subnormal should be the max among zeros");
     }
 
     // @trace TEST-SIT [level:unit]
@@ -5981,7 +5990,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: zeros are greater than negative subnormal; ties among zeros -> last zero (index 2)
-        assert_eq!(idx, 2, "zeros should beat negative subnormal");
+        assert_eq!(idx, Some(2), "zeros should beat negative subnormal");
     }
 
     // @trace TEST-SIT [level:unit]
@@ -6282,7 +6291,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: smallest positive subnormal > 0.0
-        assert_eq!(idx, 1, "smallest positive subnormal should beat zero");
+        assert_eq!(idx, Some(1), "smallest positive subnormal should beat zero");
     }
 
     // @trace TEST-SIT [req:REQ-SIT-001] [level:unit]
@@ -6655,7 +6664,7 @@ mod tests {
         // Act
         let result = argmax(&values);
         // Assert: 0.0 is the max
-        assert_eq!(result, 2);
+        assert_eq!(result, Some(2));
     }
 
     // @trace TEST-SIT [level:unit]
@@ -6972,7 +6981,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: positive infinity wins
-        assert_eq!(idx, 1, "positive infinity should be the max");
+        assert_eq!(idx, Some(1), "positive infinity should be the max");
     }
 
     // @trace TEST-SIT [level:unit]
@@ -7225,7 +7234,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: 1.0 + EPSILON is larger than 1.0, so index 1 should win
-        assert_eq!(idx, 1, "smallest distinguishable difference should select index 1");
+        assert_eq!(idx, Some(1), "smallest distinguishable difference should select index 1");
     }
 
     // @trace TEST-SIT [level:unit]
@@ -7337,7 +7346,7 @@ mod tests {
         assert!((prob_sum - 1.0).abs() < 1e-5, "softmax probabilities should sum to 1.0, got {prob_sum}");
         // Also verify softmax_max returns max_exp / sum
         let conf = softmax_max(logits);
-        let max_idx = argmax(logits);
+        let max_idx = argmax(logits).unwrap();
         let expected = exps[max_idx] / sum;
         assert!((conf - expected).abs() < 1e-5, "softmax_max should equal max probability, got {conf}");
     }
@@ -7415,7 +7424,7 @@ mod tests {
         // Act
         let idx = argmax(data);
         // Assert: argmax should return the last occurrence (index 5)
-        assert_eq!(idx, 5, "argmax should return last index of tied maximum");
+        assert_eq!(idx, Some(5), "argmax should return last index of tied maximum");
     }
 
     // @trace TEST-SIT [req:REQ-SIT-001] [level:unit]

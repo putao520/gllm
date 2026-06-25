@@ -49,7 +49,7 @@ pub use safetensors::SafeTensorsLoader;
 
 use gllm_kernels::quant::QuantType;
 pub use adapter::ggml_dtype_to_quant_type;
-pub use pytorch::{convert_bins_to_safetensors, PytorchConversionConfig, PytorchConversionOutput};
+pub use pytorch::{PytorchLoader, PytorchLoaderConfig};
 
 // Re-export quantization metadata types (defined later in this file)
 // Note: CompanionConfig and QuantizationMetadata are already public below

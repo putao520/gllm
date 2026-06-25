@@ -1276,11 +1276,13 @@ impl Client {
             let sum_exp: f32 = exp_logits.iter().sum();
             let probs: Vec<f32> = exp_logits.iter().map(|e| e / sum_exp).collect();
 
-            // argmax
+            // argmax — NaN excluded (treated as -inf); empty logits returns label 0 + score 0.0
+            // (indicates upstream error; classify must always produce non-empty logits)
             let (label_id, &score) = probs
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .filter(|(_, p)| !p.is_nan())
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
                 .unwrap_or((0, &0.0));
 
             predictions.push(crate::classify::ClassificationResult {

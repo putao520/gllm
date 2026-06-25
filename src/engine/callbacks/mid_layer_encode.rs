@@ -38,6 +38,7 @@
 use gllm_kernels::types::DType;
 use half::{bf16, f16};
 
+use crate::fp8::{fp8_e4m3_to_fp32, fp8_e5m2_to_fp32};
 use crate::graph::layer_callback::{CallbackAction, LayerCallback, LayerContext};
 
 /// Priority for mid-layer encode (higher than Early Exit=50, lower than SG=90).
@@ -167,12 +168,72 @@ impl MidLayerEncodeCallback {
                     }
                     return Some(out);
                 }
-                _ => {
-                    // F32 is handled by Candidate 1 above.
-                    // Quantized dtypes (Q4_0, Q8_0, etc.) cannot be decoded to f32
-                    // element-by-element — they require dequantization with block metadata.
+                // F32 is handled by Candidate 1 above — if we reach here the
+                // buffer stride was inconsistent with F32, so this is a
+                // mismatch we cannot resolve.
+                DType::F32 => {
                     log::warn!(
-                        "mid_layer_encode: hidden state dtype {:?} unsupported — requires dequantization, returning None",
+                        "mid_layer_encode: F32 declared but buffer stride inconsistent with 4-byte elements, returning None"
+                    );
+                }
+                // 1-byte dtypes are handled by Candidate 3 below.
+                DType::U8
+                | DType::F8E4M3
+                | DType::F8E5M2
+                | DType::F6E3M2
+                | DType::F6E2M3
+                | DType::F4E2M1 => {
+                    // These 1-byte dtypes should not match the 2-byte stride
+                    // check. If they do, the buffer layout is ambiguous —
+                    // fall through to Candidate 3.
+                }
+            }
+        }
+
+        // Candidate 3: 1-byte element dtypes (FP8 E4M3 / E5M2).
+        // FP8 types are single-byte floating-point formats that can be decoded
+        // element-by-element to f32. Sub-byte types (F6/F4) and U8 cannot.
+        let one_stride = hidden_size.checked_mul(1)?;
+        if one_stride > 0
+            && output.len().is_multiple_of(one_stride)
+            && output.len() >= numel
+        {
+            let live = &output[..numel];
+            match declared_dtype {
+                DType::F8E4M3 => {
+                    let mut out = Vec::with_capacity(numel);
+                    for &byte in live {
+                        out.push(fp8_e4m3_to_fp32(byte));
+                    }
+                    return Some(out);
+                }
+                DType::F8E5M2 => {
+                    let mut out = Vec::with_capacity(numel);
+                    for &byte in live {
+                        out.push(fp8_e5m2_to_fp32(byte));
+                    }
+                    return Some(out);
+                }
+                // Sub-byte floating-point types require block-level
+                // dequantization — cannot decode element-by-element.
+                DType::F6E3M2 | DType::F6E2M3 | DType::F4E2M1 => {
+                    log::warn!(
+                        "mid_layer_encode: sub-byte dtype {:?} requires block dequantization, returning None",
+                        declared_dtype
+                    );
+                }
+                // U8 is not a floating-point type — not applicable for
+                // hidden-state activation tensors.
+                DType::U8 => {
+                    log::warn!(
+                        "mid_layer_encode: U8 dtype is not a floating-point activation type, returning None"
+                    );
+                }
+                // F32/F16/BF16 should have been handled by Candidate 1/2.
+                // If they reach here, the stride check was inconsistent.
+                DType::F32 | DType::F16 | DType::BF16 => {
+                    log::warn!(
+                        "mid_layer_encode: {:?} declared but buffer stride inconsistent, returning None",
                         declared_dtype
                     );
                 }
@@ -1248,16 +1309,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_half_stride_with_non_half_dtype_returns_none() {
+    fn decode_half_stride_with_non_half_dtype_falls_through_to_fp8_decode() {
         // Arrange: buffer passes half-stride check but declared dtype is F8E4M3 (not F16/BF16).
-        // hidden_size=2, half_stride=4. Buffer=4 bytes → 4%4==0, 4>=2 → passes stride.
-        // But DType::F8E4M3 has no match arm in the half path.
+        // hidden_size=2, half_stride=4. Buffer=4 bytes → 4%4==0, 4>=2 → passes half stride.
+        // F8E4M3 falls through Candidate 2 to Candidate 3 (1-byte stride).
+        // one_stride=2, 4%2==0, 4>=2 → Candidate 3 decodes F8E4M3 successfully.
+        // PSC-7 root fix: FP8 dtypes are now correctly decoded via Candidate 3,
+        // no longer silently discarded by the half-stride wildcard.
         let src = vec![0u8; 4];
         let out = MidLayerEncodeCallback::decode_hidden_output(&src, 1, 2, DType::F8E4M3);
-        assert!(
-            out.is_none(),
-            "half stride with F8E4M3 declared dtype must be rejected"
-        );
+        let decoded = out.expect("F8E4M3 must decode via Candidate 3 after falling through half stride");
+        assert_eq!(decoded.len(), 2, "numel = seq_len * hidden_size = 1 * 2");
+        assert!((decoded[0] - 0.0f32).abs() < 1e-6, "zero byte decodes to 0.0");
+        assert!((decoded[1] - 0.0f32).abs() < 1e-6, "zero byte decodes to 0.0");
     }
 
     #[test]
@@ -1533,11 +1597,17 @@ mod tests {
     }
 
     #[test]
-    fn decode_half_stride_with_f8e5m2_dtype_returns_none() {
-        // Arrange: buffer passes half stride but dtype is F8E5M2 (no match arm)
+    fn decode_half_stride_with_f8e5m2_dtype_falls_through_to_fp8_decode() {
+        // Arrange: buffer passes half stride but dtype is F8E5M2, which falls
+        // through Candidate 2 to Candidate 3 (1-byte stride path).
+        // PSC-7 root fix: F8E5M2 is now correctly decoded via Candidate 3,
+        // no longer silently discarded.
         let src = vec![0u8; 4]; // 4 bytes, hidden=2: half_stride=4, 4%4==0
         let out = MidLayerEncodeCallback::decode_hidden_output(&src, 1, 2, DType::F8E5M2);
-        assert!(out.is_none(), "F8E5M2 has no match arm in half path");
+        let decoded = out.expect("F8E5M2 must decode via Candidate 3 after falling through half stride");
+        assert_eq!(decoded.len(), 2, "numel = seq_len * hidden_size = 1 * 2");
+        assert!((decoded[0] - 0.0f32).abs() < 1e-6, "zero byte decodes to 0.0");
+        assert!((decoded[1] - 0.0f32).abs() < 1e-6, "zero byte decodes to 0.0");
     }
 
     // -- pre_node / post_node: multi-layer lifecycle scenarios --
@@ -3743,12 +3813,17 @@ mod tests {
     // -- decode_hidden_output: half stride passes with F8E4M3 declared → no match arm --
 
     #[test]
-    fn decode_half_stride_with_f8e4m3_declared_returns_none() {
+    fn decode_half_stride_with_f8e4m3_declared_falls_through_to_fp8_decode() {
         // Arrange: 4 bytes, hidden=2 → half_stride=4, 4%4==0. F32 stride=8, 4%8!=0.
-        // Half passes but F8E4M3 has no match arm.
+        // Half passes but F8E4M3 falls through to Candidate 3.
+        // one_stride=2, 4%2==0, 4>=2 → Candidate 3 decodes F8E4M3 successfully.
+        // PSC-7 root fix: FP8 dtypes are now correctly decoded via Candidate 3.
         let src = vec![0u8; 4];
         let out = MidLayerEncodeCallback::decode_hidden_output(&src, 1, 2, DType::F8E4M3);
-        assert!(out.is_none());
+        let decoded = out.expect("F8E4M3 must decode via Candidate 3 after half stride fall-through");
+        assert_eq!(decoded.len(), 2, "numel = seq_len * hidden_size = 1 * 2");
+        assert!((decoded[0] - 0.0f32).abs() < 1e-6);
+        assert!((decoded[1] - 0.0f32).abs() < 1e-6);
     }
 
     // -- decode_hidden_output: half stride with I32 (if it exists) or fallback to generic non-half dtype --
@@ -7800,19 +7875,25 @@ mod tests {
 
     // @trace TEST-MLE-431 [req:REQ-HR-002] [level:unit]
     #[test]
-    fn decode_with_f8e4m3_declared_dtype_rejected_by_half_match_arm() {
-        // Arrange: F8E4M3 is a 1-byte type but not F16/BF16, so the half match
-        // arm `_ => {}` swallows it. 8 bytes, hidden=4, seq=1.
+    fn decode_with_f8e4m3_declared_dtype_decoded_by_candidate3() {
+        // Arrange: F8E4M3 is a 1-byte type. 8 bytes, hidden=4, seq=1.
         // F32 stride=16, 8%16!=0 -> F32 fails.
         // half stride=8, 8%8==0, 8>=8 -> passes stride/size but F8E4M3
-        // does not match F16/BF16.
+        // falls through Candidate 2 to Candidate 3.
+        // one_stride=4, 8%4==0, 8>=4 -> Candidate 3 decodes F8E4M3.
+        // PSC-7 root fix: FP8 dtypes are now correctly decoded via Candidate 3,
+        // no longer silently discarded by the half match arm wildcard.
         let src = vec![0u8; 8];
 
         // Act
         let out = MidLayerEncodeCallback::decode_hidden_output(&src, 1, 4, DType::F8E4M3);
 
         // Assert
-        assert!(out.is_none(), "F8E4M3 declared dtype must be rejected by half match arm");
+        let decoded = out.expect("F8E4M3 must decode via Candidate 3");
+        assert_eq!(decoded.len(), 4, "numel = seq_len * hidden_size = 1 * 4");
+        for v in &decoded {
+            assert!((v - 0.0f32).abs() < 1e-6, "zero byte decodes to 0.0");
+        }
     }
 
     // @trace TEST-MLE-432 [req:REQ-HR-002] [level:unit]
@@ -7983,18 +8064,25 @@ mod tests {
 
     // @trace TEST-MLE-440 [req:REQ-HR-002] [level:unit]
     #[test]
-    fn decode_with_f8e5m2_declared_dtype_rejected() {
-        // Arrange: F8E5M2 is not F16/BF16. 8 bytes, hidden=4, seq=1.
+    fn decode_with_f8e5m2_declared_dtype_decoded_by_candidate3() {
+        // Arrange: F8E5M2 is a 1-byte type. 8 bytes, hidden=4, seq=1.
         // F32 stride=16, 8%16!=0 -> F32 fails.
         // half stride=8, 8%8==0, 8>=8 -> half stride passes but F8E5M2
-        // is not F16/BF16 in the match arm.
+        // falls through Candidate 2 to Candidate 3.
+        // one_stride=4, 8%4==0, 8>=4 -> Candidate 3 decodes F8E5M2.
+        // PSC-7 root fix: F8E5M2 is now correctly decoded via Candidate 3,
+        // no longer silently discarded.
         let src = vec![0u8; 8];
 
         // Act
         let out = MidLayerEncodeCallback::decode_hidden_output(&src, 1, 4, DType::F8E5M2);
 
         // Assert
-        assert!(out.is_none(), "F8E5M2 declared dtype must be rejected");
+        let decoded = out.expect("F8E5M2 must decode via Candidate 3");
+        assert_eq!(decoded.len(), 4, "numel = seq_len * hidden_size = 1 * 4");
+        for v in &decoded {
+            assert!((v - 0.0f32).abs() < 1e-6, "zero byte decodes to 0.0");
+        }
     }
 
     // @trace TEST-MLE-441 [req:REQ-HR-002] [level:unit]

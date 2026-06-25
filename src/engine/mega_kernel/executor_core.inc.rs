@@ -271,11 +271,16 @@ impl MegaKernelExecutor {
     }
 
     /// Returns total scratchpad bytes needed for execution.
+    ///
+    /// INVARIANT: `mega_compiled` is always `Some` after successful construction.
+    /// PSC-1 root cause: returning 0 here (via `unwrap_or(0)`) silently hides an
+    /// invariant violation and leads to a zero-sized scratchpad allocation, causing
+    /// a heap-buffer-overflow during JIT execution. Fail loudly instead.
     pub fn total_scratchpad_bytes(&self) -> usize {
         self.mega_compiled
             .as_ref()
             .map(|m| m.scratchpad_base_bytes)
-            .unwrap_or(0)
+            .expect("total_scratchpad_bytes: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
     /// Set weight page table and fault handler for explicit fault recovery (REQ-WP-009).

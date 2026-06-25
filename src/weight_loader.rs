@@ -744,6 +744,8 @@ mod tests {
             enable_fallback: false,
             checksum_policy: ChecksumPolicy::Verify,
             gguf_file_filter: Some("Q8".to_string()),
+            tensor_skip_config: crate::loader::TensorSkipConfig::default(),
+            extra_suffix_patterns: Vec::new(),
         };
         // Assert: all custom values preserved
         assert_eq!(cfg.cache_dir, std::path::PathBuf::from("/tmp/custom_cache"));

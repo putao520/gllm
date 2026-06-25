@@ -43,9 +43,9 @@ fn convert_tensor_to_f32(
 
     let mut cloned_meta = meta.clone();
 
-    apply_ffn_sparsity_heuristic(&cloned_meta, &mut converted_f32);
+    // #12 根治: apply_ffn_sparsity_heuristic 已删除 — 不可逆权重篡改违反 ARCH-BLOB-YIELDS-WEIGHT
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
-    deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
+    // #13 根治: deduplicate_q_heads_heuristic 已删除 — 不可逆权重篡改违反 ARCH-BLOB-YIELDS-WEIGHT
 
     // ARCH-ONNX-MATMUL-TRANSPOSE: ONNX MatMul weights are stored as [K, N]
     // (input_dim, output_dim), while gllm's GemmBias transB=true expects [N, K]
@@ -385,52 +385,6 @@ fn is_linear_weight(name: &str, shape: &[usize]) -> bool {
 /// Identifies and outright zeroes columns (or rows) in `gate_proj` and `up_proj` whose 
 /// L2-norm falls below `0.01 * mean_L2`. This structural nullification guarantees 
 /// `gate_out` falls to 0.0 and skips dependent computations within `MaskedGemm`.
-fn apply_ffn_sparsity_heuristic(meta: &TensorMeta, data: &mut [f32]) {
-    if !meta.name.contains("mlp.gate_proj") && !meta.name.contains("mlp.up_proj") {
-        return;
-    }
-
-    if meta.shape.len() != 2 {
-        return;
-    }
-
-    let rows = meta.shape[0]; 
-    let cols = meta.shape[1];
-
-    let mut l2_norms = Vec::with_capacity(rows);
-    let mut sum_l2 = 0.0;
-
-    for r in 0..rows {
-        let mut norm_sq = 0.0f32;
-        let start = r * cols;
-        for c in 0..cols {
-            let val = data[start + c];
-            norm_sq += val * val;
-        }
-        let norm = norm_sq.sqrt();
-        l2_norms.push(norm);
-        sum_l2 += norm;
-    }
-
-    let mean_l2 = sum_l2 / (rows as f32);
-    let threshold = 0.01 * mean_l2;
-
-    let mut pruned = 0;
-    for (r, norm) in l2_norms.iter().enumerate() {
-        if *norm < threshold {
-            let start = r * cols;
-            for c in 0..cols {
-                data[start + c] = 0.0;
-            }
-            pruned += 1;
-        }
-    }
-
-    if pruned > 0 {
-        log::info!("🧠 Structural Sparsity: Nullified {}/{} rows in {}.", pruned, rows, meta.name);
-    }
-}
-
 /// Applies NVIDIA 2:4 Structural Sparsity pattern on FFN matrices.
 /// Enforces the 2:4 sparsity pattern structurally directly inside the tensor buffer 
 /// at model load time to avoid any CPU overhead during the inference hot loop.
@@ -499,88 +453,6 @@ fn compress_24_sparsity_heuristic(meta: &mut TensorMeta, data: &mut Vec<f32>) ->
 /// Evaluates cosine similarity between attention heads in `q_proj`. 
 /// If `sim > 0.98`, the duplicate head is zeroed out to save VRAM and memory bandwidth,
 /// and metadata is generated (conceptually) to scale the runtime accumulator.
-fn deduplicate_q_heads_heuristic(meta: &TensorMeta, data: &mut [f32]) {
-    if !meta.name.contains("q_proj") && !meta.name.contains("query") {
-        return;
-    }
-
-    if meta.shape.len() != 2 {
-        return;
-    }
-
-    let rows = meta.shape[0]; 
-    let cols = meta.shape[1];
-
-    // Infer head_dim conservatively (usually 128 or 64). 
-    // If cols is not divisible by 128, try 64, else abort heuristic.
-    let head_dim = if cols.is_multiple_of(128) { 128 } else if cols.is_multiple_of(64) { 64 } else { return; };
-    let num_heads = cols / head_dim;
-
-    if num_heads <= 1 {
-        return;
-    }
-
-    // data layout: [rows, num_heads * head_dim]
-    // A head is a set of columns. 
-    // Let's compute the L2 norm for each head.
-    let mut head_norms = vec![0.0f32; num_heads];
-    for (h, norm_out) in head_norms.iter_mut().enumerate() {
-        let mut sq_norm = 0.0f32;
-        let start_col = h * head_dim;
-        for r in 0..rows {
-            let row_offset = r * cols;
-            for d in 0..head_dim {
-                let val = data[row_offset + start_col + d];
-                sq_norm += val * val;
-            }
-        }
-        *norm_out = sq_norm.sqrt();
-    }
-
-    let mut merged = 0;
-    let mut active = vec![true; num_heads];
-
-    for i in 0..num_heads {
-        if !active[i] || head_norms[i] < 1e-6 { continue; }
-        
-        for j in (i + 1)..num_heads {
-            if !active[j] || head_norms[j] < 1e-6 { continue; }
-
-            // Compute dot product between head i and head j
-            let mut dot = 0.0f32;
-            let start_col_i = i * head_dim;
-            let start_col_j = j * head_dim;
-
-            for r in 0..rows {
-                let row_offset = r * cols;
-                for d in 0..head_dim {
-                    let vi = data[row_offset + start_col_i + d];
-                    let vj = data[row_offset + start_col_j + d];
-                    dot += vi * vj;
-                }
-            }
-
-            let sim = dot / (head_norms[i] * head_norms[j]);
-            if sim > 0.98 {
-                // Head j is extremely similar to Head i.
-                // Zero out Head j to save memory bandwidth during loading to SRAM.
-                for r in 0..rows {
-                    let row_offset = r * cols;
-                    for d in 0..head_dim {
-                        data[row_offset + start_col_j + d] = 0.0;
-                    }
-                }
-                active[j] = false;
-                merged += 1;
-            }
-        }
-    }
-
-    if merged > 0 {
-        log::info!("🧠 GQA Head Deduplication: Merged {}/{} Q-heads in {}.", merged, num_heads, meta.name);
-    }
-}
-
 /// 量化配置的伴生张量信息
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompanionConfig {

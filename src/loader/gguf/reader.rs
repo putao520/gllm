@@ -640,6 +640,10 @@ impl TensorProvider for GgufReader {
         let idx = self.tensor_index.get(name)?;
         Some(self.tensors[*idx].dtype)
     }
+
+    fn weight_layout_hint(&self, _name: &str) -> Option<bool> {
+        Some(false) // GGUF stores weights in canonical [K,N] layout, no transpose needed
+    }
 }
 
 fn gguf_dtype_to_safetensors_dtype(dtype: GgmlDType) -> Dtype {

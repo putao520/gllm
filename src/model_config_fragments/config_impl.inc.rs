@@ -23,18 +23,14 @@ impl ModelConfig {
             }
         }
 
-        // Fallback: load from config.json file (HuggingFace standard format)
+        // Fallback: load from config.json file (HuggingFace standard format) — #14: uses cached config
         if config.is_none() {
-            if let Some(config_path) = loader.config_path() {
-                if config_path.exists() {
-                    let content = std::fs::read_to_string(config_path)?;
-                    let value: Value = serde_json::from_str(&content)?;
-                    let weight_dtype = loader
-                        .detect_weight_dtype()
-                        .ok()
-                        .flatten();
-                    config = Some(Self::from_value(manifest, &value, weight_dtype)?);
-                }
+            if let Some(value) = loader.config_json() {
+                let weight_dtype = loader
+                    .detect_weight_dtype()
+                    .ok()
+                    .flatten();
+                config = Some(Self::from_value(manifest, value, weight_dtype)?);
             }
         }
 

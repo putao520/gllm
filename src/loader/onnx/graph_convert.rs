@@ -136,9 +136,9 @@ impl<'a> ConvertContext<'a> {
             "MatMul" => self.convert_matmul(node)?,
             "Gemm" => self.convert_gemm(node)?,
             "Add" => self.convert_binary(node, Op::Add)?,
-            "Sub" => self.convert_binary(node, Op::Add)?,
+            "Sub" => self.convert_binary(node, Op::Sub)?,
             "Mul" => self.convert_binary(node, Op::Mul)?,
-            "Div" => self.convert_binary(node, Op::Mul)?,
+            "Div" => self.convert_binary(node, Op::Div)?,
             "Silu" => self.convert_unary(node, Op::Silu)?,
             "Gelu" => self.convert_unary(node, Op::Gelu)?,
             "Tanh" => self.convert_unary(node, Op::Tanh)?,
@@ -149,8 +149,13 @@ impl<'a> ConvertContext<'a> {
             "Transpose" => self.convert_transpose(node)?,
             "Gather" => self.convert_gather(node)?,
             "ReduceMean" => self.convert_reduce_mean(node)?,
-            "Pow" | "Sqrt" => self.convert_binary(node, Op::Mul)?,
-            "Relu" | "Sigmoid" | "Where" | "Clip" => self.convert_passthrough(node)?,
+            "Pow" => self.convert_binary(node, Op::Pow)?,
+            "Sqrt" => self.convert_unary(node, Op::Sqrt)?,
+            "Relu" => self.convert_unary(node, Op::Relu)?,
+            "Sigmoid" => self.convert_unary(node, Op::Sigmoid)?,
+            "Exp" => self.convert_unary(node, Op::Exp)?,
+            "Erf" => self.convert_unary(node, Op::Erf)?,
+            "Where" | "Clip" => self.convert_passthrough(node)?,
             _ => {
                 return Err(ConvertError::UnsupportedOp {
                     op_type: op_type.clone(),
@@ -1761,10 +1766,10 @@ mod tests {
         assert_eq!(mul.inputs.len(), 2, "Mul should have 2 inputs");
     }
 
-    // ── Passthrough ops ───────────────────────────────────────────────
+    // ── Unary ops (Relu, Sigmoid, Exp, Erf) ──────────────────────────────
 
     #[test]
-    fn convert_relu_passthrough() {
+    fn convert_relu_unary() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "relu_0".to_string(),
@@ -1776,16 +1781,20 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Passthrough does not add a new op; it maps output name to input tensor
+        // Relu now adds a dedicated Op::Relu
         assert_eq!(
             graph.ops.len(),
-            4,
-            "Relu passthrough should not add a new op"
+            5,
+            "Relu unary op should add one new op"
+        );
+        assert!(
+            graph.ops.iter().any(|op| matches!(&op.op, Op::Relu)),
+            "Graph should contain Op::Relu"
         );
     }
 
     #[test]
-    fn convert_sigmoid_passthrough() {
+    fn convert_sigmoid_unary() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sig_0".to_string(),
@@ -1799,8 +1808,12 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(
             graph.ops.len(),
-            4,
-            "Sigmoid passthrough should not add a new op"
+            5,
+            "Sigmoid unary op should add one new op"
+        );
+        assert!(
+            graph.ops.iter().any(|op| matches!(&op.op, Op::Sigmoid)),
+            "Graph should contain Op::Sigmoid"
         );
     }
 
@@ -2381,10 +2394,10 @@ mod tests {
         assert!(!graph.outputs.is_empty(), "Graph should have outputs");
     }
 
-    // ── Sub and Div map to Add/Mul ────────────────────────────────────
+    // ── Sub and Div mapping ─────────────────────────────────────────────
 
     #[test]
-    fn convert_sub_maps_to_add() {
+    fn convert_sub_maps_to_sub() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sub_0".to_string(),
@@ -2396,17 +2409,17 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Sub maps to Op::Add (2 Add ops: original add_qk + this one)
-        let add_count = graph
+        // Sub maps to Op::Sub (1 Sub op)
+        let sub_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Add))
+            .filter(|op| matches!(op.op, Op::Sub))
             .count();
-        assert_eq!(add_count, 2, "Sub should also produce Add op");
+        assert_eq!(sub_count, 1, "Sub should produce Op::Sub");
     }
 
     #[test]
-    fn convert_div_maps_to_mul() {
+    fn convert_div_maps_to_div_op() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "div_0".to_string(),
@@ -2418,18 +2431,18 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph
+        let div_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Div))
             .count();
-        assert_eq!(mul_count, 1, "Div should produce Mul op");
+        assert_eq!(div_count, 1, "Div should produce Op::Div");
     }
 
-    // ── Pow and Sqrt map to Mul ───────────────────────────────────────
+    // ── Pow and Sqrt map to correct ops ───────────────────────────────────
 
     #[test]
-    fn convert_pow_maps_to_mul() {
+    fn convert_pow_maps_to_pow_op() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "pow_0".to_string(),
@@ -2441,33 +2454,33 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph
+        let pow_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .count();
-        assert_eq!(mul_count, 1, "Pow should produce Mul op");
+        assert_eq!(pow_count, 1, "Pow should produce Op::Pow");
     }
 
     #[test]
-    fn convert_sqrt_maps_to_mul() {
+    fn convert_sqrt_maps_to_sqrt_op() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sqrt_0".to_string(),
             op_type: "Sqrt".to_string(),
             domain: String::new(),
-            inputs: vec!["q".to_string(), "k".to_string()],
+            inputs: vec!["q".to_string()],
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph
+        let sqrt_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Sqrt))
             .count();
-        assert_eq!(mul_count, 1, "Sqrt should produce Mul op");
+        assert_eq!(sqrt_count, 1, "Sqrt should produce Op::Sqrt");
     }
 
     // ── Multiple unsupported ops ──────────────────────────────────────
@@ -7023,7 +7036,7 @@ mod tests {
         }
     }
 
-    // ── Graph with only passthrough ops ───────────────────────────────
+    // ── Graph with Relu/Sigmoid/Clip ops ───────────────────────────────
 
     #[test]
     fn graph_with_only_passthrough_ops() {
@@ -7073,15 +7086,15 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(
             graph.ops.len(),
-            0,
-            "Passthrough-only graph should produce no ops"
+            2,
+            "Passthrough-only graph should produce Relu + Sigmoid ops (Clip is passthrough)"
         );
         // x is the only real tensor; passthrough ops map output names to its tensor ID
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x");
         assert!(x_tensor.is_some(), "x should exist as a tensor");
-        // c1 is not a separate tensor — it aliases x via tensor_map
-        // Only x exists in the tensor list since passthrough creates no new tensors
-        assert_eq!(graph.tensors.len(), 1, "Only input tensor should exist");
+        // c1 is not a separate tensor — it aliases via tensor_map (Clip is passthrough)
+        // r1 and s1 are separate tensors created by Relu/Sigmoid unary ops
+        assert_eq!(graph.tensors.len(), 3, "x + relu output + sigmoid output tensors");
     }
 
     // ── Reshape preserves input shape for output ──────────────────────
@@ -7658,10 +7671,10 @@ mod tests {
         assert_eq!(ann.axis, cloned.axis);
     }
 
-    // ── Pow and Sqrt produce binary Mul ops ───────────────────────────
+    // ── Pow and Sqrt produce correct binary ops ───────────────────────
 
     #[test]
-    fn pow_and_sqrt_both_map_to_mul() {
+    fn pow_and_sqrt_map_to_correct_ops() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "pow1".to_string(),
@@ -7681,12 +7694,10 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_ops: Vec<_> = graph
-            .ops
-            .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
-            .collect();
-        assert_eq!(mul_ops.len(), 2, "Pow and Sqrt should each produce Mul");
+        let pow_count = graph.ops.iter().filter(|op| matches!(op.op, Op::Pow)).count();
+        let sqrt_count = graph.ops.iter().filter(|op| matches!(op.op, Op::Sqrt)).count();
+        assert_eq!(pow_count, 1, "Pow should produce Op::Pow");
+        assert_eq!(sqrt_count, 1, "Sqrt should produce Op::Sqrt");
     }
 
     // ── SymDim::Concrete in weight initializer ────────────────────────
@@ -8799,7 +8810,7 @@ mod tests {
         }
     }
 
-    // ── Passthrough chain: Relu then Sigmoid then Where ───────────────
+    // ── Relu + Sigmoid + Where chain ───────────────
 
     #[test]
     fn triple_passthrough_chain_aliases_first_tensor() {
@@ -8849,10 +8860,10 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(
             graph.ops.len(),
-            0,
-            "Triple passthrough should produce zero ops"
+            2,
+            "Triple passthrough chain has Relu + Sigmoid ops (Where is passthrough)"
         );
-        // All three output names should alias to the same input tensor
+        // Relu and Sigmoid create separate tensors; Where aliases to the last one
         let x_tensor = graph
             .tensors
             .iter()
@@ -8860,8 +8871,8 @@ mod tests {
             .expect("x tensor should exist");
         assert_eq!(
             graph.tensors.len(),
-            1,
-            "Only x should exist as a real tensor"
+            3,
+            "x + r1_out + s1_out tensors (Where aliases s1_out)"
         );
         let _ = x_tensor;
     }
@@ -11482,7 +11493,7 @@ mod tests {
         assert_eq!(labels, &["gather", "ln", "proj"]);
     }
 
-    // ── Graph with passthrough then unary op ─────────────────────────────
+    // ── Graph with Relu unary then Gelu op ─────────────────────────────
 
     #[test]
     fn passthrough_then_unary_consumes_original_tensor() {
@@ -11510,14 +11521,14 @@ mod tests {
             .iter()
             .find(|op| op.label == "gelu_after")
             .expect("Should find gelu_after");
-        let qk_sum = graph
+        let relu_out = graph
             .tensors
             .iter()
-            .find(|t| t.name == "qk_sum")
-            .expect("qk_sum should exist");
+            .find(|t| t.name == "relu_out")
+            .expect("relu_out should exist");
         assert_eq!(
-            gelu.inputs[0], qk_sum.id,
-            "Gelu after Relu passthrough should consume qk_sum"
+            gelu.inputs[0], relu_out.id,
+            "Gelu after Relu should consume relu_out tensor"
         );
     }
 
@@ -14023,8 +14034,8 @@ mod tests {
     }
 
     #[test]
-    fn sub_then_div_maps_to_add_and_mul() {
-        // Arrange: Sub and Div both map to Add and Mul respectively
+    fn sub_then_div_maps_to_sub_and_div_ops() {
+        // Arrange: Sub and Div both map to Sub and Div respectively
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 8],
@@ -14059,19 +14070,19 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
 
-        // Assert: Sub → Op::Add, Div → Op::Mul
-        let add_ops: Vec<_> = graph
+        // Assert: Sub → Op::Sub, Div → Op::Div
+        let sub_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Add))
+            .filter(|op| matches!(op.op, Op::Sub))
             .collect();
-        let mul_ops: Vec<_> = graph
+        let div_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Div))
             .collect();
-        assert_eq!(add_ops.len(), 1, "Sub should map to Add");
-        assert_eq!(mul_ops.len(), 1, "Div should map to Mul");
+        assert_eq!(sub_ops.len(), 1, "Sub should map to Sub");
+        assert_eq!(div_ops.len(), 1, "Div should map to Div");
     }
 
     #[test]
@@ -14730,7 +14741,7 @@ mod tests {
     }
 
     #[test]
-    fn pow_maps_to_mul() {
+    fn pow_maps_to_pow_op() {
         // Arrange
         let onnx = build_graph_with_weight(
             "w",
@@ -14759,34 +14770,28 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
-        // Assert: Pow maps to Mul
-        let mul_ops: Vec<_> = graph
+        // Assert: Pow maps to Op::Pow
+        let pow_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .collect();
-        assert_eq!(mul_ops.len(), 1);
+        assert_eq!(pow_ops.len(), 1);
     }
 
     #[test]
-    fn sqrt_maps_to_mul() {
+    fn sqrt_maps_to_sqrt_op() {
         // Arrange
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 8],
             vec![
                 make_node("mm", "MatMul", vec!["x", "w"], vec!["h"]),
-                make_node("sqrt", "Sqrt", vec!["h", "dummy"], vec!["out"]),
+                make_node("sqrt", "Sqrt", vec!["h"], vec!["out"]),
             ],
             vec![
                 model::OnnxValueInfo {
                     name: "x".to_string(),
-                    value_type: None,
-                    doc_string: String::new(),
-                    metadata_props: HashMap::new(),
-                },
-                model::OnnxValueInfo {
-                    name: "dummy".to_string(),
                     value_type: None,
                     doc_string: String::new(),
                     metadata_props: HashMap::new(),
@@ -14798,13 +14803,13 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
-        // Assert: Sqrt maps to Mul
-        let mul_ops: Vec<_> = graph
+        // Assert: Sqrt maps to Sqrt
+        let sqrt_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Sqrt))
             .collect();
-        assert_eq!(mul_ops.len(), 1);
+        assert_eq!(sqrt_ops.len(), 1);
     }
 
     #[test]
@@ -14918,8 +14923,8 @@ mod tests {
     }
 
     #[test]
-    fn graph_with_only_passthrough_has_no_ops() {
-        // Arrange: Only passthrough ops (Relu, Sigmoid, Clip, Where)
+    fn graph_with_only_passthrough_has_relu_sigmoid_ops() {
+        // Arrange: Relu/Sigmoid produce ops, Clip/Where are passthrough
         let onnx = OnnxGraph {
             name: "test".to_string(),
             doc_string: String::new(),
@@ -14946,17 +14951,17 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
-        // Assert: passthrough ops don't add ops to the graph
+        // Assert: Relu + Sigmoid produce 2 ops (Clip/Where are passthrough)
         assert_eq!(
             graph.ops.len(),
-            0,
-            "Passthrough ops should not produce graph ops"
+            2,
+            "Relu + Sigmoid produce 2 ops (Clip/Where are passthrough)"
         );
     }
 
     #[test]
     fn passthrough_maps_output_to_input_tensor_id() {
-        // Arrange: Relu passthrough, then MatMul consuming the relu output
+        // Arrange: Relu unary, then MatMul consuming the relu output
         use super::super::tensor::OnnxTensor;
         let w = OnnxTensor::new(
             "w".to_string(),
@@ -14991,9 +14996,10 @@ mod tests {
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
-        // Assert: only MatMul op (Relu is passthrough)
-        assert_eq!(graph.ops.len(), 1);
-        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
+        // Assert: Relu + MatMul = 2 ops
+        assert_eq!(graph.ops.len(), 2, "Relu + MatMul = 2 ops");
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Gemm(..))));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Relu)));
     }
 
     #[test]
@@ -16885,21 +16891,21 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let add_count = graph
+        let sub_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Add))
+            .filter(|op| matches!(op.op, Op::Sub))
             .count();
         let mul_count = graph
             .ops
             .iter()
             .filter(|op| matches!(op.op, Op::Mul))
             .count();
-        assert_eq!(add_count, 2, "Original Add + Sub->Add = 2");
+        assert_eq!(sub_count, 1, "Sub produces 1 Sub op");
         assert_eq!(mul_count, 1, "Mul produces 1 Mul op");
     }
 
-    // ── Passthrough followed by RmsNorm ────────────────────────────────
+    // ── Relu unary followed by RmsNorm ────────────────────────────────
 
     #[test]
     fn relu_passthrough_then_rmsnorm() {
@@ -16934,16 +16940,16 @@ mod tests {
             .ops
             .iter()
             .find(|op| matches!(op.op, Op::RmsNorm(..)))
-            .expect("Should have RmsNorm after Relu passthrough");
-        // RmsNorm should consume the qk_sum tensor (passthrough maps relu_out -> qk_sum)
-        let qk_sum = graph
+            .expect("Should have RmsNorm after Relu unary");
+        // RmsNorm should consume the relu_out tensor (Relu produces a new tensor)
+        let relu_out = graph
             .tensors
             .iter()
-            .find(|t| t.name == "qk_sum")
-            .expect("qk_sum should exist");
+            .find(|t| t.name == "relu_out")
+            .expect("relu_out should exist");
         assert!(
-            norm.inputs.contains(&qk_sum.id),
-            "RmsNorm after Relu passthrough should consume the original tensor"
+            norm.inputs.contains(&relu_out.id),
+            "RmsNorm after Relu should consume relu_out tensor"
         );
     }
 
@@ -17443,10 +17449,10 @@ mod tests {
         assert_eq!(add.inputs.len(), 2);
     }
 
-    // ── Multiple passthroughs in chain ─────────────────────────────────
+    // ── Relu + Sigmoid + Clip chain ─────────────────────────────────
 
     #[test]
-    fn chain_relu_sigmoid_clip_all_passthrough() {
+    fn chain_relu_sigmoid_clip_relu_sigmoid_produce_ops() {
         let onnx = OnnxGraph {
             name: "chain_pass".to_string(),
             doc_string: String::new(),
@@ -17493,11 +17499,11 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(
             graph.ops.len(),
-            0,
-            "All passthrough chain should produce no ops"
+            2,
+            "Relu + Sigmoid produce 2 ops (Clip is passthrough)"
         );
-        // Only "x" should be registered as a tensor (passthroughs create no new tensors)
-        assert_eq!(graph.tensors.len(), 1, "Only input tensor should exist");
+        // x + r_out + s_out tensors (Clip aliases s_out)
+        assert_eq!(graph.tensors.len(), 3, "x + r_out + s_out tensors");
     }
 
     // ── GemmBias with transB swaps n and k ─────────────────────────────
@@ -18030,10 +18036,10 @@ mod tests {
         assert_eq!(graph.max_seq_len, 256);
     }
 
-    // ── Pow unary-like (2 inputs) maps to Mul ──────────────────────────
+    // ── Pow unary-like (2 inputs) maps to Pow op ──────────────────────────
 
     #[test]
-    fn pow_with_two_activations_maps_to_mul() {
+    fn pow_with_two_activations_maps_to_pow_op() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "pow1".to_string(),
@@ -18045,12 +18051,12 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph
+        let pow_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .count();
-        assert_eq!(mul_count, 1, "Pow should map to Mul");
+        assert_eq!(pow_count, 1, "Pow should map to Op::Pow");
     }
 
     // ── ReduceMean hidden dim comes from last concrete dimension ────────
@@ -18539,7 +18545,7 @@ mod tests {
         assert_eq!(ids.len(), unique.len(), "All tensor IDs should be unique");
     }
 
-    // ── Sigmoid passthrough then MatMul ────────────────────────────────
+    // ── Sigmoid unary then MatMul ────────────────────────────────
 
     #[test]
     fn sigmoid_passthrough_then_matmul() {
@@ -18588,8 +18594,9 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        assert_eq!(graph.ops.len(), 1, "Sigmoid passthrough + MatMul = 1 op");
-        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
+        assert_eq!(graph.ops.len(), 2, "Sigmoid + MatMul = 2 ops");
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Gemm(..))));
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Sigmoid)));
     }
 
     // ── Tanh output tensor different from input ─────────────────────────
@@ -21831,24 +21838,24 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_count = graph
+        let div_count = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Div))
             .count();
         let add_count = graph
             .ops
             .iter()
             .filter(|op| matches!(op.op, Op::Add))
             .count();
-        assert_eq!(mul_count, 1, "Div should produce 1 Mul");
+        assert_eq!(div_count, 1, "Div should produce 1 Div");
         assert_eq!(add_count, 2, "Should have 2 Add ops (original + new)");
     }
 
     // ── Pow as binary op with initializer ─────────────────────────────
 
     #[test]
-    fn pow_with_initializer_maps_to_mul() {
+    fn pow_with_initializer_maps_to_pow_op() {
         use super::super::tensor::OnnxTensor;
         let exp = OnnxTensor::new(
             "exp_val".to_string(),
@@ -21868,15 +21875,15 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        let mul_ops: Vec<_> = graph
+        let pow_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .collect();
-        assert_eq!(mul_ops.len(), 1, "Pow should produce 1 Mul op");
+        assert_eq!(pow_ops.len(), 1, "Pow should produce 1 Op::Pow");
     }
 
-    // ── Sigmoid passthrough followed by Silu ──────────────────────────
+    // ── Sigmoid unary followed by Silu ──────────────────────────
 
     #[test]
     fn sigmoid_passthrough_then_silu() {
@@ -21899,29 +21906,29 @@ mod tests {
         });
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Sigmoid is passthrough (no op), Silu adds 1 op
-        assert_eq!(graph.ops.len(), 5, "Should have 4 original + 1 Silu");
+        // Sigmoid produces an op, Silu adds 1 op
+        assert_eq!(graph.ops.len(), 6, "Should have 4 original + 1 Sigmoid + 1 Silu");
         let silu = graph
             .ops
             .iter()
             .find(|op| matches!(op.op, Op::Silu))
             .expect("Should have Silu op");
-        // Silu consumes the same tensor as qk_sum (passthrough)
-        let qk_sum = graph
+        // Silu consumes the sig_out tensor (Sigmoid produces a new tensor)
+        let sig_out = graph
             .tensors
             .iter()
-            .find(|t| t.name == "qk_sum")
-            .expect("qk_sum should exist");
+            .find(|t| t.name == "sig_out")
+            .expect("sig_out should exist");
         assert_eq!(
-            silu.inputs[0], qk_sum.id,
-            "Silu should consume qk_sum via passthrough"
+            silu.inputs[0], sig_out.id,
+            "Silu should consume sig_out tensor (Sigmoid produces new tensor)"
         );
     }
 
-    // ── Graph with only passthrough ops produces no new ops ───────────
+    // ── Graph with only passthrough ops: Relu/Sigmoid produce ops ───────────
 
     #[test]
-    fn graph_only_passthrough_ops_no_new_ops() {
+    fn graph_only_passthrough_ops_relu_sigmoid_produce_ops() {
         let mut onnx = make_test_graph();
         // Remove existing nodes, add only passthrough ops
         onnx.nodes.clear();
@@ -21953,8 +21960,8 @@ mod tests {
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(
             graph.ops.len(),
-            0,
-            "All passthrough ops should produce 0 ops"
+            2,
+            "Relu + Sigmoid produce 2 ops (Clip is passthrough)"
         );
     }
 
@@ -23574,18 +23581,22 @@ mod tests {
         };
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        // Only MatMul produces an op; Relu/Sigmoid are passthrough
-        assert_eq!(graph.ops.len(), 1, "passthrough + MatMul = 1 op");
-        let mm = &graph.ops[0];
-        // Input tensor of MatMul should be the original x tensor (passthrough preserves tensor id)
-        let x_tensor = graph
+        // Relu + Sigmoid + MatMul = 3 ops
+        assert_eq!(graph.ops.len(), 3, "Relu + Sigmoid + MatMul = 3 ops");
+        let mm = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op, Op::Gemm(..)))
+            .expect("MatMul op");
+        // MatMul input should be s_out (Sigmoid creates a new tensor)
+        let s_out = graph
             .tensors
             .iter()
-            .find(|t| t.name == "x")
-            .expect("x tensor");
+            .find(|t| t.name == "s_out")
+            .expect("s_out tensor");
         assert_eq!(
-            mm.inputs[0], x_tensor.id,
-            "MatMul input should be x tensor id (passthrough)"
+            mm.inputs[0], s_out.id,
+            "MatMul input should be s_out tensor id (Sigmoid produces new tensor)"
         );
     }
 
@@ -24145,13 +24156,13 @@ mod tests {
             .iter()
             .find(|op| op.label == "sub1")
             .expect("sub1 op");
-        assert!(matches!(sub_op.op, Op::Add), "Sub should produce Add");
+        assert!(matches!(sub_op.op, Op::Sub), "Sub should produce Sub");
         let div_op = graph
             .ops
             .iter()
             .find(|op| op.label == "div1")
             .expect("div1 op");
-        assert!(matches!(div_op.op, Op::Mul), "Div should produce Mul");
+        assert!(matches!(div_op.op, Op::Div), "Div should produce Div");
     }
 
     // @trace REQ-LOADER-006 [level:unit]
@@ -24747,13 +24758,13 @@ mod tests {
     // @trace REQ-LOADER-006 [level:unit]
     // Verifies that Sqrt op maps to Mul (same as Pow).
     #[test]
-    fn sqrt_op_maps_to_mul() {
+    fn sqrt_op_maps_to_sqrt_op() {
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sqrt1".to_string(),
             op_type: "Sqrt".to_string(),
             domain: String::new(),
-            inputs: vec!["qk_sum".to_string(), "hidden".to_string()],
+            inputs: vec!["qk_sum".to_string()],
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
@@ -24765,8 +24776,8 @@ mod tests {
             .find(|op| op.label == "sqrt1")
             .expect("Should have sqrt1 op");
         assert!(
-            matches!(sqrt_op.op, Op::Mul),
-            "Sqrt should map to Mul op"
+            matches!(sqrt_op.op, Op::Sqrt),
+            "Sqrt should map to Sqrt op"
         );
     }
 
@@ -25012,8 +25023,8 @@ mod tests {
     }
 
     #[test]
-    fn convert_pow_maps_to_mul_op_kind() {
-        // Arrange: Pow maps to Mul at the op level
+    fn convert_pow_maps_to_pow_op_kind() {
+        // Arrange: Pow maps to Pow at the op level
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "pow_node".to_string(),
@@ -25026,18 +25037,18 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Assert: Pow should produce a Mul op (not an error)
-        let mul_ops: Vec<_> = graph
+        // Assert: Pow should produce a Pow op (not an error)
+        let pow_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .collect();
-        assert!(mul_ops.len() >= 1, "Pow should produce at least one Mul op");
+        assert!(pow_ops.len() >= 1, "Pow should produce at least one Pow op");
     }
 
     #[test]
-    fn convert_clip_then_relu_chain_both_passthrough() {
-        // Arrange: Both Clip and Relu are passthrough, so they add no ops
+    fn convert_clip_then_relu_chain_clip_passthrough_relu_unary() {
+        // Arrange: Clip is passthrough, Relu adds unary op
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "clip1".to_string(),
@@ -25058,11 +25069,11 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Assert: 4 base ops (Gather + 2 MatMul + Add), no additional ops from Clip+Relu
+        // Assert: 4 base ops (Gather + 2 MatMul + Add) + 1 Relu op
         assert_eq!(
             graph.ops.len(),
-            4,
-            "Clip and Relu passthrough should not add ops"
+            5,
+            "Clip passthrough + Relu unary: 4 base + 1 Relu"
         );
     }
 
@@ -26926,8 +26937,8 @@ mod tests {
 
     // @trace TEST-GC-806 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
-    fn graph_with_single_relu_node_has_no_ops() {
-        // Arrange: Graph with only a Relu (passthrough) node produces no ops in CompilerGraph
+    fn graph_with_single_relu_node_has_one_op() {
+        // Arrange: Graph with only a Relu (unary) node produces 1 op in CompilerGraph
         let onnx = OnnxGraph {
             name: "relu_only".to_string(),
             doc_string: String::new(),
@@ -26960,18 +26971,18 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: passthrough maps output to input tensor id, no new op added
+        // Assert: Relu adds unary op
         assert_eq!(
             graph.ops.len(),
-            0,
-            "Single Relu passthrough should produce zero ops"
+            1,
+            "Single Relu should produce 1 op"
         );
     }
 
     // @trace TEST-GC-807 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
-    fn binary_sub_and_div_chain_produces_add_and_mul_ops() {
-        // Arrange: Sub followed by Div — both map to non-obvious Ops
+    fn binary_sub_and_div_chain_produces_sub_and_div_ops() {
+        // Arrange: Sub followed by Div — both map to Sub and Div respectively
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sub1".to_string(),
@@ -26992,15 +27003,15 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
-        // Assert: Sub maps to Op::Add, Div maps to Op::Mul
+        // Assert: Sub maps to Op::Sub, Div maps to Op::Div
         let sub_op = graph
             .ops
             .iter()
             .find(|op| op.label == "sub1")
             .expect("sub1 op should exist");
         assert!(
-            matches!(sub_op.op, Op::Add),
-            "Sub should produce Op::Add"
+            matches!(sub_op.op, Op::Sub),
+            "Sub should produce Op::Sub"
         );
         let div_op = graph
             .ops
@@ -27008,8 +27019,8 @@ mod tests {
             .find(|op| op.label == "div1")
             .expect("div1 op should exist");
         assert!(
-            matches!(div_op.op, Op::Mul),
-            "Div should produce Op::Mul"
+            matches!(div_op.op, Op::Div),
+            "Div should produce Op::Div"
         );
     }
 
@@ -28030,33 +28041,33 @@ mod tests {
 
     // @trace TEST-GC-835 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
-    fn sqrt_single_node_maps_to_mul() {
-        // Arrange: Sqrt is mapped to Mul via convert_binary
+    fn sqrt_single_node_maps_to_sqrt_op() {
+        // Arrange: Sqrt is mapped to Sqrt via convert_unary
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "sqrt1".to_string(),
             op_type: "Sqrt".to_string(),
             domain: String::new(),
-            inputs: vec!["hidden".to_string(), "hidden".to_string()],
+            inputs: vec!["hidden".to_string()],
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: Sqrt should produce a Mul op
-        let mul_ops: Vec<_> = graph
+        // Assert: Sqrt should produce a Sqrt op
+        let sqrt_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Sqrt))
             .collect();
-        assert!(mul_ops.len() >= 1, "Sqrt should map to at least one Mul op");
+        assert!(sqrt_ops.len() >= 1, "Sqrt should map to at least one Sqrt op");
     }
 
     // @trace TEST-GC-836 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
-    fn div_maps_to_mul_op_kind() {
-        // Arrange: Div maps to Op::Mul via convert_binary
+    fn div_maps_to_div_op_kind() {
+        // Arrange: Div maps to Op::Div via convert_binary
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "div1".to_string(),
@@ -28069,14 +28080,14 @@ mod tests {
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: Div should produce Mul op kind
+        // Assert: Div should produce Div op kind
         let div_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op, Op::Mul) && op.label == "div1");
+            .find(|op| matches!(op.op, Op::Div) && op.label == "div1");
         assert!(
             div_op.is_some(),
-            "Div node should produce Mul op with matching label"
+            "Div node should produce Div op with matching label"
         );
     }
 
@@ -28287,7 +28298,7 @@ mod tests {
     // @trace TEST-GC-841 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn convert_matmul_after_passthrough_preserves_shape() {
-        // Arrange: Sigmoid (passthrough) followed by MatMul — the MatMul should still get correct tensor id
+        // Arrange: Sigmoid (unary) followed by MatMul — the MatMul should still get correct tensor id
         use super::super::tensor::OnnxTensor;
         let w = OnnxTensor::new(
             "pw".to_string(),
@@ -28339,13 +28350,14 @@ mod tests {
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: should have 1 op (MatMul) — Sigmoid is passthrough and adds no op
+        // Assert: Sigmoid + MatMul = 2 ops
         assert_eq!(
             graph.ops.len(),
-            1,
-            "Sigmoid passthrough + MatMul should produce 1 op"
+            2,
+            "Sigmoid + MatMul = 2 ops"
         );
-        if let Op::Gemm(spec) = &graph.ops[0].op {
+        let gemm_op = graph.ops.iter().find(|op| matches!(op.op, Op::Gemm(..))).expect("Gemm op");
+        if let Op::Gemm(spec) = &gemm_op.op {
             let n = &spec.n;
             let k = &spec.k;
             assert_eq!(*n, 32, "MatMul n should be 64 from weight shape [64, 32]");
@@ -28523,8 +28535,8 @@ mod tests {
 
     // @trace TEST-GC-845 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
-    fn pow_single_node_maps_to_mul() {
-        // Arrange: Pow is mapped to Mul via convert_binary
+    fn pow_single_node_maps_to_pow_op() {
+        // Arrange: Pow is mapped to Op::Pow via convert_binary
         let mut onnx = make_test_graph();
         onnx.nodes.push(OnnxNode {
             name: "pow1".to_string(),
@@ -28537,14 +28549,14 @@ mod tests {
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: Pow should produce Mul op kind
+        // Assert: Pow should produce Op::Pow
         let pow_op = graph
             .ops
             .iter()
-            .find(|op| matches!(op.op, Op::Mul) && op.label == "pow1");
+            .find(|op| matches!(op.op, Op::Pow) && op.label == "pow1");
         assert!(
             pow_op.is_some(),
-            "Pow node should produce Mul op with label 'pow1'"
+            "Pow node should produce Op::Pow with label 'pow1'"
         );
     }
 
@@ -29105,7 +29117,7 @@ mod tests {
     // @trace TEST-GC-856 [req:REQ-LOADER-ONNX] [level:unit]
     #[test]
     fn sigmoid_passthrough_output_maps_to_input_tensor() {
-        // Arrange: Sigmoid passthrough — output should alias the same tensor as input, no new op
+        // Arrange: Sigmoid unary — produces an op
         let onnx = OnnxGraph {
             name: "sigmoid_alias".into(),
             doc_string: String::new(),
@@ -29133,12 +29145,13 @@ mod tests {
         let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: no ops added (passthrough)
+        // Assert: Sigmoid produces 1 op (unary)
         assert_eq!(
             graph.ops.len(),
-            0,
-            "Sigmoid passthrough should produce zero ops"
+            1,
+            "Sigmoid should produce 1 op"
         );
+        assert!(graph.ops.iter().any(|op| matches!(op.op, Op::Sigmoid)));
     }
 
     // @trace TEST-GC-857 [req:REQ-LOADER-ONNX] [level:unit]
@@ -29831,7 +29844,7 @@ mod tests {
         );
     }
 
-    // ── 三层 passthrough 链后接真实算子 ─────────────────────────────
+    // ── Relu + Sigmoid + Clip 链后接 MatMul ─────────────
 
     #[test]
     fn triple_passthrough_then_real_op() {
@@ -29898,22 +29911,26 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: 只有 MatMul 产生 op；三层 passthrough 全部跳过
+        // Assert: Relu + Sigmoid + MatMul = 3 ops (Clip is passthrough)
         assert_eq!(
             graph.ops.len(),
-            1,
-            "Triple passthrough should not produce any ops"
+            3,
+            "Relu + Sigmoid + MatMul = 3 ops (Clip is passthrough)"
         );
-        assert!(matches!(graph.ops[0].op, Op::Gemm(..)));
-        // MatMul 应消费原始 "x" tensor（所有 passthrough 都 alias 到 x）
-        let x_tensor = graph
+        // MatMul should consume the Sigmoid output tensor 's' (Clip aliases it)
+        let s_tensor = graph
             .tensors
             .iter()
-            .find(|t| t.name == "x")
-            .expect("x tensor should exist");
+            .find(|t| t.name == "s")
+            .expect("s tensor should exist");
+        let gemm_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op, Op::Gemm(..)))
+            .expect("Gemm op");
         assert_eq!(
-            graph.ops[0].inputs[0], x_tensor.id,
-            "MatMul should consume original 'x' tensor through passthrough chain"
+            gemm_op.inputs[0], s_tensor.id,
+            "MatMul should consume sigmoid output tensor 's'"
         );
     }
 
@@ -30582,11 +30599,11 @@ mod tests {
         );
     }
 
-    // ── 2. Sigmoid passthrough 输出别名到输入 tensor_id ──────────────
+    // ── 2. Sigmoid unary 产生新 tensor，MatMul 消费 ──────────────
 
     #[test]
     fn sigmoid_output_aliases_input_tensor_id() {
-        // Arrange: Sigmoid 节点为 passthrough，输出应映射到输入 tensor
+        // Arrange: Sigmoid unary op produces a new tensor, MatMul should consume it
         use super::super::tensor::OnnxTensor;
         let weight = OnnxTensor::new(
             "sw".to_string(),
@@ -30633,28 +30650,28 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        // Assert: Sigmoid 输出 "sig_out" 应与 "act" 共享同一 tensor_id
-        let act_tensor = graph
+        // Assert: Sigmoid produces new tensor; MatMul should consume sig_out
+        let sig_out_tensor = graph
             .tensors
             .iter()
-            .find(|t| t.name == "act")
-            .expect("act tensor should exist");
+            .find(|t| t.name == "sig_out")
+            .expect("sig_out tensor should exist");
         let mm_op = graph
             .ops
             .iter()
             .find(|op| op.label == "mm_sig")
             .expect("MatMul op should exist");
         assert_eq!(
-            mm_op.inputs[0], act_tensor.id,
-            "Sigmoid passthrough should alias output to input tensor"
+            mm_op.inputs[0], sig_out_tensor.id,
+            "Sigmoid produces new tensor; MatMul should consume sig_out"
         );
     }
 
-    // ── 3. Relu passthrough 输出别名到输入 tensor_id ──────────────
+    // ── 3. Relu unary 产生新 tensor，MatMul 消费 ──────────────
 
     #[test]
     fn relu_output_aliases_input_tensor_id() {
-        // Arrange: Relu 节点为 passthrough，验证输出映射到输入 tensor
+        // Arrange: Relu unary op produces a new tensor, MatMul should consume it
         use super::super::tensor::OnnxTensor;
         let weight = OnnxTensor::new(
             "rw".to_string(),
@@ -30701,20 +30718,20 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
-        // Assert: Relu passthrough 后 MatMul 消费原始输入 tensor
-        let input_tensor = graph
+        // Assert: Relu produces new tensor; MatMul should consume relu_out
+        let relu_out_tensor = graph
             .tensors
             .iter()
-            .find(|t| t.name == "input_act")
-            .expect("input_act tensor should exist");
+            .find(|t| t.name == "relu_out")
+            .expect("relu_out tensor should exist");
         let mm_op = graph
             .ops
             .iter()
             .find(|op| op.label == "relu_mm")
             .expect("MatMul after Relu should exist");
         assert_eq!(
-            mm_op.inputs[0], input_tensor.id,
-            "Relu passthrough should alias output to input tensor"
+            mm_op.inputs[0], relu_out_tensor.id,
+            "Relu produces new tensor; MatMul should consume relu_out"
         );
     }
 
@@ -30769,15 +30786,15 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
-        // Assert: Div 的 Op 应为 Mul（Div 映射到 Mul）
+        // Assert: Div 的 Op 应为 Div
         let div_op = graph
             .ops
             .iter()
             .find(|op| op.label == "div_op")
             .expect("Div op should exist");
         assert!(
-            matches!(div_op.op, Op::Mul),
-            "Div should map to Op::Mul"
+            matches!(div_op.op, Op::Div),
+            "Div should map to Op::Div"
         );
         // 输出 tensor 名称应为 "div_result"
         let div_result = graph
@@ -30795,7 +30812,7 @@ mod tests {
 
     #[test]
     fn sub_output_tensor_has_correct_name_and_shape() {
-        // Arrange: Sub 映射到 Add Op，验证输出 tensor
+        // Arrange: Sub 映射到 Sub Op，验证输出 tensor
         use super::super::tensor::OnnxTensor;
         let w = OnnxTensor::new(
             "sub_w".to_string(),
@@ -30842,15 +30859,15 @@ mod tests {
         // Act
         let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
-        // Assert: Sub 映射到 Add Op
+        // Assert: Sub 映射到 Sub Op
         let sub_op = graph
             .ops
             .iter()
             .find(|op| op.label == "sub_op")
             .expect("Sub op should exist");
         assert!(
-            matches!(sub_op.op, Op::Add),
-            "Sub should map to Op::Add"
+            matches!(sub_op.op, Op::Sub),
+            "Sub should map to Op::Sub"
         );
         // 输出 tensor 名称为 "sub_result"
         let sub_result = graph
@@ -31698,22 +31715,22 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        // Assert: Sub maps to Add Op
-        let add_ops: Vec<_> = graph
+        // Assert: Sub maps to Sub Op
+        let sub_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Add))
+            .filter(|op| matches!(op.op, Op::Sub))
             .collect();
-        assert!(add_ops.len() >= 1, "Sub should be mapped to Add Op");
+        assert!(sub_ops.len() >= 1, "Sub should be mapped to Sub Op");
         let softmax_op = graph
             .ops
             .iter()
             .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
-        let sub_op = add_ops[0];
+        let sub_op = sub_ops[0];
         assert_eq!(
             softmax_op.inputs[0], sub_op.outputs[0],
-            "Softmax should consume Sub (Add-opkind) output"
+            "Softmax should consume Sub output"
         );
     }
 
@@ -31858,11 +31875,11 @@ mod tests {
         );
     }
 
-    // ── 21. Pow 输出接 Add 验证 Mul Op 映射链 ──────────────────
+    // ── 21. Pow 输出接 Add 验证 Pow Op 映射链 ──────────────────
 
     #[test]
     fn pow_output_feeds_into_add() {
-        // Arrange: Gather → Pow (mapped to Mul) → Add
+        // Arrange: Gather → Pow (mapped to Op::Pow) → Add
         use super::super::tensor::OnnxTensor;
         let table = OnnxTensor::new(
             "tbl".to_string(),
@@ -31902,13 +31919,13 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
-        // Assert: Pow maps to Mul, then Add
-        let mul_ops: Vec<_> = graph
+        // Assert: Pow maps to Op::Pow, then Add
+        let pow_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .collect();
-        assert!(mul_ops.len() >= 1, "Pow should be mapped to Mul Op");
+        assert!(pow_ops.len() >= 1, "Pow should be mapped to Op::Pow");
         let add_ops: Vec<_> = graph
             .ops
             .iter()
@@ -31916,8 +31933,8 @@ mod tests {
             .collect();
         assert!(add_ops.len() >= 1, "Add should exist");
         assert_eq!(
-            add_ops[0].inputs[0], mul_ops[0].outputs[0],
-            "Add should consume Pow (Mul-mapped) output"
+            add_ops[0].inputs[0], pow_ops[0].outputs[0],
+            "Add should consume Pow output"
         );
     }
 
@@ -31966,21 +31983,21 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
-        // Assert: Div maps to Mul Op
-        let mul_ops: Vec<_> = graph
+        // Assert: Div maps to Div Op
+        let div_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Div))
             .collect();
-        assert!(mul_ops.len() >= 1, "Div should be mapped to Mul Op");
+        assert!(div_ops.len() >= 1, "Div should be mapped to Div Op");
         let softmax_op = graph
             .ops
             .iter()
             .find(|op| matches!(op.op, Op::Softmax))
             .expect("Softmax");
         assert_eq!(
-            softmax_op.inputs[0], mul_ops[0].outputs[0],
-            "Softmax should consume Div (Mul-mapped) output"
+            softmax_op.inputs[0], div_ops[0].outputs[0],
+            "Softmax should consume Div output"
         );
     }
 
@@ -32118,7 +32135,7 @@ mod tests {
 
     #[test]
     fn sqrt_output_feeds_into_add() {
-        // Arrange: MatMul → Sqrt (maps to Mul) → Add with bias
+        // Arrange: MatMul → Sqrt (maps to Sqrt) → Add with bias
         use super::super::tensor::OnnxTensor;
         let w = OnnxTensor::new(
             "w".to_string(),
@@ -32140,7 +32157,7 @@ mod tests {
             doc_string: String::new(),
             nodes: vec![
                 make_node("mm1", "MatMul", vec!["x", "w"], vec!["proj"]),
-                make_node("sq1", "Sqrt", vec!["proj", "proj"], vec!["rooted"]),
+                make_node("sq1", "Sqrt", vec!["proj"], vec!["rooted"]),
                 make_node("a1", "Add", vec!["rooted", "bias"], vec!["out"]),
             ],
             inputs: vec![model::OnnxValueInfo {
@@ -32158,13 +32175,13 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
-        // Assert: Sqrt maps to Mul Op
-        let mul_ops: Vec<_> = graph
+        // Assert: Sqrt maps to Sqrt Op
+        let sqrt_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Sqrt))
             .collect();
-        assert!(mul_ops.len() >= 1, "Sqrt should be mapped to Mul Op");
+        assert!(sqrt_ops.len() >= 1, "Sqrt should be mapped to Sqrt Op");
         let add_ops: Vec<_> = graph
             .ops
             .iter()
@@ -32172,8 +32189,8 @@ mod tests {
             .collect();
         assert!(add_ops.len() >= 1, "Add should exist");
         assert_eq!(
-            add_ops[0].inputs[0], mul_ops[0].outputs[0],
-            "Add should consume Sqrt (Mul-mapped) output"
+            add_ops[0].inputs[0], sqrt_ops[0].outputs[0],
+            "Add should consume Sqrt output"
         );
     }
 
@@ -32468,11 +32485,11 @@ mod tests {
         );
     }
 
-    // ── 30. Gather+Pow+Sqrt 三节点验证 Pow 和 Sqrt 均 Mul 映射 ─────
+    // ── 30. Gather+Pow+Sqrt 三节点验证 Pow 和 Sqrt 正确映射 ─────
 
     #[test]
-    fn gather_pow_sqrt_chain_both_map_to_mul() {
-        // Arrange: Gather → Pow (→Mul) → Sqrt (→Mul)
+    fn gather_pow_sqrt_chain_maps_to_correct_ops() {
+        // Arrange: Gather → Pow (→Op::Pow) → Sqrt (→Op::Sqrt)
         use super::super::tensor::OnnxTensor;
         let table = OnnxTensor::new(
             "tbl".to_string(),
@@ -32488,7 +32505,7 @@ mod tests {
             nodes: vec![
                 make_node("g1", "Gather", vec!["tbl", "ids"], vec!["e"]),
                 make_node("p1", "Pow", vec!["e", "e"], vec!["sq"]),
-                make_node("s1", "Sqrt", vec!["sq", "sq"], vec!["root"]),
+                make_node("s1", "Sqrt", vec!["sq"], vec!["root"]),
             ],
             inputs: vec![model::OnnxValueInfo {
                 name: "ids".to_string(),
@@ -32505,21 +32522,17 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Pow and Sqrt both map to Mul Op
-        let mul_ops: Vec<_> = graph
-            .ops
-            .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
-            .collect();
+        // Assert: Pow maps to Op::Pow, Sqrt maps to Op::Sqrt
+        let pow_count = graph.ops.iter().filter(|op| matches!(op.op, Op::Pow)).count();
+        let sqrt_count = graph.ops.iter().filter(|op| matches!(op.op, Op::Sqrt)).count();
+        assert_eq!(pow_count, 1, "Pow should produce one Op::Pow");
+        assert_eq!(sqrt_count, 1, "Sqrt should produce one Op::Sqrt");
+        // Sqrt should consume Pow's output
+        let pow_op = graph.ops.iter().find(|op| matches!(op.op, Op::Pow)).expect("Pow op should exist");
+        let sqrt_op = graph.ops.iter().find(|op| matches!(op.op, Op::Sqrt)).expect("Sqrt op should exist");
         assert_eq!(
-            mul_ops.len(),
-            2,
-            "Pow and Sqrt should each produce one Mul op"
-        );
-        // Second Mul should consume first Mul's output
-        assert_eq!(
-            mul_ops[1].inputs[0], mul_ops[0].outputs[0],
-            "Sqrt (second Mul) should consume Pow (first Mul) output"
+            sqrt_op.inputs[0], pow_op.outputs[0],
+            "Sqrt should consume Pow output"
         );
     }
 
@@ -32844,12 +32857,12 @@ mod tests {
         );
     }
 
-    // ── 40. Gather -> Relu (passthrough) -> MatMul chain ────────────────
+    // ── 40. Gather -> Relu (unary) -> MatMul chain ────────────────
 
     #[test]
     fn gather_relu_passthrough_feeds_into_matmul() {
-        // Arrange: Gather -> Relu (passthrough) -> MatMul
-        // Relu output aliases input (passthrough), so MatMul should consume Gather output
+        // Arrange: Gather -> Relu (unary) -> MatMul
+        // Relu produces a new tensor, so MatMul consumes Relu output
         use super::super::tensor::OnnxTensor;
         let emb = OnnxTensor::new(
             "emb".to_string(),
@@ -32889,7 +32902,7 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Relu is passthrough (no separate op), so only Gather + Gemm ops
+        // Assert: Relu adds unary op, so Gather + Relu + Gemm = 3 ops
         let gather_op = graph
             .ops
             .iter()
@@ -32900,23 +32913,30 @@ mod tests {
             .iter()
             .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm op (MatMul)");
-        // MatMul should consume Gather output (Relu passthrough aliases the tensor)
+        let relu_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op, Op::Relu))
+            .expect("Relu op");
+        // MatMul should consume Relu output (Relu adds unary op)
         assert_eq!(
-            gemm_op.inputs[0], gather_op.outputs[0],
-            "MatMul should consume Gather output because Relu is passthrough"
+            gemm_op.inputs[0], relu_op.outputs[0],
+            "MatMul should consume Relu output"
         );
+        let _ = gather_op;
         assert_eq!(
             graph.ops.len(),
-            2,
-            "Should have 2 ops (Gather + MatMul), Relu is passthrough"
+            3,
+            "Should have 3 ops (Gather + Relu + MatMul)"
         );
     }
 
-    // ── 41. Gather -> Sigmoid (passthrough) -> Gemm chain ───────────────
+    // ── 41. Gather -> Sigmoid (unary) -> Gemm chain ───────────────
 
     #[test]
     fn gather_sigmoid_passthrough_feeds_into_gemm() {
-        // Arrange: Gather -> Sigmoid (passthrough) -> Gemm
+        // Arrange: Gather -> Sigmoid (unary) -> Gemm
+        // Sigmoid produces a new tensor, so Gemm consumes Sigmoid output
         use super::super::tensor::OnnxTensor;
         let table = OnnxTensor::new(
             "tbl".to_string(),
@@ -32956,7 +32976,7 @@ mod tests {
         };
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
-        // Assert: Sigmoid passthrough, Gemm should consume Gather output directly
+        // Assert: Sigmoid adds unary op, Gemm should consume Sigmoid output
         let gather_op = graph
             .ops
             .iter()
@@ -32967,14 +32987,20 @@ mod tests {
             .iter()
             .find(|op| matches!(op.op, Op::Gemm(..)))
             .expect("Gemm");
+        let sigmoid_op = graph
+            .ops
+            .iter()
+            .find(|op| matches!(op.op, Op::Sigmoid))
+            .expect("Sigmoid op");
         assert_eq!(
-            gemm_op.inputs[0], gather_op.outputs[0],
-            "Gemm should consume Gather output (Sigmoid is passthrough)"
+            gemm_op.inputs[0], sigmoid_op.outputs[0],
+            "Gemm should consume Sigmoid output"
         );
+        let _ = gather_op;
         assert_eq!(
             graph.ops.len(),
-            2,
-            "Should have 2 ops (Gather + Gemm), Sigmoid is passthrough"
+            3,
+            "Should have 3 ops (Gather + Sigmoid + Gemm)"
         );
     }
 
@@ -34194,13 +34220,13 @@ mod tests {
         );
     }
 
-    // ── 68. Erf returns UnsupportedOp error ──────────────────────────────
+    // ── 68. Erf converts as unary Op::Erf ──────────────────────────────
 
     #[test]
-    fn erf_returns_unsupported_op_error() {
-        // Arrange: Erf (Gaussian error function) is not in the supported ops list
+    fn erf_converts_as_unary_op() {
+        // Arrange: Erf (Gaussian error function) converts as a unary op
         let onnx = OnnxGraph {
-            name: "erf_err".to_string(),
+            name: "erf_op".to_string(),
             doc_string: String::new(),
             nodes: vec![make_node("erf1", "Erf", vec!["x"], vec!["y"])],
             inputs: vec![model::OnnxValueInfo {
@@ -34219,12 +34245,9 @@ mod tests {
         // Act
         let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
-        assert!(result.is_err(), "Erf should fail conversion");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Erf"),
-            "Expected UnsupportedOp for Erf, got: {err:?}"
-        );
+        assert!(result.is_ok(), "Erf should convert successfully, got: {:?}", result.err());
+        let graph = result.unwrap();
+        assert!(graph.ops.iter().any(|op| matches!(&op.op, Op::Erf)), "Graph should contain Op::Erf");
     }
 
     // ── 69. Cast returns UnsupportedOp error ─────────────────────────────
@@ -35625,11 +35648,11 @@ mod tests {
         );
     }
 
-    // ── 97. Exp op returns unsupported error (not silently dropped) ──────
+    // ── 97. Exp op converts as unary op ──────────────────────────────────────
 
     #[test]
-    fn exp_op_returns_unsupported_error_not_silently_dropped() {
-        // Arrange: Exp is not in the supported op list and should produce UnsupportedOp
+    fn exp_op_converts_as_unary_op() {
+        // Arrange: Exp converts as a unary elementwise op
         let onnx = OnnxGraph {
             name: "exp_test".to_string(),
             doc_string: String::new(),
@@ -35647,23 +35670,19 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        // Act
-        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
-        // Assert
-        let msg = err.to_string();
-        assert!(msg.contains("Exp"), "Error must mention Exp op_type: {msg}");
-        assert!(
-            msg.contains("exp_node"),
-            "Error must mention node name: {msg}"
-        );
+        // Act & Assert: Exp should convert successfully
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
+        assert!(result.is_ok(), "Exp should convert successfully, got: {:?}", result.err());
+        let graph = result.unwrap();
+        assert!(graph.ops.iter().any(|op| matches!(&op.op, Op::Exp)), "Graph should contain Op::Exp");
     }
 
-    // ── 98. Pow with initializer second input converts to Mul binary op ─
+    // ── 98. Pow with initializer second input converts to Pow binary op ─
 
     #[test]
-    fn pow_with_two_activation_inputs_produces_mul_binary_op() {
+    fn pow_with_two_activation_inputs_produces_pow_binary_op() {
         // Arrange: Pow takes two activation inputs (not initializer)
-        // Pow maps to Op::Mul via convert_binary
+        // Pow maps to Op::Pow via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![32, 64],
@@ -35681,31 +35700,31 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
-        // Assert: second op should be Mul (Pow maps to Mul)
-        let mul_ops: Vec<_> = graph
+        // Assert: second op should be Pow (Pow maps to Op::Pow)
+        let pow_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .collect();
-        assert_eq!(mul_ops.len(), 1, "Pow should produce exactly one Mul op");
+        assert_eq!(pow_ops.len(), 1, "Pow should produce exactly one Pow op");
         assert_eq!(
-            mul_ops[0].inputs.len(),
+            pow_ops[0].inputs.len(),
             2,
-            "Mul from Pow must have 2 inputs"
+            "Pow from Pow must have 2 inputs"
         );
     }
 
     // ── 99. Sqrt with single input converts to Mul binary op ────────────
 
     #[test]
-    fn sqrt_with_single_input_produces_mul_op_with_two_inputs() {
-        // Arrange: Sqrt takes one input but maps to binary Mul (convert_binary path)
+    fn sqrt_with_single_input_produces_sqrt_unary_op() {
+        // Arrange: Sqrt takes one input and maps to Op::Sqrt (convert_unary path)
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 32],
             vec![
                 make_node("mm", "MatMul", vec!["x", "w"], vec!["proj"]),
-                make_node("sq1", "Sqrt", vec!["proj", "proj"], vec!["root"]),
+                make_node("sq1", "Sqrt", vec!["proj"], vec!["root"]),
             ],
             vec![model::OnnxValueInfo {
                 name: "x".to_string(),
@@ -35717,17 +35736,17 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Sqrt maps to Mul, should have 2 inputs (even if same tensor)
-        let mul_ops: Vec<_> = graph
+        // Assert: Sqrt maps to Op::Sqrt, should have 1 input (unary)
+        let sqrt_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Sqrt))
             .collect();
-        assert_eq!(mul_ops.len(), 1, "Sqrt should produce one Mul op");
+        assert_eq!(sqrt_ops.len(), 1, "Sqrt should produce one Sqrt op");
         assert_eq!(
-            mul_ops[0].inputs.len(),
-            2,
-            "Sqrt-converted Mul needs 2 inputs"
+            sqrt_ops[0].inputs.len(),
+            1,
+            "Sqrt is unary and needs 1 input"
         );
     }
 
@@ -36545,8 +36564,8 @@ mod tests {
     // ── 118. Sub op maps to Add Op via convert_binary ──────────────
 
     #[test]
-    fn sub_op_produces_add_opkind_in_graph() {
-        // Arrange: Sub node should map to Op::Add via convert_binary
+    fn sub_op_produces_sub_opkind_in_graph() {
+        // Arrange: Sub node should map to Op::Sub via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![32, 16],
@@ -36564,20 +36583,20 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Sub should produce Op::Add
-        let add_ops: Vec<_> = graph
+        // Assert: Sub should produce Op::Sub
+        let sub_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Add))
+            .filter(|op| matches!(op.op, Op::Sub))
             .collect();
-        assert_eq!(add_ops.len(), 1, "Sub should produce exactly one Add op");
+        assert_eq!(sub_ops.len(), 1, "Sub should produce exactly one Sub op");
     }
 
     // ── 119. Div op maps to Mul Op via convert_binary ──────────────
 
     #[test]
-    fn div_op_produces_mul_opkind_in_graph() {
-        // Arrange: Div node should map to Op::Mul via convert_binary
+    fn div_op_produces_div_opkind_in_graph() {
+        // Arrange: Div node should map to Op::Div via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 8],
@@ -36595,13 +36614,13 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Div should produce Op::Mul
-        let mul_ops: Vec<_> = graph
+        // Assert: Div should produce Op::Div
+        let div_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Div))
             .collect();
-        assert_eq!(mul_ops.len(), 1, "Div should produce exactly one Mul op");
+        assert_eq!(div_ops.len(), 1, "Div should produce exactly one Div op");
     }
 
     // ── 120. HardSwish returns unsupported error (not yet supported) ──
@@ -37189,11 +37208,11 @@ mod tests {
         }
     }
 
-    // ── 133. Pow op maps to Mul Op via convert_binary ───────────
+    // ── 133. Pow op maps to Pow Op via convert_binary ───────────
 
     #[test]
-    fn pow_op_produces_mul_opkind_in_graph() {
-        // Arrange: Pow node should map to Op::Mul via convert_binary
+    fn pow_op_produces_pow_opkind_in_graph() {
+        // Arrange: Pow node should map to Op::Pow via convert_binary
         let onnx = build_graph_with_weight(
             "w",
             vec![16, 8],
@@ -37211,26 +37230,26 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Pow should produce Op::Mul
-        let mul_ops: Vec<_> = graph
+        // Assert: Pow should produce Op::Pow
+        let pow_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Pow))
             .collect();
-        assert_eq!(mul_ops.len(), 1, "Pow should produce exactly one Mul op");
+        assert_eq!(pow_ops.len(), 1, "Pow should produce exactly one Pow op");
     }
 
     // ── 134. Sqrt op maps to Mul Op via convert_binary ──────────
 
     #[test]
-    fn sqrt_op_produces_mul_opkind_in_graph() {
-        // Arrange: Sqrt node should map to Op::Mul via convert_binary
+    fn sqrt_op_produces_sqrt_opkind_in_graph() {
+        // Arrange: Sqrt node should map to Op::Sqrt via convert_unary
         let onnx = build_graph_with_weight(
             "w",
             vec![32, 16],
             vec![
                 make_node("mm", "MatMul", vec!["x", "w"], vec!["proj"]),
-                make_node("sqrt1", "Sqrt", vec!["proj", "x"], vec!["rooted"]),
+                make_node("sqrt1", "Sqrt", vec!["proj"], vec!["rooted"]),
             ],
             vec![model::OnnxValueInfo {
                 name: "x".to_string(),
@@ -37242,13 +37261,13 @@ mod tests {
         );
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
-        // Assert: Sqrt should produce Op::Mul
-        let mul_ops: Vec<_> = graph
+        // Assert: Sqrt should produce Op::Sqrt
+        let sqrt_ops: Vec<_> = graph
             .ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Mul))
+            .filter(|op| matches!(op.op, Op::Sqrt))
             .collect();
-        assert_eq!(mul_ops.len(), 1, "Sqrt should produce exactly one Mul op");
+        assert_eq!(sqrt_ops.len(), 1, "Sqrt should produce exactly one Sqrt op");
     }
 
     // ── 135. Where op maps to passthrough (output shares tensor id) ──

@@ -675,12 +675,30 @@ impl super::TensorProvider for SafeTensorsLoader {
         });
 
         // Compute group_size from qweight shape
+        // AWQ/GPTQ 标准格式 group_size=128，从形状推导验证格式一致性
         let qw_shape = &g.qweight_shape;
-        let k = qw_shape.first().copied().unwrap_or(0) * 8;
-        let scales_rows = scales_tensor.shape.first().copied().unwrap_or(1);
-        let group_size = if scales_rows > 0 { k / scales_rows } else { 128 };
+        let k = qw_shape.first().copied()? * 8;
+        let scales_rows = scales_tensor.shape.first().copied()?;
 
-        Some((scales_bytes, zeros_bytes, g_idx, group_size))
+        // 验证形状一致性
+        let inferred_group_size = k / scales_rows;
+        if inferred_group_size == 0 {
+            log::warn!(
+                "AWQ/GPTQ shape mismatch: qweight shape {:?} / scales first dim {} = 0 (invalid group_size)",
+                qw_shape, scales_rows
+            );
+            return None;
+        }
+        // AWQ4/GPTQ4 标准格式 group_size=128
+        if inferred_group_size != 128 {
+            log::warn!(
+                "AWQ/GPTQ invalid group_size: inferred={} (expected 128 for standard AWQ4/GPTQ4 format), qweight shape={:?}, scales shape={:?}",
+                inferred_group_size, qw_shape, scales_tensor.shape
+            );
+            return None;
+        }
+
+        Some((scales_bytes, zeros_bytes, g_idx, inferred_group_size))
     }
 }
 

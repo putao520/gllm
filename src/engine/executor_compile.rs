@@ -4698,17 +4698,20 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn geometry_effective_kv_layer_all_shared_clamps_to_last_effective() {
+    /// PSC-14: all-shared with proper attention_pattern.
+    /// INVARIANT: num_kv_shared_layers > 0 requires attention_pattern covering all layers.
+    fn geometry_effective_kv_layer_all_shared_with_pattern() {
         let geo = ModelGeometry {
             num_layers: 4,
             num_kv_shared_layers: 4,
+            attention_pattern: vec![0, 0, 0, 0], // all sliding (type 0)
             ..make_geometry()
         };
         // effective_kv_layers = max(4 - 4, 1) = 1
         assert_eq!(geo.effective_kv_layers(), 1);
         // Layer 0 (< shared_start=0): clamped to min(0, 0) = 0
         assert_eq!(geo.effective_kv_layer(0), 0);
-        // Layer 3 (shared): no attention_pattern, fallback to effective_kv_layers - 1 = 0
+        // Layer 3 (shared, type 0): scan 3..0 but shared_start=0 → no donors → fallback 0
         assert_eq!(geo.effective_kv_layer(3), 0);
     }
 
@@ -6149,7 +6152,7 @@ mod tests {
 
     // ======================================================================
     // REQ-FATOP-003/019/027: OPCODE_VERSION JIT cache invalidation
-    // The OPCODE_VERSION constant must exist and be 3 (v3).
+    // The OPCODE_VERSION constant must exist and be 4 (v4).
     // ======================================================================
 
     #[test]
@@ -6158,8 +6161,8 @@ mod tests {
         let version = gllm_kernels::compiler::graph::OPCODE_VERSION;
         assert!(version > 0,
             "OPCODE_VERSION must be positive — zero would mean no cache invalidation on Op changes");
-        assert_eq!(version, 3,
-            "OPCODE_VERSION must be 3 (v3). If this fails, the JIT cache protocol has changed — \
+        assert_eq!(version, 4,
+            "OPCODE_VERSION must be 4 (v4). If this fails, the JIT cache protocol has changed — \
              verify all cached JIT artifacts are invalidated");
     }
 

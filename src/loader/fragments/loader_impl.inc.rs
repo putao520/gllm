@@ -18,6 +18,14 @@ pub struct Loader {
     gguf: Option<gguf::GgufReader>,
     gllm: Option<gllm::GllmReader>,
     onnx: Option<onnx::OnnxLoader>,
+    pytorch: Option<pytorch::PytorchLoader>,
+
+    // #6: Configurable tensor skip strategy.
+    tensor_skip_config: TensorSkipConfig,
+    // #5: Runtime-extensible suffix patterns for match_tensor_role().
+    extra_suffix_patterns: Vec<(Vec<String>, TensorRole, bool)>,
+    // #14: Cached config.json Value to avoid repeated IO.
+    config_json: std::sync::OnceLock<serde_json::Value>,
 }
 
 /// Per-tensor processing result for concurrent upload pipeline.
@@ -57,6 +65,10 @@ impl Loader {
             gguf: None,
             gllm: None,
             onnx: None,
+            pytorch: None,
+            tensor_skip_config: TensorSkipConfig::default(),
+            extra_suffix_patterns: Vec::new(),
+            config_json: std::sync::OnceLock::new(),
         }
     }
 
@@ -102,21 +114,23 @@ impl Loader {
                             hf_hub::WeightFormat::SafeTensors => WeightFormat::SafeTensors,
                             hf_hub::WeightFormat::Gguf => WeightFormat::Gguf,
                             hf_hub::WeightFormat::Onnx => WeightFormat::Onnx,
+                            hf_hub::WeightFormat::PyTorch => WeightFormat::PyTorch,
                         };
                         (files.weights, fmt, files.aux_files)
                     }
                     Err(err) => {
                         // Fallback to ModelScope if enabled and error is recoverable
                         if config.enable_fallback && is_recoverable_error(&err) {
-                            eprintln!(
-                                "⚠️ HuggingFace download failed, falling back to ModelScope: {}",
-                                err
+                            log::warn!(
+                                "HuggingFace download failed, falling back to ModelScope: model_id={}, error={}",
+                                model_id, err
                             );
                             let ms_api = ModelScopeClient::new(cache.modelscope_cache_dir())?;
                             let ms_files = ms_api.download_model_files(
                                 &model_id,
                                 EMPTY_FILE_MAP,
                                 ParallelLoader::new(true),
+                                config.gguf_file_filter.as_deref(),
                             )?;
                             (ms_files.weights, ms_files.format, ms_files.aux_files)
                         } else {
@@ -128,7 +142,7 @@ impl Loader {
             ModelSource::ModelScope => {
                 let api = ModelScopeClient::new(cache.modelscope_cache_dir())?;
                 let files =
-                    api.download_model_files(&model_id, EMPTY_FILE_MAP, ParallelLoader::new(true))?;
+                    api.download_model_files(&model_id, EMPTY_FILE_MAP, ParallelLoader::new(true), config.gguf_file_filter.as_deref())?;
                 (files.weights, files.format, files.aux_files)
             }
         };
@@ -136,6 +150,8 @@ impl Loader {
         let mut loader = Self::new(ModelManifest::default());
         loader.weight_paths = weights;
         loader.format = format;
+        loader.tensor_skip_config = config.tensor_skip_config;
+        loader.extra_suffix_patterns = config.extra_suffix_patterns;
 
         // Populate config/tokenizer paths from aux_files
         for path in aux_files {
@@ -285,18 +301,8 @@ impl Loader {
                 }
             }
             WeightFormat::PyTorch => {
-                let config = pytorch::PytorchConversionConfig::default();
-                let output = pytorch::convert_bins_to_safetensors(
-                    &self.weight_paths,
-                    None,
-                    &config,
-                )?;
-                let loader = safetensors::SafeTensorsLoader::from_files(
-                    &output.safetensors,
-                    parallel::ParallelLoader::new(true),
-                )?;
-                self.safetensors = Some(loader);
-                self.format = WeightFormat::SafeTensors;
+                let loader = pytorch::PytorchLoader::from_files(&self.weight_paths)?;
+                self.pytorch = Some(loader);
             }
             WeightFormat::Gllm => {
                 let reader = gllm::GllmReader::from_files(&self.weight_paths)?;
@@ -312,6 +318,21 @@ impl Loader {
 
     pub fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
+    }
+
+    /// #14: Lazily read and cache config.json. Returns None if no config path or parse failure.
+    pub fn config_json(&self) -> Option<&serde_json::Value> {
+        let val = self.config_json.get_or_init(|| {
+            let path = match self.config_path.as_deref() {
+                Some(p) if p.exists() => p,
+                _ => return serde_json::Value::Null,
+            };
+            match std::fs::read_to_string(path) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::Value::Null),
+                Err(_) => serde_json::Value::Null,
+            }
+        });
+        if val.is_null() { None } else { Some(val) }
     }
 
     pub fn tokenizer_path(&self) -> Option<&Path> {
@@ -381,26 +402,20 @@ impl Loader {
             }
         }
 
-        // 2. config.json model_type / architectures (SafeTensors/ONNX)
-        if let Some(config_path) = self.config_path() {
-            if config_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(config_path) {
-                    if let Ok(json) = serde_json::from_str::<Value>(&content) {
-                        if let Some(arr) = json.get("architectures").and_then(|v| v.as_array()) {
-                            for item in arr {
-                                if let Some(s) = item.as_str() {
-                                    if let Some(arch) = map_architecture_token(s) {
-                                        return arch;
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(s) = json.get("model_type").and_then(|v| v.as_str()) {
-                            if let Some(arch) = map_architecture_token(s) {
-                                return arch;
-                            }
+        // 2. config.json model_type / architectures (SafeTensors/ONNX) — #14: uses cached config
+        if let Some(json) = self.config_json() {
+            if let Some(arr) = json.get("architectures").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        if let Some(arch) = map_architecture_token(s) {
+                            return arch;
                         }
                     }
+                }
+            }
+            if let Some(s) = json.get("model_type").and_then(|v| v.as_str()) {
+                if let Some(arch) = map_architecture_token(s) {
+                    return arch;
                 }
             }
         }
@@ -412,6 +427,46 @@ impl Loader {
 
         // 4. manifest fallback
         self.manifest.arch.clone()
+    }
+
+    /// #4: Validate that detected architecture has key tensor roles recognized.
+    /// If a known architecture is detected but no critical tensor roles are found,
+    /// log a warning — this likely means tensor naming is non-standard.
+    pub fn validate_architecture_tensor_roles(&self, arch: &str) {
+        let critical_roles = [
+            TensorRole::AttentionQuery,
+            TensorRole::AttentionKey,
+            TensorRole::AttentionValue,
+        ];
+        let mut found_any = false;
+
+        macro_rules! check_provider {
+            ($provider:expr) => {
+                if let Some(p) = $provider {
+                    for meta in p.iter_tensors() {
+                        if let Some((role, _)) = match_tensor_role(&meta.name) {
+                            if critical_roles.contains(&role) {
+                                found_any = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        check_provider!(self.safetensors.as_ref());
+        if !found_any { check_provider!(self.onnx.as_ref()); }
+        if !found_any { check_provider!(self.gguf.as_ref()); }
+        if !found_any { check_provider!(self.pytorch.as_ref()); }
+
+        if !found_any {
+            log::warn!(
+                "Architecture '{}' detected but no critical tensor roles (AttentionQuery/Key/Value) found. \
+                 Tensor naming may be non-standard or match_tensor_role patterns need updating.",
+                arch
+            );
+        }
     }
 
     /// 从张量名称推断架构
@@ -524,6 +579,19 @@ impl Loader {
                 }
             }
         }
+        if let Some(pytorch) = self.pytorch.as_ref() {
+            if pytorch.iter_tensors().any(|m| is_gptoss_name(&m.name)) {
+                return Some("gptoss".to_string());
+            }
+            if pytorch.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
+                return Some("gemma4".to_string());
+            }
+            for meta in pytorch.iter_tensors() {
+                if let Some(arch) = check_name(&meta.name) {
+                    return Some(arch);
+                }
+            }
+        }
         None
     }
 
@@ -576,6 +644,17 @@ impl Loader {
                 }
             }
             Ok(None)
+        } else if let Some(loader) = &self.pytorch {
+            for meta in loader.iter_tensors() {
+                match meta.dtype {
+                    Dtype::BF16 => return Ok(Some(DType::BF16)),
+                    Dtype::F16 => return Ok(Some(DType::F16)),
+                    Dtype::F32 => return Ok(Some(DType::F32)),
+                    Dtype::F64 => return Ok(Some(DType::F32)),
+                    _ => continue,
+                }
+            }
+            Ok(None)
         } else {
             Ok(None)
         }
@@ -606,7 +685,11 @@ impl Loader {
                 let provider = self.gllm.as_ref().ok_or(LoaderError::MissingWeights)?;
                 self.upload_provider(provider, backend, format)
             }
-            _ => unreachable!("PyTorch is converted to SafeTensors by load()"),
+            WeightFormat::PyTorch => {
+                let provider = self.pytorch.as_ref()
+                    .ok_or(LoaderError::MissingWeights)?;
+                self.upload_provider(provider, backend, format)
+            }
         }
     }
 
@@ -621,7 +704,7 @@ impl Loader {
         // Pass 1: collect + filter + sort (back-to-front priority)
         let mut tensor_metas: Vec<TensorMeta> = provider
             .iter_tensors()
-            .filter(|m| !should_skip_tensor(&m.name))
+            .filter(|m| !should_skip_tensor(&m.name, &self.tensor_skip_config))
             .collect();
         tensor_metas.sort_by(|a, b| {
             tensor_load_priority(&b.name).cmp(&tensor_load_priority(&a.name))
@@ -662,6 +745,10 @@ impl Loader {
                     }
                 }
                 TensorProcessResult::RawFloat { name, meta, data } => {
+                    // #11: Verify dtype consistency between TensorMeta and RawFloatTensor.
+                    assert_eq!(meta.dtype, data.dtype,
+                        "RawFloatTensor dtype mismatch for '{}': meta={:?}, raw={:?}",
+                        name, meta.dtype, data.dtype);
                     shapes.insert(name.clone(), meta.shape.clone());
                     meta_map.insert(name.clone(), meta);
                     raw_floats.insert(name, data);
@@ -764,7 +851,7 @@ impl Loader {
         // Debug: trace F16 norm tensor processing
         if meta.name.contains("attn_norm") || meta.name.contains("ffn_norm") {
             let ggml_dt = provider.ggml_dtype(&meta.name);
-            eprintln!("[TENSOR-PROC] name='{}' dtype={:?} ggml_dt={:?}", meta.name, meta.dtype, ggml_dt);
+            log::debug!("[TENSOR-PROC] name='{}' dtype={:?} ggml_dt={:?}", meta.name, meta.dtype, ggml_dt);
         }
         // Quantized tensor — store raw bytes, no tier decision needed
         if let Some(ggml_dt) = provider.ggml_dtype(&meta.name) {

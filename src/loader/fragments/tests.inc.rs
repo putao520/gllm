@@ -752,6 +752,33 @@ mod tests {
         assert!(!is_recoverable_error(&err));
     }
 
+    // ── #16: normalize_gguf_key ──
+
+    #[test]
+    fn normalize_gguf_key_maps_known_keys() {
+        assert_eq!(normalize_gguf_key("n_embd"), "hidden_size");
+        assert_eq!(normalize_gguf_key("n_head"), "num_attention_heads");
+        assert_eq!(normalize_gguf_key("n_kv_head"), "num_key_value_heads");
+        assert_eq!(normalize_gguf_key("n_layer"), "num_hidden_layers");
+        assert_eq!(normalize_gguf_key("n_ff"), "intermediate_size");
+        assert_eq!(normalize_gguf_key("rope_freq_base"), "rope_theta");
+        assert_eq!(normalize_gguf_key("n_ctx"), "max_position_embeddings");
+    }
+
+    #[test]
+    fn normalize_gguf_key_passthrough_unknown() {
+        assert_eq!(normalize_gguf_key("unknown_key"), "unknown_key");
+        assert_eq!(normalize_gguf_key("hidden_size"), "hidden_size"); // already config.json form
+    }
+
+    #[test]
+    fn gguf_config_key_map_no_duplicate_gguf_keys() {
+        let mut seen = std::collections::HashSet::new();
+        for (gguf_key, _) in GGUF_CONFIG_KEY_MAP {
+            assert!(seen.insert(*gguf_key), "duplicate GGUF key in GGUF_CONFIG_KEY_MAP: {}", gguf_key);
+        }
+    }
+
     // ── ChecksumPolicy / ModelSource ──
 
     #[test]
@@ -924,23 +951,23 @@ mod tests {
 
     #[test]
     fn skip_vision_tower() {
-        assert!(should_skip_tensor("model.vision_tower.patch_embed.weight"));
+        assert!(should_skip_tensor("model.vision_tower.patch_embed.weight", &TensorSkipConfig::default()));
     }
 
     #[test]
     fn skip_audio_tower() {
-        assert!(should_skip_tensor("model.audio_tower.conv.weight"));
+        assert!(should_skip_tensor("model.audio_tower.conv.weight", &TensorSkipConfig::default()));
     }
 
     #[test]
     fn skip_per_layer_embedding() {
-        assert!(should_skip_tensor("model.embed_tokens_per_layer.weight"));
+        assert!(should_skip_tensor("model.embed_tokens_per_layer.weight", &TensorSkipConfig::default()));
     }
 
     #[test]
     fn no_skip_regular_tensor() {
-        assert!(!should_skip_tensor("model.layers.0.self_attn.q_proj.weight"));
-        assert!(!should_skip_tensor("lm_head.weight"));
+        assert!(!should_skip_tensor("model.layers.0.self_attn.q_proj.weight", &TensorSkipConfig::default()));
+        assert!(!should_skip_tensor("lm_head.weight", &TensorSkipConfig::default()));
     }
 
     // ── tensor_load_priority ──
@@ -1531,22 +1558,42 @@ mod tests {
 
     #[test]
     fn skip_embed_vision() {
-        assert!(should_skip_tensor("model.embed_vision.weight"));
+        assert!(should_skip_tensor("model.embed_vision.weight", &TensorSkipConfig::default()));
     }
 
     #[test]
     fn skip_embed_audio() {
-        assert!(should_skip_tensor("model.embed_audio.weight"));
+        assert!(should_skip_tensor("model.embed_audio.weight", &TensorSkipConfig::default()));
     }
 
     #[test]
     fn skip_per_layer_projection() {
-        assert!(should_skip_tensor("model.per_layer_projection.weight"));
+        assert!(should_skip_tensor("model.per_layer_projection.weight", &TensorSkipConfig::default()));
     }
 
     #[test]
     fn skip_post_mlp_projection() {
-        assert!(should_skip_tensor("model.post_mlp_projection.weight"));
+        assert!(should_skip_tensor("model.post_mlp_projection.weight", &TensorSkipConfig::default()));
+    }
+
+    #[test]
+    fn skip_config_disable_multimodal() {
+        let cfg = TensorSkipConfig {
+            skip_multimodal_towers: false,
+            skip_ple_altup: true,
+        };
+        assert!(!should_skip_tensor("model.vision_tower.patch_embed.weight", &cfg));
+        assert!(should_skip_tensor("model.embed_tokens_per_layer.weight", &cfg));
+    }
+
+    #[test]
+    fn skip_config_disable_ple() {
+        let cfg = TensorSkipConfig {
+            skip_multimodal_towers: true,
+            skip_ple_altup: false,
+        };
+        assert!(should_skip_tensor("model.vision_tower.patch_embed.weight", &cfg));
+        assert!(!should_skip_tensor("model.embed_tokens_per_layer.weight", &cfg));
     }
 
     // ── Additional LoaderError variant coverage ──

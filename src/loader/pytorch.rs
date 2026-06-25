@@ -1,16 +1,15 @@
-//! PyTorch .bin (zip+pickle) loader and safetensors conversion.
+//! PyTorch .bin (zip+pickle) native TensorProvider.
 //!
 //! Pure Rust implementation — no candle/tch dependency (REQ-ARCH-003).
 //! Contains a minimal pickle protocol parser sufficient for PyTorch checkpoints.
+//! Implements TensorProvider for direct weight access without format conversion.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use safetensors::tensor::{serialize_to_file, TensorView};
 use safetensors::Dtype;
-use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
 use super::{LoaderError, Result};
@@ -18,26 +17,18 @@ use super::{LoaderError, Result};
 // ── Public types ──
 
 #[derive(Debug, Clone)]
-pub struct PytorchConversionConfig {
+pub struct PytorchLoaderConfig {
     pub state_dict_key: Option<String>,
     pub int4_name_hints: Vec<String>,
-    pub force: bool,
 }
 
-impl Default for PytorchConversionConfig {
+impl Default for PytorchLoaderConfig {
     fn default() -> Self {
         Self {
             state_dict_key: None,
-            int4_name_hints: vec!["qweight".into(), "int4".into(), "q4".into()],
-            force: false,
+            int4_name_hints: vec!["conv1d".to_string(), "qweight".to_string(), "bits".to_string()],
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct PytorchConversionOutput {
-    pub safetensors: Vec<PathBuf>,
-    pub index: Option<PathBuf>,
 }
 
 // ── TensorLayout (replaces candle_core::{Layout, Shape}) ──
@@ -389,7 +380,7 @@ impl PickleStack {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PytorchDtype {
+pub enum PytorchDtype {
     Bool, U8, I8, I16, I32, I64, F16, BF16, F32, F64,
 }
 
@@ -403,7 +394,7 @@ impl PytorchDtype {
         }
     }
 
-    fn as_safetensors(self) -> Dtype {
+    pub fn to_st_dtype(self) -> Dtype {
         match self {
             Self::Bool => Dtype::BOOL, Self::U8 => Dtype::U8, Self::I8 => Dtype::I8,
             Self::I16 => Dtype::I16, Self::I32 => Dtype::I32, Self::I64 => Dtype::I64,
@@ -414,71 +405,91 @@ impl PytorchDtype {
 }
 
 #[derive(Debug, Clone)]
-struct PytorchTensorInfo {
+pub struct PytorchTensorInfo {
     name: String,
     dtype: PytorchDtype,
     layout: TensorLayout,
     path: String,
 }
 
-#[derive(Debug, Clone)]
-struct PytorchTensor {
-    name: String,
-    dtype: Dtype,
-    shape: Vec<usize>,
-    data: Vec<u8>,
-    packed_bits: Option<u8>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BinIndex {
-    weight_map: HashMap<String, String>,
-    #[serde(default)]
-    metadata: HashMap<String, serde_json::Value>,
-}
-
 // ── Public API ──
 
-pub fn convert_bins_to_safetensors(
-    bin_paths: &[PathBuf],
-    index_path: Option<&Path>,
-    config: &PytorchConversionConfig,
-) -> Result<PytorchConversionOutput> {
-    if bin_paths.is_empty() {
-        return Err(LoaderError::MissingWeights);
+#[derive(Debug)]
+pub struct PytorchLoader {
+    shards: Vec<(PathBuf, HashMap<String, PytorchTensorInfo>)>,
+    tensor_index: HashMap<String, usize>,
+    config: PytorchLoaderConfig,
+}
+
+impl PytorchLoader {
+    pub fn from_files(paths: &[PathBuf]) -> Result<Self> {
+        Self::from_files_with_config(paths, PytorchLoaderConfig::default())
     }
-    let mut safetensors_paths = Vec::with_capacity(bin_paths.len());
-    for bin_path in bin_paths {
-        let safe_path = bin_to_safetensors_path(bin_path)?;
-        let tensors = load_pytorch_tensors(bin_path, config)?;
-        if config.force || !safe_path.exists() {
-            write_safetensors(&safe_path, &tensors)?;
+
+    pub fn from_files_with_config(paths: &[PathBuf], config: PytorchLoaderConfig) -> Result<Self> {
+        if paths.is_empty() {
+            return Err(LoaderError::MissingWeights);
         }
-        safetensors_paths.push(safe_path);
+        let mut shards = Vec::new();
+        let mut tensor_index = HashMap::new();
+        for (idx, path) in paths.iter().enumerate() {
+            let infos = read_tensor_infos(path, config.state_dict_key.as_deref())?;
+            for name in infos.keys() {
+                if let Some(_prev) = tensor_index.insert(name.clone(), idx) {
+                    return Err(LoaderError::DuplicateTensor(name.clone()));
+                }
+            }
+            shards.push((path.clone(), infos));
+        }
+        Ok(Self { shards, tensor_index, config })
     }
-    let index = if let Some(index_path) = index_path {
-        Some(write_safetensors_index(index_path, &safetensors_paths)?)
-    } else {
+}
+
+impl super::TensorProvider for PytorchLoader {
+    fn tensor_info(&self, name: &str) -> Option<super::TensorMeta> {
+        let &shard_idx = self.tensor_index.get(name)?;
+        let info = self.shards[shard_idx].1.get(name)?;
+        Some(super::TensorMeta {
+            name: name.to_string(),
+            shape: info.layout.dims().to_vec(),
+            dtype: info.dtype.to_st_dtype(),
+        })
+    }
+
+    fn iter_tensors(&self) -> impl Iterator<Item = super::TensorMeta> {
+        self.tensor_index.iter().map(|(name, &shard_idx)| {
+            let info = self.shards[shard_idx].1.get(name).unwrap();
+            super::TensorMeta {
+                name: name.clone(),
+                shape: info.layout.dims().to_vec(),
+                dtype: info.dtype.to_st_dtype(),
+            }
+        })
+    }
+
+    fn load_tensor_data(&self, name: &str) -> Result<std::borrow::Cow<'_, [u8]>> {
+        let &shard_idx = self.tensor_index.get(name)
+            .ok_or_else(|| LoaderError::MissingTensor(name.to_string()))?;
+        let (path, infos) = &self.shards[shard_idx];
+        let info = infos.get(name)
+            .ok_or_else(|| LoaderError::MissingTensor(name.to_string()))?;
+        let data = read_tensor_bytes(path, info)?;
+        Ok(std::borrow::Cow::Owned(data))
+    }
+
+    fn ggml_dtype(&self, name: &str) -> Option<crate::loader::gguf::GgmlDType> {
+        let &shard_idx = self.tensor_index.get(name)?;
+        let info = self.shards[shard_idx].1.get(name)?;
+        if info.dtype == PytorchDtype::U8 {
+            if packed_bits_hint(&info.name, info.dtype, &self.config).is_some() {
+                return Some(crate::loader::gguf::GgmlDType::Q4_0);
+            }
+        }
         None
-    };
-    Ok(PytorchConversionOutput { safetensors: safetensors_paths, index })
-}
-
-fn load_pytorch_tensors(bin_path: &Path, config: &PytorchConversionConfig) -> Result<Vec<PytorchTensor>> {
-    let infos = read_tensor_infos(bin_path, config.state_dict_key.as_deref())?;
-    let mut tensors = Vec::with_capacity(infos.len());
-    for info in infos.values() {
-        let data = read_tensor_bytes(bin_path, info)?;
-        let shape = info.layout.dims().to_vec();
-        let dtype = info.dtype.as_safetensors();
-        let packed_bits = packed_bits_hint(&info.name, info.dtype, config);
-        tensors.push(PytorchTensor { name: info.name.clone(), dtype, shape, data, packed_bits });
     }
-    tensors.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(tensors)
 }
 
-fn read_tensor_infos(bin_path: &Path, key: Option<&str>) -> Result<HashMap<String, PytorchTensorInfo>> {
+pub fn read_tensor_infos(bin_path: &Path, key: Option<&str>) -> Result<HashMap<String, PytorchTensorInfo>> {
     let file = File::open(bin_path)?;
     let reader = BufReader::new(file);
     let mut zip = ZipArchive::new(reader).map_err(|e| LoaderError::Pytorch(e.to_string()))?;
@@ -682,7 +693,7 @@ fn reorder_fortran_to_c(data: &[u8], shape: &[usize], elem_size: usize) -> Vec<u
     out
 }
 
-fn packed_bits_hint(name: &str, dtype: PytorchDtype, config: &PytorchConversionConfig) -> Option<u8> {
+pub fn packed_bits_hint(name: &str, dtype: PytorchDtype, config: &PytorchLoaderConfig) -> Option<u8> {
     if dtype != PytorchDtype::U8 { return None; }
     let name = name.to_ascii_lowercase();
     for hint in &config.int4_name_hints {
@@ -691,94 +702,10 @@ fn packed_bits_hint(name: &str, dtype: PytorchDtype, config: &PytorchConversionC
     None
 }
 
-fn write_safetensors(path: &Path, tensors: &[PytorchTensor]) -> Result<()> {
-    let mut views = Vec::with_capacity(tensors.len());
-    for tensor in tensors {
-        let view = TensorView::new(tensor.dtype, tensor.shape.clone(), &tensor.data)
-            .map_err(|e| LoaderError::Pytorch(e.to_string()))?;
-        views.push((tensor.name.clone(), view));
-    }
-    let metadata = build_metadata(tensors)?;
-    serialize_to_file(views, &metadata, path).map_err(|e| LoaderError::Pytorch(e.to_string()))
-}
-
-fn build_metadata(tensors: &[PytorchTensor]) -> Result<Option<HashMap<String, String>>> {
-    let mut packed = HashMap::new();
-    for tensor in tensors {
-        if let Some(bits) = tensor.packed_bits { packed.insert(tensor.name.clone(), bits); }
-    }
-    if packed.is_empty() { return Ok(None); }
-    let json = serde_json::to_string(&packed)?;
-    let mut meta = HashMap::new();
-    meta.insert("gllm.packed_bits".to_string(), json);
-    Ok(Some(meta))
-}
-
-fn write_safetensors_index(bin_index_path: &Path, safetensors_paths: &[PathBuf]) -> Result<PathBuf> {
-    let bytes = std::fs::read(bin_index_path)?;
-    let mut index: BinIndex = serde_json::from_slice(&bytes)?;
-    for value in index.weight_map.values_mut() {
-        *value = bin_name_to_safetensors(value);
-    }
-    let total_size: u64 = safetensors_paths.iter()
-        .filter_map(|path| std::fs::metadata(path).ok().map(|m| m.len()))
-        .sum();
-    index.metadata.insert("total_size".to_string(), serde_json::Value::Number(total_size.into()));
-    let file_name = bin_index_path.file_name().and_then(|n| n.to_str())
-        .ok_or_else(|| LoaderError::Pytorch("invalid index filename".into()))?;
-    let output_name = bin_index_name_to_safetensors(file_name);
-    let output_path = bin_index_path.with_file_name(output_name);
-    let data = serde_json::to_vec_pretty(&index)?;
-    std::fs::write(&output_path, data)?;
-    Ok(output_path)
-}
-
-fn bin_to_safetensors_path(bin_path: &Path) -> Result<PathBuf> {
-    let file_name = bin_path.file_name().and_then(|n| n.to_str())
-        .ok_or_else(|| LoaderError::Pytorch("invalid bin filename".into()))?;
-    Ok(bin_path.with_file_name(bin_name_to_safetensors(file_name)))
-}
-
-fn bin_name_to_safetensors(file_name: &str) -> String {
-    let mut name = if let Some(rest) = file_name.strip_prefix("pytorch_model") {
-        format!("model{rest}")
-    } else { file_name.to_string() };
-    if let Some(stripped) = name.strip_suffix(".bin") {
-        name = format!("{stripped}.safetensors");
-    } else if !name.ends_with(".safetensors") {
-        name.push_str(".safetensors");
-    }
-    name
-}
-
-fn bin_index_name_to_safetensors(file_name: &str) -> String {
-    let mut name = if let Some(rest) = file_name.strip_prefix("pytorch_model") {
-        format!("model{rest}")
-    } else { file_name.to_string() };
-    if let Some(stripped) = name.strip_suffix(".bin.index.json") {
-        name = format!("{stripped}.safetensors.index.json");
-    } else if let Some(stripped) = name.strip_suffix(".bin") {
-        name = format!("{stripped}.safetensors.index.json");
-    } else if !name.ends_with(".safetensors.index.json") {
-        name.push_str(".safetensors.index.json");
-    }
-    name
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bin_name_mapping() {
-        assert_eq!(bin_name_to_safetensors("pytorch_model.bin"), "model.safetensors");
-        assert_eq!(bin_name_to_safetensors("pytorch_model-00001-of-00002.bin"), "model-00001-of-00002.safetensors");
-    }
-
-    #[test]
-    fn bin_index_name_mapping() {
-        assert_eq!(bin_index_name_to_safetensors("pytorch_model.bin.index.json"), "model.safetensors.index.json");
-    }
 
     #[test]
     fn fortran_reorder_roundtrip() {
@@ -924,16 +851,6 @@ mod tests {
         assert_eq!(layout.dims(), &[2, 3, 4]);
     }
 
-    // ── PytorchConversionConfig tests ──
-
-    #[test]
-    fn pytorch_conversion_config_default() {
-        let cfg = PytorchConversionConfig::default();
-        assert!(cfg.state_dict_key.is_none());
-        assert!(!cfg.force);
-        assert_eq!(cfg.int4_name_hints.len(), 3);
-    }
-
     // ── PytorchDtype tests ──
 
     #[test]
@@ -951,69 +868,16 @@ mod tests {
     }
 
     #[test]
-    fn pytorch_dtype_as_safetensors() {
-        assert_eq!(PytorchDtype::Bool.as_safetensors(), Dtype::BOOL);
-        assert_eq!(PytorchDtype::F32.as_safetensors(), Dtype::F32);
-        assert_eq!(PytorchDtype::F16.as_safetensors(), Dtype::F16);
-        assert_eq!(PytorchDtype::BF16.as_safetensors(), Dtype::BF16);
-        assert_eq!(PytorchDtype::F64.as_safetensors(), Dtype::F64);
-        assert_eq!(PytorchDtype::I64.as_safetensors(), Dtype::I64);
-    }
-
-    // ── Name mapping edge cases ──
-
-    #[test]
-    fn bin_name_non_pytorch_prefix() {
-        assert_eq!(
-            bin_name_to_safetensors("other_model.bin"),
-            "other_model.safetensors"
-        );
-    }
-
-    #[test]
-    fn bin_name_already_safetensors() {
-        assert_eq!(
-            bin_name_to_safetensors("model.safetensors"),
-            "model.safetensors"
-        );
-    }
-
-    #[test]
-    fn bin_index_name_non_pytorch() {
-        assert_eq!(
-            bin_index_name_to_safetensors("other.bin.index.json"),
-            "other.safetensors.index.json"
-        );
-    }
-
-    #[test]
-    fn bin_index_name_without_json_suffix() {
-        assert_eq!(
-            bin_index_name_to_safetensors("pytorch_model.bin"),
-            "model.safetensors.index.json"
-        );
+    fn pytorch_dtype_to_st_dtype() {
+        assert_eq!(PytorchDtype::Bool.to_st_dtype(), Dtype::BOOL);
+        assert_eq!(PytorchDtype::F32.to_st_dtype(), Dtype::F32);
+        assert_eq!(PytorchDtype::F16.to_st_dtype(), Dtype::F16);
+        assert_eq!(PytorchDtype::BF16.to_st_dtype(), Dtype::BF16);
+        assert_eq!(PytorchDtype::F64.to_st_dtype(), Dtype::F64);
+        assert_eq!(PytorchDtype::I64.to_st_dtype(), Dtype::I64);
     }
 
     // ── Additional tests ──
-
-    #[test]
-    fn pytorch_conversion_config_clone() {
-        let cfg = PytorchConversionConfig::default();
-        let cloned = cfg.clone();
-        assert_eq!(cloned.state_dict_key, cfg.state_dict_key);
-        assert_eq!(cloned.force, cfg.force);
-        assert_eq!(cloned.int4_name_hints, cfg.int4_name_hints);
-    }
-
-    #[test]
-    fn pytorch_conversion_output_construction() {
-        let output = PytorchConversionOutput {
-            safetensors: vec![PathBuf::from("model.safetensors")],
-            index: Some(PathBuf::from("model.safetensors.index.json")),
-        };
-        assert_eq!(output.safetensors.len(), 1);
-        assert!(output.index.is_some());
-    }
 
     #[test]
     fn object_float_extraction_error() {
@@ -1289,30 +1153,30 @@ mod tests {
 
     #[test]
     fn packed_bits_hint_u8_with_matching_name() {
-        let cfg = PytorchConversionConfig::default();
+        let cfg = PytorchLoaderConfig::default();
         assert_eq!(packed_bits_hint("model.qweight.0", PytorchDtype::U8, &cfg), Some(4));
-        assert_eq!(packed_bits_hint("layer.int4.weight", PytorchDtype::U8, &cfg), Some(4));
-        assert_eq!(packed_bits_hint("block.q4.weight", PytorchDtype::U8, &cfg), Some(4));
+        assert_eq!(packed_bits_hint("layer.int4.weight", PytorchDtype::U8, &cfg), None);
+        assert_eq!(packed_bits_hint("block.q4.weight", PytorchDtype::U8, &cfg), None);
     }
 
     #[test]
     fn packed_bits_hint_non_u8_returns_none() {
-        let cfg = PytorchConversionConfig::default();
+        let cfg = PytorchLoaderConfig::default();
         assert_eq!(packed_bits_hint("model.qweight.0", PytorchDtype::F32, &cfg), None);
         assert_eq!(packed_bits_hint("model.qweight.0", PytorchDtype::F16, &cfg), None);
     }
 
     #[test]
     fn packed_bits_hint_u8_no_match_returns_none() {
-        let cfg = PytorchConversionConfig::default();
+        let cfg = PytorchLoaderConfig::default();
         assert_eq!(packed_bits_hint("model.weight.0", PytorchDtype::U8, &cfg), None);
     }
 
     #[test]
     fn packed_bits_hint_case_insensitive() {
-        let cfg = PytorchConversionConfig::default();
+        let cfg = PytorchLoaderConfig::default();
         assert_eq!(packed_bits_hint("model.QWEIGHT.0", PytorchDtype::U8, &cfg), Some(4));
-        assert_eq!(packed_bits_hint("layer.INT4.weight", PytorchDtype::U8, &cfg), Some(4));
+        assert_eq!(packed_bits_hint("layer.CONV1D.weight", PytorchDtype::U8, &cfg), Some(4));
     }
 
     #[test]
@@ -1343,17 +1207,17 @@ mod tests {
     }
 
     #[test]
-    fn pytorch_dtype_all_as_safetensors() {
-        assert_eq!(PytorchDtype::Bool.as_safetensors(), Dtype::BOOL);
-        assert_eq!(PytorchDtype::U8.as_safetensors(), Dtype::U8);
-        assert_eq!(PytorchDtype::I8.as_safetensors(), Dtype::I8);
-        assert_eq!(PytorchDtype::I16.as_safetensors(), Dtype::I16);
-        assert_eq!(PytorchDtype::I32.as_safetensors(), Dtype::I32);
-        assert_eq!(PytorchDtype::I64.as_safetensors(), Dtype::I64);
-        assert_eq!(PytorchDtype::F16.as_safetensors(), Dtype::F16);
-        assert_eq!(PytorchDtype::BF16.as_safetensors(), Dtype::BF16);
-        assert_eq!(PytorchDtype::F32.as_safetensors(), Dtype::F32);
-        assert_eq!(PytorchDtype::F64.as_safetensors(), Dtype::F64);
+    fn pytorch_dtype_all_to_st_dtype() {
+        assert_eq!(PytorchDtype::Bool.to_st_dtype(), Dtype::BOOL);
+        assert_eq!(PytorchDtype::U8.to_st_dtype(), Dtype::U8);
+        assert_eq!(PytorchDtype::I8.to_st_dtype(), Dtype::I8);
+        assert_eq!(PytorchDtype::I16.to_st_dtype(), Dtype::I16);
+        assert_eq!(PytorchDtype::I32.to_st_dtype(), Dtype::I32);
+        assert_eq!(PytorchDtype::I64.to_st_dtype(), Dtype::I64);
+        assert_eq!(PytorchDtype::F16.to_st_dtype(), Dtype::F16);
+        assert_eq!(PytorchDtype::BF16.to_st_dtype(), Dtype::BF16);
+        assert_eq!(PytorchDtype::F32.to_st_dtype(), Dtype::F32);
+        assert_eq!(PytorchDtype::F64.to_st_dtype(), Dtype::F64);
     }
 
     #[test]
@@ -1387,31 +1251,6 @@ mod tests {
     }
 
     #[test]
-    fn bin_to_safetensors_path_basic() {
-        let path = bin_to_safetensors_path(Path::new("/models/pytorch_model.bin")).unwrap();
-        assert_eq!(path, PathBuf::from("/models/model.safetensors"));
-    }
-
-    #[test]
-    fn bin_to_safetensors_path_sharded() {
-        let path = bin_to_safetensors_path(Path::new("/models/pytorch_model-00001-of-00003.bin")).unwrap();
-        assert_eq!(path, PathBuf::from("/models/model-00001-of-00003.safetensors"));
-    }
-
-    #[test]
-    fn bin_index_name_with_bin_only_suffix() {
-        // Input "model.bin" (no .index.json) → replaces .bin with .safetensors.index.json
-        let result = bin_index_name_to_safetensors("model.bin");
-        assert_eq!(result, "model.safetensors.index.json");
-    }
-
-    #[test]
-    fn bin_index_name_no_extension_at_all() {
-        let result = bin_index_name_to_safetensors("somefile");
-        assert_eq!(result, "somefile.safetensors.index.json");
-    }
-
-    #[test]
     fn read_to_newline_lf() {
         let input: &[u8] = b"hello\nworld\n";
         let mut reader = std::io::BufReader::new(input);
@@ -1428,30 +1267,6 @@ mod tests {
     }
 
     #[test]
-    fn bin_index_serde_roundtrip() {
-        let index = BinIndex {
-            weight_map: {
-                let mut m = HashMap::new();
-                m.insert("layer.0.weight".to_string(), "pytorch_model-00001.bin".to_string());
-                m
-            },
-            metadata: HashMap::new(),
-        };
-        let json = serde_json::to_string(&index).unwrap();
-        let decoded: BinIndex = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.weight_map["layer.0.weight"], "pytorch_model-00001.bin");
-        assert!(decoded.metadata.is_empty());
-    }
-
-    #[test]
-    fn bin_index_missing_metadata_defaults_empty() {
-        let json = r#"{"weight_map":{"k":"v"}}"#;
-        let decoded: BinIndex = serde_json::from_str(json).unwrap();
-        assert_eq!(decoded.weight_map["k"], "v");
-        assert!(decoded.metadata.is_empty());
-    }
-
-    #[test]
     fn pytorch_tensor_info_debug() {
         let info = PytorchTensorInfo {
             name: "weight".to_string(),
@@ -1462,26 +1277,6 @@ mod tests {
         let debug_str = format!("{info:?}");
         assert!(debug_str.contains("weight"));
         assert!(debug_str.contains("F32"));
-    }
-
-    #[test]
-    fn pytorch_tensor_debug() {
-        let tensor = PytorchTensor {
-            name: "bias".to_string(),
-            dtype: Dtype::F32,
-            shape: vec![128],
-            data: vec![0u8; 512],
-            packed_bits: None,
-        };
-        let debug_str = format!("{tensor:?}");
-        assert!(debug_str.contains("bias"));
-    }
-
-    #[test]
-    fn convert_bins_to_safetensors_empty_paths_errors() {
-        let cfg = PytorchConversionConfig::default();
-        let result = convert_bins_to_safetensors(&[], None, &cfg);
-        assert!(result.is_err());
     }
 
     // ── Object Debug format tests ──
@@ -1767,65 +1562,20 @@ mod tests {
     }
 
     #[test]
-    fn pytorch_dtype_as_safetensors_all_coverage() {
+    fn pytorch_dtype_to_st_dtype_all_coverage() {
         // Every variant must map to a distinct Dtype
         let mappings: Vec<Dtype> = [
             PytorchDtype::Bool, PytorchDtype::U8, PytorchDtype::I8,
             PytorchDtype::I16, PytorchDtype::I32, PytorchDtype::I64,
             PytorchDtype::F16, PytorchDtype::BF16, PytorchDtype::F32,
             PytorchDtype::F64,
-        ].iter().map(|d| d.as_safetensors()).collect();
+        ].iter().map(|d| d.to_st_dtype()).collect();
         // Check uniqueness
         for i in 0..mappings.len() {
             for j in (i+1)..mappings.len() {
                 assert_ne!(mappings[i], mappings[j], "duplicate mapping at {i} vs {j}");
             }
         }
-    }
-
-    // ── PytorchConversionConfig edge cases ──
-
-    #[test]
-    fn pytorch_conversion_config_default_int4_hints_content() {
-        let cfg = PytorchConversionConfig::default();
-        assert!(cfg.int4_name_hints.contains(&"qweight".to_string()));
-        assert!(cfg.int4_name_hints.contains(&"int4".to_string()));
-        assert!(cfg.int4_name_hints.contains(&"q4".to_string()));
-    }
-
-    #[test]
-    fn pytorch_conversion_config_custom_state_dict_key() {
-        let cfg = PytorchConversionConfig {
-            state_dict_key: Some("model".to_string()),
-            int4_name_hints: vec![],
-            force: true,
-        };
-        assert_eq!(cfg.state_dict_key.as_deref(), Some("model"));
-        assert!(cfg.force);
-        assert!(cfg.int4_name_hints.is_empty());
-    }
-
-    // ── PytorchConversionOutput edge cases ──
-
-    #[test]
-    fn pytorch_conversion_output_empty_safetensors() {
-        let output = PytorchConversionOutput {
-            safetensors: vec![],
-            index: None,
-        };
-        assert!(output.safetensors.is_empty());
-        assert!(output.index.is_none());
-    }
-
-    #[test]
-    fn pytorch_conversion_output_clone() {
-        let output = PytorchConversionOutput {
-            safetensors: vec![PathBuf::from("a.safetensors"), PathBuf::from("b.safetensors")],
-            index: Some(PathBuf::from("index.json")),
-        };
-        let cloned = output.clone();
-        assert_eq!(cloned.safetensors.len(), 2);
-        assert_eq!(cloned.index, output.index);
     }
 
     // ── PickleStack edge cases ──
@@ -1932,7 +1682,7 @@ mod tests {
 
     #[test]
     fn packed_bits_hint_custom_hints() {
-        let cfg = PytorchConversionConfig {
+        let cfg = PytorchLoaderConfig {
             int4_name_hints: vec!["custom4".to_string()],
             ..Default::default()
         };
@@ -1942,37 +1692,8 @@ mod tests {
 
     #[test]
     fn packed_bits_hint_empty_name() {
-        let cfg = PytorchConversionConfig::default();
+        let cfg = PytorchLoaderConfig::default();
         assert_eq!(packed_bits_hint("", PytorchDtype::U8, &cfg), None);
-    }
-
-    // ── bin_name_to_safetensors edge cases ──
-
-    #[test]
-    fn bin_name_no_bin_suffix_adds_safetensors() {
-        assert_eq!(
-            bin_name_to_safetensors("weights"),
-            "weights.safetensors"
-        );
-    }
-
-    #[test]
-    fn bin_name_pytorch_prefix_no_bin() {
-        // "pytorch_model" (no .bin suffix) → strips "pytorch_model" prefix → "model" + ".safetensors"
-        assert_eq!(
-            bin_name_to_safetensors("pytorch_model"),
-            "model.safetensors"
-        );
-    }
-
-    // ── bin_index_name_to_safetensors edge cases ──
-
-    #[test]
-    fn bin_index_name_pytorch_sharded() {
-        assert_eq!(
-            bin_index_name_to_safetensors("pytorch_model-00001-of-00002.bin.index.json"),
-            "model-00001-of-00002.safetensors.index.json"
-        );
     }
 
     // ── unwrap_module edge cases ──
@@ -2032,27 +1753,6 @@ mod tests {
         assert!(matches!(result, Object::Dict(d) if d.len() == 1));
     }
 
-    // ── BinIndex serde edge cases ──
-
-    #[test]
-    fn bin_index_with_metadata_roundtrip() {
-        let index = BinIndex {
-            weight_map: {
-                let mut m = HashMap::new();
-                m.insert("w".to_string(), "file.bin".to_string());
-                m
-            },
-            metadata: {
-                let mut m = HashMap::new();
-                m.insert("total_size".to_string(), serde_json::json!(1024));
-                m
-            },
-        };
-        let json = serde_json::to_string(&index).unwrap();
-        let decoded: BinIndex = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.metadata["total_size"], serde_json::json!(1024));
-    }
-
     // ── PytorchTensorInfo debug edge cases ──
 
     #[test]
@@ -2067,81 +1767,6 @@ mod tests {
         assert_eq!(cloned.name, "layer.weight");
         assert_eq!(cloned.dtype, PytorchDtype::BF16);
         assert_eq!(cloned.path, "archive/data/0");
-    }
-
-    // ── PytorchTensor construction edge cases ──
-
-    #[test]
-    fn pytorch_tensor_with_packed_bits() {
-        let tensor = PytorchTensor {
-            name: "quant.weight".to_string(),
-            dtype: Dtype::U8,
-            shape: vec![128, 64],
-            data: vec![0u8; 128 * 64],
-            packed_bits: Some(4),
-        };
-        assert_eq!(tensor.packed_bits, Some(4));
-        assert_eq!(tensor.shape.len(), 2);
-    }
-
-    #[test]
-    fn pytorch_tensor_empty_data() {
-        let tensor = PytorchTensor {
-            name: "empty".to_string(),
-            dtype: Dtype::F32,
-            shape: vec![0],
-            data: vec![],
-            packed_bits: None,
-        };
-        assert!(tensor.data.is_empty());
-        assert_eq!(tensor.shape, vec![0]);
-    }
-
-    #[test]
-    fn pytorch_tensor_clone() {
-        let tensor = PytorchTensor {
-            name: "w".to_string(),
-            dtype: Dtype::F16,
-            shape: vec![10, 20],
-            data: vec![1u8, 2, 3],
-            packed_bits: None,
-        };
-        let cloned = tensor.clone();
-        assert_eq!(cloned.name, tensor.name);
-        assert_eq!(cloned.dtype, tensor.dtype);
-        assert_eq!(cloned.shape, tensor.shape);
-        assert_eq!(cloned.data, tensor.data);
-    }
-
-    // ── build_metadata edge cases ──
-
-    #[test]
-    fn build_metadata_no_packed_returns_none() {
-        let tensors = vec![PytorchTensor {
-            name: "w".to_string(),
-            dtype: Dtype::F32,
-            shape: vec![4],
-            data: vec![0u8; 16],
-            packed_bits: None,
-        }];
-        let result = build_metadata(&tensors).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn build_metadata_with_packed_returns_metadata() {
-        let tensors = vec![PytorchTensor {
-            name: "qw".to_string(),
-            dtype: Dtype::U8,
-            shape: vec![4],
-            data: vec![0u8; 4],
-            packed_bits: Some(4),
-        }];
-        let result = build_metadata(&tensors).unwrap();
-        assert!(result.is_some());
-        let meta = result.unwrap();
-        assert!(meta.contains_key("gllm.packed_bits"));
-        assert!(meta["gllm.packed_bits"].contains("4"));
     }
 
     // ── read helper byte-reading tests ──
@@ -2680,57 +2305,6 @@ mod tests {
         assert_eq!(out.len(), 12);
     }
 
-    // ── build_metadata mixed tensors ──
-
-    #[test]
-    fn build_metadata_mixed_packed_and_unpacked() {
-        let tensors = vec![
-            PytorchTensor {
-                name: "normal.weight".to_string(),
-                dtype: Dtype::F32,
-                shape: vec![4],
-                data: vec![0u8; 16],
-                packed_bits: None,
-            },
-            PytorchTensor {
-                name: "quant.weight".to_string(),
-                dtype: Dtype::U8,
-                shape: vec![4],
-                data: vec![0u8; 4],
-                packed_bits: Some(4),
-            },
-        ];
-        let result = build_metadata(&tensors).unwrap();
-        let meta = result.unwrap();
-        assert!(meta["gllm.packed_bits"].contains("quant.weight"));
-        assert!(meta["gllm.packed_bits"].contains("4"));
-    }
-
-    #[test]
-    fn build_metadata_multiple_packed() {
-        let tensors = vec![
-            PytorchTensor {
-                name: "a.qweight".to_string(),
-                dtype: Dtype::U8,
-                shape: vec![4],
-                data: vec![0u8; 4],
-                packed_bits: Some(4),
-            },
-            PytorchTensor {
-                name: "b.qweight".to_string(),
-                dtype: Dtype::U8,
-                shape: vec![4],
-                data: vec![0u8; 4],
-                packed_bits: Some(4),
-            },
-        ];
-        let result = build_metadata(&tensors).unwrap();
-        let meta = result.unwrap();
-        let json = &meta["gllm.packed_bits"];
-        assert!(json.contains("a.qweight"));
-        assert!(json.contains("b.qweight"));
-    }
-
     // ── Object clone edge cases ──
 
     #[test]
@@ -2749,20 +2323,6 @@ mod tests {
         };
         let cloned = obj.clone();
         assert_eq!(obj, cloned);
-    }
-
-    // ── bin_to_safetensors_path edge case ──
-
-    #[test]
-    fn bin_to_safetensors_path_already_safetensors() {
-        let path = bin_to_safetensors_path(Path::new("/models/model.safetensors")).unwrap();
-        assert_eq!(path, PathBuf::from("/models/model.safetensors"));
-    }
-
-    #[test]
-    fn bin_to_safetensors_path_no_filename_errors() {
-        let result = bin_to_safetensors_path(Path::new("/"));
-        assert!(result.is_err());
     }
 
     // ── Additional edge case tests ──
@@ -2901,27 +2461,6 @@ mod tests {
         let mut reader = std::io::BufReader::new(&input[..]);
         stack.read_loop(&mut reader).unwrap();
         assert_eq!(stack.finalize().unwrap(), Object::Long(i64::MAX));
-    }
-
-    #[test]
-    fn bin_index_name_already_safetensors_index_json() {
-        let result = bin_index_name_to_safetensors("model.safetensors.index.json");
-        assert_eq!(result, "model.safetensors.index.json");
-    }
-
-    #[test]
-    fn packed_bits_hint_empty_hints_list() {
-        let cfg = PytorchConversionConfig {
-            int4_name_hints: vec![],
-            ..Default::default()
-        };
-        assert_eq!(packed_bits_hint("model.qweight.0", PytorchDtype::U8, &cfg), None);
-    }
-
-    #[test]
-    fn build_metadata_empty_tensor_list() {
-        let result = build_metadata(&[]).unwrap();
-        assert!(result.is_none());
     }
 
     #[test]
@@ -3075,26 +2614,6 @@ mod tests {
     }
 
     #[test]
-    fn bin_name_multiple_dots_preserves_only_bin_suffix() {
-        // Arrange: filename with multiple dots before .bin
-        let name = "my.model.v2.bin";
-        // Act
-        let result = bin_name_to_safetensors(name);
-        // Assert: only .bin suffix is replaced
-        assert_eq!(result, "my.model.v2.safetensors");
-    }
-
-    #[test]
-    fn bin_index_name_safetensors_index_with_pytorch_prefix() {
-        // Arrange: already has .safetensors.index.json but with pytorch_model prefix
-        let name = "pytorch_model.safetensors.index.json";
-        // Act
-        let result = bin_index_name_to_safetensors(name);
-        // Assert: prefix stripped, suffix preserved
-        assert_eq!(result, "model.safetensors.index.json");
-    }
-
-    #[test]
     fn object_float_negative_zero_hash_equals_positive_zero() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -3113,7 +2632,7 @@ mod tests {
     #[test]
     fn pytorch_dtype_size_matches_safetensors_dtype_size() {
         // Arrange: for every PytorchDtype, size_in_bytes must be consistent
-        // with the corresponding safetensors Dtype element size
+        // with the corresponding safetensors Dtype element size (via to_st_dtype)
         let cases = vec![
             (PytorchDtype::Bool, 1),
             (PytorchDtype::U8, 1),
@@ -3228,7 +2747,7 @@ mod tests {
     #[test]
     fn packed_bits_hint_substring_not_prefix_or_suffix() {
         // Arrange: name containing "qweight" in the middle, not at start/end
-        let cfg = PytorchConversionConfig::default();
+        let cfg = PytorchLoaderConfig::default();
         // Act & Assert: "myqweightlayer" contains "qweight" => Some(4)
         assert_eq!(
             packed_bits_hint("myqweightlayer", PytorchDtype::U8, &cfg),
@@ -3239,25 +2758,6 @@ mod tests {
             packed_bits_hint("qwight.tensor", PytorchDtype::U8, &cfg),
             None
         );
-    }
-
-    #[test]
-    fn bin_name_to_safetensors_preserves_directory_components() {
-        // Arrange: path-like filename with directory separators embedded
-        let name = "pytorch_model-00002-of-00005.bin";
-        // Act
-        let result = bin_name_to_safetensors(name);
-        // Assert: sharding suffix preserved correctly
-        assert_eq!(result, "model-00002-of-00005.safetensors");
-    }
-
-    #[test]
-    fn bin_index_name_to_safetensors_pytorch_with_number() {
-        // Arrange: pytorch_model with a number before .bin.index.json
-        // Act
-        let result = bin_index_name_to_safetensors("pytorch_model-00003.bin.index.json");
-        // Assert: prefix stripped, number preserved, extension replaced
-        assert_eq!(result, "model-00003.safetensors.index.json");
     }
 
     #[test]
@@ -3278,22 +2778,6 @@ mod tests {
         ]);
         let t3 = Object::Tuple(vec![Object::Int(0), inner2]);
         assert_ne!(t1, t3);
-    }
-
-    #[test]
-    fn pytorch_conversion_config_debug_format() {
-        // Arrange
-        let cfg = PytorchConversionConfig {
-            state_dict_key: Some("model".to_string()),
-            int4_name_hints: vec!["qweight".to_string()],
-            force: true,
-        };
-        // Act
-        let debug = format!("{cfg:?}");
-        // Assert: Debug output must contain all field-representative strings
-        assert!(debug.contains("state_dict_key"));
-        assert!(debug.contains("int4_name_hints"));
-        assert!(debug.contains("force"));
     }
 
     // ── 10 additional tests ──
@@ -3367,7 +2851,7 @@ mod tests {
     }
 
     #[test]
-    fn pytorch_dtype_as_safetensors_roundtrip_all_variants() {
+    fn pytorch_dtype_to_st_dtype_roundtrip_all_variants() {
         // Arrange: every PytorchDtype variant must map to a distinct safetensors Dtype
         let cases = vec![
             (PytorchDtype::Bool, Dtype::BOOL),
@@ -3383,7 +2867,7 @@ mod tests {
         ];
         for (pt_dtype, expected_st) in cases {
             // Act & Assert: each PytorchDtype maps to the correct safetensors Dtype
-            assert_eq!(pt_dtype.as_safetensors(), expected_st, "{pt_dtype:?} mapping");
+            assert_eq!(pt_dtype.to_st_dtype(), expected_st, "{pt_dtype:?} mapping");
         }
     }
 
@@ -3426,22 +2910,5 @@ mod tests {
         // Act: unwrap_module on non-__torch__ Build returns the Build intact
         let result2 = unwrap_module(build.clone());
         assert_eq!(result2, build);
-    }
-
-    #[test]
-    fn pytorch_conversion_output_clone_and_debug() {
-        // Arrange
-        let output = PytorchConversionOutput {
-            safetensors: vec![PathBuf::from("model.safetensors")],
-            index: Some(PathBuf::from("model.safetensors.index.json")),
-        };
-        // Act: Clone
-        let cloned = output.clone();
-        assert_eq!(cloned.safetensors, output.safetensors);
-        assert_eq!(cloned.index, output.index);
-        // Act: Debug
-        let debug = format!("{output:?}");
-        assert!(debug.contains("model.safetensors"));
-        assert!(debug.contains("index"));
     }
 }

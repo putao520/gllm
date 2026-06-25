@@ -139,6 +139,10 @@ pub struct LoaderConfig {
     /// GGUF file name substring filter. When set, only GGUF files whose name
     /// contains this substring are considered for download.
     pub gguf_file_filter: Option<String>,
+    /// #6: Configurable tensor skip strategy.
+    pub tensor_skip_config: TensorSkipConfig,
+    /// #5: Runtime-extensible suffix patterns for `match_tensor_role()`.
+    pub extra_suffix_patterns: Vec<(Vec<String>, TensorRole, bool)>,
 }
 
 impl Default for LoaderConfig {
@@ -153,6 +157,8 @@ impl Default for LoaderConfig {
             enable_fallback: true,
             checksum_policy: ChecksumPolicy::Ignore,
             gguf_file_filter: None,
+            tensor_skip_config: TensorSkipConfig::default(),
+            extra_suffix_patterns: Vec::new(),
         }
     }
 }
@@ -204,6 +210,39 @@ pub fn fallback_source(source: ModelSource) -> ModelSource {
         ModelSource::HuggingFace => ModelSource::ModelScope,
         ModelSource::ModelScope => ModelSource::HuggingFace,
     }
+}
+
+/// #16: GGUF metadata key → config.json key mapping.
+/// Used to normalize GGUF-specific keys to the same namespace as config.json fields,
+/// so downstream code (model_config derivation) can use a single set of field names.
+pub const GGUF_CONFIG_KEY_MAP: &[(&str, &str)] = &[
+    ("n_embd", "hidden_size"),
+    ("n_head", "num_attention_heads"),
+    ("n_kv_head", "num_key_value_heads"),
+    ("n_layer", "num_hidden_layers"),
+    ("n_ff", "intermediate_size"),
+    ("n_embd_head_k", "head_dim"),
+    ("context_length", "max_position_embeddings"),
+    ("n_ctx", "max_position_embeddings"),
+    ("rope_freq_base", "rope_theta"),
+    ("layer_norm_eps", "rms_norm_eps"),
+    ("layer_norm_epsilon", "layer_norm_eps"),
+    ("attention_layer_norm", "layer_norm_eps"),
+    ("n_experts", "num_local_experts"),
+    ("n_experts_per_tok", "num_experts_per_topk"),
+    ("intermediate_size", "intermediate_size"), // 1:1 mapping for clarity
+    ("vocab_size", "vocab_size"),
+];
+
+/// #16: Normalize a GGUF metadata key to its config.json equivalent.
+/// Returns the config.json key if a mapping exists, otherwise returns the original key.
+pub fn normalize_gguf_key(key: &str) -> &str {
+    for (gguf_key, config_key) in GGUF_CONFIG_KEY_MAP {
+        if *gguf_key == key {
+            return config_key;
+        }
+    }
+    key
 }
 
 // --- Tensor Role & Provider Logic ---
@@ -345,12 +384,103 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["layer_output_scale"],               TensorRole::LayerOutputScale,  false),
 ];
 
+/// #5: Global registry for runtime-extensible suffix patterns.
+/// Set once at model load time via `set_extra_suffix_patterns()`.
+/// `match_tensor_role()` automatically includes these after the static `SUFFIX_PATTERNS`.
+static EXTRA_SUFFIX_PATTERNS: std::sync::OnceLock<Vec<(Vec<String>, TensorRole, bool)>> =
+    std::sync::OnceLock::new();
+
+/// Set the global extra suffix patterns. Can only be called once.
+/// Returns `Err(patterns)` if already set.
+pub fn set_extra_suffix_patterns(
+    patterns: Vec<(Vec<String>, TensorRole, bool)>,
+) -> std::result::Result<(), Vec<(Vec<String>, TensorRole, bool)>> {
+    EXTRA_SUFFIX_PATTERNS.set(patterns).map_err(|e| e.clone())
+}
+
+fn get_extra_suffix_patterns() -> &'static [(Vec<String>, TensorRole, bool)] {
+    EXTRA_SUFFIX_PATTERNS
+        .get()
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
 /// Matches a tensor name to a role and optional layer index.
 ///
 /// 100% precise: uses segment-sequence exact matching (not `contains()` heuristics).
 /// Longest suffix matches first to disambiguate (e.g. `attn_q_norm` before `attn_q`).
 /// Unrecognized names return `None` — no guessing.
+///
+/// Delegates to `match_tensor_role_ext` with the globally registered extra patterns.
 pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
+    match_tensor_role_ext(name, get_extra_suffix_patterns())
+}
+
+/// Extended version of `match_tensor_role` that also checks extra patterns.
+/// Extra patterns are checked after the static `SUFFIX_PATTERNS` table.
+pub fn match_tensor_role_ext(
+    name: &str,
+    extra_patterns: &[(Vec<String>, TensorRole, bool)],
+) -> Option<(TensorRole, Option<usize>)> {
+    // First try the static table
+    if let Some(result) = match_tensor_role_static(name) {
+        return Some(result);
+    }
+
+    // Then try extra patterns
+    let lower = name.to_ascii_lowercase();
+    let segments: Vec<&str> = lower.split('.').collect();
+
+    let mut layer_idx = None;
+    let mut layer_end = 0;
+    for (i, seg) in segments.iter().enumerate() {
+        if let Ok(idx) = seg.parse::<usize>() {
+            if i > 0 {
+                let prev = segments[i - 1];
+                if matches!(prev, "layers" | "blk" | "blocks" | "h" | "layer" | "block" | "encoder")
+                {
+                    layer_idx = Some(idx);
+                    layer_end = i + 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    let content_segs = if layer_end > 0 {
+        &segments[layer_end..]
+    } else {
+        &segments[..]
+    };
+
+    let content_segs = if content_segs
+        .last()
+        .is_some_and(|s| matches!(*s, "weight" | "bias" | "scales" | "blocks"))
+    {
+        &content_segs[..content_segs.len() - 1]
+    } else {
+        content_segs
+    };
+
+    for (suffix_segs, role, is_global) in extra_patterns {
+        if *is_global != layer_idx.is_none() && !*is_global {
+            continue;
+        }
+        if suffix_segs.len() > content_segs.len() {
+            continue;
+        }
+        let start = content_segs.len() - suffix_segs.len();
+        let suffix_strs: Vec<&str> = suffix_segs.iter().map(|s| s.as_str()).collect();
+        if content_segs[start..] == suffix_strs[..] {
+            return Some((*role, layer_idx));
+        }
+    }
+
+    None
+}
+
+/// Static-table-only matching (core logic, used by `match_tensor_role_ext`).
+fn match_tensor_role_static(name: &str) -> Option<(TensorRole, Option<usize>)> {
     let lower = name.to_ascii_lowercase();
 
     // Skip bias tensors
@@ -427,10 +557,23 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
 }
 
 /// Build a reverse index from (TensorRole, Option<layer_idx>) to tensor name.
+/// Uses the globally registered extra suffix patterns.
 /// Also indexes bias tensors: for each weight tensor "foo.weight", checks if "foo.bias" exists.
 #[allow(clippy::type_complexity)]
 pub fn build_tensor_role_index<'a>(
     tensor_names: impl Iterator<Item = &'a str>,
+) -> (
+    HashMap<(TensorRole, Option<usize>), String>,
+    HashMap<String, String>,
+) {
+    build_tensor_role_index_ext(tensor_names, get_extra_suffix_patterns())
+}
+
+/// Extended version of `build_tensor_role_index` with explicit extra patterns.
+#[allow(clippy::type_complexity)]
+pub fn build_tensor_role_index_ext<'a>(
+    tensor_names: impl Iterator<Item = &'a str>,
+    extra_patterns: &[(Vec<String>, TensorRole, bool)],
 ) -> (
     HashMap<(TensorRole, Option<usize>), String>,
     HashMap<String, String>,
@@ -442,7 +585,7 @@ pub fn build_tensor_role_index<'a>(
     let mut bias_index: HashMap<String, String> = HashMap::new();
 
     for &name in &names {
-        if let Some((role, layer_idx)) = match_tensor_role(name) {
+        if let Some((role, layer_idx)) = match_tensor_role_ext(name, extra_patterns) {
             role_index.insert((role, layer_idx), name.to_string());
         }
 
@@ -595,17 +738,43 @@ pub trait TensorProvider {
     }
 }
 
+/// #6: Configurable tensor skip strategy.
+#[derive(Debug, Clone)]
+pub struct TensorSkipConfig {
+    /// Skip multimodal tower weights (vision_tower, audio_tower, embed_vision, embed_audio).
+    pub skip_multimodal_towers: bool,
+    /// Skip PLE/AltUp weights (embed_tokens_per_layer, per_layer_embedding, etc.).
+    pub skip_ple_altup: bool,
+}
+
+impl Default for TensorSkipConfig {
+    fn default() -> Self {
+        Self {
+            skip_multimodal_towers: true,
+            skip_ple_altup: true,
+        }
+    }
+}
+
 /// ARCH-TENSOR-FILTER: check if a tensor should be skipped during upload.
-fn should_skip_tensor(name: &str) -> bool {
-    name.contains("vision_tower")
-        || name.contains("audio_tower")
-        || name.contains("embed_vision")
-        || name.contains("embed_audio")
-        // PLE/AltUp weights: handled by JIT graph, not CPU forward path
-        || name.contains("embed_tokens_per_layer")
-        || name.contains("per_layer_embedding")
-        || name.contains("per_layer_projection")
-        || name.contains("post_mlp_projection")
+/// Uses `TensorSkipConfig` to control which categories are skipped.
+fn should_skip_tensor(name: &str, config: &TensorSkipConfig) -> bool {
+    let mut skip = false;
+    if config.skip_multimodal_towers {
+        skip = skip
+            || name.contains("vision_tower")
+            || name.contains("audio_tower")
+            || name.contains("embed_vision")
+            || name.contains("embed_audio");
+    }
+    if config.skip_ple_altup {
+        skip = skip
+            || name.contains("embed_tokens_per_layer")
+            || name.contains("per_layer_embedding")
+            || name.contains("per_layer_projection")
+            || name.contains("post_mlp_projection");
+    }
+    skip
 }
 
 /// Tensor loading priority for back-to-front ordering.

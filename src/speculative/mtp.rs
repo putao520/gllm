@@ -127,9 +127,10 @@ pub fn mtp_candidates(mtp_logits: &[Vec<f32>]) -> Vec<u32> {
             logits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .filter(|(_, v)| !v.is_nan())
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
                 .map(|(i, _)| i as u32)
-                .expect("max_by on non-empty iterator always returns Some")
+                .expect("max_by on non-empty non-all-NaN iterator always returns Some")
         })
         .collect()
 }
