@@ -21,7 +21,13 @@ use crate::engine::mega_kernel_gpu;
 pub const BATCH_CTX_HEADER_SIZE: usize = 96;
 
 pub const NUM_SEQS: usize = 0;
-pub const MAX_DECODE_STEPS: usize = 4;
+/// Byte offset of the `max_decode_steps` u32 field in the BatchContext header.
+/// NOT a value limit — the actual max decode steps is set dynamically via
+/// `set_max_decode_steps(v)` and is bounded only by u32::MAX.
+/// MTP depth is orthogonal: candidates are generated per-step inside the JIT
+/// decode loop, so `max_decode_steps` = number of main decode steps regardless
+/// of mtp_depth.
+pub const MAX_DECODE_STEPS_OFFSET: usize = 4;
 pub const TOTAL_PREFILL_TOKENS: usize = 8;
 // 12: pad
 pub const INPUT_IDS_FLAT_PTR: usize = 16;
@@ -173,7 +179,7 @@ impl BatchContext {
     }
 
     pub fn set_max_decode_steps(&mut self, v: u32) {
-        write_u32(&mut self.data, MAX_DECODE_STEPS, v);
+        write_u32(&mut self.data, MAX_DECODE_STEPS_OFFSET, v);
     }
 
     pub fn set_total_prefill_tokens(&mut self, v: u32) {
@@ -385,7 +391,7 @@ mod tests {
         ctx.set_total_prefill_tokens(50);
 
         assert_eq!(read_u32(&ctx.data, NUM_SEQS), 2);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 100);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 100);
         assert_eq!(read_u32(&ctx.data, TOTAL_PREFILL_TOKENS), 50);
     }
 
@@ -572,7 +578,7 @@ mod tests {
     fn constants_non_overlapping_header() {
         // Header fields should not overlap
         let offsets = [
-            NUM_SEQS, MAX_DECODE_STEPS, TOTAL_PREFILL_TOKENS,
+            NUM_SEQS, MAX_DECODE_STEPS_OFFSET, TOTAL_PREFILL_TOKENS,
             INPUT_IDS_FLAT_PTR, OUTPUT_TOKENS_FLAT_PTR, POSITIONS_PTR,
             PAGE_TABLE_FLAT_PTR, KV_POOL_BASE, SAMPLING_PARAMS_PTR,
             HOOK_CTX_PTR, CALLBACK_TABLE_PTR, SEQ_MAPPING_PTR,
@@ -687,7 +693,7 @@ mod tests {
         ctx.set_max_decode_steps(u32::MAX);
         ctx.set_total_prefill_tokens(u32::MAX);
         assert_eq!(read_u32(&ctx.data, NUM_SEQS), u32::MAX);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), u32::MAX);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), u32::MAX);
         assert_eq!(read_u32(&ctx.data, TOTAL_PREFILL_TOKENS), u32::MAX);
     }
 
@@ -1024,7 +1030,7 @@ mod tests {
     fn batch_context_header_u32_offsets_are_4_byte_aligned() {
         let u32_offsets = [
             NUM_SEQS,      // 0
-            MAX_DECODE_STEPS, // 4
+            MAX_DECODE_STEPS_OFFSET, // 4
             TOTAL_PREFILL_TOKENS, // 8
         ];
         for &off in &u32_offsets {
@@ -1300,7 +1306,7 @@ mod tests {
 
         // Header fields should remain intact
         assert_eq!(read_u32(&ctx.data, NUM_SEQS), 4);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 10);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 10);
         assert_eq!(read_u32(&ctx.data, TOTAL_PREFILL_TOKENS), 100);
     }
 
@@ -1355,7 +1361,7 @@ mod tests {
         ctx.set_max_decode_steps(42);
 
         // Assert
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 42);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 42);
     }
 
     #[test]
@@ -1969,9 +1975,9 @@ mod tests {
     fn batch_context_header_field_max_decode_steps_zero_then_set() {
         let mut ctx = BatchContext::new(1);
         ctx.set_max_decode_steps(0);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 0);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 0);
         ctx.set_max_decode_steps(10);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 10);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 10);
     }
 
     #[test]
@@ -2819,7 +2825,7 @@ mod tests {
 
         // Assert: all fields read back correctly despite no per-seq area
         assert_eq!(read_u32(&ctx.data, NUM_SEQS), 10);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 20);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 20);
         assert_eq!(read_u32(&ctx.data, TOTAL_PREFILL_TOKENS), 30);
         assert_eq!(ctx.byte_size(), BATCH_CTX_HEADER_SIZE); // size unchanged
     }
@@ -2871,7 +2877,7 @@ mod tests {
 
         // Assert: all header and per-seq values correct
         assert_eq!(read_u32(&ctx.data, NUM_SEQS), 2);
-        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS), 8);
+        assert_eq!(read_u32(&ctx.data, MAX_DECODE_STEPS_OFFSET), 8);
         assert_eq!(read_u32(&ctx.data, TOTAL_PREFILL_TOKENS), 125);
         assert_eq!(read_u32(&ctx.data, BATCH_CTX_HEADER_SIZE + SEQ_PROMPT_LEN), 50);
         assert_eq!(read_u32(&ctx.data, BATCH_CTX_HEADER_SIZE + SEQ_META_STRIDE + SEQ_PROMPT_LEN), 75);

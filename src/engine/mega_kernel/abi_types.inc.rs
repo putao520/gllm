@@ -332,11 +332,26 @@ struct MegaKernelCompiled {
 
 /// JIT sampling scratch workspace multiplier.
 ///
-/// The JIT sampling code needs 4 vocab-sized buffers for its workspace:
-///   1x logits/probs       — softmax probabilities (f32 per vocab entry)
-///   1x sorted indices     — index array for nucleus sorting (usize per entry)
-///   1x CDF / copy buffer  — cumulative distribution function for top-p
-///   1x temp workspace     — scratch for sorting/shuffling intermediates
+/// The JIT sampling code (mega_kernel_emit.rs emit_sampling_pipeline) uses
+/// 4 vocab-sized regions after the logits row for its workspace:
+///
+///   Region 0 (+0·vocab_bytes):        Top-K sorted indices (u32[], vocab_size entries)
+///   Region 1 (+1·vocab_bytes):        PRNG state for Multinomial (u64[2], 8 bytes)
+///   Region 2 (+2·vocab_bytes):        Reserved — CDF buffer for future top-p/gumbel
+///   Region 3 (+3·vocab_bytes):        Reserved — temp workspace for sorting intermediates
+///
+/// Note: logits/probs are mutated in-place (TemperatureScale → Softmax → TopK → TopP →
+/// Multinomial all operate on the logits row itself). TopP and Multinomial accumulate CDF
+/// in registers (xmm on x86, PTX regs on GPU), not in a separate buffer.
+///
+/// LEGAL justification for ×4:
+/// - Region 0 (indices) is actively written by SampleTopKFilter (u32 per vocab entry).
+/// - Region 1 (PRNG) only needs 8 bytes but reserves a full vocab_bytes row to keep
+///   alignment and avoid offset arithmetic with mixed element sizes.
+/// - Regions 2–3 are reserved for future sampling strategies (e.g., full sort for GPU
+///   top-k, gumbel noise, or explicit CDF buffer) and must not be reclaimed.
+/// - MTP logits start at `logits_scratch_offset + vocab_bytes * 5` (1 logits + 4 sampling),
+///   so any change to this multiplier must be mirrored in mega_kernel_emit.rs.
 ///
 /// Total: `SAMPLING_WORKSPACE_MULTIPLIER * vocab_bytes` per sampling invocation.
 const SAMPLING_WORKSPACE_MULTIPLIER: usize = 4;

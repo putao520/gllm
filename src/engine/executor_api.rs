@@ -412,8 +412,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let prompt_tokens = self.encode_prompt(prompt)?;
         if prompt_tokens.is_empty() { return Err(ExecutorError::EmptyPrompt); }
 
-        let session_position = self.dispatch.memory_manager
-            .session_finalized_position(session_id).unwrap_or(0);
+        let session_position = match self.dispatch.memory_manager
+            .session_finalized_position(session_id)
+        {
+            Some(pos) => pos,
+            None => {
+                return Err(ExecutorError::Scheduler(format!(
+                    "session_finalized_position returned None for session {session_id}"
+                )));
+            }
+        };
 
         // Mutable operations first
         let position_agnostic_range = self.optimize_session_prefix(session_position);

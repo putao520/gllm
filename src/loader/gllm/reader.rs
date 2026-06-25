@@ -211,20 +211,33 @@ impl GllmReader {
     }
 
     /// Model parameters from metadata for architecture resolution.
+    ///
+    /// Returns `None` if any required field is missing, unparseable, or zero.
+    /// All 8 fields (vocab_size, hidden_size, num_layers, num_heads, num_kv_heads,
+    /// head_dim, intermediate_size, context_length) are required — a zero value
+    /// for any indicates corrupted or incomplete metadata.
     pub fn model_params(&self) -> Option<GllmModelParams> {
         let meta: std::collections::HashMap<String, String> =
             serde_json::from_slice(&self.metadata_bytes).ok()?;
         Some(GllmModelParams {
-            vocab_size: meta.get("vocab_size").and_then(|v| v.parse().ok()).unwrap_or(0),
-            hidden_size: meta.get("hidden_size").and_then(|v| v.parse().ok()).unwrap_or(0),
-            num_layers: meta.get("num_layers").and_then(|v| v.parse().ok()).unwrap_or(0),
-            num_heads: meta.get("num_heads").and_then(|v| v.parse().ok()).unwrap_or(0),
-            num_kv_heads: meta.get("num_kv_heads").and_then(|v| v.parse().ok()).unwrap_or(0),
-            head_dim: meta.get("head_dim").and_then(|v| v.parse().ok()).unwrap_or(0),
-            intermediate_size: meta.get("intermediate_size").and_then(|v| v.parse().ok()).unwrap_or(0),
-            context_length: meta.get("context_length").and_then(|v| v.parse().ok()).unwrap_or(0),
+            vocab_size: require_meta_u64(&meta, "vocab_size")?,
+            hidden_size: require_meta_u64(&meta, "hidden_size")?,
+            num_layers: require_meta_u64(&meta, "num_layers")?,
+            num_heads: require_meta_u64(&meta, "num_heads")?,
+            num_kv_heads: require_meta_u64(&meta, "num_kv_heads")?,
+            head_dim: require_meta_u64(&meta, "head_dim")?,
+            intermediate_size: require_meta_u64(&meta, "intermediate_size")?,
+            context_length: require_meta_u64(&meta, "context_length")?,
         })
     }
+}
+
+/// Parse a required u64 metadata field. Returns `None` if the key is missing,
+/// the value cannot be parsed as u64, or the parsed value is 0 (zero indicates
+/// corrupted/incomplete metadata for all required model parameter fields).
+fn require_meta_u64(meta: &std::collections::HashMap<String, String>, key: &str) -> Option<u64> {
+    let val = meta.get(key).and_then(|v| v.parse::<u64>().ok())?;
+    if val == 0 { None } else { Some(val) }
 }
 
 /// Resolved model architecture parameters from .gllm metadata.
@@ -1079,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn model_params_with_non_json_metadata_returns_defaults() {
+    fn model_params_with_non_json_metadata_returns_none() {
         let data = build_minimal_gllm();
         let dir = unique_test_dir("mp");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2565,7 +2578,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_partial_json_uses_defaults() {
+    fn model_params_partial_json_returns_none() {
+        // Incomplete metadata (only 2 of 8 required fields) → None
         let meta = r#"{"vocab_size":"100","hidden_size":"200"}"#;
         let data = build_gllm_with_json_meta(&["w1"], meta, 0);
         let dir = unique_test_dir("mp_partial");
@@ -2574,21 +2588,14 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 100);
-        assert_eq!(params.hidden_size, 200);
-        assert_eq!(params.num_layers, 0);
-        assert_eq!(params.num_heads, 0);
-        assert_eq!(params.num_kv_heads, 0);
-        assert_eq!(params.head_dim, 0);
-        assert_eq!(params.intermediate_size, 0);
-        assert_eq!(params.context_length, 0);
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn model_params_invalid_number_defaults_to_zero() {
+    fn model_params_invalid_number_returns_none() {
+        // "not_a_number" fails to parse as u64 → missing required field → None
         let meta = r#"{"vocab_size":"not_a_number","hidden_size":"4096"}"#;
         let data = build_gllm_with_json_meta(&["w1"], meta, 0);
         let dir = unique_test_dir("mp_inv");
@@ -2597,9 +2604,7 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 4096);
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3266,7 +3271,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_empty_json_object_returns_all_zeros() {
+    fn model_params_empty_json_object_returns_none() {
+        // Empty JSON object has no required fields → None
         let meta = "{}";
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_empty");
@@ -3275,15 +3281,7 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
-        assert_eq!(params.num_layers, 0);
-        assert_eq!(params.num_heads, 0);
-        assert_eq!(params.num_kv_heads, 0);
-        assert_eq!(params.head_dim, 0);
-        assert_eq!(params.intermediate_size, 0);
-        assert_eq!(params.context_length, 0);
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3572,7 +3570,8 @@ mod tests {
     // --- GllmModelParams: non-numeric JSON values ---
 
     #[test]
-    fn model_params_json_empty_string_values_default_to_zero() {
+    fn model_params_json_empty_string_values_returns_none() {
+        // Empty/invalid strings fail to parse as u64 → missing required field → None
         let meta = r#"{"vocab_size":"","hidden_size":"abc","num_layers":"NaN"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_nonnum");
@@ -3581,10 +3580,7 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
-        assert_eq!(params.num_layers, 0);
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3613,7 +3609,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_extra_json_keys_ignored() {
+    fn model_params_extra_json_keys_returns_none_when_incomplete() {
+        // Extra keys are fine, but only 2 of 8 required fields → None
         let meta = r#"{"vocab_size":"100","hidden_size":"200","extra_key":"extra_value","another":"field"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_extra");
@@ -3622,9 +3619,7 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 100);
-        assert_eq!(params.hidden_size, 200);
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4414,7 +4409,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_zero_string_values_parse_to_zero() {
+    fn model_params_zero_string_values_returns_none() {
+        // Zero values are invalid for required fields → None
         let meta = r#"{"vocab_size":"0","hidden_size":"0","num_layers":"0","num_heads":"0","num_kv_heads":"0","head_dim":"0","intermediate_size":"0","context_length":"0"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_zero_str");
@@ -4422,10 +4418,7 @@ mod tests {
         let path = dir.join("mp_zero_str.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
-        assert_eq!(params.num_layers, 0);
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4498,7 +4491,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_with_nested_json_ignores_nested_keys() {
+    fn model_params_with_nested_json_returns_none() {
+        // Nested JSON objects cannot deserialize into HashMap<String, String> → None
         let meta = r#"{"vocab_size":"500","nested":{"inner":"value"},"hidden_size":"1024"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_nested");
@@ -4506,10 +4500,7 @@ mod tests {
         let path = dir.join("mp_nested.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        if let Some(p) = reader.model_params() {
-            assert_eq!(p.vocab_size, 500);
-            assert_eq!(p.hidden_size, 1024);
-        }
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5313,7 +5304,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_empty_string_values_zero() {
+    fn model_params_empty_string_values_returns_none() {
+        // Empty strings fail u64 parse → required field missing → None
         let meta = r#"{"vocab_size":"","hidden_size":""}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_empty_str");
@@ -5321,15 +5313,13 @@ mod tests {
         let path = dir.join("mp_empty_str.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn model_params_negative_number_values_zero() {
-        // Negative numbers parsed as u64 return Err → default 0
+    fn model_params_negative_number_values_returns_none() {
+        // Negative numbers fail u64 parse → required field missing → None
         let meta = r#"{"vocab_size":"-1","hidden_size":"-100"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_neg");
@@ -5337,9 +5327,7 @@ mod tests {
         let path = dir.join("mp_neg.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6283,7 +6271,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_with_float_string_defaults_to_zero() {
+    fn model_params_with_float_string_returns_none() {
+        // Float strings fail u64 parse → missing required field → None
         let meta = r#"{"vocab_size":"3.14","hidden_size":"NaN"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_float");
@@ -6291,14 +6280,13 @@ mod tests {
         let path = dir.join("mp_float.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn model_params_with_scientific_notation_defaults_to_zero() {
+    fn model_params_with_scientific_notation_returns_none() {
+        // Scientific notation fails u64 parse → missing required field → None
         let meta = r#"{"vocab_size":"1e5","hidden_size":"4096"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_sci");
@@ -6306,10 +6294,7 @@ mod tests {
         let path = dir.join("mp_sci.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        // "1e5" cannot be parsed as u64 directly → defaults to 0
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 4096);
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6484,7 +6469,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_json_with_only_vocab_size() {
+    fn model_params_json_with_only_vocab_size_returns_none() {
+        // Only 1 of 8 required fields present → None
         let meta = r#"{"vocab_size":"32000"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_vocab_only");
@@ -6492,10 +6478,7 @@ mod tests {
         let path = dir.join("mp_vocab_only.gllm");
         std::fs::write(&path, &data).unwrap();
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-        assert_eq!(params.vocab_size, 32000);
-        assert_eq!(params.hidden_size, 0);
-        assert_eq!(params.num_layers, 0);
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6748,8 +6731,8 @@ mod tests {
     }
 
     #[test]
-    fn gllm_reader_model_params_negative_string_defaults_to_zero() {
-        // Arrange: JSON with a negative number string
+    fn gllm_reader_model_params_negative_string_returns_none() {
+        // Arrange: JSON with a negative number string — fails u64 parse → None
         let meta = r#"{"vocab_size":"-100","hidden_size":"4096"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_neg");
@@ -6759,11 +6742,9 @@ mod tests {
 
         // Act
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
 
-        // Assert: negative string "−100" → parse fails → unwrap_or(0) → 0
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 4096);
+        // Assert: negative string "-100" → parse fails → required field missing → None
+        assert!(reader.model_params().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7026,7 +7007,7 @@ mod tests {
 
     #[test]
     fn model_params_u64_max_value_in_json() {
-        // Arrange: JSON with u64 max value as string
+        // Arrange: JSON with u64 max value as string — but only 2 of 8 required fields → None
         let meta = r#"{"vocab_size":"18446744073709551615","hidden_size":"1"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_umax");
@@ -7036,11 +7017,8 @@ mod tests {
 
         // Act
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
-
-        // Assert: u64::MAX parses correctly from string
-        assert_eq!(params.vocab_size, u64::MAX);
-        assert_eq!(params.hidden_size, 1);
+        // Assert: incomplete metadata (only 2 fields) → None
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7810,8 +7788,8 @@ mod tests {
 
     #[test]
     // @trace TEST-GLLM-READER-009 [level:unit]
-    fn model_params_empty_json_yields_zero_fields() {
-        // Arrange: valid JSON but empty object — all fields default to 0
+    fn model_params_empty_json_returns_none() {
+        // Arrange: valid JSON but empty object — no required fields present → None
         let meta = "{}";
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_empty");
@@ -7821,17 +7799,9 @@ mod tests {
 
         // Act
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
 
-        // Assert: all fields default to 0 when keys are missing
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
-        assert_eq!(params.num_layers, 0);
-        assert_eq!(params.num_heads, 0);
-        assert_eq!(params.num_kv_heads, 0);
-        assert_eq!(params.head_dim, 0);
-        assert_eq!(params.intermediate_size, 0);
-        assert_eq!(params.context_length, 0);
+        // Assert: empty metadata has no required fields → None
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8251,8 +8221,8 @@ mod tests {
     }
 
     #[test]
-    fn model_params_negative_string_values_parse_to_zero() {
-        // Arrange: negative numbers in string form
+    fn model_params_negative_string_values_returns_none() {
+        // Arrange: negative numbers in string form — fail u64 parse → None
         let meta = r#"{"vocab_size":"-1","hidden_size":"-4096","num_layers":"-32"}"#;
         let data = build_gllm_with_json_meta(&["w"], meta, 0);
         let dir = unique_test_dir("mp_neg");
@@ -8262,12 +8232,9 @@ mod tests {
 
         // Act
         let reader = GllmReader::open(&path).unwrap();
-        let params = reader.model_params().unwrap();
 
-        // Assert: u64::from_str("-1") fails → .parse().ok() = None → unwrap_or(0) = 0
-        assert_eq!(params.vocab_size, 0);
-        assert_eq!(params.hidden_size, 0);
-        assert_eq!(params.num_layers, 0);
+        // Assert: u64::from_str("-1") fails → required field missing → None
+        assert!(reader.model_params().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

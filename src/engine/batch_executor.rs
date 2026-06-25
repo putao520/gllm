@@ -2058,7 +2058,7 @@ mod tests {
         let state = BatchInferenceState::build_from_requests(&reqs);
         let ctx = &state.batch_ctx;
 
-        let mds_off = 4; // MAX_DECODE_STEPS offset
+        let mds_off = 4; // MAX_DECODE_STEPS_OFFSET
         let mds = u32::from_le_bytes(ctx.data[mds_off..mds_off + 4].try_into().unwrap());
         assert_eq!(mds, 7);
     }

@@ -43,12 +43,53 @@ struct WeightAllocation {
     size: usize,
 }
 
-/// Fraction of device memory reserved for weights (rest for KV cache + scratchpad).
-const DEVICE_WEIGHT_FRACTION: f64 = 0.70;
+/// Configurable capacity fractions for weight tier budgeting.
+///
+/// These replace hardcoded magic numbers so callers can tune the split between
+/// weight memory and KV-cache/scratchpad/OS overhead per deployment scenario.
+///
+/// LEGAL: default values (0.70 / 0.60) match the original constants and are
+/// reasonable for typical single-model deployments. Multi-model or
+/// KV-heavy workloads should lower `device_fraction`; RAM-constrained
+/// systems should lower `host_fraction`.
+#[derive(Debug, Clone)]
+pub struct WeightTierConfig {
+    /// Fraction of device (GPU VRAM) memory reserved for weights.
+    /// Rest is reserved for KV cache + activations + scratchpad.
+    pub device_fraction: f64,
 
-/// Fraction of host memory usable for weight staging.
-#[allow(dead_code)]
-const HOST_WEIGHT_FRACTION: f64 = 0.60;
+    /// Fraction of host (CPU RAM) memory usable for weight staging.
+    /// Rest is reserved for OS + scratchpad + KV cache host pages.
+    pub host_fraction: f64,
+}
+
+impl Default for WeightTierConfig {
+    fn default() -> Self {
+        Self {
+            device_fraction: 0.70,
+            host_fraction: 0.60,
+        }
+    }
+}
+
+impl WeightTierConfig {
+    /// Validate that fractions are in the (0, 1] range.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(0.0 < self.device_fraction && self.device_fraction <= 1.0) {
+            return Err(format!(
+                "WeightTierConfig.device_fraction must be in (0, 1], got {}",
+                self.device_fraction
+            ));
+        }
+        if !(0.0 < self.host_fraction && self.host_fraction <= 1.0) {
+            return Err(format!(
+                "WeightTierConfig.host_fraction must be in (0, 1], got {}",
+                self.host_fraction
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Manages weight tensor placement across heterogeneous memory tiers.
 pub struct WeightTierManager {
@@ -57,6 +98,7 @@ pub struct WeightTierManager {
     device_used: AtomicUsize,
     host_used: AtomicUsize,
     allocations: Mutex<HashMap<String, WeightAllocation>>,
+    config: WeightTierConfig,
 }
 
 /// Pre-trained GMM parameters for tier assignment (REQ-WP1).
@@ -72,47 +114,133 @@ const GMM_COMPONENTS: [GmmComponent; 3] = [
     GmmComponent { weight: 0.25, mean: [0.20, 0.80], variance: [0.0225, 0.0225] },
 ];
 
+/// Compute host capacity from system information.
+///
+/// PSC-26 fix: prefer actual system RAM over the L3*100 heuristic.
+/// Priority: MemAvailable → MemTotal → L3*100 fallback.
+fn host_capacity_from_system(topo: &crate::sensors::SystemTopology, host_fraction: f64) -> usize {
+    // First: try /proc/meminfo (Linux) for real available memory
+    let available = crate::compat::memory::get_available_memory_bytes() as usize;
+    if available > 0 {
+        return (available as f64 * host_fraction) as usize;
+    }
+
+    // Second: try total physical RAM from /proc/meminfo
+    let total = get_system_total_ram_bytes() as usize;
+    if total > 0 {
+        return (total as f64 * host_fraction) as usize;
+    }
+
+    // Fallback: L3*100 heuristic for non-Linux or when /proc/meminfo is unavailable.
+    // This is intentionally conservative — L3 is typically 1-2 orders of magnitude
+    // smaller than DRAM, so the estimate is safe (under-estimates rather than over).
+    // TODO(PSC-26): add sysctl/GlobalMemoryStatusEx for macOS/Windows hosts.
+    let host_estimate = (topo.cpu.l3_bytes as f64 * 100.0) as usize;
+    host_estimate.max(16usize * 1024 * 1024 * 1024)
+}
+
+/// Read MemTotal from /proc/meminfo (Linux-only).
+fn get_system_total_ram_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let content = match std::fs::read_to_string("/proc/meminfo") {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let trimmed = rest.trim().trim_end_matches("kB").trim();
+                if let Ok(kb) = trimmed.parse::<u64>() {
+                    return kb * 1024;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Compute host capacity for backend path (no SystemTopology available).
+fn host_capacity_from_backend() -> usize {
+    let available = crate::compat::memory::get_available_memory_bytes() as usize;
+    if available > 0 {
+        return available;
+    }
+    let total = get_system_total_ram_bytes() as usize;
+    if total > 0 {
+        return total;
+    }
+    MIN_HOST_BUDGET
+}
+
+/// Minimum host budget when no RAM info is available.
+const MIN_HOST_BUDGET: usize = 16 * 1024 * 1024 * 1024; // 16 GB
+
 impl WeightTierManager {
-    /// Create from explicit capacity values (bytes).
+    /// Create from explicit capacity values (bytes) with default config.
     pub fn new(device_capacity: usize, host_capacity: usize) -> Self {
+        Self::with_config(device_capacity, host_capacity, WeightTierConfig::default())
+    }
+
+    /// Create from explicit capacity values (bytes) and custom config.
+    pub fn with_config(
+        device_capacity: usize,
+        host_capacity: usize,
+        config: WeightTierConfig,
+    ) -> Self {
         Self {
             device_capacity,
             host_capacity,
             device_used: AtomicUsize::new(0),
             host_used: AtomicUsize::new(0),
             allocations: Mutex::new(HashMap::new()),
+            config,
         }
     }
 
-    /// Create from [`SystemTopology`](crate::sensors::SystemTopology).
+    /// Create from [`SystemTopology`](crate::sensors::SystemTopology) with default config.
     ///
-    /// Device capacity = GPU VRAM × 0.70 (30% reserved for KV cache + activations).
-    /// Host capacity = physical RAM × 0.60 (40% reserved for OS + scratchpad).
+    /// Device capacity = GPU VRAM × config.device_fraction (rest for KV cache + activations).
+    /// Host capacity = available system RAM × config.host_fraction (rest for OS + scratchpad).
+    ///
+    /// PSC-15 LEGAL: `unwrap_or(0)` for GPU capacity is correct — no GPU means no device
+    /// tier, so device_capacity=0 forces all weights to degrade to HostLocal/DiskMmap.
+    /// This is not an invariant violation; it is the intended CPU-only path.
     pub fn from_system_topology(topo: &crate::sensors::SystemTopology) -> Self {
+        Self::from_system_topology_with_config(topo, WeightTierConfig::default())
+    }
+
+    /// Create from [`SystemTopology`](crate::sensors::SystemTopology) with custom config.
+    pub fn from_system_topology_with_config(
+        topo: &crate::sensors::SystemTopology,
+        config: WeightTierConfig,
+    ) -> Self {
+        // PSC-15: no GPU → device_capacity=0 is correct (CPU-only, all weights on host/mmap)
         let device_capacity = topo
             .gpu
             .as_ref()
-            .map(|g| (g.global_mem_bytes as f64 * DEVICE_WEIGHT_FRACTION) as usize)
+            .map(|g| (g.global_mem_bytes as f64 * config.device_fraction) as usize)
             .unwrap_or(0);
 
-        // Host capacity: estimate from L3 cache × 100 as a rough proxy,
-        // capped by 16 GB minimum budget for small systems.
-        let host_estimate = (topo.cpu.l3_bytes as f64 * 100.0) as usize;
-        let host_capacity = host_estimate.max(16usize * 1024 * 1024 * 1024);
+        // PSC-26: use actual system RAM instead of L3*100 heuristic.
+        // Prefer MemAvailable (what the OS can actually give us), then MemTotal,
+        // then fall back to L3*100 as last resort for non-Linux platforms.
+        let host_capacity = host_capacity_from_system(topo, config.host_fraction);
 
-        Self::new(device_capacity, host_capacity)
+        Self::with_config(device_capacity, host_capacity, config)
     }
 
     /// Create from a [`Backend`] instance.
     ///
     /// Reads `device_memory_capacity()` from the backend for accurate VRAM sizing.
+    /// Host capacity uses available system RAM when detectable; falls back to
+    /// [`MIN_HOST_BUDGET`] otherwise.
     pub fn from_backend<B, E>(backend: &B) -> Self
     where
         B: Backend<E>,
         E: crate::compat::backend_trait::Element,
     {
         let device_capacity = backend.device_memory_capacity();
-        let host_capacity = 16usize * 1024 * 1024 * 1024; // 16 GB default host budget
+        let host_capacity = host_capacity_from_backend();
         Self::new(device_capacity, host_capacity)
     }
 
@@ -210,6 +338,11 @@ impl WeightTierManager {
     /// Number of tensors tracked.
     pub fn tensor_count(&self) -> usize {
         self.allocations.lock().expect("allocations Mutex poisoned in tensor_count — previous holder panicked").len()
+    }
+
+    /// Access the active [`WeightTierConfig`].
+    pub fn config(&self) -> &WeightTierConfig {
+        &self.config
     }
 
     /// Decide upload tier by querying GlobalMemoryManager's TierUsage (REQ-WP-001).
@@ -986,22 +1119,40 @@ mod tests {
         assert_ne!(hashes[0], hashes[2]);
     }
 
-    // ─── WeightTier all-constants verification ─────────────────────────
+    // ─── WeightTierConfig validation ──────────────────────────────────
 
     #[test]
-    fn device_weight_fraction_in_range() {
+    fn default_config_fractions_in_range() {
+        let cfg = WeightTierConfig::default();
         assert!(
-            (0.0..=1.0).contains(&DEVICE_WEIGHT_FRACTION),
-            "DEVICE_WEIGHT_FRACTION must be in [0, 1]"
+            (0.0..=1.0).contains(&cfg.device_fraction),
+            "default device_fraction must be in [0, 1]"
+        );
+        assert!(
+            (0.0..=1.0).contains(&cfg.host_fraction),
+            "default host_fraction must be in [0, 1]"
         );
     }
 
     #[test]
-    fn host_weight_fraction_in_range() {
-        assert!(
-            (0.0..=1.0).contains(&HOST_WEIGHT_FRACTION),
-            "HOST_WEIGHT_FRACTION must be in [0, 1]"
-        );
+    fn config_validate_accepts_valid() {
+        assert!(WeightTierConfig::default().validate().is_ok());
+        let custom = WeightTierConfig { device_fraction: 0.5, host_fraction: 0.3 };
+        assert!(custom.validate().is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero() {
+        let bad = WeightTierConfig { device_fraction: 0.0, host_fraction: 0.6 };
+        assert!(bad.validate().is_err());
+        let bad2 = WeightTierConfig { device_fraction: 0.7, host_fraction: 0.0 };
+        assert!(bad2.validate().is_err());
+    }
+
+    #[test]
+    fn config_validate_rejects_over_one() {
+        let bad = WeightTierConfig { device_fraction: 1.5, host_fraction: 0.6 };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

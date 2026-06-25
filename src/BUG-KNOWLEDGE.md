@@ -102,7 +102,7 @@ grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 | 19 | gpu_backend_macro.rs:335 out_bytes=(N*4).min(scratch) | scratch 错误时截断输出 | 输出截断 |
 | 20 | mega_kernel_gpu.rs:627 PREFILL_CHUNK_SIZE=512 | 固定分块 | 设备差异未感知 |
 | 21 | mega_kernel_gpu.rs:636 POOL_LOCAL_CAPACITY=32 | 固定池大小 | 并发不足/浪费 |
-| 22 | batch_context.rs:24 MAX_DECODE_STEPS=4 | 固定步数上限 | MTP depth>4 截断 |
+| 22 | batch_context.rs:24 MAX_DECODE_STEPS_OFFSET=4 | ~~固定步数上限~~ 误报：是字节偏移量，非值限制 | ~~MTP depth>4 截断~~ MTP 与 max_decode_steps 正交 |
 | 23 | mega_kernel_gpu.rs:565 BATCH_CTX_EXTENSION_SIZE=128 | 固定扩展区 | 新字段可能溢出 |
 | 24 | weight_tier.rs:47/51 容量分数硬编码 70%/60% | 固定比例 | KV 小/大时浪费/不足 |
 | 25 | executor_core.inc.rs:624 output_tokens[0]!=0 | token 0 判断 | 合法 token 丢弃（同 #10） |
