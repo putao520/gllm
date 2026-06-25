@@ -47,7 +47,8 @@ pub struct OnnxLoader {
     /// attributes. Key = onnx tensor name (initializer name), value = whether
     /// the shape is HF [out, in] and needs transpose to canonical [K, N].
     ///   - Gemm with transB=1 → true  (HF layout)
-    ///   - Gemm with transB=0 or MatMul → false  (already canonical)
+    ///   - Gemm with transB=0 → false (already canonical)
+    ///   - MatMul with 2D constant weight → true (ONNX stores [K,N], needs transpose to [N,K])
     /// Indexed by onnx_name; queried via tensor_info / alias resolution.
     layout_hints: HashMap<String, bool>,
 }
@@ -75,7 +76,7 @@ fn build_alias_map(graph: &OnnxGraph) -> (
     // Pass 1: Build aliases from graph node analysis (anonymous + named initializers).
     for node in &graph.nodes {
         let (candidates, weight_transpose): (Vec<(usize, &str)>, Option<bool>) = match node.op_type.as_str() {
-            "MatMul" => (vec![(1, ".weight")], Some(false)),
+            "MatMul" => (vec![(1, ".weight")], None),
             "Gemm" => {
                 let trans_b = node.attributes.get("transB")
                     .and_then(|a| match &a.value {
@@ -95,7 +96,18 @@ fn build_alias_map(graph: &OnnxGraph) -> (
                 }
                 (v, None)
             }
-            _ => continue,
+            _ => {
+                // Fallback for unknown op_types: treat all initializer inputs as
+                // candidate weights and derive semantic names via node-name path
+                // matching (same strategy as SafeTensors suffix patterns).
+                let mut v = Vec::new();
+                for (i, input) in node.inputs.iter().enumerate() {
+                    if graph.initializers.contains_key(input) {
+                        v.push((i, ".weight"));
+                    }
+                }
+                (v, None)
+            }
         };
 
         for (input_idx, _suffix) in candidates {
@@ -107,9 +119,21 @@ fn build_alias_map(graph: &OnnxGraph) -> (
                 continue;
             }
 
-            // Record layout hint for MatMul/Gemm weights regardless of naming
+            // Record layout hint for Gemm weights regardless of naming
             if let Some(trans) = weight_transpose {
                 layout_hints.entry(onnx_name.clone()).or_insert(trans);
+            }
+
+            // MatMul: ONNX semantics store weight B as [K, N], which is the
+            // transposed form of the canonical [N, K] layout. When the second
+            // input (B matrix) is a 2D constant initializer, mark it as
+            // needing transpose — same semantics as Gemm with transB=1.
+            if node.op_type == "MatMul" && input_idx == 1 {
+                if let Some(tensor) = graph.initializers.get(onnx_name) {
+                    if tensor.shape.len() == 2 {
+                        layout_hints.entry(onnx_name.clone()).or_insert(true);
+                    }
+                }
             }
 
             if onnx_name.starts_with("onnx::") {
@@ -707,7 +731,8 @@ mod unit_tests {
     }
 
     #[test]
-    fn build_alias_map_matmul_sets_layout_hint_false() {
+    fn build_alias_map_matmul_2d_weight_sets_layout_hint_true() {
+        // ONNX MatMul stores weight B as [K, N], which needs transpose to [N, K]
         let weight = make_f32_tensor("onnx::MatMul_1", vec![2, 2]);
         let node = OnnxNode {
             name: "/layer/MatMul".to_string(),
@@ -721,7 +746,63 @@ mod unit_tests {
 
         let (_, _, layout_hints) = build_alias_map(&graph);
 
-        assert_eq!(layout_hints.get("onnx::MatMul_1"), Some(&false));
+        assert_eq!(layout_hints.get("onnx::MatMul_1"), Some(&true));
+    }
+
+    #[test]
+    fn build_alias_map_matmul_1d_weight_no_layout_hint() {
+        // 1D weight (e.g. bias mistakenly placed at input[1]) should not get a layout hint
+        let weight = make_f32_tensor("onnx::MatMul_1d", vec![16]);
+        let node = OnnxNode {
+            name: "/layer/MatMul".to_string(),
+            op_type: "MatMul".to_string(),
+            domain: String::new(),
+            inputs: vec!["x".to_string(), "onnx::MatMul_1d".to_string()],
+            outputs: vec!["y".to_string()],
+            attributes: HashMap::new(),
+        };
+        let graph = build_graph(vec![node], vec![weight]);
+
+        let (_, _, layout_hints) = build_alias_map(&graph);
+
+        assert!(layout_hints.get("onnx::MatMul_1d").is_none());
+    }
+
+    #[test]
+    fn build_alias_map_matmul_3d_weight_no_layout_hint() {
+        // 3D weight (e.g. batched MatMul) should not get a layout hint
+        let weight = make_f32_tensor("onnx::MatMul_3d", vec![2, 3, 4]);
+        let node = OnnxNode {
+            name: "/layer/MatMul".to_string(),
+            op_type: "MatMul".to_string(),
+            domain: String::new(),
+            inputs: vec!["x".to_string(), "onnx::MatMul_3d".to_string()],
+            outputs: vec!["y".to_string()],
+            attributes: HashMap::new(),
+        };
+        let graph = build_graph(vec![node], vec![weight]);
+
+        let (_, _, layout_hints) = build_alias_map(&graph);
+
+        assert!(layout_hints.get("onnx::MatMul_3d").is_none());
+    }
+
+    #[test]
+    fn build_alias_map_matmul_non_initializer_second_input_no_hint() {
+        // MatMul with runtime (non-initializer) second input gets no layout hint
+        let node = OnnxNode {
+            name: "/layer/MatMul".to_string(),
+            op_type: "MatMul".to_string(),
+            domain: String::new(),
+            inputs: vec!["x".to_string(), "runtime_tensor".to_string()],
+            outputs: vec!["y".to_string()],
+            attributes: HashMap::new(),
+        };
+        let graph = build_graph(vec![node], vec![]);
+
+        let (_, _, layout_hints) = build_alias_map(&graph);
+
+        assert!(layout_hints.is_empty());
     }
 
     // ── build_alias_map: Gemm ───────────────────────────────────────────
@@ -947,10 +1028,11 @@ mod unit_tests {
         assert!(layout_hints.is_empty());
     }
 
-    // ── build_alias_map: unknown op_type skipped ────────────────────────
+    // ── build_alias_map: unknown op_type falls back to name-based derivation ─
 
     #[test]
-    fn build_alias_map_ignores_unknown_op_types() {
+    fn build_alias_map_unknown_op_type_falls_back_to_name_derivation() {
+        // Unknown op_type "Conv" — fallback derives alias from node name path
         let weight = make_f32_tensor("onnx::Conv_1", vec![3, 3]);
         let node = OnnxNode {
             name: "/layer/Conv".to_string(),
@@ -964,8 +1046,61 @@ mod unit_tests {
 
         let (alias_map, reverse_alias, _) = build_alias_map(&graph);
 
+        // Fallback: derive_semantic_name("/layer/Conv", "Conv", ".weight")
+        // → "layer.Conv" → strip ".Conv" → "layer" → + ".weight" → "layer.weight"
+        assert_eq!(alias_map.get("layer.weight"), Some(&"onnx::Conv_1".to_string()));
+        assert_eq!(reverse_alias.get("onnx::Conv_1"), Some(&"layer.weight".to_string()));
+    }
+
+    #[test]
+    fn build_alias_map_unknown_op_type_no_initializer_inputs_no_alias() {
+        // Unknown op_type with no initializer inputs → no alias derived
+        let node = OnnxNode {
+            name: "/layer/CustomOp".to_string(),
+            op_type: "CustomOp".to_string(),
+            domain: String::new(),
+            inputs: vec!["dynamic_input".to_string()],
+            outputs: vec!["out".to_string()],
+            attributes: HashMap::new(),
+        };
+        let graph = build_graph(vec![node], vec![]);
+
+        let (alias_map, reverse_alias, _) = build_alias_map(&graph);
+
         assert!(alias_map.is_empty());
         assert!(reverse_alias.is_empty());
+    }
+
+    #[test]
+    fn build_alias_map_custom_op_anonymous_weight_derives_alias() {
+        // Custom op with anonymous onnx:: initializer and semantic node name path.
+        // The fallback should derive alias from the node name, enabling
+        // match_tensor_role to recognize the semantic role later.
+        let weight = make_f32_tensor("onnx::CustomOp_1", vec![64, 64]);
+        let node = OnnxNode {
+            name: "/encoder/q_proj/CustomOp".to_string(),
+            op_type: "CustomOp".to_string(),
+            domain: String::new(),
+            inputs: vec!["input".to_string(), "onnx::CustomOp_1".to_string()],
+            outputs: vec!["out".to_string()],
+            attributes: HashMap::new(),
+        };
+        let graph = build_graph(vec![node], vec![weight]);
+
+        let (alias_map, reverse_alias, _) = build_alias_map(&graph);
+
+        // Fallback: derive_semantic_name("/encoder/q_proj/CustomOp", "CustomOp", ".weight")
+        // → "encoder.q_proj.CustomOp" → strip ".CustomOp" → "encoder.q_proj"
+        // → + ".weight" → "encoder.q_proj.weight"
+        assert!(!alias_map.is_empty(), "alias_map must not be empty for custom op with semantic node name");
+        assert_eq!(
+            alias_map.get("encoder.q_proj.weight"),
+            Some(&"onnx::CustomOp_1".to_string())
+        );
+        assert_eq!(
+            reverse_alias.get("onnx::CustomOp_1"),
+            Some(&"encoder.q_proj.weight".to_string())
+        );
     }
 
     // ── collect_tensor_external_location ─────────────────────────────────
@@ -2051,7 +2186,7 @@ mod unit_tests {
     // ── build_alias_map: MatMul with non-onnx named initializer ─────────
 
     #[test]
-    fn build_alias_map_matmul_named_weight_still_gets_layout_hint() {
+    fn build_alias_map_matmul_named_2d_weight_gets_layout_hint_true() {
         let weight = make_f32_tensor("encoder.weight", vec![4, 4]);
         let node = OnnxNode {
             name: "/encoder/MatMul".to_string(),
@@ -2067,8 +2202,8 @@ mod unit_tests {
 
         // Named initializer does not start with "onnx::", so no alias created
         assert!(alias_map.is_empty());
-        // But layout hint is still recorded for named initializer
-        assert_eq!(layout_hints.get("encoder.weight"), Some(&false));
+        // 2D MatMul weight still gets layout hint = true (needs transpose)
+        assert_eq!(layout_hints.get("encoder.weight"), Some(&true));
     }
 
     // ── dtype_rank: all floats rank before all ints ─────────────────────
@@ -2591,8 +2726,8 @@ mod unit_tests {
 
         // First node (Gather) creates the alias; second (MatMul) finds alias_map already has key
         assert!(alias_map.contains_key("embed.weight"));
-        // MatMul still records layout hint even if alias already taken
-        assert_eq!(layout_hints.get("onnx::Shared_1"), Some(&false));
+        // MatMul still records layout hint (true for 2D) even if alias already taken
+        assert_eq!(layout_hints.get("onnx::Shared_1"), Some(&true));
     }
 
     // ── dtype_rank: signed vs unsigned pairs ────────────────────────────
@@ -2786,7 +2921,7 @@ mod unit_tests {
         assert_eq!(alias_map.get("encoder.v_proj.weight").unwrap(), "onnx::MatMul_3");
         assert_eq!(layout_hints.len(), 3);
         for hint in layout_hints.values() {
-            assert_eq!(*hint, false);
+            assert_eq!(*hint, true);
         }
     }
 
@@ -4143,8 +4278,8 @@ mod unit_tests {
 
         // First node (Gather) creates the alias for "embed.weight"
         assert!(alias_map.contains_key("embed.weight"));
-        // MatMul still records layout hint even if alias already exists
-        assert_eq!(layout_hints.get("onnx::Shared"), Some(&false));
+        // MatMul still records layout hint (true for 2D) even if alias already exists
+        assert_eq!(layout_hints.get("onnx::Shared"), Some(&true));
     }
 
     // ── LoaderError: source chain for Io variant ──────────────────────────

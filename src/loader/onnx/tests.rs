@@ -884,7 +884,7 @@ fn weight_layout_hint_matmul_returns_false() {
 
     let loader = OnnxLoader::from_path(file.path()).expect("loader");
     // Query via semantic alias name
-    assert_eq!(loader.weight_layout_hint("layer.weight"), Some(false));
+    assert_eq!(loader.weight_layout_hint("layer.weight"), Some(true));
 }
 
 // ── ggml_dtype returns None for ONNX ──────────────────────────────────
@@ -3525,10 +3525,10 @@ fn model_functions_list_empty() {
     assert!(loader.model().functions.is_empty());
 }
 
-// ── Conv node does not produce alias ─────────────────────────────────
+// ── Conv node produces alias via fallback ─────────────────────────────
 
 #[test]
-fn conv_node_no_alias_produced() {
+fn conv_node_produces_alias_via_fallback() {
     let weight = tensor_f32("onnx::Conv_1", vec![3, 3, 3, 3], &[1.0; 81]);
     let node = proto::NodeProto {
         name: Some("/conv1/Conv".to_string()),
@@ -3547,9 +3547,11 @@ fn conv_node_no_alias_produced() {
     write_model(model, file.path());
 
     let loader = OnnxLoader::from_path(file.path()).expect("loader");
-    // Conv is not in the alias-producing op list, so no alias created
-    assert!(loader.tensor("conv1.weight").is_err());
-    // But the original onnx:: name should still be accessible
+    // Conv is not a known alias-producing op, but fallback derives alias
+    // from node name path: "/conv1/Conv" → "conv1.Conv" → strip ".Conv"
+    // → "conv1" → + ".weight" → "conv1.weight"
+    assert!(loader.tensor("conv1.weight").is_ok());
+    // The original onnx:: name should still be accessible
     assert!(loader.tensor("onnx::Conv_1").is_ok());
 }
 
@@ -11081,8 +11083,8 @@ fn loader_weight_layout_hint_via_alias_resolution() {
     // Act: query via canonical alias name
     use crate::loader::TensorProvider;
     let hint = loader.weight_layout_hint("model.layers.0.self_attn.q_proj.weight");
-    // Assert: MatMul implies layout_hint = false (already canonical)
-    assert_eq!(hint, Some(false));
+    // Assert: MatMul 2D weight implies layout_hint = true (needs transpose from ONNX [K,N] to canonical [N,K])
+    assert_eq!(hint, Some(true));
 }
 
 // ── Loader: graph with sparse initializer loads without error ─────────
