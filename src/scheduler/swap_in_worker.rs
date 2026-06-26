@@ -811,6 +811,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -870,6 +871,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::Lz4,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -930,6 +932,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -994,6 +997,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::Lz4,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -1064,6 +1068,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::Lz4,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -1647,6 +1652,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -1713,6 +1719,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 8192,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -1775,6 +1782,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -1960,6 +1968,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
             table.insert(
@@ -1970,6 +1979,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
             // Page 3 is in addr_table on CpuDram but will be skipped for confidence.
@@ -1981,6 +1991,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -2677,6 +2688,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -2740,6 +2752,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -2803,6 +2816,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -3081,6 +3095,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -3142,6 +3157,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -3201,6 +3217,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -3261,6 +3278,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 },
             );
             // Page 2: NVMe — should not be processed (back-pressure after page 1).
@@ -3272,6 +3290,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -3335,6 +3354,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -3503,6 +3523,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -4180,6 +4201,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
             table.insert(
@@ -4190,6 +4212,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -4262,6 +4285,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -4355,6 +4379,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -4576,6 +4601,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -4644,6 +4670,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -4734,6 +4761,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::Lz4,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -4778,6 +4806,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::BitPackRle,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -4822,6 +4851,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::NvcompAns,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -4868,6 +4898,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -4979,6 +5010,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -5085,6 +5117,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -5134,6 +5167,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -5288,6 +5322,7 @@ mod tests {
             current_tier: StorageTier::Nvme,
             original_bytes: 8192,
             codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         };
         assert!(entry.gpu_ptr.is_none());
         assert!(entry.host_buffer.is_none());
@@ -5303,6 +5338,7 @@ mod tests {
             current_tier: StorageTier::GpuHbm,
             original_bytes: 4096,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(entry.gpu_ptr, Some(0xCAFE));
         assert!(entry.host_buffer.is_none());
@@ -5316,6 +5352,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 2048,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         assert!(entry.gpu_ptr.is_none());
         assert_eq!(entry.host_buffer.as_ref().map(|b| b.len()), Some(2048));
@@ -5348,6 +5385,7 @@ mod tests {
                         current_tier: StorageTier::Nvme,
                         original_bytes: 4096,
                         codec: CompressionCodec::ZstdDict,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -5446,6 +5484,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
             // Page 2 is not in the table.
@@ -5508,6 +5547,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -5561,6 +5601,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 16384,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -5842,6 +5883,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 65536,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -6037,6 +6079,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -6166,6 +6209,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -6216,6 +6260,7 @@ mod tests {
                         current_tier: StorageTier::CpuDram,
                         original_bytes: 4096,
                         codec: CompressionCodec::None,
+                        compressed_bytes: None,
                     },
                 );
             }
@@ -6294,6 +6339,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -6344,6 +6390,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -6404,6 +6451,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -6469,6 +6517,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -6765,6 +6814,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 3,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         let debug = format!("{entry:?}");
         assert!(debug.contains("PageAddrEntry"), "Debug should contain struct name: {debug}");
@@ -6779,6 +6829,7 @@ mod tests {
             current_tier: StorageTier::Nvme,
             original_bytes: 0,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(entry.original_bytes, 0);
     }
@@ -6791,6 +6842,7 @@ mod tests {
             current_tier: StorageTier::GpuHbm,
             original_bytes: 4096,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(entry.gpu_ptr, Some(u64::MAX));
     }
@@ -6819,6 +6871,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -6826,6 +6879,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -6971,6 +7025,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -7136,6 +7191,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -7219,6 +7275,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -7292,6 +7349,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -7820,6 +7878,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -7870,6 +7929,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -7916,6 +7976,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -8019,6 +8080,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             // Page 2: HBM, will be skipped.
             table.insert(2, PageAddrEntry {
@@ -8027,6 +8089,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -8083,6 +8146,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -8126,6 +8190,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -8205,6 +8270,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -8492,6 +8558,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -8499,6 +8566,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -8548,6 +8616,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -8629,6 +8698,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: usize::MAX,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(entry.original_bytes, usize::MAX);
     }
@@ -9075,6 +9145,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 4096,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         assert_eq!(entry.gpu_ptr, Some(0xDEAD_BEEF));
         assert_eq!(entry.host_buffer.as_ref().unwrap().len(), 4);
@@ -9091,6 +9162,7 @@ mod tests {
             current_tier: StorageTier::Nvme,
             original_bytes: 1024,
             codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         };
         entry.gpu_ptr = Some(999);
         assert_eq!(entry.gpu_ptr, Some(999), "mutation should be visible");
@@ -9644,6 +9716,7 @@ mod tests {
             current_tier: StorageTier::GpuHbm,
             original_bytes: 256,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert!(entry.gpu_ptr.is_some());
         assert!(entry.host_buffer.is_some());
@@ -9657,6 +9730,7 @@ mod tests {
             current_tier: StorageTier::Nvme,
             original_bytes: 0,
             codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         };
         assert_eq!(entry.original_bytes, 0);
     }
@@ -9669,6 +9743,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 4096,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         assert!(entry.host_buffer.as_ref().unwrap().is_empty());
     }
@@ -10156,6 +10231,7 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10211,6 +10287,7 @@ mod tests {
                 table.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -10242,6 +10319,7 @@ mod tests {
                 table.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -10294,10 +10372,12 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None, host_buffer: None,
                 current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10330,6 +10410,7 @@ mod tests {
                 table.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -10360,6 +10441,7 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 8192]),
                 current_tier: StorageTier::CpuDram, original_bytes: 8192, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10388,6 +10470,7 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10436,6 +10519,7 @@ mod tests {
             table.insert(42, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10468,6 +10552,7 @@ mod tests {
             table.insert(99, PageAddrEntry {
                 gpu_ptr: None, host_buffer: None,
                 current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let _ = actor.send(MigrationCommand::PromoteToDram { page_id: 99, page_bytes: 4096 });
@@ -10589,6 +10674,7 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10650,6 +10736,7 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10749,6 +10836,7 @@ mod tests {
             table.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -10815,6 +10903,7 @@ mod tests {
         let e = PageAddrEntry {
             gpu_ptr: Some(0xDEADBEEF), host_buffer: None,
             current_tier: StorageTier::GpuHbm, original_bytes: 4096, codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(e.gpu_ptr, Some(0xDEADBEEF));
         assert!(e.host_buffer.is_none());
@@ -10825,6 +10914,7 @@ mod tests {
         let e = PageAddrEntry {
             gpu_ptr: None, host_buffer: Some(vec![0xAA; 8192]),
             current_tier: StorageTier::CpuDram, original_bytes: 8192, codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         assert!(e.gpu_ptr.is_none());
         assert_eq!(e.host_buffer.as_ref().map(|b| b.len()), Some(8192));
@@ -10836,6 +10926,7 @@ mod tests {
         let e = PageAddrEntry {
             gpu_ptr: None, host_buffer: None,
             current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         };
         assert!(e.gpu_ptr.is_none());
         assert!(e.host_buffer.is_none());
@@ -11750,6 +11841,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -11789,6 +11881,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -11826,6 +11919,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -11865,6 +11959,7 @@ mod tests {
                     current_tier: StorageTier::Nvme,
                     original_bytes: 4096,
                     codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -11904,6 +11999,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -11972,6 +12068,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -12297,6 +12394,7 @@ mod tests {
             current_tier: StorageTier::GpuHbm,
             original_bytes: 4096,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(entry.gpu_ptr, Some(0xDEAD_BEEF));
         assert!(entry.host_buffer.is_none());
@@ -12312,6 +12410,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 4096,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         assert!(entry.gpu_ptr.is_none());
         assert!(entry.host_buffer.is_some());
@@ -12327,6 +12426,7 @@ mod tests {
             current_tier: StorageTier::Nvme,
             original_bytes: 4096,
             codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         };
         assert!(entry.gpu_ptr.is_none());
         assert!(entry.host_buffer.is_none());
@@ -12342,6 +12442,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 0,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         assert_eq!(entry.original_bytes, 0);
     }
@@ -13490,6 +13591,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec,
+                compressed_bytes: None,
             };
             assert_eq!(entry.codec, codec);
         }
@@ -13504,6 +13606,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 4096,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         entry.current_tier = StorageTier::GpuHbm;
         entry.original_bytes = 8192;
@@ -14075,6 +14178,7 @@ mod tests {
             current_tier: tier,
             original_bytes: 4096,
             codec,
+            compressed_bytes: None,
         });
     }
 
@@ -14917,6 +15021,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -14981,6 +15086,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -15047,6 +15153,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         // Page 61: NVMe-resident without host_buffer (may fail).
@@ -15058,6 +15165,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -15133,6 +15241,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -15232,6 +15341,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let mut page_metadata: HashMap<PageId, PageMetadata> = HashMap::new();
@@ -15351,6 +15461,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -15412,6 +15523,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -15605,6 +15717,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let _ = actor.send(MigrationCommand::PromoteToHbm {
@@ -16978,6 +17091,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 8192,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -17074,6 +17188,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -17119,6 +17234,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let mut page_metadata: HashMap<PageId, PageMetadata> = HashMap::new();
@@ -17174,6 +17290,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 16384,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -17375,6 +17492,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -17382,6 +17500,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17444,6 +17563,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 8192,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -17542,6 +17662,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -17549,6 +17670,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17610,6 +17732,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17780,6 +17903,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17830,6 +17954,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17886,6 +18011,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -17893,6 +18019,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17954,6 +18081,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18004,6 +18132,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -18011,6 +18140,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18070,6 +18200,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             table.insert(2, PageAddrEntry {
                 gpu_ptr: Some(0x2000),
@@ -18077,6 +18208,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18796,6 +18928,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 },
             );
         }
@@ -19042,6 +19175,7 @@ mod tests {
         { let mut t = addr_table.write().expect("wl"); t.insert(1, PageAddrEntry {
             gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
             current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+            compressed_bytes: None,
         }); }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
         let stats: Arc<Mutex<SwapInWorkerStats>> = Arc::new(Mutex::new(SwapInWorkerStats::default()));
@@ -19063,6 +19197,7 @@ mod tests {
         { let mut t = addr_table.write().expect("wl"); t.insert(77, PageAddrEntry {
             gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
             current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+            compressed_bytes: None,
         }); }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
         let stats: Arc<Mutex<SwapInWorkerStats>> = Arc::new(Mutex::new(SwapInWorkerStats::default()));
@@ -19111,6 +19246,7 @@ mod tests {
         { let mut t = addr_table.write().expect("wl"); for pid in 1..=3usize { t.insert(pid, PageAddrEntry {
             gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
             current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+            compressed_bytes: None,
         }); } }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
         let stats: Arc<Mutex<SwapInWorkerStats>> = Arc::new(Mutex::new(SwapInWorkerStats::default()));
@@ -19148,6 +19284,7 @@ mod tests {
         { let mut t = addr_table.write().expect("wl"); for pid in 1..=4usize { t.insert(pid, PageAddrEntry {
             gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
             current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+            compressed_bytes: None,
         }); } }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
         let stats: Arc<Mutex<SwapInWorkerStats>> = Arc::new(Mutex::new(SwapInWorkerStats::default()));
@@ -19178,6 +19315,7 @@ mod tests {
         { let mut t = addr_table.write().expect("wl"); t.insert(200, PageAddrEntry {
             gpu_ptr: None, host_buffer: None,
             current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         }); }
         let mut pm: HashMap<PageId, PageMetadata> = HashMap::new();
         pm.insert(200, PageMetadata { page_id: 200, sequence_id: Some(1), recency: 0, access_count: 3,
@@ -19237,6 +19375,7 @@ mod tests {
         { let mut t = addr_table.write().expect("wl"); t.insert(1, PageAddrEntry {
             gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
             current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+            compressed_bytes: None,
         }); }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
         let stats: Arc<Mutex<SwapInWorkerStats>> = Arc::new(Mutex::new(SwapInWorkerStats::default()));
@@ -19291,8 +19430,10 @@ mod tests {
         );
         { let mut t = addr_table.write().expect("wl");
             t.insert(1, PageAddrEntry { gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
+                    compressed_bytes: None,
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None });
             t.insert(2, PageAddrEntry { gpu_ptr: None, host_buffer: None,
+                    compressed_bytes: None,
                 current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::ZstdDict });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -19329,6 +19470,7 @@ mod tests {
             t.insert(55, PageAddrEntry {
                 gpu_ptr: None, host_buffer: None,
                 current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -19361,6 +19503,7 @@ mod tests {
             t.insert(77, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let mut pm: HashMap<PageId, PageMetadata> = HashMap::new();
@@ -19421,6 +19564,7 @@ mod tests {
                 t.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19484,6 +19628,7 @@ mod tests {
                 t.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19533,6 +19678,7 @@ mod tests {
                 t.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: None,
                     current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19574,6 +19720,7 @@ mod tests {
             t.insert(88, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let mut pm: HashMap<PageId, PageMetadata> = HashMap::new();
@@ -19650,6 +19797,7 @@ mod tests {
                 t.insert(pid, PageAddrEntry {
                     gpu_ptr: Some(0x1000), host_buffer: None,
                     current_tier: StorageTier::GpuHbm, original_bytes: 4096, codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19733,6 +19881,7 @@ mod tests {
                 t.insert(pid, PageAddrEntry {
                     gpu_ptr: None, host_buffer: None,
                     current_tier: StorageTier::Nvme, original_bytes: 4096, codec: CompressionCodec::ZstdDict,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19774,6 +19923,7 @@ mod tests {
             t.insert(1, PageAddrEntry {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 1]),
                 current_tier: StorageTier::CpuDram, original_bytes: 1, codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -19881,6 +20031,7 @@ mod tests {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19928,6 +20079,7 @@ mod tests {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20013,6 +20165,7 @@ mod tests {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -20053,6 +20206,7 @@ mod tests {
                 gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                 current_tier: StorageTier::CpuDram, original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -20141,6 +20295,7 @@ mod tests {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20206,6 +20361,7 @@ mod tests {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20281,6 +20437,7 @@ mod tests {
                     gpu_ptr: None, host_buffer: Some(vec![0u8; 4096]),
                     current_tier: StorageTier::CpuDram, original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20333,6 +20490,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -20374,6 +20532,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20416,6 +20575,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -20456,6 +20616,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -20495,6 +20656,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 8192,
                 codec: CompressionCodec::BitPackRle,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -21853,6 +22015,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let tmp = tempfile::TempDir::new().expect("tempdir");

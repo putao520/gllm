@@ -5,12 +5,69 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use hf_hub::api::sync::Api;
+use hf_hub::api::Progress;
 use serde::Deserialize;
 
 use crate::manifest::{FileMap, EMPTY_FILE_MAP};
 
 
 use super::{parallel::ParallelLoader, LoaderError, Result};
+
+/// HF 下载进度适配器：将 hf_hub::api::Progress 回调桥接到 log::info 输出。
+///
+/// hf_hub 的 `download_with_progress()` 接受 `impl Progress` 参数，
+/// 本适配器在 init/finish 时输出 log::info，提供下载可观测性。
+/// `update()` 按 10% 间隔输出进度，避免高频刷屏。
+struct HfLogProgress {
+    filename: String,
+    total: usize,
+    cumulative: usize,
+    last_logged_pct: u8,
+}
+
+impl HfLogProgress {
+    fn new(filename: &str) -> Self {
+        Self {
+            filename: filename.to_string(),
+            total: 0,
+            cumulative: 0,
+            last_logged_pct: 0,
+        }
+    }
+}
+
+impl Progress for HfLogProgress {
+    fn init(&mut self, size: usize, filename: &str) {
+        self.total = size;
+        self.filename = filename.to_string();
+        if size > 0 {
+            log::info!("下载: {} ({:.2} MB)", filename, size as f64 / 1e6);
+        } else {
+            log::info!("下载: {} (大小未知)", filename);
+        }
+    }
+
+    fn update(&mut self, size: usize) {
+        // hf_hub update 传入增量字节数，累加后按 10% 间隔输出进度
+        self.cumulative += size;
+        if self.total > 0 {
+            let pct = ((self.cumulative as f64 / self.total as f64) * 100.0) as u8;
+            // 每 10% 输出一次，避免刷屏
+            if pct >= self.last_logged_pct + 10 {
+                log::info!(
+                    "下载进度: {} — {}%",
+                    self.filename,
+                    pct
+                );
+                self.last_logged_pct = pct;
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        log::info!("下载完成: {}", self.filename);
+    }
+}
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
 const DEFAULT_HF_TOKEN_PATH: &str = ".huggingface/token";
@@ -620,8 +677,8 @@ impl HfHubClient {
             let is_quantized = stem.contains("int8") || stem.contains("uint8")
                 || stem.contains("quint8") || stem.contains("bnb");
             if is_optimized || is_quantized {
-                eprintln!(
-                    "[gllm:onnx] WARN repo {repo} 仓库不含 model.onnx 原始版本,\
+                log::warn!(
+                    "[gllm:onnx] repo {repo} 仓库不含 model.onnx 原始版本,\
                      退化选用 {name} (优化/量化变体)。\
                      gllm ONNX loader 可能不识别 fused operators (FusedGELU/FusedLayerNorm 等),\
                      可能产生 NaN/数值漂移。建议: 优先用 SafeTensors 加载,\
@@ -762,9 +819,10 @@ impl HfHubClient {
 
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
         let repo_api = self.api.model(repo.to_string());
-        // get() 会自动检查缓存，不存在则下载（无进度显示）
+        // download_with_progress 提供下载进度可观测性（log::info 输出）
+        let progress = HfLogProgress::new(filename);
         repo_api
-            .get(filename)
+            .download_with_progress(filename, progress)
             .map_err(|err| LoaderError::HfHub(err.to_string()))
     }
 
@@ -788,25 +846,27 @@ impl HfHubClient {
         let shard_paths_list: Vec<PathBuf> = shards.iter().map(PathBuf::from).collect();
 
         if parallel.enabled() {
-            // 并行下载：使用默认进度条
-            eprintln!("📥 并行下载 {} 个分片...", shards.len());
+            // 并行下载：每个分片独立进度
+            log::info!("并行下载 {} 个分片...", shards.len());
             let shard_paths = parallel.map_paths(&shard_paths_list, |path| {
                 let filename = path.to_string_lossy().to_string();
+                let progress = HfLogProgress::new(&filename);
                 api.model(repo_id.clone())
-                    .get(&filename)
+                    .download_with_progress(&filename, progress)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))
             })?;
-            eprintln!("   ✅ 并行下载完成");
+            log::info!("并行下载完成");
             Ok(shard_paths)
         } else {
-            // 串行下载：get() 会自动检查缓存
+            // 串行下载：每个分片独立进度
             let mut result = Vec::new();
-            for shard_path in shard_paths_list {
+            for (idx, shard_path) in shard_paths_list.iter().enumerate() {
                 let filename = shard_path.to_string_lossy().to_string();
-                let repo_api = api.model(repo_id.clone());
-
-                let path = repo_api
-                    .get(&filename)
+                log::info!("[{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
+                let progress = HfLogProgress::new(&filename);
+                let path = api
+                    .model(repo_id.clone())
+                    .download_with_progress(&filename, progress)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))?;
                 result.push(path);
             }

@@ -5088,6 +5088,7 @@ mod tests {
             current_tier: StorageTier::GpuHbm,
             original_bytes: 4096,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
 
         // Assert: all fields match construction

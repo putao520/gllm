@@ -746,6 +746,7 @@ impl ThreeTierSwapCoordinator {
             },
             original_bytes: page_bytes,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         });
     }
 
@@ -4354,6 +4355,7 @@ mod tests {
             current_tier: StorageTier::GpuHbm,
             original_bytes: 4096,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         assert_eq!(entry.gpu_ptr, Some(0xDEADBEEF));
         assert_eq!(entry.host_buffer.as_ref().map(|b| b.len()), Some(4096));
@@ -4370,6 +4372,7 @@ mod tests {
             current_tier: StorageTier::Nvme,
             original_bytes: 8192,
             codec: CompressionCodec::ZstdDict,
+            compressed_bytes: None,
         };
         assert!(entry.gpu_ptr.is_none());
         assert!(entry.host_buffer.is_none());
@@ -4385,6 +4388,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 4096,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         let dbg = format!("{:?}", entry);
         assert!(dbg.contains("gpu_ptr"));
@@ -5890,6 +5894,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec,
+                compressed_bytes: None,
             };
             assert_eq!(entry.codec, codec);
         }
@@ -7867,6 +7872,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 4096,
             codec: CompressionCodec::NvcompAns,
+            compressed_bytes: None,
         };
         // Act & Assert
         assert_eq!(entry.gpu_ptr, Some(0xCAFE));
@@ -9055,6 +9061,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 16,
             codec: CompressionCodec::None,
+            compressed_bytes: None,
         };
         // Assert
         assert_eq!(entry.host_buffer.as_ref().map(|b| b.len()), Some(16));
@@ -9069,6 +9076,7 @@ mod tests {
             current_tier: StorageTier::CpuDram,
             original_bytes: 65536,
             codec: CompressionCodec::Lz4,
+            compressed_bytes: None,
         };
         // Assert
         assert_eq!(entry.host_buffer.as_ref().map(|b| b.len()), Some(65536));

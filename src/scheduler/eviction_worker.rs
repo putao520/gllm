@@ -403,18 +403,16 @@ impl EvictionWorker {
                 }
 
                 // Determine current tier from addr_table.
-                // NOTE(BCE-20260624-030): meta.access_count is a frequency counter, NOT
-                // a byte count. Using it as compressed_size produces wrong compression_ratio
-                // (access_count=5000 / original_bytes=65536 = 0.076 → huge false bonus).
-                // Correct fix: use entry.compressed_bytes when available, or original_bytes
-                // (ratio=1.0, no bonus). However, changing to original_bytes alters scoring
-                // and may trigger DMA in tests that use fake GPU pointers (SIGSEGV).
-                // Tracked as BCE-20260624-030 — deferred until PageAddrEntry gains
-                // compressed_bytes field.
+                // [BCE-030] Use entry.compressed_bytes for eviction scoring instead of
+                // meta.access_count (which is a frequency counter, NOT a byte count).
+                // compressed_bytes is set after eviction, None when page is uncompressed
+                // (on GPU HBM or after promote). Fallback to original_bytes gives
+                // ratio=1.0 (no compression bonus) which is the correct behavior for
+                // uncompressed pages.
                 let (current_tier, compressed_size, original_size, codec) = match addr_guard.get(&page_id) {
                     Some(entry) => (
                         entry.current_tier,
-                        meta.access_count, // BCE-20260624-030: wrong but changing breaks tests; see note above
+                        entry.compressed_bytes.unwrap_or(entry.original_bytes as u32),
                         entry.original_bytes,
                         entry.codec,
                     ),
@@ -1969,6 +1967,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -2600,6 +2599,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -5401,35 +5401,37 @@ mod tests {
 
         let old_instant = Instant::now() - Duration::from_millis(6000);
         let mut pages = HashMap::new();
-        let mut addrs = HashMap::new();
-        for i in 1..=5usize {
-            pages.insert(i, PageMetadata {
-                page_id: i,
-                sequence_id: Some(100),
-                recency: 0,
-                access_count: 0,
-                last_access: old_instant,
-                swap_in_time: Some(old_instant),
-                is_lir: false,
-                state: PageState::Standby,
-                warm_until: None,
-            });
-            addrs.insert(i, PageAddrEntry {
-                gpu_ptr: Some(0x1000 + (i as u64) * 0x1000),
-                host_buffer: None,
-                current_tier: StorageTier::GpuHbm,
-                original_bytes: 4096,
-                codec: CompressionCodec::None,
-            });
+        let mut gpu_ptrs: Vec<u64> = Vec::new();
+        {
+            let mut guard = addr_table.write().unwrap();
+            for i in 1..=5usize {
+                pages.insert(i, PageMetadata {
+                    page_id: i,
+                    sequence_id: Some(100),
+                    recency: 0,
+                    access_count: 0,
+                    last_access: old_instant,
+                    swap_in_time: Some(old_instant),
+                    is_lir: false,
+                    state: PageState::Standby,
+                    warm_until: None,
+                });
+                // [BCE-030] Use real CPU-allocated GPU page instead of fake pointer
+                // to avoid SIGSEGV when eviction triggers DMA.
+                let gpu_ptr = backend.allocate_gpu_page(4096).expect("alloc gpu page");
+                gpu_ptrs.push(gpu_ptr);
+                guard.insert(i, PageAddrEntry {
+                    gpu_ptr: Some(gpu_ptr),
+                    host_buffer: None,
+                    current_tier: StorageTier::GpuHbm,
+                    original_bytes: 4096,
+                    codec: CompressionCodec::None,
+                    compressed_bytes: None,
+                });
+            }
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
             Arc::new(RwLock::new(pages));
-        {
-            let mut guard = addr_table.write().unwrap();
-            for (k, v) in addrs {
-                guard.insert(k, v);
-            }
-        }
 
         let mut mm = GlobalMemoryManager::new_with_capacities(100, 1000, 1000);
         for _ in 0..95 {
@@ -5542,6 +5544,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -5602,6 +5605,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -5663,6 +5667,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -5723,6 +5728,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -8752,6 +8758,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -8818,6 +8825,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13083,6 +13091,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13140,6 +13149,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13200,6 +13210,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13261,6 +13272,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -13801,6 +13813,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13862,6 +13875,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13924,6 +13938,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -13991,6 +14006,7 @@ mod tests {
                 current_tier: StorageTier::Nvme, // Nvme pages → never eligible
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
 
@@ -14066,6 +14082,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -14193,6 +14210,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 8192,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -14260,6 +14278,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -14338,6 +14357,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             guard.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -14345,6 +14365,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -14443,6 +14464,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -14508,6 +14530,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -14574,6 +14597,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -14638,6 +14662,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -14705,6 +14730,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -14771,6 +14797,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -14920,6 +14947,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 16384,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -14988,6 +15016,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -15057,6 +15086,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -15134,6 +15164,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
             guard.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -15141,6 +15172,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
 
@@ -15238,6 +15270,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             guard.insert(2, PageAddrEntry {
                 gpu_ptr: None,
@@ -15245,6 +15278,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
             guard.insert(3, PageAddrEntry {
                 gpu_ptr: None,
@@ -15252,6 +15286,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
 
@@ -15359,6 +15394,7 @@ mod tests {
                 current_tier: StorageTier::Nvme,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
 
@@ -15534,6 +15570,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
             guard.insert(11, PageAddrEntry {
                 gpu_ptr: None,
@@ -15541,6 +15578,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -15707,6 +15745,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17030,6 +17069,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17244,6 +17284,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
             guard.insert(200, PageAddrEntry {
                 gpu_ptr: None,
@@ -17251,6 +17292,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -17787,6 +17829,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -17849,6 +17892,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -17979,6 +18023,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -18045,6 +18090,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18141,6 +18187,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18199,6 +18246,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18307,6 +18355,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -18367,6 +18416,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -18430,6 +18480,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::Lz4,
+                compressed_bytes: None,
             });
         }
 
@@ -18940,6 +18991,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19045,6 +19097,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19104,6 +19157,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19172,6 +19226,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19244,6 +19299,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19310,6 +19366,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19431,6 +19488,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19534,6 +19592,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19645,6 +19704,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19706,6 +19766,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -19774,6 +19835,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19886,6 +19948,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -19965,6 +20028,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20039,6 +20103,7 @@ mod tests {
                     current_tier: StorageTier::GpuHbm,
                     original_bytes: 4096,
                     codec: CompressionCodec::None,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -20118,6 +20183,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::ZstdDict,
+                compressed_bytes: None,
             });
         }
 
@@ -20186,6 +20252,7 @@ mod tests {
                 current_tier: StorageTier::CpuDram,
                 original_bytes: 4096,
                 codec: CompressionCodec::BitPackRle,
+                compressed_bytes: None,
             });
         }
 
@@ -20249,6 +20316,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -20701,6 +20769,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -21239,6 +21308,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
         let page_metadata: Arc<RwLock<HashMap<PageId, PageMetadata>>> =
@@ -21775,6 +21845,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -22351,6 +22422,7 @@ mod tests {
                     current_tier: StorageTier::CpuDram,
                     original_bytes: 4096,
                     codec: CompressionCodec::Lz4,
+                    compressed_bytes: None,
                 });
             }
         }
@@ -22449,6 +22521,7 @@ mod tests {
                 current_tier: StorageTier::GpuHbm,
                 original_bytes: 4096,
                 codec: CompressionCodec::None,
+                compressed_bytes: None,
             });
         }
 
@@ -22920,5 +22993,66 @@ mod tests {
         // HBM has no discount, so all others are <= HBM.
         assert!(score_dram < score_hbm, "DRAM discount should make it strictly less than HBM");
         assert!(score_nvme < score_dram, "NVMe discount should make it strictly less than DRAM");
+    }
+
+    // ── [BCE-030] compressed_bytes used for eviction scoring ──
+
+    /// Verify that eviction scoring uses compressed_bytes from PageAddrEntry
+    /// instead of meta.access_count (BCE-030 root fix).
+    #[test]
+    fn eviction_score_uses_compressed_bytes() {
+        // When compressed_bytes is known (page was previously evicted and re-promoted
+        // with compression info preserved), the score uses it for compression_ratio_bonus.
+        let meta = PageMetadata {
+            page_id: 1,
+            sequence_id: Some(100),
+            recency: 0,
+            access_count: 5,
+            last_access: Instant::now(),
+            swap_in_time: None,
+            is_lir: false,
+            state: PageState::Standby,
+            warm_until: None,
+        };
+
+        // Case 1: compressed_bytes = 1000, original_bytes = 4096
+        // ratio = 1000/4096 ≈ 0.244
+        // compression_ratio_bonus = (1.0 - 0.244) * 500 ≈ 378
+        let score_with_compressed = EvictionWorker::compute_importance_score(
+            &meta,
+            Some(PagePayloadKind::KvContext),
+            1000,  // compressed_bytes from entry
+            4096,  // original_bytes
+            StorageTier::GpuHbm,
+            0,
+        );
+
+        // Case 2: compressed_bytes = None → fallback to original_bytes = 4096
+        // ratio = 4096/4096 = 1.0
+        // compression_ratio_bonus = (1.0 - 1.0) * 500 = 0
+        let score_with_fallback = EvictionWorker::compute_importance_score(
+            &meta,
+            Some(PagePayloadKind::KvContext),
+            4096,  // compressed_bytes = None → fallback to original_bytes
+            4096,
+            StorageTier::GpuHbm,
+            0,
+        );
+
+        // The compressed entry should have a higher score because compression_ratio_bonus
+        // is positive (cheaper to evict/restore = harder to evict).
+        assert!(
+            score_with_compressed > score_with_fallback,
+            "compressed_bytes=1000 should give higher score than fallback=4096: {} vs {}",
+            score_with_compressed, score_with_fallback,
+        );
+
+        // Sanity: exact delta should be ~(1 - 1000/4096) * 500 ≈ 378
+        let delta = score_with_compressed - score_with_fallback;
+        assert!(
+            delta > 300 && delta < 400,
+            "compression bonus delta should be ~378 (got {})",
+            delta,
+        );
     }
 }

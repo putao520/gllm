@@ -326,7 +326,7 @@ impl ModelScopeClient {
         let mut result = Vec::new();
         for (idx, shard_path) in shards.iter().enumerate() {
             let filename = shard_path;
-            eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
+            log::info!("[{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
 
             let mut progress = ProgressBar::new(filename.clone());
             let path = downloader.download_file_with_progress(
