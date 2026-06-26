@@ -739,7 +739,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 **patternId**: BCE-20260624-030
 **title**: eviction_worker compute_importance_score 使用 meta.access_count（频率计数器）作为 compressed_size，产生错误压缩比评分
 **layer**: 设计
-**status**: DEFERRED — 测试用假 GPU 指针，修正评分后 DMA 触发 SIGSEGV；需先修复测试基础设施
+**status**: 根治 — PageAddrEntry 新增 compressed_bytes 字段，评分改用 entry.compressed_bytes.unwrap_or(original_bytes)，测试基础设施已修复
 
 **codePattern**: `meta.access_count` 在 eviction_worker::evict_round 中用作 `compressed_size` 参数传入 compute_importance_score
 
