@@ -734,7 +734,7 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
-## BCE-20260624-030 — eviction_worker meta.access_count 误当 compressed_size (DEFERRED)
+## BCE-20260624-030 — eviction_worker meta.access_count 误当 compressed_size ✅
 
 **patternId**: BCE-20260624-030
 **title**: eviction_worker compute_importance_score 使用 meta.access_count（频率计数器）作为 compressed_size，产生错误压缩比评分
