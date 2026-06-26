@@ -20039,4 +20039,127 @@ mod tests {
         }
     }
 
+    // ── [BCE-030] compressed_bytes field tracking ──
+
+    /// Verify that EvictToDram sets compressed_bytes on the PageAddrEntry.
+    #[test]
+    fn evict_to_dram_sets_compressed_bytes() {
+        const PAGE_BYTES: usize = 1024;
+        const PAGE_ID: PageId = 42;
+
+        let backend: Arc<dyn DmaBackend> = Arc::new(CpuDmaBackendSized);
+        let addr_table: PageAddrTable = Arc::new(RwLock::new(HashMap::new()));
+
+        let gpu_ptr = backend.allocate_gpu_page(PAGE_BYTES).expect("alloc failed");
+        // Write some data to the GPU page
+        let data: Vec<u8> = (0u8..=255u8).cycle().take(PAGE_BYTES).collect();
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), gpu_ptr as *mut u8, PAGE_BYTES);
+        }
+
+        {
+            let mut table = addr_table.write().expect("write lock");
+            table.insert(
+                PAGE_ID,
+                PageAddrEntry {
+                    gpu_ptr: Some(gpu_ptr),
+                    host_buffer: None,
+                    current_tier: StorageTier::GpuHbm,
+                    original_bytes: PAGE_BYTES,
+                    codec: CompressionCodec::None,
+                    compressed_bytes: None,
+                },
+            );
+        }
+
+        let actor = PageMigrationActor::spawn_with_backend(
+            MigrationActorConfig::default(),
+            Arc::clone(&backend),
+            Arc::clone(&addr_table),
+            None,
+        );
+
+        // Evict to DRAM with LZ4 compression
+        actor
+            .send(MigrationCommand::EvictToDram {
+                page_id: PAGE_ID,
+                codec: CompressionCodec::Lz4,
+                page_bytes: PAGE_BYTES,
+            })
+            .expect("send failed");
+
+        let evict_done = actor.recv_done().expect("recv done failed");
+        match &evict_done.result {
+            MigrationResult::Ok { compressed_bytes, .. } => {
+                // Verify the addr_table entry now has compressed_bytes set
+                let table = addr_table.read().expect("read lock");
+                let entry = table.get(&PAGE_ID).expect("entry missing");
+                assert_eq!(
+                    entry.compressed_bytes,
+                    Some(*compressed_bytes),
+                    "[BCE-030] compressed_bytes must be set after EvictToDram"
+                );
+            }
+            MigrationResult::Failed { reason } => panic!("EvictToDram failed: {reason}"),
+        }
+
+        actor.shutdown();
+    }
+
+    /// Verify that PromoteToHbm clears compressed_bytes on the PageAddrEntry.
+    #[test]
+    fn promote_to_hbm_clears_compressed_bytes() {
+        const PAGE_BYTES: usize = 1024;
+        const PAGE_ID: PageId = 43;
+
+        let backend: Arc<dyn DmaBackend> = Arc::new(CpuDmaBackendSized);
+        let addr_table: PageAddrTable = Arc::new(RwLock::new(HashMap::new()));
+
+        // Pre-populate with a DRAM entry that has compressed_bytes set
+        {
+            let mut table = addr_table.write().expect("write lock");
+            table.insert(
+                PAGE_ID,
+                PageAddrEntry {
+                    gpu_ptr: None,
+                    host_buffer: Some(vec![0xABu8; PAGE_BYTES]),
+                    current_tier: StorageTier::CpuDram,
+                    original_bytes: PAGE_BYTES,
+                    codec: CompressionCodec::None,
+                    compressed_bytes: Some(512), // [BCE-030] set as if previously compressed
+                },
+            );
+        }
+
+        let actor = PageMigrationActor::spawn_with_backend(
+            MigrationActorConfig::default(),
+            Arc::clone(&backend),
+            Arc::clone(&addr_table),
+            None,
+        );
+
+        actor
+            .send(MigrationCommand::PromoteToHbm {
+                page_id: PAGE_ID,
+                page_bytes: PAGE_BYTES,
+            })
+            .expect("send failed");
+
+        let promote_done = actor.recv_done().expect("recv done failed");
+        match &promote_done.result {
+            MigrationResult::Ok { .. } => {
+                let table = addr_table.read().expect("read lock");
+                let entry = table.get(&PAGE_ID).expect("entry missing");
+                assert_eq!(
+                    entry.compressed_bytes,
+                    None,
+                    "[BCE-030] compressed_bytes must be None after PromoteToHbm"
+                );
+            }
+            MigrationResult::Failed { reason } => panic!("PromoteToHbm failed: {reason}"),
+        }
+
+        actor.shutdown();
+    }
+
 }
