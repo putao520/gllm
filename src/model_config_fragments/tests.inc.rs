@@ -180,7 +180,7 @@ mod tests {
             rope_partial_ratio_global: None,
             mla_use_unabsorbed: None,
         };
-        let moe = cfg.build_moe_config("deepseek").unwrap();
+        let moe = cfg.build_moe_config("deepseek").unwrap().unwrap();
         assert_eq!(moe.num_experts, 64);
         assert_eq!(moe.num_experts_per_tok, 6);
         assert_eq!(moe.router_type, RouterType::DeepSeek);
@@ -417,7 +417,7 @@ mod tests {
             rope_partial_ratio_global: None,
             mla_use_unabsorbed: None,
         };
-        assert!(cfg.build_moe_config("llama").is_none());
+        assert!(cfg.build_moe_config("llama").unwrap().is_none());
     }
 
     // ── MTP depth parsing tests ──
@@ -1943,7 +1943,7 @@ mod tests {
         config.num_experts = Some(1);
         config.num_experts_per_tok = Some(1);
         let result = config.build_moe_config("test_arch");
-        assert_eq!(result, None,
+        assert_eq!(result.unwrap(), None,
             "num_experts <= 1 must return None — not a real MoE model");
     }
 
@@ -1954,7 +1954,7 @@ mod tests {
         let mut config = minimal_model_config(4096);
         config.num_experts = Some(4);
         config.num_experts_per_tok = Some(8); // exceeds num_experts
-        let moe = config.build_moe_config("mixtral").expect("build_moe_config");
+        let moe = config.build_moe_config("mixtral").unwrap().expect("build_moe_config");
         assert_eq!(moe.num_experts_per_tok, 8,
             "build_moe_config does not validate per_tok <= experts; that's downstream");
     }
@@ -2146,5 +2146,337 @@ mod tests {
         let ple = gguf_arch_usize(&reader, "gemma4", "embedding.per_layer_input");
         assert_eq!(ple, Some(128), "per_layer_input must be readable");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ── FieldDef registry tests (BCE-040 Task A) ──
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── normalize_text_config tests ──
+
+    /// normalize_text_config: merges text_config fields to root level.
+    #[test]
+    fn normalize_text_config_merges_nested_fields() {
+        let json = serde_json::json!({
+            "vocab_size": 256000,
+            "torch_dtype": "bfloat16",
+            "text_config": {
+                "hidden_size": 2048,
+                "num_attention_heads": 16,
+                "num_hidden_layers": 24,
+                "rope_theta": 10000.0,
+            },
+        });
+        let normalized = normalize_text_config(&json);
+        // text_config fields should appear at root level
+        assert_eq!(normalized["hidden_size"], 2048);
+        assert_eq!(normalized["num_attention_heads"], 16);
+        assert_eq!(normalized["num_hidden_layers"], 24);
+        assert_eq!(normalized["rope_theta"], 10000.0);
+        // Original root-level fields preserved
+        assert_eq!(normalized["vocab_size"], 256000);
+        assert_eq!(normalized["torch_dtype"], "bfloat16");
+    }
+
+    /// normalize_text_config: root-level fields take priority over text_config.
+    #[test]
+    fn normalize_text_config_root_priority() {
+        let json = serde_json::json!({
+            "hidden_size": 4096,
+            "text_config": {
+                "hidden_size": 2048, // should NOT override root
+            },
+        });
+        let normalized = normalize_text_config(&json);
+        assert_eq!(normalized["hidden_size"], 4096, "root-level must win");
+    }
+
+    /// normalize_text_config: no text_config → returns clone unchanged.
+    #[test]
+    fn normalize_text_config_no_text_config_returns_clone() {
+        let json = serde_json::json!({
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+        });
+        let normalized = normalize_text_config(&json);
+        assert_eq!(normalized["hidden_size"], 4096);
+        assert_eq!(normalized["num_attention_heads"], 32);
+    }
+
+    /// normalize_text_config: empty text_config → no new fields added.
+    #[test]
+    fn normalize_text_config_empty_text_config() {
+        let json = serde_json::json!({
+            "hidden_size": 4096,
+            "text_config": {},
+        });
+        let normalized = normalize_text_config(&json);
+        assert_eq!(normalized["hidden_size"], 4096);
+        assert_eq!(normalized.get("num_attention_heads"), None);
+    }
+
+    /// normalize_text_config: non-object value → returns clone unchanged.
+    #[test]
+    fn normalize_text_config_non_object_returns_clone() {
+        let json = serde_json::json!(42);
+        let normalized = normalize_text_config(&json);
+        assert_eq!(normalized, 42);
+    }
+
+    /// normalize_text_config: text_config deeply nested fields are merged shallowly.
+    #[test]
+    fn normalize_text_config_shallow_merge() {
+        let json = serde_json::json!({
+            "text_config": {
+                "rope_parameters": {
+                    "full_attention": {
+                        "rope_theta": 1000000.0,
+                    },
+                },
+            },
+        });
+        let normalized = normalize_text_config(&json);
+        // rope_parameters object is merged as a whole (shallow merge)
+        assert!(normalized.get("rope_parameters").is_some());
+        assert_eq!(
+            normalized["rope_parameters"]["full_attention"]["rope_theta"],
+            1000000.0
+        );
+    }
+
+    // ── apply_field_registry tests ──
+
+    /// apply_field_registry: extracts core required fields from minimal JSON.
+    #[test]
+    fn apply_field_registry_extracts_required_fields() {
+        let json = serde_json::json!({
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32,
+            "vocab_size": 32000,
+            "max_position_embeddings": 4096,
+            "rope_theta": 10000.0,
+        });
+        let config = apply_field_registry(&json, FIELD_DEFS).expect("apply_field_registry");
+        assert_eq!(config.hidden_size, Some(4096));
+        assert_eq!(config.num_attention_heads, Some(32));
+        assert_eq!(config.num_hidden_layers, Some(32));
+        assert_eq!(config.vocab_size, Some(32000));
+        assert_eq!(config.max_position_embeddings, Some(4096));
+        assert_eq!(config.rope_theta, Some(10000.0));
+    }
+
+    /// apply_field_registry: missing required field returns Err.
+    #[test]
+    fn apply_field_registry_err_missing_required_field() {
+        let json = serde_json::json!({
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32,
+            "vocab_size": 32000,
+            // hidden_size missing — required
+        });
+        let result = apply_field_registry(&json, FIELD_DEFS);
+        assert!(result.is_err(), "missing required field must return Err");
+        let err = result.unwrap_err();
+        assert!(matches!(err, ModelConfigError::InvalidConfig(_)));
+        assert!(err.to_string().contains("hidden_size"));
+    }
+
+    /// apply_field_registry: alias keys work (e.g., n_embd → hidden_size).
+    #[test]
+    fn apply_field_registry_alias_keys() {
+        let json = serde_json::json!({
+            "n_embd": 2048,
+            "n_head": 16,
+            "n_layer": 24,
+            "vocab_size": 32000,
+            "max_position_embeddings": 4096,
+            "rope_theta": 10000.0,
+        });
+        let config = apply_field_registry(&json, FIELD_DEFS).expect("alias keys");
+        assert_eq!(config.hidden_size, Some(2048), "n_embd → hidden_size");
+        assert_eq!(config.num_attention_heads, Some(16), "n_head → num_attention_heads");
+        assert_eq!(config.num_hidden_layers, Some(24), "n_layer → num_hidden_layers");
+    }
+
+    /// apply_field_registry: optional fields default correctly.
+    #[test]
+    fn apply_field_registry_optional_defaults() {
+        let json = serde_json::json!({
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32,
+            "vocab_size": 32000,
+        });
+        let config = apply_field_registry(&json, FIELD_DEFS).expect("defaults");
+        assert_eq!(config.rope_scale, Some(1.0), "rope_scale defaults to 1.0");
+        assert_eq!(config.rope_interleaved, Some(false), "rope_interleaved defaults to false");
+        assert_eq!(config.max_position_embeddings, None, "max_position_embeddings has no default");
+        // rope_theta is a Derived field: parse_rope_theta always returns a value
+        // (0.0 for encoder models, 10000.0 for decoder models when not specified in config).
+        // Since this test JSON has no model_type, it's treated as decoder → default 10000.0.
+        assert_eq!(config.rope_theta, Some(10000.0), "rope_theta defaults to 10000.0 for decoder");
+    }
+
+    /// apply_field_registry: after normalize_text_config, text_config fields are accessible.
+    #[test]
+    fn apply_field_registry_after_normalize_text_config() {
+        let json = serde_json::json!({
+            "vocab_size": 256000,
+            "torch_dtype": "bfloat16",
+            "text_config": {
+                "hidden_size": 2048,
+                "num_attention_heads": 16,
+                "num_hidden_layers": 24,
+                "rope_theta": 10000.0,
+                "qk_norm": true,
+            },
+        });
+        let normalized = normalize_text_config(&json);
+        let config = apply_field_registry(&normalized, FIELD_DEFS).expect("after normalize");
+        assert_eq!(config.hidden_size, Some(2048), "from text_config via normalize");
+        assert_eq!(config.num_attention_heads, Some(16));
+        assert_eq!(config.qk_norm, Some(true), "text_config.qk_norm → root qk_norm");
+    }
+
+    /// apply_field_registry: Gemma 4 nested RoPE parameters extracted.
+    #[test]
+    fn apply_field_registry_gemma4_rope_parameters() {
+        let json = serde_json::json!({
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            "num_hidden_layers": 24,
+            "vocab_size": 256000,
+            "rope_parameters": {
+                "sliding_attention": {
+                    "rope_theta": 10000.0,
+                    "partial_rotary_factor": 1.0,
+                },
+                "full_attention": {
+                    "rope_theta": 1000000.0,
+                    "partial_rotary_factor": 0.25,
+                },
+            },
+        });
+        let config = apply_field_registry(&json, FIELD_DEFS).expect("gemma4 RoPE");
+        // parse_rope_theta handles rope_parameters.sliding_attention.rope_theta
+        assert_eq!(
+            config.rope_theta,
+            Some(10000.0),
+            "sliding rope_theta via parse_rope_theta"
+        );
+        // global_rope_theta field def includes rope_parameters.full_attention.rope_theta
+        assert_eq!(
+            config.global_rope_theta,
+            Some(1000000.0),
+            "full rope_theta via global_rope_theta alias"
+        );
+        // rope_partial_ratio_global field def includes rope_parameters.full_attention.partial_rotary_factor
+        assert_eq!(
+            config.rope_partial_ratio_global,
+            Some(0.25),
+            "full partial_rotary_factor via rope_partial_ratio_global alias"
+        );
+    }
+
+    /// apply_field_registry: all required fields missing → one error per call.
+    #[test]
+    fn apply_field_registry_all_required_missing() {
+        let json = serde_json::json!({});
+        let result = apply_field_registry(&json, FIELD_DEFS);
+        assert!(result.is_err());
+    }
+
+    // ── FIELD_DEFS completeness tests ──
+
+    /// FIELD_DEFS contains all expected required fields.
+    #[test]
+    fn field_defs_has_required_fields() {
+        let names = all_canonical_names();
+        let required = ["hidden_size", "num_attention_heads", "num_hidden_layers", "vocab_size"];
+        for &name in &required {
+            assert!(names.contains(&name), "FIELD_DEFS must contain required field '{}'", name);
+        }
+    }
+
+    /// FIELD_DEFS has a reasonable number of entries (at least 40).
+    #[test]
+    fn field_defs_has_sufficient_count() {
+        let count = field_defs_count();
+        assert!(count >= 40, "FIELD_DEFS must have at least 40 entries, got {}", count);
+    }
+
+    /// FIELD_DEFS has the expected number of required fields.
+    #[test]
+    fn field_defs_required_count() {
+        let count = required_field_count();
+        assert_eq!(count, 4, "hidden_size + num_attention_heads + num_hidden_layers + vocab_size = 4 required");
+    }
+
+    // ── apply_post_process tests ──
+
+    /// apply_post_process: head_dim derived from hidden_size / num_attention_heads.
+    #[test]
+    fn apply_post_process_derives_head_dim() {
+        let mut config = CanonicalConfig {
+            hidden_size: Some(4096),
+            num_attention_heads: Some(32),
+            head_dim: None,
+            ..Default::default()
+        };
+        apply_post_process(&mut config);
+        assert_eq!(config.head_dim, Some(128), "head_dim = 4096 / 32 = 128");
+    }
+
+    /// apply_post_process: kv_cache_block_size derived from head_dim.max(num_key_value_heads).
+    #[test]
+    fn apply_post_process_derives_kv_cache_block_size() {
+        let mut config = CanonicalConfig {
+            head_dim: Some(128),
+            num_key_value_heads: Some(8),
+            kv_cache_block_size: None,
+            ..Default::default()
+        };
+        apply_post_process(&mut config);
+        assert_eq!(config.kv_cache_block_size, Some(128), "128.max(8) = 128");
+    }
+
+    /// apply_post_process: explicit head_dim not overridden.
+    #[test]
+    fn apply_post_process_preserves_explicit_head_dim() {
+        let mut config = CanonicalConfig {
+            hidden_size: Some(4096),
+            num_attention_heads: Some(32),
+            head_dim: Some(64), // explicit — should NOT be overridden
+            ..Default::default()
+        };
+        apply_post_process(&mut config);
+        assert_eq!(config.head_dim, Some(64), "explicit head_dim must not be overridden");
+    }
+
+    /// apply_post_process: explicit kv_cache_block_size not overridden.
+    #[test]
+    fn apply_post_process_preserves_explicit_kv_cache_block_size() {
+        let mut config = CanonicalConfig {
+            head_dim: Some(128),
+            num_key_value_heads: Some(8),
+            kv_cache_block_size: Some(256), // explicit
+            ..Default::default()
+        };
+        apply_post_process(&mut config);
+        assert_eq!(config.kv_cache_block_size, Some(256), "explicit kv_cache_block_size must not be overridden");
+    }
+
+    /// apply_post_process: kv_cache_block_size when num_key_value_heads > head_dim.
+    #[test]
+    fn apply_post_process_kv_cache_block_size_kv_heads_larger() {
+        let mut config = CanonicalConfig {
+            head_dim: Some(32),
+            num_key_value_heads: Some(128),
+            kv_cache_block_size: None,
+            ..Default::default()
+        };
+        apply_post_process(&mut config);
+        assert_eq!(config.kv_cache_block_size, Some(128), "32.max(128) = 128");
     }
 }

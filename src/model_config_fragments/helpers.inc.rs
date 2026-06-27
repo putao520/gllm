@@ -344,19 +344,6 @@ fn projection_out_dim(
     Ok(out)
 }
 
-fn require_usize(value: &Value, keys: &[&str]) -> ModelConfigResult<usize> {
-    find_usize(value, keys).ok_or_else(|| ModelConfigError::InvalidConfig(keys[0].to_string()))
-}
-
-fn require_gguf_usize(value: Option<u64>, field: &str) -> ModelConfigResult<usize> {
-    let value = value.ok_or_else(|| {
-        ModelConfigError::InvalidConfig(format!("missing GGUF metadata field: {field}"))
-    })?;
-    usize::try_from(value).map_err(|_| {
-        ModelConfigError::InvalidConfig(format!("GGUF metadata field overflow: {field}"))
-    })
-}
-
 fn optional_gguf_usize(value: Option<u64>, field: &str) -> ModelConfigResult<Option<usize>> {
     let Some(value) = value else {
         return Ok(None);
@@ -365,12 +352,6 @@ fn optional_gguf_usize(value: Option<u64>, field: &str) -> ModelConfigResult<Opt
         ModelConfigError::InvalidConfig(format!("GGUF metadata field overflow: {field}"))
     })?;
     Ok(Some(parsed))
-}
-
-fn require_gguf_f32(value: Option<f32>, field: &str) -> ModelConfigResult<f32> {
-    value.filter(|v| v.is_finite()).ok_or_else(|| {
-        ModelConfigError::InvalidConfig(format!("missing GGUF metadata field: {field}"))
-    })
 }
 
 fn find_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
@@ -698,5 +679,106 @@ pub fn derive_default_attention_pattern(num_layers: usize) -> Vec<u8> {
     (0..num_layers)
         .map(|i| if (i + 1) % 6 == 0 { 1u8 } else { 0u8 })
         .collect()
+}
+
+// ── GGUF canonical post-processing helpers (BCE-040 Task 23) ──
+//
+// These operate on a CanonicalConfig after apply_gguf_field_registry + tensor-derived
+// injection. They preserve the GGUF-specific logic previously inlined in from_gguf_loader.
+
+/// Gemma 4 dual-RoPE correction.
+///
+/// Unsloth/llama.cpp GGUF only stores `rope_freq_base=1000000` (the *global* theta).
+/// For Gemma 4 the *sliding* theta is 10000. When the GGUF lacks an explicit
+/// `rope.global.freq_base` but we detect the model as dual-RoPE
+/// (Gemma 4 signals present + freq_base >= 100K), reinterpret:
+///   rope_theta            ← 10000    (sliding, used by 29/35 layers)
+///   global_rope_theta     ← original (1M)
+///   rope_partial_ratio    ← unchanged (sliding partial = None → 1.0 default)
+fn apply_gguf_dual_rope_correction(canonical: &mut CanonicalConfig) {
+    let has_gemma4_signal = canonical
+        .hidden_size_per_layer_input
+        .map(|v| v > 0)
+        .unwrap_or(false)
+        || canonical.sliding_window.map(|v| v > 0).unwrap_or(false);
+    let is_dual_rope_candidate = canonical.global_rope_theta.is_none()
+        && canonical.rope_theta.map(|t| t >= 100_000.0).unwrap_or(false)
+        && has_gemma4_signal;
+    if is_dual_rope_candidate {
+        if let Some(freq_base) = canonical.rope_theta {
+            canonical.rope_theta = Some(10_000.0_f32); // sliding theta
+            canonical.global_rope_theta = Some(freq_base); // global theta = original freq_base
+            // rope_partial_ratio stays unchanged (sliding partial = None → 1.0 default)
+        }
+    }
+}
+
+/// Gemma 4 attention_pattern default derivation.
+///
+/// When `attention_pattern` metadata is absent but Gemma 4 family signals are
+/// present (PLE / global-rope / sliding_window), synthesise the default
+/// "every 6th layer is global" pattern. Other arches keep `None` to avoid
+/// polluting non-Gemma-4 models.
+///
+/// Requires `num_hidden_layers` to be resolved first (tensor-derived injection).
+fn apply_gguf_attention_pattern_default(canonical: &mut CanonicalConfig) {
+    if canonical.attention_pattern.is_some() {
+        return;
+    }
+    let enable_gemma4_pattern_default = canonical
+        .hidden_size_per_layer_input
+        .map(|v| v > 0)
+        .unwrap_or(false)
+        || canonical.global_rope_theta.is_some()
+        || canonical.sliding_window.map(|v| v > 0).unwrap_or(false);
+    if !enable_gemma4_pattern_default {
+        return;
+    }
+    if let Some(num_hidden_layers) = canonical.num_hidden_layers {
+        if num_hidden_layers > 0 {
+            canonical.attention_pattern = Some(derive_default_attention_pattern(num_hidden_layers));
+        }
+    }
+}
+
+/// GGUF-specific invariant validation.
+///
+/// NO-SILENT-FALLBACK: invalid metadata must surface as Err, not be silently dropped.
+/// Checks: num_experts != 0, expert_intermediate_size != 0, rope_theta > 0,
+/// rope_scale > 0 & finite, max_position_embeddings > 0.
+fn validate_gguf_canonical(canonical: &CanonicalConfig) -> ModelConfigResult<()> {
+    if matches!(canonical.num_experts, Some(0)) {
+        return Err(ModelConfigError::InvalidConfig(
+            "GGUF metadata field invalid: num_experts".to_string(),
+        ));
+    }
+    if matches!(canonical.expert_intermediate_size, Some(0)) {
+        return Err(ModelConfigError::InvalidConfig(
+            "GGUF metadata field invalid: expert_intermediate_size".to_string(),
+        ));
+    }
+    match canonical.rope_theta {
+        Some(t) if t > 0.0 && t.is_finite() => {}
+        Some(_) => {
+            return Err(ModelConfigError::InvalidConfig(
+                "GGUF metadata invalid: rope.freq_base (rope_theta) must be > 0".to_string(),
+            ));
+        }
+        None => {
+            return Err(ModelConfigError::InvalidConfig(
+                "GGUF metadata missing: rope.freq_base (rope_theta)".to_string(),
+            ));
+        }
+    }
+    // rope_scale default applied in apply_post_process (1.0 industry standard)
+    if let Some(scale) = canonical.rope_scale {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(ModelConfigError::InvalidConfig(
+                "GGUF metadata field invalid: rope.scale".to_string(),
+            ));
+        }
+    }
+    // max_position_embeddings checked downstream (manifest override → from_value-style check)
+    Ok(())
 }
 
