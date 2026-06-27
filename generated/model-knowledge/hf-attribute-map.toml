@@ -1,0 +1,2341 @@
+# attribute_alias: 390 entries
+
+[[attribute_alias]]
+model_type = "aria"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "AriaConfig"
+
+[[attribute_alias]]
+model_type = "audioflamingo3_encoder"
+alias = "d_model"
+canonical = "hidden_size"
+class_name = "AudioFlamingo3EncoderConfig"
+
+[[attribute_alias]]
+model_type = "audioflamingo3_encoder"
+alias = "encoder_layers"
+canonical = "num_hidden_layers"
+class_name = "AudioFlamingo3EncoderConfig"
+
+[[attribute_alias]]
+model_type = "audioflamingo3_encoder"
+alias = "encoder_attention_heads"
+canonical = "num_attention_heads"
+class_name = "AudioFlamingo3EncoderConfig"
+
+[[attribute_alias]]
+model_type = "audioflamingo3_encoder"
+alias = "encoder_ffn_dim"
+canonical = "intermediate_size"
+class_name = "AudioFlamingo3EncoderConfig"
+
+[[attribute_alias]]
+model_type = "audioflamingo3_encoder"
+alias = "encoder_layerdrop"
+canonical = "layerdrop"
+class_name = "AudioFlamingo3EncoderConfig"
+
+[[attribute_alias]]
+model_type = "autoformer"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "AutoformerConfig"
+
+[[attribute_alias]]
+model_type = "autoformer"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "AutoformerConfig"
+
+[[attribute_alias]]
+model_type = "autoformer"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "AutoformerConfig"
+
+[[attribute_alias]]
+model_type = "aya_vision"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "AyaVisionConfig"
+
+[[attribute_alias]]
+model_type = "bamba"
+alias = "layer_types"
+canonical = "layers_block_type"
+class_name = "BambaConfig"
+
+[[attribute_alias]]
+model_type = ""
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "BarkSubModelConfig"
+
+[[attribute_alias]]
+model_type = ""
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "BarkSubModelConfig"
+
+[[attribute_alias]]
+model_type = ""
+alias = "vocab_size"
+canonical = "input_vocab_size"
+class_name = "BarkSubModelConfig"
+
+[[attribute_alias]]
+model_type = ""
+alias = "window_size"
+canonical = "block_size"
+class_name = "BarkSubModelConfig"
+
+[[attribute_alias]]
+model_type = "bart"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "BartConfig"
+
+[[attribute_alias]]
+model_type = "bart"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "BartConfig"
+
+[[attribute_alias]]
+model_type = "bart"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "BartConfig"
+
+[[attribute_alias]]
+model_type = "bigbird_pegasus"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "BigBirdPegasusConfig"
+
+[[attribute_alias]]
+model_type = "bigbird_pegasus"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "BigBirdPegasusConfig"
+
+[[attribute_alias]]
+model_type = "bigbird_pegasus"
+alias = "attention_probs_dropout_prob"
+canonical = "attention_dropout"
+class_name = "BigBirdPegasusConfig"
+
+[[attribute_alias]]
+model_type = "bigbird_pegasus"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "BigBirdPegasusConfig"
+
+[[attribute_alias]]
+model_type = "blenderbot"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "BlenderbotConfig"
+
+[[attribute_alias]]
+model_type = "blenderbot"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "BlenderbotConfig"
+
+[[attribute_alias]]
+model_type = "blenderbot"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "BlenderbotConfig"
+
+[[attribute_alias]]
+model_type = "blenderbot-small"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "BlenderbotSmallConfig"
+
+[[attribute_alias]]
+model_type = "blenderbot-small"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "BlenderbotSmallConfig"
+
+[[attribute_alias]]
+model_type = "blenderbot-small"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "BlenderbotSmallConfig"
+
+[[attribute_alias]]
+model_type = "blip-2"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Blip2Config"
+
+[[attribute_alias]]
+model_type = "bloom"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "BloomConfig"
+
+[[attribute_alias]]
+model_type = "bloom"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "BloomConfig"
+
+[[attribute_alias]]
+model_type = "codegen"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "CodeGenConfig"
+
+[[attribute_alias]]
+model_type = "codegen"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "CodeGenConfig"
+
+[[attribute_alias]]
+model_type = "codegen"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "CodeGenConfig"
+
+[[attribute_alias]]
+model_type = "codegen"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "CodeGenConfig"
+
+[[attribute_alias]]
+model_type = "conditional_detr"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "ConditionalDetrConfig"
+
+[[attribute_alias]]
+model_type = "conditional_detr"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "ConditionalDetrConfig"
+
+[[attribute_alias]]
+model_type = "conditional_detr"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "ConditionalDetrConfig"
+
+[[attribute_alias]]
+model_type = "csm_depth_decoder_model"
+alias = "codebook_size"
+canonical = "vocab_size"
+class_name = "CsmDepthDecoderConfig"
+
+[[attribute_alias]]
+model_type = "csm"
+alias = "codebook_size"
+canonical = "vocab_size"
+class_name = "CsmConfig"
+
+[[attribute_alias]]
+model_type = "ctrl"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "CTRLConfig"
+
+[[attribute_alias]]
+model_type = "ctrl"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "CTRLConfig"
+
+[[attribute_alias]]
+model_type = "ctrl"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "CTRLConfig"
+
+[[attribute_alias]]
+model_type = "ctrl"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "CTRLConfig"
+
+[[attribute_alias]]
+model_type = "d_fine"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "DFineConfig"
+
+[[attribute_alias]]
+model_type = "d_fine"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "DFineConfig"
+
+[[attribute_alias]]
+model_type = "dab-detr"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "DabDetrConfig"
+
+[[attribute_alias]]
+model_type = "dab-detr"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "DabDetrConfig"
+
+[[attribute_alias]]
+model_type = "dbrx"
+alias = "num_attention_heads"
+canonical = "n_heads"
+class_name = "DbrxConfig"
+
+[[attribute_alias]]
+model_type = "dbrx"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "DbrxConfig"
+
+[[attribute_alias]]
+model_type = "dbrx"
+alias = "num_hidden_layers"
+canonical = "n_layers"
+class_name = "DbrxConfig"
+
+[[attribute_alias]]
+model_type = "dbrx"
+alias = "max_position_embeddings"
+canonical = "max_seq_len"
+class_name = "DbrxConfig"
+
+[[attribute_alias]]
+model_type = "decision_transformer"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "DecisionTransformerConfig"
+
+[[attribute_alias]]
+model_type = "decision_transformer"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "DecisionTransformerConfig"
+
+[[attribute_alias]]
+model_type = "decision_transformer"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "DecisionTransformerConfig"
+
+[[attribute_alias]]
+model_type = "deepseek_ocr2_text"
+alias = "num_experts"
+canonical = "n_routed_experts"
+class_name = "DeepseekOcr2TextConfig"
+
+[[attribute_alias]]
+model_type = "deepseek_v2"
+alias = "num_experts"
+canonical = "n_routed_experts"
+class_name = "DeepseekV2Config"
+
+[[attribute_alias]]
+model_type = "deepseek_v3"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "DeepseekV3Config"
+
+[[attribute_alias]]
+model_type = "deepseek_v32"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "DeepseekV32Config"
+
+[[attribute_alias]]
+model_type = "deepseek_v4"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "DeepseekV4Config"
+
+[[attribute_alias]]
+model_type = "deepseek_v4"
+alias = "intermediate_size"
+canonical = "moe_intermediate_size"
+class_name = "DeepseekV4Config"
+
+[[attribute_alias]]
+model_type = "deformable_detr"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "DeformableDetrConfig"
+
+[[attribute_alias]]
+model_type = "deformable_detr"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "DeformableDetrConfig"
+
+[[attribute_alias]]
+model_type = "deimv2"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Deimv2Config"
+
+[[attribute_alias]]
+model_type = "deimv2"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "Deimv2Config"
+
+[[attribute_alias]]
+model_type = "detr"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "DetrConfig"
+
+[[attribute_alias]]
+model_type = "detr"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "DetrConfig"
+
+[[attribute_alias]]
+model_type = "detr"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "DetrConfig"
+
+[[attribute_alias]]
+model_type = "dinat"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "DinatConfig"
+
+[[attribute_alias]]
+model_type = "dinat"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "DinatConfig"
+
+[[attribute_alias]]
+model_type = "distilbert"
+alias = "hidden_size"
+canonical = "dim"
+class_name = "DistilBertConfig"
+
+[[attribute_alias]]
+model_type = "distilbert"
+alias = "num_attention_heads"
+canonical = "n_heads"
+class_name = "DistilBertConfig"
+
+[[attribute_alias]]
+model_type = "distilbert"
+alias = "num_hidden_layers"
+canonical = "n_layers"
+class_name = "DistilBertConfig"
+
+[[attribute_alias]]
+model_type = "donut-swin"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "DonutSwinConfig"
+
+[[attribute_alias]]
+model_type = "donut-swin"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "DonutSwinConfig"
+
+[[attribute_alias]]
+model_type = "dots1"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "Dots1Config"
+
+[[attribute_alias]]
+model_type = "ernie4_5_moe"
+alias = "num_experts"
+canonical = "moe_num_experts"
+class_name = "Ernie4_5_MoeConfig"
+
+[[attribute_alias]]
+model_type = "ernie4_5_moe"
+alias = "num_experts_per_tok"
+canonical = "moe_k"
+class_name = "Ernie4_5_MoeConfig"
+
+[[attribute_alias]]
+model_type = "ernie4_5_vl_moe_text"
+alias = "num_experts"
+canonical = "moe_num_experts"
+class_name = "Ernie4_5_VLMoeTextConfig"
+
+[[attribute_alias]]
+model_type = "ernie4_5_vl_moe_text"
+alias = "num_experts_per_tok"
+canonical = "moe_k"
+class_name = "Ernie4_5_VLMoeTextConfig"
+
+[[attribute_alias]]
+model_type = "falcon_h1"
+alias = "layer_types"
+canonical = "layers_block_type"
+class_name = "FalconH1Config"
+
+[[attribute_alias]]
+model_type = "fast_vlm"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "FastVlmConfig"
+
+[[attribute_alias]]
+model_type = "fastspeech2_conformer"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "FastSpeech2ConformerConfig"
+
+[[attribute_alias]]
+model_type = "fastspeech2_conformer"
+alias = "num_attention_heads"
+canonical = "encoder_num_attention_heads"
+class_name = "FastSpeech2ConformerConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "hidden_size"
+canonical = "emb_dim"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "num_attention_heads"
+canonical = "n_heads"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "num_hidden_layers"
+canonical = "n_layers"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "n_words"
+canonical = "vocab_size"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "bos_index"
+canonical = "bos_token_id"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "eos_index"
+canonical = "eos_token_id"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flaubert"
+alias = "pad_index"
+canonical = "pad_token_id"
+class_name = "FlaubertConfig"
+
+[[attribute_alias]]
+model_type = "flex_olmo"
+alias = "num_local_experts"
+canonical = "num_experts"
+class_name = "FlexOlmoConfig"
+
+[[attribute_alias]]
+model_type = "fsmt"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "FSMTConfig"
+
+[[attribute_alias]]
+model_type = "fsmt"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "FSMTConfig"
+
+[[attribute_alias]]
+model_type = "fsmt"
+alias = "vocab_size"
+canonical = "tgt_vocab_size"
+class_name = "FSMTConfig"
+
+[[attribute_alias]]
+model_type = "fsmt"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "FSMTConfig"
+
+[[attribute_alias]]
+model_type = "funnel"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "FunnelConfig"
+
+[[attribute_alias]]
+model_type = "funnel"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "FunnelConfig"
+
+[[attribute_alias]]
+model_type = "gemma3"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Gemma3Config"
+
+[[attribute_alias]]
+model_type = "gemma3"
+alias = "boi_token_id"
+canonical = "boi_token_index"
+class_name = "Gemma3Config"
+
+[[attribute_alias]]
+model_type = "gemma3"
+alias = "eoi_token_id"
+canonical = "eoi_token_index"
+class_name = "Gemma3Config"
+
+[[attribute_alias]]
+model_type = "glm4_moe"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "Glm4MoeConfig"
+
+[[attribute_alias]]
+model_type = "glm4_moe_lite"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "Glm4MoeLiteConfig"
+
+[[attribute_alias]]
+model_type = "glm4_moe_lite"
+alias = "head_dim"
+canonical = "qk_rope_head_dim"
+class_name = "Glm4MoeLiteConfig"
+
+[[attribute_alias]]
+model_type = "glm4v_moe_text"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "Glm4vMoeTextConfig"
+
+[[attribute_alias]]
+model_type = "glm_moe_dsa"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "GlmMoeDsaConfig"
+
+[[attribute_alias]]
+model_type = "got_ocr2"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "GotOcr2Config"
+
+[[attribute_alias]]
+model_type = "gpt2"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "GPT2Config"
+
+[[attribute_alias]]
+model_type = "gpt2"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "GPT2Config"
+
+[[attribute_alias]]
+model_type = "gpt2"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "GPT2Config"
+
+[[attribute_alias]]
+model_type = "gpt2"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "GPT2Config"
+
+[[attribute_alias]]
+model_type = "gpt_bigcode"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "GPTBigCodeConfig"
+
+[[attribute_alias]]
+model_type = "gpt_bigcode"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "GPTBigCodeConfig"
+
+[[attribute_alias]]
+model_type = "gpt_bigcode"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "GPTBigCodeConfig"
+
+[[attribute_alias]]
+model_type = "gpt_bigcode"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "GPTBigCodeConfig"
+
+[[attribute_alias]]
+model_type = "gpt_neo"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "GPTNeoConfig"
+
+[[attribute_alias]]
+model_type = "gpt_neo"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "GPTNeoConfig"
+
+[[attribute_alias]]
+model_type = "gpt_oss"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "GptOssConfig"
+
+[[attribute_alias]]
+model_type = "gptj"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "GPTJConfig"
+
+[[attribute_alias]]
+model_type = "gptj"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "GPTJConfig"
+
+[[attribute_alias]]
+model_type = "gptj"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "GPTJConfig"
+
+[[attribute_alias]]
+model_type = "gptj"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "GPTJConfig"
+
+[[attribute_alias]]
+model_type = "granite4_vision"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Granite4VisionConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_encoder"
+alias = "hidden_size"
+canonical = "hidden_dim"
+class_name = "GraniteSpeechEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_encoder"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "GraniteSpeechEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_encoder"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "GraniteSpeechEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_encoder"
+alias = "num_mel_bins"
+canonical = "input_dim"
+class_name = "GraniteSpeechEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech"
+alias = "audio_token_id"
+canonical = "audio_token_index"
+class_name = "GraniteSpeechConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_plus_encoder"
+alias = "hidden_size"
+canonical = "hidden_dim"
+class_name = "GraniteSpeechPlusEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_plus_encoder"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "GraniteSpeechPlusEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_plus_encoder"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "GraniteSpeechPlusEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_plus_encoder"
+alias = "num_mel_bins"
+canonical = "input_dim"
+class_name = "GraniteSpeechPlusEncoderConfig"
+
+[[attribute_alias]]
+model_type = "granite_speech_plus"
+alias = "audio_token_id"
+canonical = "audio_token_index"
+class_name = "GraniteSpeechPlusConfig"
+
+[[attribute_alias]]
+model_type = "granitemoehybrid"
+alias = "layers_block_type"
+canonical = "layer_types"
+class_name = "GraniteMoeHybridConfig"
+
+[[attribute_alias]]
+model_type = "grounding-dino"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "GroundingDinoConfig"
+
+[[attribute_alias]]
+model_type = "grounding-dino"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "GroundingDinoConfig"
+
+[[attribute_alias]]
+model_type = "hiera"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "HieraConfig"
+
+[[attribute_alias]]
+model_type = "hunyuan_v1_moe"
+alias = "num_experts_per_tok"
+canonical = "moe_topk"
+class_name = "HunYuanMoEV1Config"
+
+[[attribute_alias]]
+model_type = "hunyuan_v1_moe"
+alias = "num_local_experts"
+canonical = "num_experts"
+class_name = "HunYuanMoEV1Config"
+
+[[attribute_alias]]
+model_type = "hy_v3"
+alias = "num_local_experts"
+canonical = "num_experts"
+class_name = "HYV3Config"
+
+[[attribute_alias]]
+model_type = "idefics_vision"
+alias = "hidden_size"
+canonical = "embed_dim"
+class_name = "IdeficsVisionConfig"
+
+[[attribute_alias]]
+model_type = "imagegpt"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "ImageGPTConfig"
+
+[[attribute_alias]]
+model_type = "imagegpt"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "ImageGPTConfig"
+
+[[attribute_alias]]
+model_type = "imagegpt"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "ImageGPTConfig"
+
+[[attribute_alias]]
+model_type = "imagegpt"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "ImageGPTConfig"
+
+[[attribute_alias]]
+model_type = "informer"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "InformerConfig"
+
+[[attribute_alias]]
+model_type = "informer"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "InformerConfig"
+
+[[attribute_alias]]
+model_type = "informer"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "InformerConfig"
+
+[[attribute_alias]]
+model_type = "informer"
+alias = "initializer_range"
+canonical = "init_std"
+class_name = "InformerConfig"
+
+[[attribute_alias]]
+model_type = "instructblip"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "InstructBlipConfig"
+
+[[attribute_alias]]
+model_type = "instructblipvideo"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "InstructBlipVideoConfig"
+
+[[attribute_alias]]
+model_type = "jamba"
+alias = "num_local_experts"
+canonical = "num_experts"
+class_name = "JambaConfig"
+
+[[attribute_alias]]
+model_type = "jetmoe"
+alias = "head_dim"
+canonical = "kv_channels"
+class_name = "JetMoeConfig"
+
+[[attribute_alias]]
+model_type = "kosmos_2_text_model"
+alias = "num_attention_heads"
+canonical = "attention_heads"
+class_name = "Kosmos2TextConfig"
+
+[[attribute_alias]]
+model_type = "kosmos_2_text_model"
+alias = "hidden_size"
+canonical = "embed_dim"
+class_name = "Kosmos2TextConfig"
+
+[[attribute_alias]]
+model_type = "kosmos_2_text_model"
+alias = "num_hidden_layers"
+canonical = "layers"
+class_name = "Kosmos2TextConfig"
+
+[[attribute_alias]]
+model_type = "kosmos_2_5_text_model"
+alias = "num_attention_heads"
+canonical = "attention_heads"
+class_name = "Kosmos2_5TextConfig"
+
+[[attribute_alias]]
+model_type = "kosmos_2_5_text_model"
+alias = "hidden_size"
+canonical = "embed_dim"
+class_name = "Kosmos2_5TextConfig"
+
+[[attribute_alias]]
+model_type = "kosmos_2_5_text_model"
+alias = "num_hidden_layers"
+canonical = "layers"
+class_name = "Kosmos2_5TextConfig"
+
+[[attribute_alias]]
+model_type = "led"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "LEDConfig"
+
+[[attribute_alias]]
+model_type = "led"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "LEDConfig"
+
+[[attribute_alias]]
+model_type = "led"
+alias = "attention_probs_dropout_prob"
+canonical = "attention_dropout"
+class_name = "LEDConfig"
+
+[[attribute_alias]]
+model_type = "led"
+alias = "initializer_range"
+canonical = "init_std"
+class_name = "LEDConfig"
+
+[[attribute_alias]]
+model_type = "led"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "LEDConfig"
+
+[[attribute_alias]]
+model_type = "llama4"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Llama4Config"
+
+[[attribute_alias]]
+model_type = "llama4"
+alias = "boi_token_id"
+canonical = "boi_token_index"
+class_name = "Llama4Config"
+
+[[attribute_alias]]
+model_type = "llama4"
+alias = "eoi_token_id"
+canonical = "eoi_token_index"
+class_name = "Llama4Config"
+
+[[attribute_alias]]
+model_type = "llava"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "LlavaConfig"
+
+[[attribute_alias]]
+model_type = "llava_next"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "LlavaNextConfig"
+
+[[attribute_alias]]
+model_type = "llava_next_video"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "LlavaNextVideoConfig"
+
+[[attribute_alias]]
+model_type = "llava_next_video"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "LlavaNextVideoConfig"
+
+[[attribute_alias]]
+model_type = "llava_onevision"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "LlavaOnevisionConfig"
+
+[[attribute_alias]]
+model_type = "llava_onevision"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "LlavaOnevisionConfig"
+
+[[attribute_alias]]
+model_type = "longcat_flash"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "LongcatFlashConfig"
+
+[[attribute_alias]]
+model_type = "longcat_flash"
+alias = "num_experts_per_tok"
+canonical = "moe_topk"
+class_name = "LongcatFlashConfig"
+
+[[attribute_alias]]
+model_type = "longcat_flash"
+alias = "intermediate_size"
+canonical = "ffn_hidden_size"
+class_name = "LongcatFlashConfig"
+
+[[attribute_alias]]
+model_type = "longt5"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "LongT5Config"
+
+[[attribute_alias]]
+model_type = "longt5"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "LongT5Config"
+
+[[attribute_alias]]
+model_type = "longt5"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "LongT5Config"
+
+[[attribute_alias]]
+model_type = "longt5"
+alias = "head_dim"
+canonical = "d_kv"
+class_name = "LongT5Config"
+
+[[attribute_alias]]
+model_type = "m2m_100"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "M2M100Config"
+
+[[attribute_alias]]
+model_type = "m2m_100"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "M2M100Config"
+
+[[attribute_alias]]
+model_type = "m2m_100"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "M2M100Config"
+
+[[attribute_alias]]
+model_type = "marian"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "MarianConfig"
+
+[[attribute_alias]]
+model_type = "marian"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MarianConfig"
+
+[[attribute_alias]]
+model_type = "marian"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "MarianConfig"
+
+[[attribute_alias]]
+model_type = "mask2former"
+alias = "hidden_size"
+canonical = "hidden_dim"
+class_name = "Mask2FormerConfig"
+
+[[attribute_alias]]
+model_type = "mask2former"
+alias = "num_hidden_layers"
+canonical = "decoder_layers"
+class_name = "Mask2FormerConfig"
+
+[[attribute_alias]]
+model_type = "detr"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MaskFormerDetrConfig"
+
+[[attribute_alias]]
+model_type = "detr"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "MaskFormerDetrConfig"
+
+[[attribute_alias]]
+model_type = "detr"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "MaskFormerDetrConfig"
+
+[[attribute_alias]]
+model_type = "maskformer"
+alias = "hidden_size"
+canonical = "mask_feature_size"
+class_name = "MaskFormerConfig"
+
+[[attribute_alias]]
+model_type = "maskformer-swin"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "MaskFormerSwinConfig"
+
+[[attribute_alias]]
+model_type = "maskformer-swin"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "MaskFormerSwinConfig"
+
+[[attribute_alias]]
+model_type = "mbart"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "MBartConfig"
+
+[[attribute_alias]]
+model_type = "mbart"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MBartConfig"
+
+[[attribute_alias]]
+model_type = "mbart"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "MBartConfig"
+
+[[attribute_alias]]
+model_type = "mellum"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "MellumConfig"
+
+[[attribute_alias]]
+model_type = "minimax"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "MiniMaxConfig"
+
+[[attribute_alias]]
+model_type = "minimax_m2"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "MiniMaxM2Config"
+
+[[attribute_alias]]
+model_type = "minimax_m3_vl_text"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "MiniMaxM3VLTextConfig"
+
+[[attribute_alias]]
+model_type = "minimax_m3_vl"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "MiniMaxM3VLConfig"
+
+[[attribute_alias]]
+model_type = "minimax_m3_vl"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "MiniMaxM3VLConfig"
+
+[[attribute_alias]]
+model_type = "mistral3"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Mistral3Config"
+
+[[attribute_alias]]
+model_type = "mistral4"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "Mistral4Config"
+
+[[attribute_alias]]
+model_type = "mixtral"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "MixtralConfig"
+
+[[attribute_alias]]
+model_type = "mllama_vision_model"
+alias = "num_attention_heads"
+canonical = "attention_heads"
+class_name = "MllamaVisionConfig"
+
+[[attribute_alias]]
+model_type = "mllama"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "MllamaConfig"
+
+[[attribute_alias]]
+model_type = "mm-grounding-dino"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MMGroundingDinoConfig"
+
+[[attribute_alias]]
+model_type = "mm-grounding-dino"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "MMGroundingDinoConfig"
+
+[[attribute_alias]]
+model_type = "moonshine"
+alias = "num_key_value_heads"
+canonical = "decoder_num_key_value_heads"
+class_name = "MoonshineConfig"
+
+[[attribute_alias]]
+model_type = "moonshine"
+alias = "num_attention_heads"
+canonical = "decoder_num_attention_heads"
+class_name = "MoonshineConfig"
+
+[[attribute_alias]]
+model_type = "moonshine"
+alias = "num_hidden_layers"
+canonical = "decoder_num_hidden_layers"
+class_name = "MoonshineConfig"
+
+[[attribute_alias]]
+model_type = "moonshine"
+alias = "hidden_act"
+canonical = "decoder_hidden_act"
+class_name = "MoonshineConfig"
+
+[[attribute_alias]]
+model_type = "mpt"
+alias = "num_attention_heads"
+canonical = "n_heads"
+class_name = "MptConfig"
+
+[[attribute_alias]]
+model_type = "mpt"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MptConfig"
+
+[[attribute_alias]]
+model_type = "mpt"
+alias = "num_hidden_layers"
+canonical = "n_layers"
+class_name = "MptConfig"
+
+[[attribute_alias]]
+model_type = "mt5"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MT5Config"
+
+[[attribute_alias]]
+model_type = "mt5"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "MT5Config"
+
+[[attribute_alias]]
+model_type = "mt5"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "MT5Config"
+
+[[attribute_alias]]
+model_type = "mt5"
+alias = "head_dim"
+canonical = "d_kv"
+class_name = "MT5Config"
+
+[[attribute_alias]]
+model_type = "mvp"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "MvpConfig"
+
+[[attribute_alias]]
+model_type = "mvp"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "MvpConfig"
+
+[[attribute_alias]]
+model_type = "mvp"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "MvpConfig"
+
+[[attribute_alias]]
+model_type = "nemotron_h"
+alias = "layer_types"
+canonical = "layers_block_type"
+class_name = "NemotronHConfig"
+
+[[attribute_alias]]
+model_type = "nemotron_h"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "NemotronHConfig"
+
+[[attribute_alias]]
+model_type = "nllb-moe"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "NllbMoeConfig"
+
+[[attribute_alias]]
+model_type = "nllb-moe"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "NllbMoeConfig"
+
+[[attribute_alias]]
+model_type = "nllb-moe"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "NllbMoeConfig"
+
+[[attribute_alias]]
+model_type = "olmoe"
+alias = "num_local_experts"
+canonical = "num_experts"
+class_name = "OlmoeConfig"
+
+[[attribute_alias]]
+model_type = "omdet-turbo"
+alias = "encoder_hidden_dim"
+canonical = "d_model"
+class_name = "OmDetTurboConfig"
+
+[[attribute_alias]]
+model_type = "omdet-turbo"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "OmDetTurboConfig"
+
+[[attribute_alias]]
+model_type = "oneformer"
+alias = "hidden_size"
+canonical = "hidden_dim"
+class_name = "OneFormerConfig"
+
+[[attribute_alias]]
+model_type = "oneformer"
+alias = "num_hidden_layers"
+canonical = "decoder_layers"
+class_name = "OneFormerConfig"
+
+[[attribute_alias]]
+model_type = "openai-gpt"
+alias = "max_position_embeddings"
+canonical = "n_positions"
+class_name = "OpenAIGPTConfig"
+
+[[attribute_alias]]
+model_type = "openai-gpt"
+alias = "hidden_size"
+canonical = "n_embd"
+class_name = "OpenAIGPTConfig"
+
+[[attribute_alias]]
+model_type = "openai-gpt"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "OpenAIGPTConfig"
+
+[[attribute_alias]]
+model_type = "openai-gpt"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "OpenAIGPTConfig"
+
+[[attribute_alias]]
+model_type = "openai_privacy_filter"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "OpenAIPrivacyFilterConfig"
+
+[[attribute_alias]]
+model_type = "paligemma"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "PaliGemmaConfig"
+
+[[attribute_alias]]
+model_type = "patchtsmixer"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PatchTSMixerConfig"
+
+[[attribute_alias]]
+model_type = "patchtsmixer"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "PatchTSMixerConfig"
+
+[[attribute_alias]]
+model_type = "patchtst"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PatchTSTConfig"
+
+[[attribute_alias]]
+model_type = "patchtst"
+alias = "num_attention_heads"
+canonical = "num_attention_heads"
+class_name = "PatchTSTConfig"
+
+[[attribute_alias]]
+model_type = "patchtst"
+alias = "num_hidden_layers"
+canonical = "num_hidden_layers"
+class_name = "PatchTSTConfig"
+
+[[attribute_alias]]
+model_type = "pegasus"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "PegasusConfig"
+
+[[attribute_alias]]
+model_type = "pegasus"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PegasusConfig"
+
+[[attribute_alias]]
+model_type = "pegasus"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "PegasusConfig"
+
+[[attribute_alias]]
+model_type = "pegasus_x"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "PegasusXConfig"
+
+[[attribute_alias]]
+model_type = "pegasus_x"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PegasusXConfig"
+
+[[attribute_alias]]
+model_type = "pegasus_x"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "PegasusXConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "hidden_size"
+canonical = "hidden_size"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "decoder_attention_heads"
+canonical = "num_heads"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "encoder_attention_heads"
+canonical = "num_heads"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "encoder_layers"
+canonical = "num_layers"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "pix2struct_text_model"
+alias = "decoder_layers"
+canonical = "num_layers"
+class_name = "Pix2StructTextConfig"
+
+[[attribute_alias]]
+model_type = "plbart"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "PLBartConfig"
+
+[[attribute_alias]]
+model_type = "plbart"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PLBartConfig"
+
+[[attribute_alias]]
+model_type = "plbart"
+alias = "initializer_range"
+canonical = "init_std"
+class_name = "PLBartConfig"
+
+[[attribute_alias]]
+model_type = "plbart"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "PLBartConfig"
+
+[[attribute_alias]]
+model_type = "pop2piano"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "Pop2PianoConfig"
+
+[[attribute_alias]]
+model_type = "pop2piano"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Pop2PianoConfig"
+
+[[attribute_alias]]
+model_type = "pop2piano"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "Pop2PianoConfig"
+
+[[attribute_alias]]
+model_type = "pp_chart2table"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "PPChart2TableConfig"
+
+[[attribute_alias]]
+model_type = "pp_doclayout_v2"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PPDocLayoutV2Config"
+
+[[attribute_alias]]
+model_type = "pp_doclayout_v2"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "PPDocLayoutV2Config"
+
+[[attribute_alias]]
+model_type = "pp_doclayout_v3"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PPDocLayoutV3Config"
+
+[[attribute_alias]]
+model_type = "pp_doclayout_v3"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "PPDocLayoutV3Config"
+
+[[attribute_alias]]
+model_type = "pp_formulanet"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "PPFormulaNetTextConfig"
+
+[[attribute_alias]]
+model_type = "pp_formulanet"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "PPFormulaNetTextConfig"
+
+[[attribute_alias]]
+model_type = "pp_formulanet"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "PPFormulaNetTextConfig"
+
+[[attribute_alias]]
+model_type = "prophetnet"
+alias = "num_attention_heads"
+canonical = "num_encoder_attention_heads"
+class_name = "ProphetNetConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_audio_encoder"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "Qwen2_5OmniAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_audio_encoder"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Qwen2_5OmniAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_audio_encoder"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "Qwen2_5OmniAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_audio_encoder"
+alias = "intermediate_size"
+canonical = "encoder_ffn_dim"
+class_name = "Qwen2_5OmniAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_thinker"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Qwen2_5OmniThinkerConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_thinker"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "Qwen2_5OmniThinkerConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_thinker"
+alias = "audio_token_id"
+canonical = "audio_token_index"
+class_name = "Qwen2_5OmniThinkerConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_talker"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "Qwen2_5OmniTalkerConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_talker"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "Qwen2_5OmniTalkerConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_5_omni_talker"
+alias = "audio_token_id"
+canonical = "audio_token_index"
+class_name = "Qwen2_5OmniTalkerConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_audio_encoder"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "Qwen2AudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_audio_encoder"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Qwen2AudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_audio_encoder"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "Qwen2AudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_audio_encoder"
+alias = "intermediate_size"
+canonical = "encoder_ffn_dim"
+class_name = "Qwen2AudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen2_audio"
+alias = "audio_token_id"
+canonical = "audio_token_index"
+class_name = "Qwen2AudioConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_asr_encoder"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "Qwen3ASREncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_asr_encoder"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Qwen3ASREncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_asr_encoder"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "Qwen3ASREncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_asr_encoder"
+alias = "intermediate_size"
+canonical = "encoder_ffn_dim"
+class_name = "Qwen3ASREncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_moe"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "Qwen3MoeConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_omni_moe_audio_encoder"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "Qwen3OmniMoeAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_omni_moe_audio_encoder"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Qwen3OmniMoeAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_omni_moe_audio_encoder"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "Qwen3OmniMoeAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_omni_moe_audio_encoder"
+alias = "intermediate_size"
+canonical = "encoder_ffn_dim"
+class_name = "Qwen3OmniMoeAudioEncoderConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_omni_moe_talker_text"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "Qwen3OmniMoeTalkerTextConfig"
+
+[[attribute_alias]]
+model_type = "qwen3_vl_moe_text"
+alias = "num_experts"
+canonical = "num_local_experts"
+class_name = "Qwen3VLMoeTextConfig"
+
+[[attribute_alias]]
+model_type = "recurrent_gemma"
+alias = "sliding_window"
+canonical = "attention_window_size"
+class_name = "RecurrentGemmaConfig"
+
+[[attribute_alias]]
+model_type = "rt_detr"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "RTDetrConfig"
+
+[[attribute_alias]]
+model_type = "rt_detr"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "RTDetrConfig"
+
+[[attribute_alias]]
+model_type = "rt_detr_v2"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "RTDetrV2Config"
+
+[[attribute_alias]]
+model_type = "rt_detr_v2"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "RTDetrV2Config"
+
+[[attribute_alias]]
+model_type = "rwkv"
+alias = "max_position_embeddings"
+canonical = "context_length"
+class_name = "RwkvConfig"
+
+[[attribute_alias]]
+model_type = "seamless_m4t"
+alias = "num_hidden_layers"
+canonical = "decoder_layers"
+class_name = "SeamlessM4TConfig"
+
+[[attribute_alias]]
+model_type = "seamless_m4t"
+alias = "num_attention_heads"
+canonical = "decoder_attention_heads"
+class_name = "SeamlessM4TConfig"
+
+[[attribute_alias]]
+model_type = "seamless_m4t_v2"
+alias = "num_hidden_layers"
+canonical = "decoder_layers"
+class_name = "SeamlessM4Tv2Config"
+
+[[attribute_alias]]
+model_type = "seamless_m4t_v2"
+alias = "num_attention_heads"
+canonical = "decoder_attention_heads"
+class_name = "SeamlessM4Tv2Config"
+
+[[attribute_alias]]
+model_type = "shieldgemma2"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "ShieldGemma2Config"
+
+[[attribute_alias]]
+model_type = "shieldgemma2"
+alias = "boi_token_id"
+canonical = "boi_token_index"
+class_name = "ShieldGemma2Config"
+
+[[attribute_alias]]
+model_type = "shieldgemma2"
+alias = "eoi_token_id"
+canonical = "eoi_token_index"
+class_name = "ShieldGemma2Config"
+
+[[attribute_alias]]
+model_type = "solar_open"
+alias = "num_local_experts"
+canonical = "n_routed_experts"
+class_name = "SolarOpenConfig"
+
+[[attribute_alias]]
+model_type = "speech_to_text"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "Speech2TextConfig"
+
+[[attribute_alias]]
+model_type = "speech_to_text"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "Speech2TextConfig"
+
+[[attribute_alias]]
+model_type = "speech_to_text"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "Speech2TextConfig"
+
+[[attribute_alias]]
+model_type = "speecht5"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "SpeechT5Config"
+
+[[attribute_alias]]
+model_type = "speecht5"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "SpeechT5Config"
+
+[[attribute_alias]]
+model_type = "swin"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "SwinConfig"
+
+[[attribute_alias]]
+model_type = "swin"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "SwinConfig"
+
+[[attribute_alias]]
+model_type = "swin2sr"
+alias = "hidden_size"
+canonical = "embed_dim"
+class_name = "Swin2SRConfig"
+
+[[attribute_alias]]
+model_type = "swin2sr"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "Swin2SRConfig"
+
+[[attribute_alias]]
+model_type = "swin2sr"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "Swin2SRConfig"
+
+[[attribute_alias]]
+model_type = "swinv2"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "Swinv2Config"
+
+[[attribute_alias]]
+model_type = "swinv2"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "Swinv2Config"
+
+[[attribute_alias]]
+model_type = "switch_transformers"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "SwitchTransformersConfig"
+
+[[attribute_alias]]
+model_type = "switch_transformers"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "SwitchTransformersConfig"
+
+[[attribute_alias]]
+model_type = "switch_transformers"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "SwitchTransformersConfig"
+
+[[attribute_alias]]
+model_type = "t5"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "T5Config"
+
+[[attribute_alias]]
+model_type = "t5"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "T5Config"
+
+[[attribute_alias]]
+model_type = "t5"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "T5Config"
+
+[[attribute_alias]]
+model_type = "t5"
+alias = "head_dim"
+canonical = "d_kv"
+class_name = "T5Config"
+
+[[attribute_alias]]
+model_type = "t5gemma2_encoder"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "T5Gemma2EncoderConfig"
+
+[[attribute_alias]]
+model_type = "t5gemma2_encoder"
+alias = "boi_token_id"
+canonical = "boi_token_index"
+class_name = "T5Gemma2EncoderConfig"
+
+[[attribute_alias]]
+model_type = "t5gemma2_encoder"
+alias = "eoi_token_id"
+canonical = "eoi_token_index"
+class_name = "T5Gemma2EncoderConfig"
+
+[[attribute_alias]]
+model_type = "t5gemma2"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "T5Gemma2Config"
+
+[[attribute_alias]]
+model_type = "t5gemma2"
+alias = "eoi_token_id"
+canonical = "eoi_token_index"
+class_name = "T5Gemma2Config"
+
+[[attribute_alias]]
+model_type = "table-transformer"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "TableTransformerConfig"
+
+[[attribute_alias]]
+model_type = "table-transformer"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "TableTransformerConfig"
+
+[[attribute_alias]]
+model_type = "table-transformer"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "TableTransformerConfig"
+
+[[attribute_alias]]
+model_type = "time_series_transformer"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "TimeSeriesTransformerConfig"
+
+[[attribute_alias]]
+model_type = "time_series_transformer"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "TimeSeriesTransformerConfig"
+
+[[attribute_alias]]
+model_type = "time_series_transformer"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "TimeSeriesTransformerConfig"
+
+[[attribute_alias]]
+model_type = "trocr"
+alias = "num_attention_heads"
+canonical = "decoder_attention_heads"
+class_name = "TrOCRConfig"
+
+[[attribute_alias]]
+model_type = "trocr"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "TrOCRConfig"
+
+[[attribute_alias]]
+model_type = "trocr"
+alias = "num_hidden_layers"
+canonical = "decoder_layers"
+class_name = "TrOCRConfig"
+
+[[attribute_alias]]
+model_type = "udop"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "UdopConfig"
+
+[[attribute_alias]]
+model_type = "udop"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "UdopConfig"
+
+[[attribute_alias]]
+model_type = "udop"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "UdopConfig"
+
+[[attribute_alias]]
+model_type = "umt5"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "UMT5Config"
+
+[[attribute_alias]]
+model_type = "umt5"
+alias = "num_attention_heads"
+canonical = "num_heads"
+class_name = "UMT5Config"
+
+[[attribute_alias]]
+model_type = "umt5"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "UMT5Config"
+
+[[attribute_alias]]
+model_type = "umt5"
+alias = "head_dim"
+canonical = "d_kv"
+class_name = "UMT5Config"
+
+[[attribute_alias]]
+model_type = "video_llava"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "VideoLlavaConfig"
+
+[[attribute_alias]]
+model_type = "video_llava"
+alias = "video_token_id"
+canonical = "video_token_index"
+class_name = "VideoLlavaConfig"
+
+[[attribute_alias]]
+model_type = "vipllava"
+alias = "image_token_id"
+canonical = "image_token_index"
+class_name = "VipLlavaConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_encoder"
+alias = "d_model"
+canonical = "hidden_size"
+class_name = "VoxtralEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_encoder"
+alias = "encoder_layers"
+canonical = "num_hidden_layers"
+class_name = "VoxtralEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_encoder"
+alias = "encoder_attention_heads"
+canonical = "num_attention_heads"
+class_name = "VoxtralEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_encoder"
+alias = "encoder_ffn_dim"
+canonical = "intermediate_size"
+class_name = "VoxtralEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_encoder"
+alias = "encoder_layerdrop"
+canonical = "layerdrop"
+class_name = "VoxtralEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_realtime_encoder"
+alias = "d_model"
+canonical = "hidden_size"
+class_name = "VoxtralRealtimeEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_realtime_encoder"
+alias = "encoder_layers"
+canonical = "num_hidden_layers"
+class_name = "VoxtralRealtimeEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_realtime_encoder"
+alias = "encoder_attention_heads"
+canonical = "num_attention_heads"
+class_name = "VoxtralRealtimeEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_realtime_encoder"
+alias = "encoder_ffn_dim"
+canonical = "intermediate_size"
+class_name = "VoxtralRealtimeEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_realtime_encoder"
+alias = "encoder_layerdrop"
+canonical = "layerdrop"
+class_name = "VoxtralRealtimeEncoderConfig"
+
+[[attribute_alias]]
+model_type = "voxtral_realtime_encoder"
+alias = "num_key_value_heads"
+canonical = "num_attention_heads"
+class_name = "VoxtralRealtimeEncoderConfig"
+
+[[attribute_alias]]
+model_type = "whisper"
+alias = "num_key_value_heads"
+canonical = "encoder_attention_heads"
+class_name = "WhisperConfig"
+
+[[attribute_alias]]
+model_type = "whisper"
+alias = "num_attention_heads"
+canonical = "encoder_attention_heads"
+class_name = "WhisperConfig"
+
+[[attribute_alias]]
+model_type = "whisper"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "WhisperConfig"
+
+[[attribute_alias]]
+model_type = "whisper"
+alias = "num_hidden_layers"
+canonical = "encoder_layers"
+class_name = "WhisperConfig"
+
+[[attribute_alias]]
+model_type = "xglm"
+alias = "num_attention_heads"
+canonical = "attention_heads"
+class_name = "XGLMConfig"
+
+[[attribute_alias]]
+model_type = "xglm"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "XGLMConfig"
+
+[[attribute_alias]]
+model_type = "xglm"
+alias = "num_hidden_layers"
+canonical = "num_layers"
+class_name = "XGLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "hidden_size"
+canonical = "emb_dim"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "num_attention_heads"
+canonical = "n_heads"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "num_hidden_layers"
+canonical = "n_layers"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "n_words"
+canonical = "vocab_size"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "bos_index"
+canonical = "bos_token_id"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "eos_index"
+canonical = "eos_token_id"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlm"
+alias = "pad_index"
+canonical = "pad_token_id"
+class_name = "XLMConfig"
+
+[[attribute_alias]]
+model_type = "xlnet"
+alias = "n_token"
+canonical = "vocab_size"
+class_name = "XLNetConfig"
+
+[[attribute_alias]]
+model_type = "xlnet"
+alias = "hidden_size"
+canonical = "d_model"
+class_name = "XLNetConfig"
+
+[[attribute_alias]]
+model_type = "xlnet"
+alias = "num_attention_heads"
+canonical = "n_head"
+class_name = "XLNetConfig"
+
+[[attribute_alias]]
+model_type = "xlnet"
+alias = "num_hidden_layers"
+canonical = "n_layer"
+class_name = "XLNetConfig"
+
+[[attribute_alias]]
+model_type = "zamba"
+alias = "layer_types"
+canonical = "layers_block_type"
+class_name = "ZambaConfig"
+
+[[attribute_alias]]
+model_type = "zamba"
+alias = "head_dim"
+canonical = "attention_head_dim"
+class_name = "ZambaConfig"
+
+[[attribute_alias]]
+model_type = "zamba2"
+alias = "layer_types"
+canonical = "layers_block_type"
+class_name = "Zamba2Config"
+
+[[attribute_alias]]
+model_type = "zamba2"
+alias = "head_dim"
+canonical = "attention_head_dim"
+class_name = "Zamba2Config"

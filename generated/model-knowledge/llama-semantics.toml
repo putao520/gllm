@@ -1,0 +1,156 @@
+# semantic: 31 entries
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_DIMENSION_COUNT_SWA"
+gguf_key = "{arch}.rope.dimension_count_swa"
+hparams_field = "n_rot_swa"
+
+[[semantic]]
+kv_enum = "LLM_KV_ATTENTION_VALUE_LENGTH_SWA"
+gguf_key = "{arch}.attention.value_length_swa"
+hparams_field = "n_embd_head_v_swa"
+
+[[semantic]]
+kv_enum = "LLM_KV_ATTENTION_KEY_LENGTH_SWA"
+gguf_key = "{arch}.attention.key_length_swa"
+hparams_field = "n_embd_head_k_swa"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_DIMENSION_COUNT"
+gguf_key = "{arch}.rope.dimension_count"
+hparams_field = "n_rot_full"
+
+[[semantic]]
+kv_enum = "LLM_KV_ATTENTION_VALUE_LENGTH"
+gguf_key = "{arch}.attention.value_length"
+hparams_field = "n_embd_head_v_full"
+
+[[semantic]]
+kv_enum = "LLM_KV_ATTENTION_KEY_LENGTH"
+gguf_key = "{arch}.attention.indexer.key_length"
+hparams_field = "n_embd_head_k_full"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALING_ALPHA"
+gguf_key = "{arch}.rope.scaling.alpha"
+hparams_field = "rope_scaling_alpha"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALING_ATTN_FACTOR"
+gguf_key = "{arch}.rope.scaling.attn_factor"
+hparams_field = "rope_attn_factor"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALE_LINEAR"
+gguf_key = ""
+hparams_field = "ropescale"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALING_FACTOR"
+gguf_key = "{arch}.rope.scaling.attn_factor"
+hparams_field = "ropescale"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALING_TYPE"
+gguf_key = "{arch}.rope.scaling.type"
+hparams_field = "rope_scaling"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_FREQ_BASE"
+gguf_key = "{arch}.rope.freq_base"
+hparams_field = "rope_freq_base_train"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALING_ORIG_CTX_LEN"
+gguf_key = ""
+hparams_field = "n_ctx_orig_yarn"
+
+[[semantic]]
+kv_enum = "LLM_KV_ROPE_SCALING_FINETUNED"
+gguf_key = "{arch}.rope.scaling.finetuned"
+hparams_field = "rope_finetuned"
+
+[[semantic]]
+kv_enum = "LLM_KV_CONVNEXT_BLOCK_COUNT"
+gguf_key = "{arch}.convnext.block_count"
+hparams_field = "n_layer"
+
+[[semantic]]
+kv_enum = "LLM_KV_CONVNEXT_EMBEDDING_LENGTH"
+gguf_key = "{arch}.convnext.embedding_length"
+hparams_field = "n_embd"
+
+[[semantic]]
+kv_enum = "LLM_KV_POSNET_BLOCK_COUNT"
+gguf_key = "{arch}.posnet.block_count"
+hparams_field = "n_layer"
+
+[[semantic]]
+kv_enum = "LLM_KV_POSNET_EMBEDDING_LENGTH"
+gguf_key = "{arch}.posnet.embedding_length"
+hparams_field = "n_embd"
+
+[[semantic]]
+kv_enum = "LLM_KV_EMBEDDING_LENGTH"
+gguf_key = "clip.audio.embedding_length"
+hparams_field = "n_embd_out_impl"
+
+[[semantic]]
+kv_enum = "LLM_KV_FEATURES_LENGTH"
+gguf_key = "{arch}.features_length"
+hparams_field = "n_embd"
+
+[[semantic]]
+kv_enum = "LLM_KV_EXPERT_GROUP_USED_COUNT"
+gguf_key = "{arch}.expert_group_used_count"
+hparams_field = "n_group_used"
+
+[[semantic]]
+kv_enum = "LLM_KV_EXPERT_GROUP_COUNT"
+gguf_key = "{arch}.expert_group_count"
+hparams_field = "n_expert_groups"
+
+[[semantic]]
+kv_enum = "LLM_KV_EXPERT_USED_COUNT"
+gguf_key = "{arch}.expert_group_used_count"
+hparams_field = "n_expert_used"
+
+[[semantic]]
+kv_enum = "LLM_KV_EXPERT_COUNT"
+gguf_key = "{arch}.expert_count"
+hparams_field = "n_expert"
+
+[[semantic]]
+kv_enum = "LLM_KV_BLOCK_COUNT"
+gguf_key = "clip.audio.block_count"
+hparams_field = "n_layer_all"
+
+[[semantic]]
+kv_enum = "LLM_KV_POOLING_TYPE"
+gguf_key = "{arch}.pooling_type"
+hparams_field = "pooling_type"
+
+[[semantic]]
+kv_enum = "LLM_KV_ATTENTION_CAUSAL"
+gguf_key = "{arch}.attention.causal"
+hparams_field = "causal_attn"
+
+[[semantic]]
+kv_enum = "LLM_KV_EMBEDDING_LENGTH_OUT"
+gguf_key = "{arch}.embedding_length_out"
+hparams_field = "n_embd_out_impl"
+
+[[semantic]]
+kv_enum = "LLM_KV_EMBEDDING_LENGTH"
+gguf_key = "clip.audio.embedding_length"
+hparams_field = "n_embd"
+
+[[semantic]]
+kv_enum = "LLM_KV_CONTEXT_LENGTH"
+gguf_key = "{arch}.context_length"
+hparams_field = "n_ctx_train"
+
+[[semantic]]
+kv_enum = "LLM_KV_GENERAL_NAME"
+gguf_key = "general.basename"
+hparams_field = "name"

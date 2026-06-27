@@ -1,0 +1,1776 @@
+# tensor: 355 entries
+
+[[tensor]]
+tensor_enum = "ALTUP_CORRECT_COEF"
+name_template = "blk.{bid}.altup_correct_coef"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ALTUP_CORRECT_SCALE"
+name_template = "blk.{bid}.altup_correct_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ALTUP_PREDICT_COEF"
+name_template = "blk.{bid}.altup_predict_coef"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ALTUP_PROJ"
+name_template = "altup_proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ALTUP_ROUTER"
+name_template = "blk.{bid}.altup_router"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ALTUP_ROUTER_NORM"
+name_template = "blk.{bid}.altup_router_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ALTUP_UNEMBD_PROJ"
+name_template = "altup_unembd_proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_GATE"
+name_template = "blk.{bid}.attn_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_K"
+name_template = "blk.{bid}.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_KV_A_MQA"
+name_template = "blk.{bid}.attn_kv_a_mqa"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_KV_A_NORM"
+name_template = "blk.{bid}.attn_kv_a_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_KV_B"
+name_template = "blk.{bid}.attn_kv_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_K_B"
+name_template = "blk.{bid}.attn_k_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_K_NORM"
+name_template = "blk.{bid}.attn_k_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_NORM"
+name_template = "blk.{bid}.attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_NORM_2"
+name_template = "blk.{bid}.attn_norm_2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_OUT"
+name_template = "blk.{bid}.attn_output"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_OUT_NORM"
+name_template = "blk.{bid}.attn_output_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_POST_NORM"
+name_template = "blk.{bid}.post_attention_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_Q"
+name_template = "blk.{bid}.attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_QKV"
+name_template = "blk.{bid}.attn_qkv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_Q_A"
+name_template = "blk.{bid}.attn_q_a"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_Q_A_NORM"
+name_template = "blk.{bid}.attn_q_a_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_Q_B"
+name_template = "blk.{bid}.attn_q_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_Q_NORM"
+name_template = "blk.{bid}.attn_q_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_ROT_EMBD"
+name_template = "blk.{bid}.attn_rot_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_SINKS"
+name_template = "blk.{bid}.attn_sinks"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_SUB_NORM"
+name_template = "blk.{bid}.attn_sub_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_V"
+name_template = "blk.{bid}.attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ATTN_V_B"
+name_template = "blk.{bid}.attn_v_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_CTC_OUT"
+name_template = "a.enc_ctc_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_CTC_OUT_MID"
+name_template = "a.enc_ctc_out_mid"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_K"
+name_template = "a.blk.{bid}.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_K_REL"
+name_template = "a.blk.{bid}.attn_k_rel"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_POST_NORM"
+name_template = "a.blk.{bid}.attn_post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_PRE_NORM"
+name_template = "a.blk.{bid}.attn_pre_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_Q"
+name_template = "a.blk.{bid}.attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_REL_POS_EMB"
+name_template = "a.blk.{bid}.attn_rel_pos_emb"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_ATTN_V"
+name_template = "a.blk.{bid}.attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV1D"
+name_template = "a.conv1d.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV1D_NORM"
+name_template = "a.conv1d.{bid}.norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV2D"
+name_template = "a.conv2d.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV_DW"
+name_template = "a.blk.{bid}.conv_dw"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV_NORM"
+name_template = "a.blk.{bid}.conv_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV_OUT"
+name_template = "a.conv_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV_PW1"
+name_template = "a.blk.{bid}.conv_pw1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_CONV_PW2"
+name_template = "a.blk.{bid}.conv_pw2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_EMBD_NORM"
+name_template = "a.position_embd_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_EMBD_POS"
+name_template = "a.position_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_EMBD_TO_LOGITS"
+name_template = "a.embd_to_logits"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_DOWN"
+name_template = "a.blk.{bid}.ffn_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_DOWN_1"
+name_template = "a.blk.{bid}.ffn_down_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_GATE"
+name_template = "a.blk.{bid}.ffn_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_GATE_1"
+name_template = "a.blk.{bid}.ffn_gate_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_NORM"
+name_template = "a.blk.{bid}.ffn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_NORM_1"
+name_template = "a.blk.{bid}.ffn_norm_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_POST_NORM"
+name_template = "a.blk.{bid}.ffn_post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_POST_NORM_1"
+name_template = "a.blk.{bid}.ffn_post_norm_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_SCALE"
+name_template = "a.blk.{bid}.ffn_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_SCALE_1"
+name_template = "a.blk.{bid}.ffn_scale_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_UP"
+name_template = "a.blk.{bid}.ffn_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_FFN_UP_1"
+name_template = "a.blk.{bid}.ffn_up_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_INPUT_NORM"
+name_template = "a.blk.{bid}.ln1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_INP_PROJ"
+name_template = "a.input_projection"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_LAYER_PRE_NORM"
+name_template = "a.blk.{bid}.layer_pre_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_LINEAR_POS"
+name_template = "a.blk.{bid}.linear_pos"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_NORM_CONV"
+name_template = "a.blk.{bid}.norm_conv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_OUT"
+name_template = "a.pre_encode.out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_OUTPUT"
+name_template = "a.blk.{bid}.attn_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_OUTPUT_NORM"
+name_template = "a.blk.{bid}.ln2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_PER_DIM_SCALE"
+name_template = "a.blk.{bid}.per_dim_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_POS_BIAS_U"
+name_template = "a.blk.{bid}.pos_bias_u"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_ENC_POS_BIAS_V"
+name_template = "a.blk.{bid}.pos_bias_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MMPROJ"
+name_template = "mm.a.mlp.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MMPROJ_FC"
+name_template = "mm.a.fc"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MM_EMBEDDING"
+name_template = "mm.a.embedding"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MM_HARD_EMB_NORM"
+name_template = "mm.a.hard_emb_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MM_INP_PROJ"
+name_template = "mm.a.input_projection"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MM_NORM_MID"
+name_template = "mm.a.norm_mid"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MM_NORM_PRE"
+name_template = "mm.a.norm_pre"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_MM_SOFT_EMB_NORM"
+name_template = "mm.a.soft_emb_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_PER_DIM_K_SCALE"
+name_template = "a.blk.{bid}.per_dim_k_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_PER_DIM_SCALE"
+name_template = "a.blk.{bid}.per_dim_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_POST_NORM"
+name_template = "a.post_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_PRE_NORM"
+name_template = "a.pre_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_CROSS_ATTN_K"
+name_template = "a.proj_blk.{bid}.cross_attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_CROSS_ATTN_NORM"
+name_template = "a.proj_blk.{bid}.cross_attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_CROSS_ATTN_O"
+name_template = "a.proj_blk.{bid}.cross_attn_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_CROSS_ATTN_Q"
+name_template = "a.proj_blk.{bid}.cross_attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_CROSS_ATTN_V"
+name_template = "a.proj_blk.{bid}.cross_attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_FFN_DOWN"
+name_template = "a.proj_blk.{bid}.ffn_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_FFN_NORM"
+name_template = "a.proj_blk.{bid}.ffn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_FFN_UP"
+name_template = "a.proj_blk.{bid}.ffn_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_PROJ_LINEAR"
+name_template = "a.proj_linear"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_PROJ_NORM"
+name_template = "a.proj_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_PROJ_QUERY"
+name_template = "a.proj_query"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_SELF_ATTN_K"
+name_template = "a.proj_blk.{bid}.self_attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_SELF_ATTN_NORM"
+name_template = "a.proj_blk.{bid}.self_attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_SELF_ATTN_O"
+name_template = "a.proj_blk.{bid}.self_attn_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_SELF_ATTN_Q"
+name_template = "a.proj_blk.{bid}.self_attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "A_QF_SELF_ATTN_V"
+name_template = "a.proj_blk.{bid}.self_attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CHANNEL_MIX_KEY"
+name_template = "blk.{bid}.channel_mix_key"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CHANNEL_MIX_LERP_K"
+name_template = "blk.{bid}.channel_mix_lerp_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CHANNEL_MIX_LERP_R"
+name_template = "blk.{bid}.channel_mix_lerp_r"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CHANNEL_MIX_RECEPTANCE"
+name_template = "blk.{bid}.channel_mix_receptance"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CHANNEL_MIX_VALUE"
+name_template = "blk.{bid}.channel_mix_value"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CLS"
+name_template = "cls"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CLS_NORM"
+name_template = "cls.norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CLS_OUT"
+name_template = "cls.output"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CONV1D"
+name_template = "conv1d"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CONVNEXT_DW"
+name_template = "convnext.{bid}.dw"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CONVNEXT_GAMMA"
+name_template = "convnext.{bid}.gamma"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CONVNEXT_NORM"
+name_template = "convnext.{bid}.norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CONVNEXT_PW1"
+name_template = "convnext.{bid}.pw1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "CONVNEXT_PW2"
+name_template = "convnext.{bid}.pw2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_ATTN_K"
+name_template = "dec.blk.{bid}.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_ATTN_NORM"
+name_template = "dec.blk.{bid}.attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_ATTN_OUT"
+name_template = "dec.blk.{bid}.attn_o"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_ATTN_Q"
+name_template = "dec.blk.{bid}.attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_ATTN_REL_B"
+name_template = "dec.blk.{bid}.attn_rel_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_ATTN_V"
+name_template = "dec.blk.{bid}.attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_CROSS_ATTN_K"
+name_template = "dec.blk.{bid}.cross_attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_CROSS_ATTN_NORM"
+name_template = "dec.blk.{bid}.cross_attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_CROSS_ATTN_OUT"
+name_template = "dec.blk.{bid}.cross_attn_o"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_CROSS_ATTN_Q"
+name_template = "dec.blk.{bid}.cross_attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_CROSS_ATTN_REL_B"
+name_template = "dec.blk.{bid}.cross_attn_rel_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_CROSS_ATTN_V"
+name_template = "dec.blk.{bid}.cross_attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_FFN_DOWN"
+name_template = "dec.blk.{bid}.ffn_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_FFN_GATE"
+name_template = "dec.blk.{bid}.ffn_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_FFN_NORM"
+name_template = "dec.blk.{bid}.ffn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_FFN_UP"
+name_template = "dec.blk.{bid}.ffn_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DEC_OUTPUT_NORM"
+name_template = "dec.output_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DENSE_2_OUT"
+name_template = "dense_2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "DENSE_3_OUT"
+name_template = "dense_3"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_ATTN_K"
+name_template = "enc.blk.{bid}.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_ATTN_NORM"
+name_template = "enc.blk.{bid}.attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_ATTN_OUT"
+name_template = "enc.blk.{bid}.attn_o"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_ATTN_Q"
+name_template = "enc.blk.{bid}.attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_ATTN_REL_B"
+name_template = "enc.blk.{bid}.attn_rel_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_ATTN_V"
+name_template = "enc.blk.{bid}.attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_FFN_DOWN"
+name_template = "enc.blk.{bid}.ffn_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_FFN_GATE"
+name_template = "enc.blk.{bid}.ffn_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_FFN_NORM"
+name_template = "enc.blk.{bid}.ffn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_FFN_UP"
+name_template = "enc.blk.{bid}.ffn_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ENC_OUTPUT_NORM"
+name_template = "enc.output_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_ACT"
+name_template = "blk.{bid}.ffn"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_DOWN"
+name_template = "blk.{bid}.ffn_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_DOWN_CHEXP"
+name_template = "blk.{bid}.ffn_down_chexps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_DOWN_EXP"
+name_template = "blk.{bid}.ffn_down_exps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_DOWN_SHEXP"
+name_template = "blk.{bid}.ffn_down_shexp"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_EXP_PROBS_B"
+name_template = "blk.{bid}.exp_probs_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE"
+name_template = "blk.{bid}.ffn_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE_CHEXP"
+name_template = "blk.{bid}.ffn_gate_chexps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE_EXP"
+name_template = "blk.{bid}.ffn_gate_exps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE_INP"
+name_template = "blk.{bid}.ffn_gate_inp"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE_INP_SHEXP"
+name_template = "blk.{bid}.ffn_gate_inp_shexp"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE_SHEXP"
+name_template = "blk.{bid}.ffn_gate_shexp"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_GATE_UP_EXP"
+name_template = "blk.{bid}.ffn_gate_up_exps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_NORM"
+name_template = "blk.{bid}.ffn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_NORM_EXP"
+name_template = "blk.{bid}.ffn_norm_exps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_POST_NORM"
+name_template = "blk.{bid}.post_ffw_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_POST_NORM_1"
+name_template = "blk.{bid}.post_ffw_norm_1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_POST_NORM_2"
+name_template = "blk.{bid}.post_ffw_norm_2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_PRE_NORM"
+name_template = "blk.{bid}.ffn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_PRE_NORM_2"
+name_template = "blk.{bid}.pre_ffw_norm_2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_SUB_NORM"
+name_template = "blk.{bid}.ffn_sub_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_UP"
+name_template = "blk.{bid}.ffn_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_UP_CHEXP"
+name_template = "blk.{bid}.ffn_up_chexps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_UP_EXP"
+name_template = "blk.{bid}.ffn_up_exps"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "FFN_UP_SHEXP"
+name_template = "blk.{bid}.ffn_up_shexp"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "INDEXER_ATTN_K"
+name_template = "blk.{bid}.indexer.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "INDEXER_ATTN_Q_B"
+name_template = "blk.{bid}.indexer.attn_q_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "INDEXER_K_NORM"
+name_template = "blk.{bid}.indexer.k_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "INDEXER_PROJ"
+name_template = "blk.{bid}.indexer.proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "LAUREL_L"
+name_template = "blk.{bid}.laurel_l"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "LAUREL_POST_NORM"
+name_template = "blk.{bid}.laurel_post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "LAUREL_R"
+name_template = "blk.{bid}.laurel_r"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "LAYER_OUT_NORM"
+name_template = "blk.{bid}.layer_output_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "LAYER_OUT_SCALE"
+name_template = "blk.{bid}.layer_output_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "MOE_LATENT_DOWN"
+name_template = "blk.{bid}.ffn_latent_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "MOE_LATENT_UP"
+name_template = "blk.{bid}.ffn_latent_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "NEXTN_EH_PROJ"
+name_template = "blk.{bid}.nextn.eh_proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "NEXTN_EMBED_TOKENS"
+name_template = "blk.{bid}.nextn.embed_tokens"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "NEXTN_ENORM"
+name_template = "blk.{bid}.nextn.enorm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "NEXTN_HNORM"
+name_template = "blk.{bid}.nextn.hnorm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "NEXTN_SHARED_HEAD_HEAD"
+name_template = "blk.{bid}.nextn.shared_head_head"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "NEXTN_SHARED_HEAD_NORM"
+name_template = "blk.{bid}.nextn.shared_head_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "OUTPUT"
+name_template = "output"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "OUTPUT_NORM"
+name_template = "output_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "PER_LAYER_INP_GATE"
+name_template = "blk.{bid}.inp_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "PER_LAYER_MODEL_PROJ"
+name_template = "per_layer_model_proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "PER_LAYER_POST_NORM"
+name_template = "blk.{bid}.post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "PER_LAYER_PROJ"
+name_template = "blk.{bid}.proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "PER_LAYER_PROJ_NORM"
+name_template = "per_layer_proj_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "PER_LAYER_TOKEN_EMBD"
+name_template = "per_layer_token_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_ATTN_K"
+name_template = "posnet.{bid}.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_ATTN_NORM"
+name_template = "posnet.{bid}.attn_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_ATTN_OUT"
+name_template = "posnet.{bid}.attn_output"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_ATTN_Q"
+name_template = "posnet.{bid}.attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_ATTN_V"
+name_template = "posnet.{bid}.attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_CONV1"
+name_template = "posnet.{bid}.conv1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_CONV2"
+name_template = "posnet.{bid}.conv2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_NORM"
+name_template = "posnet.{bid}.norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_NORM1"
+name_template = "posnet.{bid}.norm1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POSNET_NORM2"
+name_template = "posnet.{bid}.norm2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "POS_EMBD"
+name_template = "position_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ROPE_FACTORS_LONG"
+name_template = "rope_factors_long"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ROPE_FACTORS_SHORT"
+name_template = "rope_factors_short"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "ROPE_FREQS"
+name_template = "rope_freqs"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SHORTCONV_CONV"
+name_template = "blk.{bid}.shortconv.conv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SHORTCONV_INPROJ"
+name_template = "blk.{bid}.shortconv.in_proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SHORTCONV_OUTPROJ"
+name_template = "blk.{bid}.shortconv.out_proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_A"
+name_template = "blk.{bid}.ssm_a"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_ALPHA"
+name_template = "blk.{bid}.ssm_alpha"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_BETA"
+name_template = "blk.{bid}.ssm_beta"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_BETA_ALPHA"
+name_template = "blk.{bid}.ssm_ba"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_B_NORM"
+name_template = "blk.{bid}.ssm_b_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_CONV1D"
+name_template = "blk.{bid}.ssm_conv1d"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_CONV1D_K"
+name_template = "blk.{bid}.ssm_conv1d_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_CONV1D_Q"
+name_template = "blk.{bid}.ssm_conv1d_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_CONV1D_V"
+name_template = "blk.{bid}.ssm_conv1d_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_C_NORM"
+name_template = "blk.{bid}.ssm_c_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_D"
+name_template = "blk.{bid}.ssm_d"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_DT"
+name_template = "blk.{bid}.ssm_dt"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_DT_NORM"
+name_template = "blk.{bid}.ssm_dt_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_F_A"
+name_template = "blk.{bid}.ssm_f_a"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_F_B"
+name_template = "blk.{bid}.ssm_f_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_G_A"
+name_template = "blk.{bid}.ssm_g_a"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_G_B"
+name_template = "blk.{bid}.ssm_g_b"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_IN"
+name_template = "blk.{bid}.ssm_in"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_NORM"
+name_template = "blk.{bid}.ssm_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_OUT"
+name_template = "blk.{bid}.ssm_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "SSM_X"
+name_template = "blk.{bid}.ssm_x"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_A0"
+name_template = "blk.{bid}.time_mix_a0"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_A1"
+name_template = "blk.{bid}.time_mix_a1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_A2"
+name_template = "blk.{bid}.time_mix_a2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_DECAY"
+name_template = "blk.{bid}.time_mix_decay"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_DECAY_W1"
+name_template = "blk.{bid}.time_mix_decay_w1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_DECAY_W2"
+name_template = "blk.{bid}.time_mix_decay_w2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_FIRST"
+name_template = "blk.{bid}.time_mix_first"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_G1"
+name_template = "blk.{bid}.time_mix_g1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_G2"
+name_template = "blk.{bid}.time_mix_g2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_GATE"
+name_template = "blk.{bid}.time_mix_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_KEY"
+name_template = "blk.{bid}.time_mix_key"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_K_A"
+name_template = "blk.{bid}.time_mix_k_a"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_K_K"
+name_template = "blk.{bid}.time_mix_k_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_FUSED"
+name_template = "blk.{bid}.time_mix_lerp_fused"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_G"
+name_template = "blk.{bid}.time_mix_lerp_g"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_K"
+name_template = "blk.{bid}.time_mix_lerp_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_R"
+name_template = "blk.{bid}.time_mix_lerp_r"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_V"
+name_template = "blk.{bid}.time_mix_lerp_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_W"
+name_template = "blk.{bid}.time_mix_lerp_w"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LERP_X"
+name_template = "blk.{bid}.time_mix_lerp_x"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_LN"
+name_template = "blk.{bid}.time_mix_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_OUTPUT"
+name_template = "blk.{bid}.time_mix_output"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_RECEPTANCE"
+name_template = "blk.{bid}.time_mix_receptance"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_R_K"
+name_template = "blk.{bid}.time_mix_r_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_V0"
+name_template = "blk.{bid}.time_mix_v0"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_V1"
+name_template = "blk.{bid}.time_mix_v1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_V2"
+name_template = "blk.{bid}.time_mix_v2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_VALUE"
+name_template = "blk.{bid}.time_mix_value"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_W0"
+name_template = "blk.{bid}.time_mix_w0"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_W1"
+name_template = "blk.{bid}.time_mix_w1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TIME_MIX_W2"
+name_template = "blk.{bid}.time_mix_w2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TOKEN_EMBD"
+name_template = "token_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TOKEN_EMBD_NORM"
+name_template = "token_embd_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "TOKEN_TYPES"
+name_template = "token_types"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "VISEXP_ATTN_OUT"
+name_template = "blk.{bid}.vis_attn_output"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "VISEXP_ATTN_QKV"
+name_template = "blk.{bid}.vis_attn_qkv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "VISEXP_DOWN"
+name_template = "blk.{bid}.vis_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "VISEXP_GATE"
+name_template = "blk.{bid}.vis_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "VISEXP_UP"
+name_template = "blk.{bid}.vis_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_DS_FC1"
+name_template = "v.deepstack.{bid}.fc1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_DS_FC2"
+name_template = "v.deepstack.{bid}.fc2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_DS_NORM"
+name_template = "v.deepstack.{bid}.norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_K"
+name_template = "v.blk.{bid}.attn_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_K_NORM"
+name_template = "v.blk.{bid}.attn_k_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_O"
+name_template = "v.blk.{bid}.attn_out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_O_NORM"
+name_template = "v.blk.{bid}.attn_out_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_POST_NORM"
+name_template = "v.blk.{bid}.attn_post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_Q"
+name_template = "v.blk.{bid}.attn_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_QKV"
+name_template = "v.blk.{bid}.attn_qkv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_Q_NORM"
+name_template = "v.blk.{bid}.attn_q_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_ATTN_V"
+name_template = "v.blk.{bid}.attn_v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_CONV_STEM"
+name_template = "v.conv_stem.conv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_CONV_STEM_NORM"
+name_template = "v.conv_stem.bn"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_EMBD_CLS"
+name_template = "v.class_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_EMBD_IMGNL"
+name_template = "v.image_newline"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_EMBD_NORM"
+name_template = "v.norm_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_EMBD_PATCH"
+name_template = "v.patch_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_EMBD_POS"
+name_template = "v.position_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_EMBD_VSEP"
+name_template = "v.view_seperator"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_FFN_DOWN"
+name_template = "v.blk.{bid}.ffn_down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_FFN_GATE"
+name_template = "v.blk.{bid}.ffn_gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_FFN_POST_NORM"
+name_template = "v.blk.{bid}.ffn_post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_FFN_UP"
+name_template = "v.blk.{bid}.ffn_up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_INPUT_NORM"
+name_template = "v.blk.{bid}.ln1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_MSFA_EXP"
+name_template = "v.msfa.ffn.pw_exp.conv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_MSFA_EXP_NORM"
+name_template = "v.msfa.ffn.pw_exp.bn"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_MSFA_NORM"
+name_template = "v.msfa.norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_MSFA_PROJ"
+name_template = "v.msfa.ffn.pw_proj.conv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_MSFA_PROJ_NORM"
+name_template = "v.msfa.ffn.pw_proj.bn"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_ENC_POST_ATTN_NORM"
+name_template = "v.blk.{bid}.ln2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_LAYER_OUT_SCALE"
+name_template = "v.blk.{bid}.out_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_LAYER_SCALE_1"
+name_template = "v.blk.{bid}.ls1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_LAYER_SCALE_2"
+name_template = "v.blk.{bid}.ls2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MMPROJ"
+name_template = "mm.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MMPROJ_FC"
+name_template = "mm.model.fc"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MMPROJ_MLP"
+name_template = "mm.model.mlp.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MMPROJ_PEG"
+name_template = "mm.model.peg.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_DOWN"
+name_template = "mm.down"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_EMBEDDING"
+name_template = "mm.embedding"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_GATE"
+name_template = "mm.gate"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_HARD_EMB_NORM"
+name_template = "mm.hard_emb_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_INP_NORM"
+name_template = "mm.input_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_INP_PROJ"
+name_template = "mm.input_projection"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_PATCH_MERGER"
+name_template = "mm.patch_merger"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_POST_FC_NORM"
+name_template = "mm.post_fc_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_POST_NORM"
+name_template = "mm.post_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_PRE_NORM"
+name_template = "mm.pre_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_SOFT_EMB_NORM"
+name_template = "mm.soft_emb_norm"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_MM_UP"
+name_template = "mm.up"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_POST_NORM"
+name_template = "v.post_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_PRE_NORM"
+name_template = "v.pre_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_ATTN_K"
+name_template = "resampler.attn.k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_ATTN_OUT"
+name_template = "resampler.attn.out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_ATTN_Q"
+name_template = "resampler.attn.q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_ATTN_V"
+name_template = "resampler.attn.v"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_KV"
+name_template = "resampler.kv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_KV_NORM"
+name_template = "resampler.ln_kv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_POST_NORM"
+name_template = "resampler.ln_post"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_POS_EMBD_K"
+name_template = "resampler.pos_embd_k"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_PROJ"
+name_template = "resampler.proj"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_QUERY"
+name_template = "resampler.query"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_RESMPL_Q_NORM"
+name_template = "resampler.ln_q"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_ATTN_OUT"
+name_template = "v.sam.blk.{bid}.attn.out"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_ATTN_POS_H"
+name_template = "v.sam.blk.{bid}.attn.pos_h"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_ATTN_POS_W"
+name_template = "v.sam.blk.{bid}.attn.pos_w"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_ATTN_QKV"
+name_template = "v.sam.blk.{bid}.attn.qkv"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_MLP_LIN_1"
+name_template = "v.sam.blk.{bid}.mlp.lin1"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_MLP_LIN_2"
+name_template = "v.sam.blk.{bid}.mlp.lin2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_NECK"
+name_template = "v.sam.neck.{bid}"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_NET_2"
+name_template = "v.sam.net_2"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_NET_3"
+name_template = "v.sam.net_3"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_PATCH_EMBD"
+name_template = "v.sam.patch_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_POST_NORM"
+name_template = "v.sam.blk.{bid}.post_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_POS_EMBD"
+name_template = "v.sam.pos_embd"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_SAM_PRE_NORM"
+name_template = "v.sam.blk.{bid}.pre_ln"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_STD_BIAS"
+name_template = "v.std_bias"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_STD_SCALE"
+name_template = "v.std_scale"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_TOK_BOI"
+name_template = "v.boi"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_TOK_EMBD_IMG_BREAK"
+name_template = "v.token_embd.img_break"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_TOK_EOI"
+name_template = "v.eoi"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_TOK_IMG_BEGIN"
+name_template = "mm.image_begin"
+has_index_placeholder = false
+
+[[tensor]]
+tensor_enum = "V_TOK_IMG_END"
+name_template = "mm.image_end"
+has_index_placeholder = false

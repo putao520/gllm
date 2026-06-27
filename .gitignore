@@ -41,13 +41,24 @@ docs/
 *.rlib
 run_gdb.sh
 scripts/
-tools/
+# tools/ as a whole is untracked dev scratch; exempt model-knowledge toolset below
+tools/*
+!tools/model-knowledge/
 test_compress
 test_scope_issue
 \{
 auto_select_ops.txt
 trace_ops.txt
 trace_op_analysis.txt
+
+# model-knowledge toolset: track scripts + TOML products, ignore venv/upstream caches
+tools/model-knowledge/.venv/
+tools/model-knowledge/.upstream/
+
+# model-knowledge extracted knowledge products (tracked for diff review)
+!generated/
+generated/*
+!generated/model-knowledge/
 
 # AI tools
 .serena/

@@ -1,0 +1,4677 @@
+# model_type: 668 entries
+
+[[model_type]]
+model_type = "afmoe"
+class_name = "AfmoeConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "aimv2_vision_model"
+class_name = "Aimv2VisionConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "aimv2_text_model"
+class_name = "Aimv2TextConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "aimv2"
+class_name = "Aimv2Config"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "albert"
+class_name = "AlbertConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "align_text_model"
+class_name = "AlignTextConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "align_vision_model"
+class_name = "AlignVisionConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "align"
+class_name = "AlignConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "altclip_text_model"
+class_name = "AltCLIPTextConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "altclip_vision_model"
+class_name = "AltCLIPVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "altclip"
+class_name = "AltCLIPConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "apertus"
+class_name = "ApertusConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "arcee"
+class_name = "ArceeConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "aria_text"
+class_name = "AriaTextConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "aria"
+class_name = "AriaConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "audio-spectrogram-transformer"
+class_name = "ASTConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "audioflamingo3_encoder"
+class_name = "AudioFlamingo3EncoderConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "audioflamingo3"
+class_name = "AudioFlamingo3Config"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "autoformer"
+class_name = "AutoformerConfig"
+field_count = 33
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "aya_vision"
+class_name = "AyaVisionConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bamba"
+class_name = "BambaConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "semantic"
+class_name = "BarkSemanticConfig"
+field_count = 0
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "coarse_acoustics"
+class_name = "BarkCoarseConfig"
+field_count = 0
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "fine_acoustics"
+class_name = "BarkFineConfig"
+field_count = 3
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "bark"
+class_name = "BarkConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bart"
+class_name = "BartConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "beit"
+class_name = "BeitConfig"
+field_count = 29
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bert"
+class_name = "BertConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "bert-generation"
+class_name = "BertGenerationConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "big_bird"
+class_name = "BigBirdConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "bigbird_pegasus"
+class_name = "BigBirdPegasusConfig"
+field_count = 30
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "biogpt"
+class_name = "BioGptConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "bit"
+class_name = "BitConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bitnet"
+class_name = "BitNetConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blenderbot"
+class_name = "BlenderbotConfig"
+field_count = 27
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "blenderbot-small"
+class_name = "BlenderbotSmallConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "blip_text_model"
+class_name = "BlipTextConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "blip_vision_model"
+class_name = "BlipVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "blip"
+class_name = "BlipConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blip_2_vision_model"
+class_name = "Blip2VisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "blip_2_qformer"
+class_name = "Blip2QFormerConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "blip-2"
+class_name = "Blip2Config"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bloom"
+class_name = "BloomConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blt_local_encoder"
+class_name = "BltLocalEncoderConfig"
+field_count = 15
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blt_local_decoder"
+class_name = "BltLocalDecoderConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blt_global_transformer"
+class_name = "BltGlobalTransformerConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blt_patcher"
+class_name = "BltPatcherConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "blt"
+class_name = "BltConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bridgetower_vision_model"
+class_name = "BridgeTowerVisionConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "bridgetower_text_model"
+class_name = "BridgeTowerTextConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "bridgetower"
+class_name = "BridgeTowerConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "bros"
+class_name = "BrosConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "camembert"
+class_name = "CamembertConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "canine"
+class_name = "CanineConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "chameleon_vqgan"
+class_name = "ChameleonVQVAEConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "chameleon"
+class_name = "ChameleonConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "chinese_clip_text_model"
+class_name = "ChineseCLIPTextConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "chinese_clip_vision_model"
+class_name = "ChineseCLIPVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "chinese_clip"
+class_name = "ChineseCLIPConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "chmv2"
+class_name = "CHMv2Config"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "clap_text_model"
+class_name = "ClapTextConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clap_audio_model"
+class_name = "ClapAudioConfig"
+field_count = 27
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clap"
+class_name = "ClapConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "clip_text_model"
+class_name = "CLIPTextConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clip_vision_model"
+class_name = "CLIPVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clip"
+class_name = "CLIPConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "clipseg_text_model"
+class_name = "CLIPSegTextConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clipseg_vision_model"
+class_name = "CLIPSegVisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clipseg"
+class_name = "CLIPSegConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "clvp_encoder"
+class_name = "ClvpEncoderConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clvp_decoder"
+class_name = "ClvpDecoderConfig"
+field_count = 28
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "clvp"
+class_name = "ClvpConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "codegen"
+class_name = "CodeGenConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "cohere"
+class_name = "CohereConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "cohere2"
+class_name = "Cohere2Config"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "cohere2_moe"
+class_name = "Cohere2MoeConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "cohere2_vision"
+class_name = "Cohere2VisionConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "cohere_asr"
+class_name = "CohereAsrConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "colmodernvbert"
+class_name = "ColModernVBertConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "colpali"
+class_name = "ColPaliConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "colqwen2"
+class_name = "ColQwen2Config"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "conditional_detr"
+class_name = "ConditionalDetrConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "convbert"
+class_name = "ConvBertConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "convnext"
+class_name = "ConvNextConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "convnextv2"
+class_name = "ConvNextV2Config"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "cosmos3_omni"
+class_name = "Cosmos3OmniConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "cpmant"
+class_name = "CpmAntConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "csm_depth_decoder_model"
+class_name = "CsmDepthDecoderConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "csm"
+class_name = "CsmConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ctrl"
+class_name = "CTRLConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "cvt"
+class_name = "CvtConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "cwm"
+class_name = "CwmConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "d_fine"
+class_name = "DFineConfig"
+field_count = 65
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dab-detr"
+class_name = "DabDetrConfig"
+field_count = 35
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dac"
+class_name = "DacConfig"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "data2vec-audio"
+class_name = "Data2VecAudioConfig"
+field_count = 44
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "data2vec-text"
+class_name = "Data2VecTextConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "data2vec-vision"
+class_name = "Data2VecVisionConfig"
+field_count = 27
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "dbrx"
+class_name = "DbrxConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deberta"
+class_name = "DebertaConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deberta-v2"
+class_name = "DebertaV2Config"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "decision_transformer"
+class_name = "DecisionTransformerConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "deepseek_ocr2_sam_vision_model"
+class_name = "DeepseekOcr2SamVisionConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_ocr2_encoder"
+class_name = "DeepseekOcr2VisionEncoderConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_ocr2_vision"
+class_name = "DeepseekOcr2VisionConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_ocr2_text"
+class_name = "DeepseekOcr2TextConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_ocr2"
+class_name = "DeepseekOcr2Config"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_v2"
+class_name = "DeepseekV2Config"
+field_count = 36
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_v3"
+class_name = "DeepseekV3Config"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_v32"
+class_name = "DeepseekV32Config"
+field_count = 39
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_v4"
+class_name = "DeepseekV4Config"
+field_count = 47
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_vl"
+class_name = "DeepseekVLConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deepseek_vl_hybrid"
+class_name = "DeepseekVLHybridConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deformable_detr"
+class_name = "DeformableDetrConfig"
+field_count = 40
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deimv2"
+class_name = "Deimv2Config"
+field_count = 74
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "deit"
+class_name = "DeiTConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "depth_anything"
+class_name = "DepthAnythingConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "depth_pro"
+class_name = "DepthProConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "detr"
+class_name = "DetrConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dia_encoder"
+class_name = "DiaEncoderConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "dia_decoder"
+class_name = "DiaDecoderConfig"
+field_count = 22
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "dia"
+class_name = "DiaConfig"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "diffllama"
+class_name = "DiffLlamaConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "diffusion_gemma_text"
+class_name = "DiffusionGemmaTextConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "diffusion_gemma"
+class_name = "DiffusionGemmaConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dinat"
+class_name = "DinatConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dinov2"
+class_name = "Dinov2Config"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dinov2_with_registers"
+class_name = "Dinov2WithRegistersConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dinov3_convnext"
+class_name = "DINOv3ConvNextConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dinov3_vit"
+class_name = "DINOv3ViTConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "distilbert"
+class_name = "DistilBertConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "doge"
+class_name = "DogeConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "donut-swin"
+class_name = "DonutSwinConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dots1"
+class_name = "Dots1Config"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "dpr"
+class_name = "DPRConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "dpt"
+class_name = "DPTConfig"
+field_count = 32
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "edgetam_vision_model"
+class_name = "EdgeTamVisionConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "edgetam"
+class_name = "EdgeTamConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "edgetam_video"
+class_name = "EdgeTamVideoConfig"
+field_count = 51
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "efficientloftr"
+class_name = "EfficientLoFTRConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "efficientnet"
+class_name = "EfficientNetConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "electra"
+class_name = "ElectraConfig"
+field_count = 25
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "emu3_vqgan"
+class_name = "Emu3VQVAEConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "emu3_text_model"
+class_name = "Emu3TextConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "emu3"
+class_name = "Emu3Config"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "encodec"
+class_name = "EncodecConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "encoder-decoder"
+class_name = "EncoderDecoderConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "eomt"
+class_name = "EomtConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "eomt_dinov3"
+class_name = "EomtDinov3Config"
+field_count = 35
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "ernie"
+class_name = "ErnieConfig"
+field_count = 22
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "ernie4_5"
+class_name = "Ernie4_5Config"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ernie4_5_moe"
+class_name = "Ernie4_5_MoeConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ernie4_5_vl_moe_vision"
+class_name = "Ernie4_5_VLMoeVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "ernie4_5_vl_moe_text"
+class_name = "Ernie4_5_VLMoeTextConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ernie4_5_vl_moe"
+class_name = "Ernie4_5_VLMoeConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "esm"
+class_name = "EsmConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "eurobert"
+class_name = "EuroBertConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "evolla"
+class_name = "EvollaConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "exaone4"
+class_name = "Exaone4Config"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "exaone4_5_vision"
+class_name = "Exaone4_5_VisionConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "exaone4_5"
+class_name = "Exaone4_5_Config"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "exaone_moe"
+class_name = "ExaoneMoeConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "falcon"
+class_name = "FalconConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "falcon_h1"
+class_name = "FalconH1Config"
+field_count = 45
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "falcon_mamba"
+class_name = "FalconMambaConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fast_vlm"
+class_name = "FastVlmConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fastspeech2_conformer"
+class_name = "FastSpeech2ConformerConfig"
+field_count = 56
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fastspeech2_conformer_hifigan"
+class_name = "FastSpeech2ConformerHifiGanConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fastspeech2_conformer_with_hifigan"
+class_name = "FastSpeech2ConformerWithHifiGanConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "flaubert"
+class_name = "FlaubertConfig"
+field_count = 37
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "flava_image_model"
+class_name = "FlavaImageConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "flava_text_model"
+class_name = "FlavaTextConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "flava_multimodal_model"
+class_name = "FlavaMultimodalConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "flava"
+class_name = "FlavaConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "flex_olmo"
+class_name = "FlexOlmoConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "florence_vision"
+class_name = "Florence2VisionConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "florence2"
+class_name = "Florence2Config"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fnet"
+class_name = "FNetConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "focalnet"
+class_name = "FocalNetConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fsmt"
+class_name = "FSMTConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "funnel"
+class_name = "FunnelConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "fuyu"
+class_name = "FuyuConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma"
+class_name = "GemmaConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gemma2"
+class_name = "Gemma2Config"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma3_text"
+class_name = "Gemma3TextConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma3"
+class_name = "Gemma3Config"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma3n_text"
+class_name = "Gemma3nTextConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma3n_audio"
+class_name = "Gemma3nAudioConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gemma3n_vision"
+class_name = "Gemma3nVisionConfig"
+field_count = 8
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gemma3n"
+class_name = "Gemma3nConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_audio"
+class_name = "Gemma4AudioConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_text"
+class_name = "Gemma4TextConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_vision"
+class_name = "Gemma4VisionConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4"
+class_name = "Gemma4Config"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_assistant"
+class_name = "Gemma4AssistantConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_unified_audio"
+class_name = "Gemma4UnifiedAudioConfig"
+field_count = 3
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gemma4_unified_text"
+class_name = "Gemma4UnifiedTextConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_unified_vision"
+class_name = "Gemma4UnifiedVisionConfig"
+field_count = 7
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gemma4_unified"
+class_name = "Gemma4UnifiedConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gemma4_unified_assistant"
+class_name = "Gemma4UnifiedAssistantConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "git_vision_model"
+class_name = "GitVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "git"
+class_name = "GitConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm"
+class_name = "GlmConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4"
+class_name = "Glm4Config"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm46v"
+class_name = "Glm46VConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4_moe"
+class_name = "Glm4MoeConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4_moe_lite"
+class_name = "Glm4MoeLiteConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4v_vision"
+class_name = "Glm4vVisionConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "glm4v_text"
+class_name = "Glm4vTextConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4v"
+class_name = "Glm4vConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4v_moe_text"
+class_name = "Glm4vMoeTextConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm4v_moe_vision"
+class_name = "Glm4vMoeVisionConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "glm4v_moe"
+class_name = "Glm4vMoeConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm_image_vqmodel"
+class_name = "GlmImageVQVAEConfig"
+field_count = 5
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "glm_image_vision"
+class_name = "GlmImageVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "glm_image_text"
+class_name = "GlmImageTextConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm_image"
+class_name = "GlmImageConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm_moe_dsa"
+class_name = "GlmMoeDsaConfig"
+field_count = 40
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm_ocr_vision"
+class_name = "GlmOcrVisionConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "glm_ocr_text"
+class_name = "GlmOcrTextConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glm_ocr"
+class_name = "GlmOcrConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glmasr_encoder"
+class_name = "GlmAsrEncoderConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glmasr"
+class_name = "GlmAsrConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glmga"
+class_name = "GlmgaConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "glpn"
+class_name = "GLPNConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "got_ocr2"
+class_name = "GotOcr2Config"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gpt2"
+class_name = "GPT2Config"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gpt_bigcode"
+class_name = "GPTBigCodeConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gpt_neo"
+class_name = "GPTNeoConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gpt_neox"
+class_name = "GPTNeoXConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gpt_neox_japanese"
+class_name = "GPTNeoXJapaneseConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "gpt_oss"
+class_name = "GptOssConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "gptj"
+class_name = "GPTJConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "granite"
+class_name = "GraniteConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granite4_vision_text"
+class_name = "Granite4VisionTextConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granite4_vision"
+class_name = "Granite4VisionConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granite_speech_encoder"
+class_name = "GraniteSpeechEncoderConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granite_speech"
+class_name = "GraniteSpeechConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granite_speech_plus_encoder"
+class_name = "GraniteSpeechPlusEncoderConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granite_speech_plus"
+class_name = "GraniteSpeechPlusConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granitemoe"
+class_name = "GraniteMoeConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granitemoehybrid"
+class_name = "GraniteMoeHybridConfig"
+field_count = 41
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "granitemoeshared"
+class_name = "GraniteMoeSharedConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "grounding-dino"
+class_name = "GroundingDinoConfig"
+field_count = 40
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "groupvit_text_model"
+class_name = "GroupViTTextConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "groupvit_vision_model"
+class_name = "GroupViTVisionConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "groupvit"
+class_name = "GroupViTConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "helium"
+class_name = "HeliumConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "hgnet_v2"
+class_name = "HGNetV2Config"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hiera"
+class_name = "HieraConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "higgs_audio_v2"
+class_name = "HiggsAudioV2Config"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "higgs_audio_v2_tokenizer"
+class_name = "HiggsAudioV2TokenizerConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hrm_text"
+class_name = "HrmTextConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hubert"
+class_name = "HubertConfig"
+field_count = 39
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hunyuan_v1_dense"
+class_name = "HunYuanDenseV1Config"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hunyuan_v1_moe"
+class_name = "HunYuanMoEV1Config"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hy_v3"
+class_name = "HYV3Config"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "hyperclovax"
+class_name = "HyperCLOVAXConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ibert"
+class_name = "IBertConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "idefics_vision"
+class_name = "IdeficsVisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "idefics_perciever"
+class_name = "IdeficsPerceiverConfig"
+field_count = 6
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "idefics"
+class_name = "IdeficsConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "idefics2_vision"
+class_name = "Idefics2VisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "idefics2_perceiver"
+class_name = "Idefics2PerceiverConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "idefics2"
+class_name = "Idefics2Config"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "idefics3_vision"
+class_name = "Idefics3VisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "idefics3"
+class_name = "Idefics3Config"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ijepa"
+class_name = "IJepaConfig"
+field_count = 15
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "imagegpt"
+class_name = "ImageGPTConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "informer"
+class_name = "InformerConfig"
+field_count = 33
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "instructblip_vision_model"
+class_name = "InstructBlipVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "instructblip_qformer"
+class_name = "InstructBlipQFormerConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "instructblip"
+class_name = "InstructBlipConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "instructblipvideo_vision_model"
+class_name = "InstructBlipVideoVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "instructblipvideo_qformer"
+class_name = "InstructBlipVideoQFormerConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "instructblipvideo"
+class_name = "InstructBlipVideoConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "internvl_vision"
+class_name = "InternVLVisionConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "internvl"
+class_name = "InternVLConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "jais2"
+class_name = "Jais2Config"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "jamba"
+class_name = "JambaConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "janus_vision_model"
+class_name = "JanusVisionConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "janus_vqgan"
+class_name = "JanusVQVAEConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "janus"
+class_name = "JanusConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "jetmoe"
+class_name = "JetMoeConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "jina_embeddings_v3"
+class_name = "JinaEmbeddingsV3Config"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "kosmos_2_text_model"
+class_name = "Kosmos2TextConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "kosmos_2_vision_model"
+class_name = "Kosmos2VisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "kosmos-2"
+class_name = "Kosmos2Config"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "kosmos_2_5_text_model"
+class_name = "Kosmos2_5TextConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "kosmos_2_5_vision_model"
+class_name = "Kosmos2_5VisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "kosmos-2.5"
+class_name = "Kosmos2_5Config"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "kyutai_speech_to_text"
+class_name = "KyutaiSpeechToTextConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "laguna"
+class_name = "LagunaConfig"
+field_count = 33
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lasr_encoder"
+class_name = "LasrEncoderConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lasr_ctc"
+class_name = "LasrCTCConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "layoutlm"
+class_name = "LayoutLMConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "layoutlmv2"
+class_name = "LayoutLMv2Config"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "layoutlmv3"
+class_name = "LayoutLMv3Config"
+field_count = 30
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "layoutxlm"
+class_name = "LayoutXLMConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "led"
+class_name = "LEDConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "levit"
+class_name = "LevitConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lfm2"
+class_name = "Lfm2Config"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lfm2_moe"
+class_name = "Lfm2MoeConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lfm2_vl"
+class_name = "Lfm2VlConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lightglue"
+class_name = "LightGlueConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lighton_ocr"
+class_name = "LightOnOcrConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lilt"
+class_name = "LiltConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "llama"
+class_name = "LlamaConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "llama4_vision_model"
+class_name = "Llama4VisionConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "llama4_text"
+class_name = "Llama4TextConfig"
+field_count = 35
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "llama4"
+class_name = "Llama4Config"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "llava"
+class_name = "LlavaConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "llava_next"
+class_name = "LlavaNextConfig"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "llava_next_video"
+class_name = "LlavaNextVideoConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "llava_onevision"
+class_name = "LlavaOnevisionConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "longcat_flash"
+class_name = "LongcatFlashConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "longformer"
+class_name = "LongformerConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "longt5"
+class_name = "LongT5Config"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "luke"
+class_name = "LukeConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "lw_detr_vit"
+class_name = "LwDetrViTConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lw_detr"
+class_name = "LwDetrConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "lxmert"
+class_name = "LxmertConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "m2m_100"
+class_name = "M2M100Config"
+field_count = 24
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mamba"
+class_name = "MambaConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mamba2"
+class_name = "Mamba2Config"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "marian"
+class_name = "MarianConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "markuplm"
+class_name = "MarkupLMConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mask2former"
+class_name = "Mask2FormerConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "detr"
+class_name = "MaskFormerDetrConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "maskformer"
+class_name = "MaskFormerConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "maskformer-swin"
+class_name = "MaskFormerSwinConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mbart"
+class_name = "MBartConfig"
+field_count = 27
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "megatron-bert"
+class_name = "MegatronBertConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mellum"
+class_name = "MellumConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "metaclip_2_text_model"
+class_name = "MetaClip2TextConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "metaclip_2_vision_model"
+class_name = "MetaClip2VisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "metaclip_2"
+class_name = "MetaClip2Config"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mgp-str"
+class_name = "MgpstrConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mimi"
+class_name = "MimiConfig"
+field_count = 38
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "minicpm3"
+class_name = "MiniCPM3Config"
+field_count = 29
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "minicpmv4_6_vision"
+class_name = "MiniCPMV4_6VisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "minicpmv4_6"
+class_name = "MiniCPMV4_6Config"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "minimax"
+class_name = "MiniMaxConfig"
+field_count = 32
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "minimax_m2"
+class_name = "MiniMaxM2Config"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "minimax_m3_vl_text"
+class_name = "MiniMaxM3VLTextConfig"
+field_count = 36
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "minimax_m3_vl_vision"
+class_name = "MiniMaxM3VLVisionConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "minimax_m3_vl"
+class_name = "MiniMaxM3VLConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ministral"
+class_name = "MinistralConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ministral3"
+class_name = "Ministral3Config"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mistral"
+class_name = "MistralConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mistral3"
+class_name = "Mistral3Config"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mistral4"
+class_name = "Mistral4Config"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mixtral"
+class_name = "MixtralConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mlcd_vision_model"
+class_name = "MLCDVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mllama_vision_model"
+class_name = "MllamaVisionConfig"
+field_count = 15
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mllama_text_model"
+class_name = "MllamaTextConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mllama"
+class_name = "MllamaConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mm-grounding-dino"
+class_name = "MMGroundingDinoConfig"
+field_count = 38
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mobilebert"
+class_name = "MobileBertConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mobilenet_v1"
+class_name = "MobileNetV1Config"
+field_count = 9
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mobilenet_v2"
+class_name = "MobileNetV2Config"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mobilevit"
+class_name = "MobileViTConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mobilevitv2"
+class_name = "MobileViTV2Config"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "modernbert"
+class_name = "ModernBertConfig"
+field_count = 33
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "modernbert-decoder"
+class_name = "ModernBertDecoderConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "modernvbert"
+class_name = "ModernVBertConfig"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "moonshine"
+class_name = "MoonshineConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "moonshine_streaming_encoder"
+class_name = "MoonshineStreamingEncoderConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "moonshine_streaming"
+class_name = "MoonshineStreamingConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "moshi_depth"
+class_name = "MoshiDepthConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "moshi"
+class_name = "MoshiConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mpnet"
+class_name = "MPNetConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mpt"
+class_name = "MptConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mra"
+class_name = "MraConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "mt5"
+class_name = "MT5Config"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "musicflamingo"
+class_name = "MusicFlamingoConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "musicgen_decoder"
+class_name = "MusicgenDecoderConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "musicgen"
+class_name = "MusicgenConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "musicgen_melody_decoder"
+class_name = "MusicgenMelodyDecoderConfig"
+field_count = 22
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "musicgen_melody"
+class_name = "MusicgenMelodyConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "mvp"
+class_name = "MvpConfig"
+field_count = 29
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "nanochat"
+class_name = "NanoChatConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nemotron"
+class_name = "NemotronConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nemotron3_5_asr"
+class_name = "Nemotron3_5AsrConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nemotron_asr_streaming_encoder"
+class_name = "NemotronAsrStreamingEncoderConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nemotron_asr_streaming"
+class_name = "NemotronAsrStreamingConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nemotron_h"
+class_name = "NemotronHConfig"
+field_count = 54
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nllb-moe"
+class_name = "NllbMoeConfig"
+field_count = 39
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "nomic_bert"
+class_name = "NomicBertConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nougat"
+class_name = "NougatConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "nystromformer"
+class_name = "NystromformerConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "olmo"
+class_name = "OlmoConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "olmo2"
+class_name = "Olmo2Config"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "olmo3"
+class_name = "Olmo3Config"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "olmo_hybrid"
+class_name = "OlmoHybridConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "olmoe"
+class_name = "OlmoeConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "omdet-turbo"
+class_name = "OmDetTurboConfig"
+field_count = 40
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "oneformer"
+class_name = "OneFormerConfig"
+field_count = 41
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "openai-gpt"
+class_name = "OpenAIGPTConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "openai_privacy_filter"
+class_name = "OpenAIPrivacyFilterConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "opt"
+class_name = "OPTConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "ovis2"
+class_name = "Ovis2Config"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "owlv2_text_model"
+class_name = "Owlv2TextConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "owlv2_vision_model"
+class_name = "Owlv2VisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "owlv2"
+class_name = "Owlv2Config"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "owlvit_text_model"
+class_name = "OwlViTTextConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "owlvit_vision_model"
+class_name = "OwlViTVisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "owlvit"
+class_name = "OwlViTConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "paddleocr_vl_vision"
+class_name = "PaddleOCRVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "paddleocr_vl_text"
+class_name = "PaddleOCRTextConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "paddleocr_vl"
+class_name = "PaddleOCRVLConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "paligemma"
+class_name = "PaliGemmaConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "parakeet_encoder"
+class_name = "ParakeetEncoderConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "parakeet_ctc"
+class_name = "ParakeetCTCConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "parakeet_rnnt"
+class_name = "ParakeetRNNTConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "parakeet_tdt"
+class_name = "ParakeetTDTConfig"
+field_count = 1
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "patchtsmixer"
+class_name = "PatchTSMixerConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "patchtst"
+class_name = "PatchTSTConfig"
+field_count = 39
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pe_audio_encoder"
+class_name = "PeAudioEncoderConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pe_audio"
+class_name = "PeAudioConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pe_audio_video_encoder"
+class_name = "PeAudioVideoEncoderConfig"
+field_count = 15
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pe_audio_video"
+class_name = "PeAudioVideoConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pe_video_encoder"
+class_name = "PeVideoEncoderConfig"
+field_count = 14
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pe_video"
+class_name = "PeVideoConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pegasus"
+class_name = "PegasusConfig"
+field_count = 25
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pegasus_x"
+class_name = "PegasusXConfig"
+field_count = 27
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "perceiver"
+class_name = "PerceiverConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "perception_lm"
+class_name = "PerceptionLMConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "persimmon"
+class_name = "PersimmonConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "phi"
+class_name = "PhiConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "phi3"
+class_name = "Phi3Config"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "phi4_multimodal_vision"
+class_name = "Phi4MultimodalVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "phi4_multimodal_audio"
+class_name = "Phi4MultimodalAudioConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "phi4_multimodal"
+class_name = "Phi4MultimodalConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "phimoe"
+class_name = "PhimoeConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pi0"
+class_name = "PI0Config"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pix2struct_text_model"
+class_name = "Pix2StructTextConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pix2struct_vision_model"
+class_name = "Pix2StructVisionConfig"
+field_count = 15
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pix2struct"
+class_name = "Pix2StructConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pixio"
+class_name = "PixioConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pixtral"
+class_name = "PixtralVisionConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "plbart"
+class_name = "PLBartConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "poolformer"
+class_name = "PoolFormerConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pop2piano"
+class_name = "Pop2PianoConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_chart2table"
+class_name = "PPChart2TableConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_doclayout_v2"
+class_name = "PPDocLayoutV2Config"
+field_count = 41
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_doclayout_v3"
+class_name = "PPDocLayoutV3Config"
+field_count = 45
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_formulanet"
+class_name = "PPFormulaNetTextConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pp_formulanet"
+class_name = "PPFormulaNetConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_lcnet"
+class_name = "PPLCNetConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_lcnet_v3"
+class_name = "PPLCNetV3Config"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_lcnet_v4"
+class_name = "PPLCNetV4Config"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv5_mobile_det"
+class_name = "PPOCRV5MobileDetConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv5_mobile_rec"
+class_name = "PPOCRV5MobileRecConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv5_server_det"
+class_name = "PPOCRV5ServerDetConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv5_server_rec"
+class_name = "PPOCRV5ServerRecConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv6_medium_det"
+class_name = "PPOCRV6MediumDetConfig"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv6_small_det"
+class_name = "PPOCRV6SmallDetConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv6_small_rec"
+class_name = "PPOCRV6SmallRecConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "pp_ocrv6_tiny_rec"
+class_name = "PPOCRV6TinyRecConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "prompt_depth_anything"
+class_name = "PromptDepthAnythingConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "prophetnet"
+class_name = "ProphetNetConfig"
+field_count = 28
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pvt"
+class_name = "PvtConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "pvt_v2"
+class_name = "PvtV2Config"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qianfan_ocr_vision"
+class_name = "QianfanOCRVisionConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qianfan_ocr"
+class_name = "QianfanOCRConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2"
+class_name = "Qwen2Config"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_omni_vision_encoder"
+class_name = "Qwen2_5OmniVisionEncoderConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_5_omni_audio_encoder"
+class_name = "Qwen2_5OmniAudioEncoderConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_5_omni_text"
+class_name = "Qwen2_5OmniTextConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_omni_thinker"
+class_name = "Qwen2_5OmniThinkerConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_omni_talker"
+class_name = "Qwen2_5OmniTalkerConfig"
+field_count = 38
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_omni_dit"
+class_name = "Qwen2_5OmniDiTConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_5_omni_bigvgan"
+class_name = "Qwen2_5OmniBigVGANConfig"
+field_count = 6
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_5_omni_token2wav"
+class_name = "Qwen2_5OmniToken2WavConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_omni"
+class_name = "Qwen2_5OmniConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_vl_vision"
+class_name = "Qwen2_5_VLVisionConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_5_vl_text"
+class_name = "Qwen2_5_VLTextConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_5_vl"
+class_name = "Qwen2_5_VLConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_audio_encoder"
+class_name = "Qwen2AudioEncoderConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_audio"
+class_name = "Qwen2AudioConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_moe"
+class_name = "Qwen2MoeConfig"
+field_count = 31
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_vl_vision"
+class_name = "Qwen2VLVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen2_vl_text"
+class_name = "Qwen2VLTextConfig"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen2_vl"
+class_name = "Qwen2VLConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3"
+class_name = "Qwen3Config"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_5_text"
+class_name = "Qwen3_5TextConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_5_vision"
+class_name = "Qwen3_5VisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_5"
+class_name = "Qwen3_5Config"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_5_moe_text"
+class_name = "Qwen3_5MoeTextConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_5_moe_vision"
+class_name = "Qwen3_5MoeVisionConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_5_moe"
+class_name = "Qwen3_5MoeConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_asr_encoder"
+class_name = "Qwen3ASREncoderConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_asr"
+class_name = "Qwen3ASRConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_moe"
+class_name = "Qwen3MoeConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_next"
+class_name = "Qwen3NextConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_omni_moe_audio_encoder"
+class_name = "Qwen3OmniMoeAudioEncoderConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_omni_moe_vision_encoder"
+class_name = "Qwen3OmniMoeVisionEncoderConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_omni_moe_text"
+class_name = "Qwen3OmniMoeTextConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_omni_moe_thinker"
+class_name = "Qwen3OmniMoeThinkerConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_omni_moe_talker_code_predictor"
+class_name = "Qwen3OmniMoeTalkerCodePredictorConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_omni_moe_talker_text"
+class_name = "Qwen3OmniMoeTalkerTextConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_omni_moe"
+class_name = "Qwen3OmniMoeConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_vl_vision"
+class_name = "Qwen3VLVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_vl_text"
+class_name = "Qwen3VLTextConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_vl"
+class_name = "Qwen3VLConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_vl_moe_text"
+class_name = "Qwen3VLMoeTextConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "qwen3_vl_moe_vision"
+class_name = "Qwen3VLMoeVisionConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "qwen3_vl_moe"
+class_name = "Qwen3VLMoeConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rag"
+class_name = "RagConfig"
+field_count = 27
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "recurrent_gemma"
+class_name = "RecurrentGemmaConfig"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "reformer"
+class_name = "ReformerConfig"
+field_count = 34
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "regnet"
+class_name = "RegNetConfig"
+field_count = 8
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "rembert"
+class_name = "RemBertConfig"
+field_count = 22
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "resnet"
+class_name = "ResNetConfig"
+field_count = 9
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rf_detr_dinov2"
+class_name = "RfDetrDinov2Config"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rf_detr"
+class_name = "RfDetrConfig"
+field_count = 38
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "roberta"
+class_name = "RobertaConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "roberta-prelayernorm"
+class_name = "RobertaPreLayerNormConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "roc_bert"
+class_name = "RoCBertConfig"
+field_count = 25
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "roformer"
+class_name = "RoFormerConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rt_detr"
+class_name = "RTDetrConfig"
+field_count = 52
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rt_detr_resnet"
+class_name = "RTDetrResNetConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rt_detr_v2"
+class_name = "RTDetrV2Config"
+field_count = 55
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "rwkv"
+class_name = "RwkvConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam_vision_model"
+class_name = "SamVisionConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam"
+class_name = "SamConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam2_hiera_det_model"
+class_name = "Sam2HieraDetConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam2_vision_model"
+class_name = "Sam2VisionConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam2"
+class_name = "Sam2Config"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam2_video"
+class_name = "Sam2VideoConfig"
+field_count = 41
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_vit_model"
+class_name = "Sam3ViTConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_vision_model"
+class_name = "Sam3VisionConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_geometry_encoder"
+class_name = "Sam3GeometryEncoderConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_detr_encoder"
+class_name = "Sam3DETREncoderConfig"
+field_count = 9
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_detr_decoder"
+class_name = "Sam3DETRDecoderConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_mask_decoder"
+class_name = "Sam3MaskDecoderConfig"
+field_count = 6
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3"
+class_name = "Sam3Config"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_lite_text_geometry_encoder"
+class_name = "Sam3LiteTextGeometryEncoderConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_lite_text_detr_encoder"
+class_name = "Sam3LiteTextDETREncoderConfig"
+field_count = 9
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_lite_text_detr_decoder"
+class_name = "Sam3LiteTextDETRDecoderConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_lite_text_mask_decoder"
+class_name = "Sam3LiteTextMaskDecoderConfig"
+field_count = 6
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_lite_text_text_model"
+class_name = "Sam3LiteTextTextConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "sam3_lite_text"
+class_name = "Sam3LiteTextConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_tracker"
+class_name = "Sam3TrackerConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_tracker_video"
+class_name = "Sam3TrackerVideoConfig"
+field_count = 40
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam3_video"
+class_name = "Sam3VideoConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam_hq_vision_model"
+class_name = "SamHQVisionConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sam_hq"
+class_name = "SamHQConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sapiens2_head"
+class_name = "Sapiens2HeadConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sapiens2"
+class_name = "Sapiens2Config"
+field_count = 35
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "seamless_m4t"
+class_name = "SeamlessM4TConfig"
+field_count = 73
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "seamless_m4t_v2"
+class_name = "SeamlessM4Tv2Config"
+field_count = 76
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "seed_oss"
+class_name = "SeedOssConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "segformer"
+class_name = "SegformerConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "seggpt"
+class_name = "SegGptConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sew"
+class_name = "SEWConfig"
+field_count = 37
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "sew-d"
+class_name = "SEWDConfig"
+field_count = 43
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "shieldgemma2"
+class_name = "ShieldGemma2Config"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "siglip_text_model"
+class_name = "SiglipTextConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "siglip_vision_model"
+class_name = "SiglipVisionConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "siglip"
+class_name = "SiglipConfig"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "siglip2_text_model"
+class_name = "Siglip2TextConfig"
+field_count = 13
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "siglip2_vision_model"
+class_name = "Siglip2VisionConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "siglip2"
+class_name = "Siglip2Config"
+field_count = 3
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "slanet"
+class_name = "SLANetConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "slanext"
+class_name = "SLANeXtConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "smollm3"
+class_name = "SmolLM3Config"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "smolvlm_vision"
+class_name = "SmolVLMVisionConfig"
+field_count = 11
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "smolvlm"
+class_name = "SmolVLMConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "solar_open"
+class_name = "SolarOpenConfig"
+field_count = 26
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "speech-encoder-decoder"
+class_name = "SpeechEncoderDecoderConfig"
+field_count = 1
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "speech_to_text"
+class_name = "Speech2TextConfig"
+field_count = 30
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "speecht5"
+class_name = "SpeechT5Config"
+field_count = 58
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "speecht5_hifigan"
+class_name = "SpeechT5HifiGanConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "splinter"
+class_name = "SplinterConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "squeezebert"
+class_name = "SqueezeBertConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "stablelm"
+class_name = "StableLmConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "starcoder2"
+class_name = "Starcoder2Config"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "superglue"
+class_name = "SuperGlueConfig"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "superpoint"
+class_name = "SuperPointConfig"
+field_count = 9
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "swiftformer"
+class_name = "SwiftFormerConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "swin"
+class_name = "SwinConfig"
+field_count = 17
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "swin2sr"
+class_name = "Swin2SRConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "swinv2"
+class_name = "Swinv2Config"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "switch_transformers"
+class_name = "SwitchTransformersConfig"
+field_count = 32
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5"
+class_name = "T5Config"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5_gemma_module"
+class_name = "T5GemmaModuleConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5gemma"
+class_name = "T5GemmaConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5gemma2_text"
+class_name = "T5Gemma2TextConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5gemma2_encoder"
+class_name = "T5Gemma2EncoderConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5gemma2_decoder"
+class_name = "T5Gemma2DecoderConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "t5gemma2"
+class_name = "T5Gemma2Config"
+field_count = 10
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "table-transformer"
+class_name = "TableTransformerConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "tapas"
+class_name = "TapasConfig"
+field_count = 42
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "textnet"
+class_name = "TextNetConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "time_series_transformer"
+class_name = "TimeSeriesTransformerConfig"
+field_count = 30
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "timesfm"
+class_name = "TimesFmConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "timesfm2_5"
+class_name = "TimesFm2_5Config"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "timesformer"
+class_name = "TimesformerConfig"
+field_count = 16
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "timm_backbone"
+class_name = "TimmBackboneConfig"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "timm_wrapper"
+class_name = "TimmWrapperConfig"
+field_count = 4
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "trocr"
+class_name = "TrOCRConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "tvp"
+class_name = "TvpConfig"
+field_count = 23
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "udop"
+class_name = "UdopConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "umt5"
+class_name = "UMT5Config"
+field_count = 20
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "unispeech"
+class_name = "UniSpeechConfig"
+field_count = 47
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "unispeech-sat"
+class_name = "UniSpeechSatConfig"
+field_count = 50
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "univnet"
+class_name = "UnivNetConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "upernet"
+class_name = "UperNetConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "uvdoc_backbone"
+class_name = "UVDocBackboneConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "uvdoc"
+class_name = "UVDocConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vaultgemma"
+class_name = "VaultGemmaConfig"
+field_count = 24
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vibevoice_acoustic_tokenizer"
+class_name = "VibeVoiceAcousticTokenizerConfig"
+field_count = 12
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vibevoice_acoustic_tokenizer_encoder"
+class_name = "VibeVoiceAcousticTokenizerEncoderConfig"
+field_count = 0
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vibevoice_acoustic_tokenizer_decoder"
+class_name = "VibeVoiceAcousticTokenizerDecoderConfig"
+field_count = 0
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vibevoice_asr"
+class_name = "VibeVoiceAsrConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "video_llama_3_vision"
+class_name = "VideoLlama3VisionConfig"
+field_count = 10
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "video_llama_3"
+class_name = "VideoLlama3Config"
+field_count = 5
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "video_llava"
+class_name = "VideoLlavaConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "videomae"
+class_name = "VideoMAEConfig"
+field_count = 21
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "videomt"
+class_name = "VideomtConfig"
+field_count = 26
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "videoprism_vision_model"
+class_name = "VideoPrismVisionConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "videoprism_text_model"
+class_name = "VideoPrismTextConfig"
+field_count = 17
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "videoprism"
+class_name = "VideoPrismConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vilt"
+class_name = "ViltConfig"
+field_count = 21
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vipllava"
+class_name = "VipLlavaConfig"
+field_count = 8
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vision-encoder-decoder"
+class_name = "VisionEncoderDecoderConfig"
+field_count = 1
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vision-text-dual-encoder"
+class_name = "VisionTextDualEncoderConfig"
+field_count = 2
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "visual_bert"
+class_name = "VisualBertConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vit"
+class_name = "ViTConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vit_mae"
+class_name = "ViTMAEConfig"
+field_count = 19
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vit_msn"
+class_name = "ViTMSNConfig"
+field_count = 13
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vitdet"
+class_name = "VitDetConfig"
+field_count = 19
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vitmatte"
+class_name = "VitMatteConfig"
+field_count = 6
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vitpose"
+class_name = "VitPoseConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vitpose_backbone"
+class_name = "VitPoseBackboneConfig"
+field_count = 15
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vits"
+class_name = "VitsConfig"
+field_count = 45
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "vivit"
+class_name = "VivitConfig"
+field_count = 16
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "vjepa2"
+class_name = "VJEPA2Config"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "voxtral_encoder"
+class_name = "VoxtralEncoderConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "voxtral"
+class_name = "VoxtralConfig"
+field_count = 4
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "voxtral_realtime_text"
+class_name = "VoxtralRealtimeTextConfig"
+field_count = 18
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "voxtral_realtime_encoder"
+class_name = "VoxtralRealtimeEncoderConfig"
+field_count = 15
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "voxtral_realtime"
+class_name = "VoxtralRealtimeConfig"
+field_count = 7
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "wav2vec2"
+class_name = "Wav2Vec2Config"
+field_count = 55
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "wav2vec2-bert"
+class_name = "Wav2Vec2BertConfig"
+field_count = 47
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "wav2vec2-conformer"
+class_name = "Wav2Vec2ConformerConfig"
+field_count = 58
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "wavlm"
+class_name = "WavLMConfig"
+field_count = 55
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "whisper"
+class_name = "WhisperConfig"
+field_count = 38
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xclip_text_model"
+class_name = "XCLIPTextConfig"
+field_count = 14
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xclip_vision_model"
+class_name = "XCLIPVisionConfig"
+field_count = 18
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xclip"
+class_name = "XCLIPConfig"
+field_count = 11
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "xcodec"
+class_name = "XcodecConfig"
+field_count = 12
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "xcodec2"
+class_name = "Xcodec2Config"
+field_count = 22
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "xglm"
+class_name = "XGLMConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xlm"
+class_name = "XLMConfig"
+field_count = 32
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xlm-roberta"
+class_name = "XLMRobertaConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xlm-roberta-xl"
+class_name = "XLMRobertaXLConfig"
+field_count = 20
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "xlnet"
+class_name = "XLNetConfig"
+field_count = 28
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "xlstm"
+class_name = "xLSTMConfig"
+field_count = 32
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "xmod"
+class_name = "XmodConfig"
+field_count = 27
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "yolos"
+class_name = "YolosConfig"
+field_count = 22
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "yoso"
+class_name = "YosoConfig"
+field_count = 23
+is_strict = false
+derived = false
+
+[[model_type]]
+model_type = "youtu"
+class_name = "YoutuConfig"
+field_count = 25
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "zamba"
+class_name = "ZambaConfig"
+field_count = 33
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "zamba2"
+class_name = "Zamba2Config"
+field_count = 38
+is_strict = false
+derived = true
+
+[[model_type]]
+model_type = "zoedepth"
+class_name = "ZoeDepthConfig"
+field_count = 27
+is_strict = false
+derived = true

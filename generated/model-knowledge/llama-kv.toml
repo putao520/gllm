@@ -1,0 +1,1615 @@
+# kv: 269 entries
+
+[[kv]]
+key_name = "Adapter..ALORA_INVOCATION_TOKENS"
+key_string = "adapter.alora.invocation_tokens"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Adapter..LORA_ALPHA"
+key_string = "adapter.lora.alpha"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Adapter..LORA_PROMPT_PREFIX"
+key_string = "adapter.lora.prompt_prefix"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Adapter..LORA_TASK_NAME"
+key_string = "adapter.lora.task_name"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Adapter..TYPE"
+key_string = "adapter.type"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Attention..CAUSAL"
+key_string = "{arch}.attention.causal"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..CLAMP_KQV"
+key_string = "{arch}.attention.clamp_kqv"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..DECAY_LORA_RANK"
+key_string = "{arch}.attention.decay_lora_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..GATE_LORA_RANK"
+key_string = "{arch}.attention.gate_lora_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..GROUPNORM_EPS"
+key_string = "{arch}.attention.group_norm_epsilon"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..GROUPNORM_GROUPS"
+key_string = "{arch}.attention.group_norm_groups"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..HEAD_COUNT"
+key_string = "{arch}.attention.head_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..HEAD_COUNT_KV"
+key_string = "{arch}.attention.head_count_kv"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..ICLR_LORA_RANK"
+key_string = "{arch}.attention.iclr_lora_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..KEY_LENGTH"
+key_string = "{arch}.attention.key_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..KEY_LENGTH_MLA"
+key_string = "{arch}.attention.key_length_mla"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..KEY_LENGTH_SWA"
+key_string = "{arch}.attention.key_length_swa"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..KV_LORA_RANK"
+key_string = "{arch}.attention.kv_lora_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..LAYERNORM_EPS"
+key_string = "{arch}.attention.layer_norm_epsilon"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..LAYERNORM_RMS_EPS"
+key_string = "{arch}.attention.layer_norm_rms_epsilon"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..MAX_ALIBI_BIAS"
+key_string = "{arch}.attention.max_alibi_bias"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..OUTPUT_SCALE"
+key_string = "{arch}.attention.output_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..Q_LORA_RANK"
+key_string = "{arch}.attention.q_lora_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..REL_BUCKETS_COUNT"
+key_string = "{arch}.attention.relative_buckets_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..SCALE"
+key_string = "{arch}.attention.scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..SHARED_KV_LAYERS"
+key_string = "{arch}.attention.shared_kv_layers"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..SLIDING_WINDOW"
+key_string = "{arch}.attention.sliding_window"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..SLIDING_WINDOW_PATTERN"
+key_string = "{arch}.attention.sliding_window_pattern"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..TEMPERATURE_LENGTH"
+key_string = "{arch}.attention.temperature_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..TEMPERATURE_SCALE"
+key_string = "{arch}.attention.temperature_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..VALUE_LENGTH"
+key_string = "{arch}.attention.value_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..VALUE_LENGTH_MLA"
+key_string = "{arch}.attention.value_length_mla"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..VALUE_LENGTH_SWA"
+key_string = "{arch}.attention.value_length_swa"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention..VALUE_RESIDUAL_MIX_LORA_RANK"
+key_string = "{arch}.attention.value_residual_mix_lora_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention.Indexer..HEAD_COUNT"
+key_string = "{arch}.attention.indexer.head_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention.Indexer..KEY_LENGTH"
+key_string = "{arch}.attention.indexer.key_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Attention.Indexer..TOP_K"
+key_string = "{arch}.attention.indexer.top_k"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Classifier..OUTPUT_LABELS"
+key_string = "{arch}.classifier.output_labels"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Clip..HAS_AUDIO_ENCODER"
+key_string = "clip.has_audio_encoder"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Clip..HAS_LLAVA_PROJECTOR"
+key_string = "clip.has_llava_projector"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Clip..HAS_VISION_ENCODER"
+key_string = "clip.has_vision_encoder"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Clip..PROJECTOR_TYPE"
+key_string = "clip.projector_type"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..BLOCK_COUNT"
+key_string = "clip.audio.block_count"
+has_arch_placeholder = false
+category = "moe_or_block"
+
+[[kv]]
+key_name = "ClipAudio..CHUNK_SIZE"
+key_string = "clip.audio.chunk_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..CONV_KERNEL_SIZE"
+key_string = "clip.audio.conv_kernel_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..EMBEDDING_LENGTH"
+key_string = "clip.audio.embedding_length"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..FEED_FORWARD_LENGTH"
+key_string = "clip.audio.feed_forward_length"
+has_arch_placeholder = false
+category = "ffn"
+
+[[kv]]
+key_name = "ClipAudio..MAX_POS_EMB"
+key_string = "clip.audio.max_pos_emb"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..NUM_MEL_BINS"
+key_string = "clip.audio.num_mel_bins"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..PROJECTION_DIM"
+key_string = "clip.audio.projection_dim"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio..PROJECTOR_TYPE"
+key_string = "clip.audio.projector_type"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio.Attention..HEAD_COUNT"
+key_string = "clip.audio.attention.head_count"
+has_arch_placeholder = false
+category = "attention"
+
+[[kv]]
+key_name = "ClipAudio.Attention..LAYERNORM_EPS"
+key_string = "clip.audio.attention.layer_norm_epsilon"
+has_arch_placeholder = false
+category = "attention"
+
+[[kv]]
+key_name = "ClipAudio.Projector..DOWNSAMPLE_RATE"
+key_string = "clip.audio.projector.downsample_rate"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio.Projector..HEAD_COUNT"
+key_string = "clip.audio.projector.head_count"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio.Projector..STACK_FACTOR"
+key_string = "clip.audio.projector.stack_factor"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipAudio.Projector..WINDOW_SIZE"
+key_string = "clip.audio.projector.window_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..BLOCK_COUNT"
+key_string = "clip.vision.block_count"
+has_arch_placeholder = false
+category = "moe_or_block"
+
+[[kv]]
+key_name = "ClipVision..EMBEDDING_LENGTH"
+key_string = "clip.vision.embedding_length"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..FEED_FORWARD_LENGTH"
+key_string = "clip.vision.feed_forward_length"
+has_arch_placeholder = false
+category = "ffn"
+
+[[kv]]
+key_name = "ClipVision..IMAGE_MAX_PIXELS"
+key_string = "clip.vision.image_max_pixels"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..IMAGE_MEAN"
+key_string = "clip.vision.image_mean"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..IMAGE_MIN_PIXELS"
+key_string = "clip.vision.image_min_pixels"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..IMAGE_SIZE"
+key_string = "clip.vision.image_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..IMAGE_STD"
+key_string = "clip.vision.image_std"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..IS_DEEPSTACK_LAYERS"
+key_string = "clip.vision.is_deepstack_layers"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..N_WA_PATTERN"
+key_string = "clip.vision.n_wa_pattern"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..PATCH_SIZE"
+key_string = "clip.vision.patch_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..PREPROC_IMAGE_SIZE"
+key_string = "clip.vision.preproc_image_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..PREPROC_MAX_TILES"
+key_string = "clip.vision.preproc_max_tiles"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..PREPROC_MIN_TILES"
+key_string = "clip.vision.preproc_min_tiles"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..PROJECTION_DIM"
+key_string = "clip.vision.projection_dim"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..PROJECTOR_TYPE"
+key_string = "clip.vision.projector_type"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..SPATIAL_MERGE_SIZE"
+key_string = "clip.vision.spatial_merge_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..USE_GELU"
+key_string = "clip.use_gelu"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..USE_SILU"
+key_string = "clip.use_silu"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..WA_LAYER_INDEXES"
+key_string = "clip.vision.wa_layer_indexes"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision..WINDOW_SIZE"
+key_string = "clip.vision.window_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision.Attention..HEAD_COUNT"
+key_string = "clip.vision.attention.head_count"
+has_arch_placeholder = false
+category = "attention"
+
+[[kv]]
+key_name = "ClipVision.Attention..LAYERNORM_EPS"
+key_string = "clip.vision.attention.layer_norm_epsilon"
+has_arch_placeholder = false
+category = "attention"
+
+[[kv]]
+key_name = "ClipVision.Projector..SCALE_FACTOR"
+key_string = "clip.vision.projector.scale_factor"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision.SAM..BLOCK_COUNT"
+key_string = "clip.vision.sam.block_count"
+has_arch_placeholder = false
+category = "moe_or_block"
+
+[[kv]]
+key_name = "ClipVision.SAM..EMBEDDING_LENGTH"
+key_string = "clip.vision.sam.embedding_length"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ClipVision.SAM..HEAD_COUNT"
+key_string = "clip.vision.sam.head_count"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "ConvNext..BLOCK_COUNT"
+key_string = "{arch}.convnext.block_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "ConvNext..EMBEDDING_LENGTH"
+key_string = "{arch}.convnext.embedding_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Diffusion..SHIFT_LOGITS"
+key_string = "diffusion.shift_logits"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "General..ALIGNMENT"
+key_string = "general.alignment"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..ARCHITECTURE"
+key_string = "general.architecture"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..AUTHOR"
+key_string = "general.author"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASENAME"
+key_string = "general.basename"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_AUTHOR"
+key_string = "general.base_model.{id}.author"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_COUNT"
+key_string = "general.base_model.count"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_DESCRIPTION"
+key_string = "general.base_model.{id}.description"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_DOI"
+key_string = "general.base_model.{id}.doi"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_NAME"
+key_string = "general.base_model.{id}.name"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_ORGANIZATION"
+key_string = "general.base_model.{id}.organization"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_REPO_URL"
+key_string = "general.base_model.{id}.repo_url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_URL"
+key_string = "general.base_model.{id}.url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_UUID"
+key_string = "general.base_model.{id}.uuid"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..BASE_MODEL_VERSION"
+key_string = "general.base_model.{id}.version"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_AUTHOR"
+key_string = "general.dataset.{id}.author"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_COUNT"
+key_string = "general.dataset.count"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_DESCRIPTION"
+key_string = "general.dataset.{id}.description"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_DOI"
+key_string = "general.dataset.{id}.doi"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_NAME"
+key_string = "general.dataset.{id}.name"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_ORGANIZATION"
+key_string = "general.dataset.{id}.organization"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_REPO_URL"
+key_string = "general.dataset.{id}.repo_url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_URL"
+key_string = "general.dataset.{id}.url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_UUID"
+key_string = "general.dataset.{id}.uuid"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DATASET_VERSION"
+key_string = "general.dataset.{id}.version"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DESCRIPTION"
+key_string = "general.description"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..DOI"
+key_string = "general.doi"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..FILE_TYPE"
+key_string = "general.file_type"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..FINETUNE"
+key_string = "general.finetune"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..LANGUAGES"
+key_string = "general.languages"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..LICENSE"
+key_string = "general.license"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..LICENSE_LINK"
+key_string = "general.license.link"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..LICENSE_NAME"
+key_string = "general.license.name"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..NAME"
+key_string = "general.name"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..ORGANIZATION"
+key_string = "general.organization"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..QUANTIZATION_VERSION"
+key_string = "general.quantization_version"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..QUANTIZED_BY"
+key_string = "general.quantized_by"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..REPO_URL"
+key_string = "general.repo_url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_MIN_P"
+key_string = "general.sampling.min_p"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_MIROSTAT"
+key_string = "general.sampling.mirostat"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_MIROSTAT_ETA"
+key_string = "general.sampling.mirostat_eta"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_MIROSTAT_TAU"
+key_string = "general.sampling.mirostat_tau"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_PENALTY_LAST_N"
+key_string = "general.sampling.penalty_last_n"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_PENALTY_REPEAT"
+key_string = "general.sampling.penalty_repeat"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_SEQUENCE"
+key_string = "general.sampling.sequence"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_TEMP"
+key_string = "general.sampling.temp"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_TOP_K"
+key_string = "general.sampling.top_k"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_TOP_P"
+key_string = "general.sampling.top_p"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_XTC_PROBABILITY"
+key_string = "general.sampling.xtc_probability"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SAMPLING_XTC_THRESHOLD"
+key_string = "general.sampling.xtc_threshold"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SIZE_LABEL"
+key_string = "general.size_label"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SOURCE_DOI"
+key_string = "general.source.doi"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SOURCE_REPO_URL"
+key_string = "general.source.repo_url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SOURCE_URL"
+key_string = "general.source.url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..SOURCE_UUID"
+key_string = "general.source.uuid"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..TAGS"
+key_string = "general.tags"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..TYPE"
+key_string = "general.type"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..URL"
+key_string = "general.url"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..UUID"
+key_string = "general.uuid"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "General..VERSION"
+key_string = "general.version"
+has_arch_placeholder = false
+category = "general"
+
+[[kv]]
+key_name = "IMatrix..CHUNK_COUNT"
+key_string = "imatrix.chunk_count"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "IMatrix..CHUNK_SIZE"
+key_string = "imatrix.chunk_size"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "IMatrix..DATASETS"
+key_string = "imatrix.datasets"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "KDA..HEAD_DIM"
+key_string = "{arch}.kda.head_dim"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..ACTIVATION_SPARSITY_SCALE"
+key_string = "{arch}.activation_sparsity_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..ALTUP_ACTIVE_IDX"
+key_string = "{arch}.altup.active_idx"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..ALTUP_NUM_INPUTS"
+key_string = "{arch}.altup.num_inputs"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..ATTN_LOGIT_SOFTCAPPING"
+key_string = "{arch}.attn_logit_softcapping"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..BLOCK_COUNT"
+key_string = "{arch}.block_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..CONTEXT_LENGTH"
+key_string = "{arch}.context_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..DECODER_BLOCK_COUNT"
+key_string = "{arch}.decoder_block_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..DECODER_START_TOKEN_ID"
+key_string = "{arch}.decoder_start_token_id"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..DENSE_FEAT_IN_SIZE"
+key_string = "{arch}.{dense}_feat_in"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..DENSE_FEAT_OUT_SIZE"
+key_string = "{arch}.{dense}_feat_out"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EMBD_LENGTH_PER_LAYER_INP"
+key_string = "{arch}.embedding_length_per_layer_input"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EMBEDDING_LENGTH"
+key_string = "{arch}.embedding_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EMBEDDING_LENGTH_OUT"
+key_string = "{arch}.embedding_length_out"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EMBEDDING_SCALE"
+key_string = "{arch}.embedding_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERTS_PER_GROUP"
+key_string = "{arch}.experts_per_group"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_CHUNK_FEED_FORWARD_LENGTH"
+key_string = "{arch}.expert_chunk_feed_forward_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_COUNT"
+key_string = "{arch}.expert_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_FEED_FORWARD_LENGTH"
+key_string = "{arch}.expert_feed_forward_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_GATING_FUNC"
+key_string = "{arch}.expert_gating_func"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_GROUP_COUNT"
+key_string = "{arch}.expert_group_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_GROUP_SCALE"
+key_string = "{arch}.expert_group_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_GROUP_USED_COUNT"
+key_string = "{arch}.expert_group_used_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_SHARED_COUNT"
+key_string = "{arch}.expert_shared_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_SHARED_FEED_FORWARD_LENGTH"
+key_string = "{arch}.expert_shared_feed_forward_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_USED_COUNT"
+key_string = "{arch}.expert_used_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_WEIGHTS_NORM"
+key_string = "{arch}.expert_weights_norm"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..EXPERT_WEIGHTS_SCALE"
+key_string = "{arch}.expert_weights_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..FEATURES_LENGTH"
+key_string = "{arch}.features_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..FEED_FORWARD_LENGTH"
+key_string = "{arch}.feed_forward_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..FINAL_LOGIT_SOFTCAPPING"
+key_string = "{arch}.final_logit_softcapping"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..FULL_ATTENTION_INTERVAL"
+key_string = "{arch}.full_attention_interval"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..INTERLEAVE_MOE_LAYER_STEP"
+key_string = "{arch}.interleave_moe_layer_step"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..LEADING_DENSE_BLOCK_COUNT"
+key_string = "{arch}.leading_dense_block_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..LOGIT_SCALE"
+key_string = "{arch}.logit_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..MOE_EVERY_N_LAYERS"
+key_string = "{arch}.moe_every_n_layers"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..MOE_LATENT_SIZE"
+key_string = "{arch}.moe_latent_size"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..NEXTN_PREDICT_LAYERS"
+key_string = "{arch}.nextn_predict_layers"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..NUM_DEEPSTACK_LAYERS"
+key_string = "{arch}.n_deepstack_layers"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..POOLING_TYPE"
+key_string = "{arch}.pooling_type"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..RESCALE_EVERY_N_LAYERS"
+key_string = "{arch}.rescale_every_n_layers"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..RESIDUAL_SCALE"
+key_string = "{arch}.residual_scale"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..ROUTER_LOGIT_SOFTCAPPING"
+key_string = "{arch}.router_logit_softcapping"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..SWIGLU_CLAMP_EXP"
+key_string = "{arch}.swiglu_clamp_exp"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..SWIGLU_CLAMP_SHEXP"
+key_string = "{arch}.swiglu_clamp_shexp"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..SWIN_NORM"
+key_string = "{arch}.swin_norm"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..TENSOR_DATA_LAYOUT"
+key_string = "{arch}.tensor_data_layout"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..TIME_DECAY_EXTRA_DIM"
+key_string = "{arch}.time_decay_extra_dim"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..TIME_MIX_EXTRA_DIM"
+key_string = "{arch}.time_mix_extra_dim"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..TOKEN_SHIFT_COUNT"
+key_string = "{arch}.token_shift_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..USE_PARALLEL_RESIDUAL"
+key_string = "{arch}.use_parallel_residual"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "LLM..VOCAB_SIZE"
+key_string = "{arch}.vocab_size"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "PosNet..BLOCK_COUNT"
+key_string = "{arch}.posnet.block_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "PosNet..EMBEDDING_LENGTH"
+key_string = "{arch}.posnet.embedding_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..DIMENSION_COUNT"
+key_string = "{arch}.rope.dimension_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..DIMENSION_COUNT_SWA"
+key_string = "{arch}.rope.dimension_count_swa"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..DIMENSION_SECTIONS"
+key_string = "{arch}.rope.dimension_sections"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..FREQ_BASE"
+key_string = "{arch}.rope.freq_base"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..FREQ_BASE_SWA"
+key_string = "{arch}.rope.freq_base_swa"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_ALPHA"
+key_string = "{arch}.rope.scaling.alpha"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_ATTN_FACTOR"
+key_string = "{arch}.rope.scaling.attn_factor"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_FACTOR"
+key_string = "{arch}.rope.scaling.factor"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_FINETUNED"
+key_string = "{arch}.rope.scaling.finetuned"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_ORIG_CTX_LEN"
+key_string = "{arch}.rope.scaling.original_context_length"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_TYPE"
+key_string = "{arch}.rope.scaling.type"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_YARN_ATTN_FACTOR"
+key_string = "{arch}.rope.scaling.yarn_attn_factor"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_YARN_BETA_FAST"
+key_string = "{arch}.rope.scaling.yarn_beta_fast"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_YARN_BETA_SLOW"
+key_string = "{arch}.rope.scaling.yarn_beta_slow"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_YARN_EXT_FACTOR"
+key_string = "{arch}.rope.scaling.yarn_ext_factor"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Rope..SCALING_YARN_LOG_MUL"
+key_string = "{arch}.rope.scaling.yarn_log_multiplier"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "SSM..CONV_KERNEL"
+key_string = "{arch}.ssm.conv_kernel"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "SSM..DT_B_C_RMS"
+key_string = "{arch}.ssm.dt_b_c_rms"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "SSM..GROUP_COUNT"
+key_string = "{arch}.ssm.group_count"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "SSM..INNER_SIZE"
+key_string = "{arch}.ssm.inner_size"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "SSM..STATE_SIZE"
+key_string = "{arch}.ssm.state_size"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "SSM..TIME_STEP_RANK"
+key_string = "{arch}.ssm.time_step_rank"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "ShortConv..L_CACHE"
+key_string = "{arch}.shortconv.l_cache"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "Split..LLM_KV_SPLIT_COUNT"
+key_string = "split.count"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Split..LLM_KV_SPLIT_NO"
+key_string = "split.no"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Split..LLM_KV_SPLIT_TENSORS_COUNT"
+key_string = "split.tensors.count"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "Tokenizer..ADD_BOS"
+key_string = "tokenizer.ggml.add_bos_token"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..ADD_EOS"
+key_string = "tokenizer.ggml.add_eos_token"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..ADD_PREFIX"
+key_string = "tokenizer.ggml.add_space_prefix"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..ADD_SEP"
+key_string = "tokenizer.ggml.add_sep_token"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..BOS_ID"
+key_string = "tokenizer.ggml.bos_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..CHAT_TEMPLATE"
+key_string = "tokenizer.chat_template"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..CHAT_TEMPLATES"
+key_string = "tokenizer.chat_templates"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..CHAT_TEMPLATE_N"
+key_string = "tokenizer.chat_template.{name}"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..EOM_ID"
+key_string = "tokenizer.ggml.eom_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..EOS_ID"
+key_string = "tokenizer.ggml.eos_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..EOT_ID"
+key_string = "tokenizer.ggml.eot_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..FIM_MID_ID"
+key_string = "tokenizer.ggml.fim_mid_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..FIM_PAD_ID"
+key_string = "tokenizer.ggml.fim_pad_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..FIM_PRE_ID"
+key_string = "tokenizer.ggml.fim_pre_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..FIM_REP_ID"
+key_string = "tokenizer.ggml.fim_rep_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..FIM_SEP_ID"
+key_string = "tokenizer.ggml.fim_sep_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..FIM_SUF_ID"
+key_string = "tokenizer.ggml.fim_suf_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..HF_JSON"
+key_string = "tokenizer.huggingface.json"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..LIST"
+key_string = "tokenizer.ggml.tokens"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..MASK_ID"
+key_string = "tokenizer.ggml.mask_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..MERGES"
+key_string = "tokenizer.ggml.merges"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..MIDDLE_ID"
+key_string = "tokenizer.ggml.middle_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..MODEL"
+key_string = "tokenizer.ggml.model"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..PAD_ID"
+key_string = "tokenizer.ggml.padding_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..PRE"
+key_string = "tokenizer.ggml.pre"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..PRECOMPILED_CHARSMAP"
+key_string = "tokenizer.ggml.precompiled_charsmap"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..PREFIX_ID"
+key_string = "tokenizer.ggml.prefix_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..REMOVE_EXTRA_WS"
+key_string = "tokenizer.ggml.remove_extra_whitespaces"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..RWKV"
+key_string = "tokenizer.rwkv.world"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..SCORES"
+key_string = "tokenizer.ggml.scores"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..SEP_ID"
+key_string = "tokenizer.ggml.seperator_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..SUFFIX_ID"
+key_string = "tokenizer.ggml.suffix_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..TOKEN_TYPE"
+key_string = "tokenizer.ggml.token_type"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..TOKEN_TYPE_COUNT"
+key_string = "tokenizer.ggml.token_type_count"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "Tokenizer..UNK_ID"
+key_string = "tokenizer.ggml.unknown_token_id"
+has_arch_placeholder = false
+category = "vocab"
+
+[[kv]]
+key_name = "WKV..HEAD_SIZE"
+key_string = "{arch}.wkv.head_size"
+has_arch_placeholder = true
+category = "arch_specific"
+
+[[kv]]
+key_name = "xIELU..ALPHA_N"
+key_string = "xielu.alpha_n"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "xIELU..ALPHA_P"
+key_string = "xielu.alpha_p"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "xIELU..BETA"
+key_string = "xielu.beta"
+has_arch_placeholder = false
+category = "other"
+
+[[kv]]
+key_name = "xIELU..EPS"
+key_string = "xielu.eps"
+has_arch_placeholder = false
+category = "other"
