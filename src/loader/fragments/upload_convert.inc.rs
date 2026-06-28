@@ -11,32 +11,42 @@ impl<'a> TensorSlice<'a> {
     }
 }
 
-// upload_native_tensor removed — superseded by convert_tensor_to_f32 (pure conversion)
-// + tier-aware upload in process_single_tensor.
+// upload_native_tensor removed — superseded by convert_tensor_preserve_dtype (F32 passthrough only).
 
-/// Convert raw tensor bytes to f32, applying P4/P5 heuristics and layout normalization.
-/// Returns the modified meta, the f32 data, and optional sparsity metadata.
-fn convert_tensor_to_f32(
+/// Convert a native (unquantized) weight tensor while preserving its original dtype.
+///
+/// ARCH-BLOB-YIELDS-WEIGHT: only F32 is accepted here (passthrough — the original
+/// bytes are copied verbatim). F64 is rejected because converting F64→F32 would
+/// change the tensor's dtype (data-morphing-to-code violation). Real models do not
+/// ship F64 weights; encountering one is an explicit error (NO-SILENT-FALLBACK).
+///
+/// BF16/F16 weights bypass this function entirely and are stored as `RawFloatTensor`
+/// (`Vec<u8>` + dtype) so their original bytes flow into the blob untouched.
+///
+/// Returns the (possibly layout-normalized) meta, the F32 byte data, and optional
+/// sparsity metadata.
+fn convert_tensor_preserve_dtype(
     meta: &TensorMeta,
     data: &[u8],
     _format: WeightFormat,
     explicit_transpose_hint: Option<bool>,
 ) -> Result<(TensorMeta, Vec<f32>, Option<Vec<Vec<u16>>>)> {
-    // ARCH-LOADER-PARALLEL-CONVERT: Rayon-parallel dtype→f32 conversion.
-    // For large models (e.g. Gemma 4 E2B 9.6 GB BF16), a single-threaded
-    // `chunks_exact().map().collect()` takes 60-120s on 4.8B elements. The
-    // parallel path pre-allocates the output Vec and uses `par_chunks_mut`
-    // so each worker writes into its own disjoint slice — no synchronisation,
-    // ~5-10s on a 20-core machine.
+    // ARCH-BLOB-YIELDS-WEIGHT: F32 passthrough only. F64 (and anything else) is
+    // rejected — original dtype must be preserved, never widened/narrowed.
     let mut converted_f32: Vec<f32> = match meta.dtype {
         Dtype::F32 => parallel_bytes_to_f32_lossless(data)?,
-        Dtype::F16 => parallel_half_to_f32::<half::f16>(data)?,
-        Dtype::BF16 => parallel_half_to_f32::<half::bf16>(data)?,
-        Dtype::F64 => parallel_f64_to_f32(data)?,
-        _ => {
+        Dtype::F64 => {
             return Err(LoaderError::Backend(format!(
-                "cannot convert {:?} to f32 for heuristics",
-                meta.dtype
+                "F64 weight '{}' not supported — original dtype must be preserved \
+                 (ARCH-BLOB-YIELDS-WEIGHT). Convert the source checkpoint to F32/BF16/F16.",
+                meta.name
+            )));
+        }
+        other => {
+            return Err(LoaderError::Backend(format!(
+                "convert_tensor_preserve_dtype: dtype {:?} for '{}' is not a native float dtype \
+                 (BF16/F16 go through RawFloatTensor path)",
+                other, meta.name
             )));
         }
     };
@@ -250,6 +260,10 @@ fn parallel_bytes_to_f32_lossless(data: &[u8]) -> Result<Vec<f32>> {
 
 /// Parallel `&[u8]` → `Vec<f32>` for any 16-bit half-precision type
 /// (`half::f16` or `half::bf16`).
+///
+/// Reachable only under `feature = "nccl"` (via `WeightsHandle::shard_for_tp`)
+/// or in test builds. Compiled out otherwise to avoid dead code.
+#[cfg(any(test, feature = "nccl"))]
 pub(crate) fn parallel_half_to_f32<H>(data: &[u8]) -> Result<Vec<f32>>
 where
     H: Copy + Send + Sync + 'static,
@@ -282,45 +296,23 @@ where
     Ok(out)
 }
 
-/// Parallel `&[u8]` → `Vec<f32>` for `F64` (narrowing cast).
-fn parallel_f64_to_f32(data: &[u8]) -> Result<Vec<f32>> {
-    let src_size = std::mem::size_of::<f64>();
-    if !data.len().is_multiple_of(src_size) {
-        return Err(LoaderError::Backend(format!(
-            "F64 tensor data length {} is not a multiple of {}",
-            data.len(),
-            src_size
-        )));
-    }
-    let n = data.len() / src_size;
-    let mut out = vec![0.0f32; n];
-    const CHUNK: usize = 4096;
-    out.par_chunks_mut(CHUNK)
-        .enumerate()
-        .for_each(|(chunk_idx, out_chunk)| {
-            let byte_start = chunk_idx * CHUNK * src_size;
-            let byte_end = byte_start + out_chunk.len() * src_size;
-            let in_bytes = &data[byte_start..byte_end];
-            for (i, sub) in in_bytes.chunks_exact(src_size).enumerate() {
-                let v: f64 =
-                    unsafe { std::ptr::read_unaligned(sub.as_ptr() as *const f64) };
-                out_chunk[i] = v as f32;
-            }
-        });
-    Ok(out)
-}
-
 /// Internal trait bridging `half::f16` / `half::bf16` to their `to_f32`
 /// implementation inside a generic context.
+///
+/// Reachable only under `feature = "nccl"` or in test builds (same live-set
+/// as `parallel_half_to_f32`).
+#[cfg(any(test, feature = "nccl"))]
 pub(crate) trait HalfToF32 {
     fn to_f32_fast(self) -> f32;
 }
 
+#[cfg(any(test, feature = "nccl"))]
 impl HalfToF32 for half::f16 {
     #[inline(always)]
     fn to_f32_fast(self) -> f32 { self.to_f32() }
 }
 
+#[cfg(any(test, feature = "nccl"))]
 impl HalfToF32 for half::bf16 {
     #[inline(always)]
     fn to_f32_fast(self) -> f32 { self.to_f32() }

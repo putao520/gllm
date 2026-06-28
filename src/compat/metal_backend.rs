@@ -69,6 +69,119 @@ impl<E: Element> Clone for MetalBackend<E> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Apple Silicon SoC specs — derived from `[MTLDevice name]`
+// ---------------------------------------------------------------------------
+//
+// Apple's Metal API deliberately does not expose: GPU core (CU) count, peak
+// FLOPS, memory bandwidth, or clock rate. The only stable, advertised signal
+// that varies across the M1/M2/M3/M4 tiers is the device name string returned
+// by `[device name]` (e.g. "Apple M2 Max"). We map that name to published SoC
+// specs so the JIT codegen layer receives real per-tier numbers instead of one
+// flat hard-coded profile shared by every Apple Silicon Mac.
+//
+// Sources for the per-tier numbers: Apple's published Apple Silicon GPU
+// specifications (core counts, memory bandwidth, peak FP32/FP16 throughput at
+// the advertised boost clock). When a name is not recognized we fall back to a
+// conservative generic Apple-GPU profile and log the fallback — never silent.
+
+/// Per-SoC Metal GPU specs not exposed by the Metal runtime API.
+///
+/// Used by `MetalBackend::new` on macOS+metal, and by the per-SoC lookup tests
+/// (which are pure data-validation and run on any host). Compiled out otherwise
+/// to avoid dead-code warnings on non-Apple platforms.
+#[cfg(any(all(target_os = "macos", feature = "metal"), test))]
+struct MetalDeviceSpecs {
+    /// `MTLGPUFamily` numeric family (Apple GPU family 7 ≈ M1, 8 ≈ M2, 9 ≈ M3+).
+    gpu_family: u8,
+    /// GPU core count (Apple advertises these per SoC).
+    compute_units: u32,
+    /// Peak unified-memory bandwidth (GB/s).
+    memory_bandwidth_gbs: f64,
+    /// Peak FP32 throughput (GFLOPS).
+    peak_gflops_f32: f64,
+    /// Peak FP16/BF16 throughput (GFLOPS, 2× FP32 rate via SIMD-group matrix).
+    peak_gflops_f16: f64,
+    /// GPU boost clock (MHz).
+    clock_mhz: u32,
+}
+
+/// Resolve Apple Silicon GPU specs from the advertised device name.
+///
+/// `name` is the raw `[MTLDevice name]` string (e.g. "Apple M1 Ultra").
+/// Matching is substring-based and tier-aware (Max/Ultra/Pro supersede base).
+///
+/// Only used on macOS with `feature = "metal"` (and by per-SoC lookup tests).
+#[cfg(any(all(target_os = "macos", feature = "metal"), test))]
+fn metal_device_specs(name: &str) -> MetalDeviceSpecs {
+    // Lowercased for case-insensitive substring matching.
+    let n = name.to_ascii_lowercase();
+    let unknown = !n.contains("apple") && !(n.contains('m') && (n.contains("gpu") || n.contains("metal")));
+
+    // ---- Generation + gpu_family from the Mx prefix ----
+    let (family, base_clock) = if n.contains("m4") {
+        (9u8, 1398u32)
+    } else if n.contains("m3") {
+        (9, 1398)
+    } else if n.contains("m2") {
+        (8, 1398)
+    } else if n.contains("m1") {
+        (7, 1278)
+    } else {
+        // Unknown / non-Apple-Silicon Metal device (e.g. Intel/AMD Mac dGPU).
+        // Conservative generic profile; logged below.
+        (7, 1000)
+    };
+
+    // ---- Tier resolution (Ultra > Max > Pro > base) ----
+    // Per-tier published specs: (cores, bandwidth GB/s, FP32 GFLOPS, FP16 GFLOPS).
+    // FP16 = 2× FP32 on Apple GPU (simdgroup_matrix).
+    let (cores, bw_gbs, fp32, fp16, clock) = if n.contains("ultra") {
+        // Ultra = 2× Max die: doubled cores and bandwidth.
+        match family {
+            7 => (48u32, 800.0,                17600.0,  35200.0, base_clock), // M1 Ultra (2× M1 Max 24-core)
+            8 => (60,    800.0,                27200.0,  54400.0, base_clock), // M2 Ultra (2× M2 Max 30-core)
+            _ => (80,    800.0,                36400.0,  72800.0, base_clock), // M3+ Ultra (2× Max 40-core)
+        }
+    } else if n.contains("max") {
+        match family {
+            7 => (24,    400.0,                 8800.0,  17600.0, base_clock), // M1 Max
+            8 => (30,    400.0,                13600.0,  27200.0, base_clock), // M2 Max
+            _ => (40,    400.0,                18200.0,  36400.0, base_clock), // M3 Max
+        }
+    } else if n.contains("pro") {
+        match family {
+            7 => (16,    200.0,                 5200.0,  10400.0, base_clock), // M1 Pro
+            8 => (19,    200.0,                 7800.0,  15600.0, base_clock), // M2 Pro
+            _ => (18,    150.0,                 7400.0,  14800.0, base_clock), // M3 Pro
+        }
+    } else {
+        // Base-tier (M1 / M2 / M3 / M4) — 8-10 GPU cores.
+        match family {
+            7 => (8,     68.0,                  2600.0,   5200.0, base_clock), // M1
+            8 => (10,    100.0,                 3800.0,   7600.0, base_clock), // M2
+            9 => (10,    100.0,                 4600.0,   9200.0, base_clock), // M3 / M4
+            _ => (8,     68.0,                  2600.0,   5200.0, base_clock),
+        }
+    };
+
+    if unknown {
+        eprintln!(
+            "[MetalBackend] Unrecognized Metal device name '{name}'; \
+             falling back to conservative Apple-GPU generic specs"
+        );
+    }
+
+    MetalDeviceSpecs {
+        gpu_family: family,
+        compute_units: cores,
+        memory_bandwidth_gbs: bw_gbs,
+        peak_gflops_f32: fp32,
+        peak_gflops_f16: fp16,
+        clock_mhz: clock,
+    }
+}
+
 impl<E: Element> MetalBackend<E> {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn new(device: usize) -> Option<Self> {
@@ -81,22 +194,46 @@ impl<E: Element> MetalBackend<E> {
         let total_memory = metal_device.total_memory();
         let cpu_profile = gllm_kernels::dispatch::DeviceProfile::detect();
 
+        // Hardware-profile construction.
+        //
+        // Two field classes, each driven by the correct ARCH-JIT-YIELDS P0
+        // source (the actual Metal device), never hard-coded:
+        //
+        //   1. Runtime-queryable via `[MTLDevice <selector>]` — queried through
+        //      `MetalDevice` accessors: shared_mem_per_block, warp_size,
+        //      max_threads_per_block. These reflect the real device limits.
+        //
+        //   2. Not exposed by any Metal API (Apple does not advertise CU count,
+        //      peak FLOPS, memory bandwidth or GPU clock) — derived from the
+        //      advertised device name (`[device name]`) via `metal_device_specs`,
+        //      a per-SoC lookup covering the M1/M2/M3/M4 family tiers
+        //      (base / Pro / Max / Ultra). Falls back to conservative Apple-GPU
+        //      generic values only when the name is unrecognized, and logs the
+        //      fallback so it is never silent.
+        let specs = metal_device_specs(&device_name);
+
+        let shared_mem_per_block = metal_device.max_threadgroup_memory_length() as u32;
+        let warp_size = metal_device.thread_execution_width();
+        let max_threads_per_block = metal_device.max_threads_per_threadgroup_width();
+
         use gllm_kernels::compiler::codegen::emitter::Platform;
         let gpu_profile = gllm_kernels::gpu::GpuDeviceProfile {
-            platform: Platform::Metal { gpu_family: 9 },
-            compute_units: 10,
-            shared_mem_per_block: 32768,
+            platform: Platform::Metal { gpu_family: specs.gpu_family },
+            compute_units: specs.compute_units,
+            shared_mem_per_block,
             max_registers_per_thread: 0,
-            warp_size: 32,
-            max_threads_per_block: 1024,
-            max_block_dim: [1024, 1024, 1024],
+            warp_size,
+            max_threads_per_block,
+            // Metal does not expose per-dimension threadgroup limits distinctly;
+            // clamp each axis to the queried per-threadgroup thread cap.
+            max_block_dim: [max_threads_per_block; 3],
             max_grid_dim: [u32::MAX, u32::MAX, u32::MAX],
             total_memory,
-            memory_bandwidth_gbs: 200.0,
-            peak_gflops_f32: 5000.0,
-            peak_gflops_f16: 10000.0,
+            memory_bandwidth_gbs: specs.memory_bandwidth_gbs,
+            peak_gflops_f32: specs.peak_gflops_f32,
+            peak_gflops_f16: specs.peak_gflops_f16,
             has_matrix_unit: true,
-            clock_mhz: 1000,
+            clock_mhz: specs.clock_mhz,
             isv: gllm_kernels::gpu::GpuIsvCapabilities::default(),
         };
 
@@ -1392,5 +1529,72 @@ mod tests {
         assert!(cfg.rerank_yes_token_id.is_none());
         assert!(cfg.rerank_no_token_id.is_none());
         assert!(cfg.moe_config.is_none());
+    }
+
+    // ── Regression: per-SoC spec derivation ────────────────
+    //
+    // Guards against re-introducing one flat hard-coded profile for every Apple
+    // Silicon device. Each tier must resolve to its own published numbers,
+    // with strict monotonicity inside a generation (base < Pro < Max < Ultra).
+
+    #[test]
+    fn metal_specs_m1_ultra_distinct_from_m1_max() {
+        let ultra = metal_device_specs("Apple M1 Ultra");
+        let mx = metal_device_specs("Apple M1 Max");
+        assert_eq!(ultra.gpu_family, 7);
+        assert_eq!(mx.gpu_family, 7);
+        // Ultra is 2× Max in cores and bandwidth within the M1 generation.
+        assert_eq!(ultra.compute_units, mx.compute_units * 2);
+        assert!(ultra.memory_bandwidth_gbs > mx.memory_bandwidth_gbs);
+        assert!(ultra.peak_gflops_f32 > mx.peak_gflops_f32);
+    }
+
+    #[test]
+    fn metal_specs_fp16_is_double_fp32() {
+        // Apple GPU simdgroup_matrix delivers 2× FP32 throughput at FP16/BF16.
+        for name in ["Apple M1", "Apple M2 Pro", "Apple M3 Max", "Apple M4"] {
+            let s = metal_device_specs(name);
+            assert!(
+                (s.peak_gflops_f16 - 2.0 * s.peak_gflops_f32).abs() < 1e-6,
+                "{name}: FP16 ({}) must equal 2×FP32 ({})",
+                s.peak_gflops_f16,
+                2.0 * s.peak_gflops_f32,
+            );
+        }
+    }
+
+    #[test]
+    fn metal_specs_tier_monotonic_within_m2() {
+        let base = metal_device_specs("Apple M2");
+        let pro = metal_device_specs("Apple M2 Pro");
+        let mx = metal_device_specs("Apple M2 Max");
+        let ultra = metal_device_specs("Apple M2 Ultra");
+        // Cores strictly increase across the tier ladder.
+        assert!(base.compute_units < pro.compute_units);
+        assert!(pro.compute_units < mx.compute_units);
+        assert!(mx.compute_units < ultra.compute_units);
+        // Bandwidth is non-decreasing across tiers.
+        assert!(base.memory_bandwidth_gbs <= pro.memory_bandwidth_gbs);
+        assert!(pro.memory_bandwidth_gbs <= mx.memory_bandwidth_gbs);
+        assert!(mx.memory_bandwidth_gbs <= ultra.memory_bandwidth_gbs);
+    }
+
+    #[test]
+    fn metal_specs_generation_progression() {
+        // Family bumps with generation: M1=7, M2=8, M3/M4=9.
+        assert_eq!(metal_device_specs("Apple M1").gpu_family, 7);
+        assert_eq!(metal_device_specs("Apple M2").gpu_family, 8);
+        assert_eq!(metal_device_specs("Apple M3").gpu_family, 9);
+        assert_eq!(metal_device_specs("Apple M4").gpu_family, 9);
+    }
+
+    #[test]
+    fn metal_specs_unknown_name_yields_conservative_fallback() {
+        // Non-Apple-Silicon Metal device: must still return a sane profile
+        // (the fallback path), not panic.
+        let s = metal_device_specs("AMD Radeon Pro 5500 XT");
+        assert!(s.compute_units > 0);
+        assert!(s.memory_bandwidth_gbs > 0.0);
+        assert!(s.peak_gflops_f32 > 0.0);
     }
 }

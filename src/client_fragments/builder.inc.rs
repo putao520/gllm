@@ -404,10 +404,13 @@ impl ClientBuilder {
                     let dummy_manifest = make_dummy_manifest(model_id, &arch, kind);
                     let cfg_result =
                         crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
+                    // GGUF dummy-manifest 容错路径: config load 可能失败, MoE 字段可能缺失.
+                    // 此分支尽力构建 manifest; MoE 构建错误被吞掉(保持原容错语义),
+                    // 缺失字段在 SafeTensors/ONNX 主路径(line 439)已通过 ? 硬失败根治.
                     let moe_config = cfg_result
                         .as_ref()
                         .ok()
-                        .and_then(|cfg| cfg.build_moe_config(&arch));
+                        .and_then(|cfg| cfg.build_moe_config(&arch).ok().flatten());
                     if let Ok(cfg) = cfg_result {
                         model_config_for_arbiter = Some(cfg);
                     }
@@ -424,13 +427,19 @@ impl ClientBuilder {
                 // .gllm metadata includes arch_key + all auto_graph params
                 loader = loader.load()?;
 
-                let dummy_manifest = make_dummy_manifest(model_id, "llama", kind);
+                // arch placeholder: SafeTensors/ONNX/PyTorch/Gllm 格式没有 GGUF 那样的 arch
+                // 元数据头，arch 需在 from_loader() 之后通过 detect_architecture() 从张量名
+                // 推导得到。此处传入空串作为显式「待推导」占位符——ModelConfig::from_loader
+                // 不消费 manifest.arch 字段（见 config_impl.inc.rs），最终 manifest 由下方
+                // make_dummy_manifest_with_moe(&arch, ...) 用真实 arch 重建。
+                // 禁止用 "llama" 等字面量架构字符串作占位符（会误导）。
+                let dummy_manifest = make_dummy_manifest(model_id, "", kind);
 
                 let derived_config =
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
 
                 let arch = loader.detect_architecture();
-                let moe_config = derived_config.build_moe_config(&arch);
+                let moe_config = derived_config.build_moe_config(&arch)?;
                 model_config_for_arbiter = Some(derived_config);
 
                 make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
@@ -635,7 +644,7 @@ impl ClientBuilder {
                     let moe_config = cfg_result
                         .as_ref()
                         .ok()
-                        .and_then(|cfg| cfg.build_moe_config(&arch));
+                        .and_then(|cfg| cfg.build_moe_config(&arch).ok().flatten());
                     make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
                 } else {
                     return Err(ClientError::ModelNotFound(format!(
@@ -646,11 +655,15 @@ impl ClientBuilder {
             }
             WeightFormat::SafeTensors | WeightFormat::Onnx | WeightFormat::PyTorch | WeightFormat::Gllm => {
                 loader = loader.load()?;
-                let dummy_manifest = make_dummy_manifest(model_id, "llama", kind);
+                // arch placeholder: 见上方 SafeTensors 分支注释。空串 = 显式「待推导」占位符，
+                // from_loader() 不消费 manifest.arch，真实 arch 由 detect_architecture() 推导
+                // 并在下方 make_dummy_manifest_with_moe(&arch, ...) 中重建 manifest。
+                // 禁止字面量架构字符串占位符。
+                let dummy_manifest = make_dummy_manifest(model_id, "", kind);
                 let derived_config =
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
                 let arch = loader.detect_architecture();
-                let moe_config = derived_config.build_moe_config(&arch);
+                let moe_config = derived_config.build_moe_config(&arch)?;
                 make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
             }
         };

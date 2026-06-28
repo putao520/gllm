@@ -372,12 +372,6 @@ fn find_usize(value: &Value, keys: &[&str]) -> Option<usize> {
         .and_then(|v| usize::try_from(v).ok())
 }
 
-fn find_u32(value: &Value, keys: &[&str]) -> Option<u32> {
-    find_value(value, keys)
-        .and_then(Value::as_u64)
-        .and_then(|v| u32::try_from(v).ok())
-}
-
 fn find_f32(value: &Value, keys: &[&str]) -> Option<f32> {
     find_value(value, keys).and_then(|v| v.as_f64().map(|num| num as f32))
 }
@@ -399,18 +393,6 @@ fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
     find_value(value, keys)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-}
-
-fn find_bool(value: &Value, keys: &[&str]) -> Option<bool> {
-    find_value(value, keys).and_then(|v| {
-        v.as_bool().or_else(|| {
-            v.as_u64().and_then(|num| match num {
-                0 => Some(false),
-                1 => Some(true),
-                _ => None,
-            })
-        })
-    })
 }
 
 fn rope_scaling_from_metadata_json(value: &Value) -> ModelConfigResult<Option<RopeScalingConfig>> {
@@ -597,12 +579,6 @@ fn gguf_arch_f32(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<f32> {
 fn gguf_arch_str<'a>(reader: &'a GgufLoader, arch: &str, suffix: &str) -> Option<&'a str> {
     let key = gguf_arch_key(arch, suffix);
     reader.get_metadata_str(&key)
-}
-
-fn gguf_arch_bool(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<bool> {
-    let key = gguf_arch_key(arch, suffix);
-    let value = reader.get(&key)?;
-    value.as_bool().or_else(|| value.as_u64().map(|v| v != 0))
 }
 
 fn gguf_arch_array_f32(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<Vec<f32>> {

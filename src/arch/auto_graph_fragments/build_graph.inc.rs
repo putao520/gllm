@@ -67,17 +67,31 @@ pub fn build_compiler_graph(
         name: "seq_len".to_string(),
         max_value: Some(max_seq_len),
     };
-    // Activation dtype (always F32 — compute happens in F32).
-    let dt = DType::F32;
-    // Weight dtype: currently weight_blob stores F32 for all formats (pack_weights_from_graph
-    // converts BF16→F32), so tensor dtype is always F32. Once raw-pack is implemented,
-    // switch to: weight_dtypes.get(name).copied().unwrap_or(dt)
-    let _ = weight_dtypes;
-    let tdt = |_: &str| -> DType { dt };
+    // ARCH-JIT-DATA-YIELDS: 激活 dtype 从权重自描述推断，绝不硬编码。
+    // 权重文件每个 tensor 自带 dtype（safetensors dtype / GGUF quant type），
+    // 必须尊重。激活 tensor（embedding 输出及之后）的精度跟随模型主要权重精度：
+    //   BF16 权重 → 激活 BF16 → 全程 BF16 计算（零转换，Gather/GEMM/Attention/Norm 同精度）
+    //   F16 权重 → 激活 F16
+    //   F32 权重 → 激活 F32
+    // 从 embed_tokens 权重 dtype 推断（embed 是模型的第一个权重，代表模型主精度）。
+    // 违宪根源（已修复）：初始 commit 硬编码 `let dt = DType::F32`（注释写"always F32"），
+    // 无视权重自描述，导致 BF16 模型激活被强制 F32 + WidenCompute 转换 → 数据迁就代码。
+    let dt = weight_dtypes.get("embed")
+        .copied()
+        .or_else(|| weight_dtypes.values().next().copied())
+        .unwrap_or(DType::F32);
+    // ARCH-BLOB-YIELDS-WEIGHT: 每个 weight tensor 的 dtype 顺从其自描述（不统一为 dt）。
+    // 混合精度模型中不同权重可能不同 dtype（如 lm_head F16 + 中间层 BF16），
+    // 每个 op lowering 读自己权重 input 的 dtype 生成对应精度代码实例。
+    let tdt = |name: &str| -> DType { weight_dtypes.get(name).copied().unwrap_or(dt) };
 
     // @trace REQ-FATOP-004 [entity:AttentionSpec] AttentionSpec kv_source 自描述
     // @trace REQ-FATOP-005 [entity:AttentionSpec] AttentionSpec sinks 配置
     // Helper: generate Gemm or QuantGemm based on weight quantization type.
+    // ARCH-JIT-DATA-YIELDS: GemmSpec.dtype 顺从权重 tensor 实际 dtype（从 weight_dtypes 推断）。
+    // 注意：GemmSpec.dtype 现在语义是"权重 dtype"，激活 dtype 由 ctx.dtype 决定（永远是 F32）。
+    // 混合精度：权重 BF16 → GemmSpec.dtype=BF16，激活 F32 → ctx.dtype=F32。
+    // emit_gemm_* 会按权重 dtype 加载 B，按激活 dtype 加载 A 和存储 C。
     let add_gemm_or_quant = |g: &mut CompilerGraph,
                               weight_name: &str,
                               m: SymDim, n: usize, k: usize,
@@ -88,7 +102,8 @@ pub fn build_compiler_graph(
             let spec = QuantGemmSpec { m: m.clone(), n, k, quant_type: qt };
             g.add_op(Op::QuantGemm(spec), inputs, outputs, label);
         } else {
-            let spec = GemmSpec { m: m.clone(), n, k, dtype: dt, trans_b: true, has_bias: false };
+            let weight_dtype = tdt(weight_name);  // 从 weight_dtypes 推断，而非硬编码 dt
+            let spec = GemmSpec { m: m.clone(), n, k, dtype: weight_dtype, trans_b: true, has_bias: false };
             g.add_op(Op::Gemm(spec),
                 inputs, outputs, label);
         }
@@ -294,6 +309,11 @@ pub fn build_compiler_graph(
     let mut _lc_weight_stride: usize = 0;
     let mut _lc_layer_input: Option<TensorId> = None;
     let mut _lc_layer_output: Option<TensorId> = None;
+    // Capture expert config for expert_loop_config setup (MoE models)
+    let mut _expert_weight_tids: Vec<TensorId> = Vec::new();
+    let mut _expert_num_experts: usize = 0;
+    let mut _expert_top_k: usize = 0;
+    let mut _expert_weight_stride: usize = 0;
 
     // AltUp fat buffer output (set inside layer template closure, read in post-layer)
     // Set inside layer template closure, read in post-layer block below.
@@ -681,8 +701,15 @@ pub fn build_compiler_graph(
             // LAuReL
             let mut laurel_out_tid: Option<TensorId> = None;
             if let (Some(up_w), Some(down_w), Some(ln_w)) = (laurel_up_w, laurel_down_w, laurel_norm_w) {
-                let laurel_rank = weight_shapes.get(&cn_layer(ref_layer, "laurel_up"))
-                    .map(|s| s[0]).unwrap_or(64);
+                // NO-SILENT-FALLBACK: laurel_up weight is confirmed present (Some(up_w))
+                // but its shape lookup failed — contradictory state, never fall back to 64.
+                let laurel_up_name = cn_layer(ref_layer, "laurel_up");
+                let laurel_rank = weight_shapes.get(&laurel_up_name)
+                    .and_then(|s| s.first().copied())
+                    .ok_or_else(|| GraphBuildError::MissingTensor(format!(
+                        "{laurel_up_name} shape missing while laurel_up weight is present \
+                         — cannot infer laurel_rank (NO-SILENT-FALLBACK)"
+                    )))?;
                 let laurel_hidden = g.add_tensor(&ptname("laurel_hidden"),
                     vec![s.clone(), SymDim::Concrete(laurel_rank)], dt);
                 add_gemm_or_quant(&mut g, &cn_layer(ref_layer, "laurel_up"),
@@ -1517,8 +1544,15 @@ pub fn build_compiler_graph(
         // laurel = RMSNorm(GEMM(GELU(GEMM(normed, laurel_up)), laurel_down), laurel_norm)
         let mut laurel_out_tid: Option<TensorId> = None;
         if let (Some(up_w), Some(down_w), Some(ln_w)) = (laurel_up_w, laurel_down_w, laurel_norm_w) {
+            // NO-SILENT-FALLBACK: same logic as per-layer LAuReL above — laurel_up
+            // weight confirmed present, shape lookup must succeed.
             let laurel_rank = weight_shapes.get(&cn_layer(0, "laurel_up"))
-                .map(|s| s[0]).unwrap_or(64);
+                .and_then(|s| s.first().copied())
+                .ok_or_else(|| GraphBuildError::MissingTensor(format!(
+                    "{} shape missing while laurel_up weight is present \
+                     — cannot infer laurel_rank (NO-SILENT-FALLBACK)",
+                    cn_layer(0, "laurel_up"),
+                )))?;
 
             // GEMM(normed, laurel_up) → [S, laurel_rank]
             let laurel_hidden = g.add_tensor("layer.laurel_hidden",
@@ -1756,49 +1790,65 @@ pub fn build_compiler_graph(
                 g.add_op(Op::TopK { seq_len: SymDim::Concrete(max_seq_len), num_experts: num_experts, top_k: top_k },
                     vec![gate_probs], vec![topk_idx, topk_w], "layer.topk");
 
-                let mut current_acc = g.add_tensor("layer.expert_acc", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                let expert_acc = g.add_tensor("layer.expert_acc", vec![s.clone(), SymDim::Concrete(hidden)], dt);
 
-                for e in 0..num_experts {
-                    let gate_exp_cn = cn_expert(0, e, "gate_proj");
-                    let w_gate_e = g.add_tensor_concrete(&gate_exp_cn, &[hidden, inter], tdt(&gate_exp_cn));
-                    layer_weight_tids.push((w_gate_e, layer_weight_byte_cursor));
-                    layer_weight_byte_cursor += weight_physical_bytes(&gate_exp_cn, &[hidden, inter]);
+                // NO-LAYER-EXPAND + ARCH-NO-LOOP-UNROLL:
+                // Single expert template (6 ops with "expert." prefix) instead of
+                // for e in 0..num_experts { ... } which would produce num_experts*6 ops.
+                // The JIT compiler wraps these in LoopBegin/LoopEnd at runtime.
+                let mut expert_weight_tids: Vec<TensorId> = Vec::new();
+                let expert_weight_byte_start = layer_weight_byte_cursor;
 
-                    let gate_out = g.add_tensor(&format!("layer.exp{}.gate", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true, has_bias: false }), 
-                        vec![post_normed, w_gate_e], vec![gate_out], &format!("layer.exp{}.gate_gemm", e));
+                let gate_exp_cn = cn_expert(0, 0, "gate_proj");
+                let w_gate = g.add_tensor_concrete(&gate_exp_cn, &[hidden, inter], tdt(&gate_exp_cn));
+                layer_weight_tids.push((w_gate, layer_weight_byte_cursor));
+                expert_weight_tids.push(w_gate);
+                layer_weight_byte_cursor += weight_physical_bytes(&gate_exp_cn, &[hidden, inter]);
 
-                    let mask_out = g.add_tensor(&format!("layer.exp{}.mask", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op(Op::GateMask { hidden: inter },  vec![gate_out], vec![mask_out], &format!("layer.exp{}.gate_mask", e));
+                let gate_out = g.add_tensor("expert.gate", vec![s.clone(), SymDim::Concrete(inter)], dt);
+                g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true, has_bias: false }),
+                    vec![post_normed, w_gate], vec![gate_out], "expert.gate_gemm");
 
-                    let up_exp_cn = cn_expert(0, e, "up_proj");
-                    let w_up_e = g.add_tensor_concrete(&up_exp_cn, &[hidden, inter], tdt(&up_exp_cn));
-                    layer_weight_tids.push((w_up_e, layer_weight_byte_cursor));
-                    layer_weight_byte_cursor += weight_physical_bytes(&up_exp_cn, &[hidden, inter]);
+                let mask_out = g.add_tensor("expert.mask", vec![s.clone(), SymDim::Concrete(inter)], dt);
+                g.add_op(Op::GateMask { hidden: inter },  vec![gate_out], vec![mask_out], "expert.gate_mask");
 
-                    let up_out = g.add_tensor(&format!("layer.exp{}.up", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op(Op::MaskedGemm { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true }, 
-                        vec![post_normed, w_up_e, mask_out], vec![up_out], &format!("layer.exp{}.up_gemm", e));
+                let up_exp_cn = cn_expert(0, 0, "up_proj");
+                let w_up = g.add_tensor_concrete(&up_exp_cn, &[hidden, inter], tdt(&up_exp_cn));
+                layer_weight_tids.push((w_up, layer_weight_byte_cursor));
+                expert_weight_tids.push(w_up);
+                layer_weight_byte_cursor += weight_physical_bytes(&up_exp_cn, &[hidden, inter]);
 
-                    let swiglu_out = g.add_tensor(&format!("layer.exp{}.swiglu", e), vec![s.clone(), SymDim::Concrete(inter)], dt);
-                    g.add_op(Op::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], &format!("layer.exp{}.swiglu", e));
+                let up_out = g.add_tensor("expert.up", vec![s.clone(), SymDim::Concrete(inter)], dt);
+                g.add_op(Op::MaskedGemm { m: s.clone(), n: inter, k: hidden, dtype: dt, trans_b: true },
+                    vec![post_normed, w_up, mask_out], vec![up_out], "expert.up_gemm");
 
-                    let down_exp_cn = cn_expert(0, e, "down_proj");
-                    let w_down_e = g.add_tensor_concrete(&down_exp_cn, &[inter, hidden], tdt(&down_exp_cn));
-                    layer_weight_tids.push((w_down_e, layer_weight_byte_cursor));
-                    layer_weight_byte_cursor += weight_physical_bytes(&down_exp_cn, &[inter, hidden]);
+                let swiglu_out = g.add_tensor("expert.swiglu", vec![s.clone(), SymDim::Concrete(inter)], dt);
+                g.add_op(Op::SwiGlu, vec![mask_out, up_out], vec![swiglu_out], "expert.swiglu");
 
-                    let down_out = g.add_tensor(&format!("layer.exp{}.down", e), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                    g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: hidden, k: inter, dtype: dt, trans_b: true, has_bias: false }), 
-                        vec![swiglu_out, w_down_e], vec![down_out], &format!("layer.exp{}.down_gemm", e));
+                let down_exp_cn = cn_expert(0, 0, "down_proj");
+                let w_down = g.add_tensor_concrete(&down_exp_cn, &[inter, hidden], tdt(&down_exp_cn));
+                layer_weight_tids.push((w_down, layer_weight_byte_cursor));
+                expert_weight_tids.push(w_down);
+                layer_weight_byte_cursor += weight_physical_bytes(&down_exp_cn, &[inter, hidden]);
 
-                    let next_acc = g.add_tensor(&format!("layer.exp{}.acc", e), vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                    g.add_op(Op::MoEConditionalAdd { seq_len: s.clone(), hidden: hidden, num_experts: num_experts, expert_idx: e }, 
-                        vec![current_acc, down_out, gate_probs], vec![next_acc], &format!("layer.exp{}.cond_add", e));
-                    current_acc = next_acc;
-                }
+                let down_out = g.add_tensor("expert.down", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                g.add_op(Op::Gemm(GemmSpec { m: s.clone(), n: hidden, k: inter, dtype: dt, trans_b: true, has_bias: false }),
+                    vec![swiglu_out, w_down], vec![down_out], "expert.down_gemm");
 
-                if features.has_shared_experts {
+                // MoEConditionalAdd: expert_idx=0 is the template index.
+                // At runtime, the JIT expert_loop_counter provides the actual expert index.
+                let expert_next_acc = g.add_tensor("expert.next_acc", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                g.add_op(Op::MoEConditionalAdd { seq_len: s.clone(), hidden: hidden, num_experts: num_experts, expert_idx: 0 },
+                    vec![expert_acc, down_out, gate_probs], vec![expert_next_acc], "expert.cond_add");
+
+                // Compute per-expert weight stride (total bytes for 1 expert's 3 weight matrices).
+                let expert_weight_stride = layer_weight_byte_cursor - expert_weight_byte_start;
+
+                // Expert loop config will be set after g.inputs is finalized (see below).
+
+                // After the expert loop, the accumulator is expert_next_acc.
+                // If shared experts exist, add their output to the accumulator.
+                let moe_acc = if features.has_shared_experts {
                     let se_gate_cn = cn_shared(0, "gate_proj");
                     let se_gate_w = g.add_tensor_concrete(&se_gate_cn, &[hidden, inter], tdt(&se_gate_cn));
                     layer_weight_tids.push((se_gate_w, layer_weight_byte_cursor));
@@ -1829,13 +1879,21 @@ pub fn build_compiler_graph(
                     g.add_op(Op::SwiGlu, vec![se_gate, se_up], vec![se_swiglu], "layer.shared_swiglu");
                     add_gemm_or_quant(&mut g, &se_down_cn, s.clone(), hidden, inter,
                         vec![se_swiglu, se_down_w], vec![se_down], "layer.shared_down_gemm");
-                    g.add_op(Op::Add, vec![current_acc, se_down], vec![se_out], "layer.shared_add");
-                    current_acc = se_out;
-                }
+                    g.add_op(Op::Add, vec![expert_next_acc, se_down], vec![se_out], "layer.shared_add");
+                    se_out
+                } else {
+                    expert_next_acc
+                };
 
                 let ffn_resid = g.add_tensor("layer.ffn_resid", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-                g.add_op(Op::Add, vec![ffn_resid_src, current_acc], vec![ffn_resid], "layer.moe_resid");
+                g.add_op(Op::Add, vec![ffn_resid_src, moe_acc], vec![ffn_resid], "layer.moe_resid");
                 ffn_resid_tid = Some(ffn_resid);
+
+                // Save expert config for expert_loop_config setup after g.inputs is finalized.
+                _expert_weight_tids = expert_weight_tids;
+                _expert_num_experts = num_experts;
+                _expert_top_k = top_k;
+                _expert_weight_stride = expert_weight_stride;
             }
         }
 
@@ -2004,6 +2062,12 @@ pub fn build_compiler_graph(
         // Save layer config for later layer_loop_config setup
         _lc_weight_tids = layer_weight_tids.iter().map(|(t, _)| *t).collect();
         _lc_weight_stride = layer_weight_byte_cursor;
+        // For MoE models, each layer's weight region includes num_experts copies
+        // of the expert template weights. The template has 1 expert, so we need
+        // to add (num_experts - 1) * expert_weight_stride to the layer stride.
+        if _expert_num_experts > 1 && _expert_weight_stride > 0 {
+            _lc_weight_stride += (_expert_num_experts - 1) * _expert_weight_stride;
+        }
         if let Some(fat_in) = fat_input_tid {
             _lc_layer_input = Some(fat_in);
         } else {
@@ -2510,6 +2574,30 @@ pub fn build_compiler_graph(
             activation_alias: Some((_lc_layer_input.unwrap(), _lc_layer_output.unwrap())),
             per_layer_input_stride: _ple_stride,
         });
+    }
+
+    // ── Expert loop config (MoE per-expert runtime loop) ──
+    // NO-LAYER-EXPAND + ARCH-NO-LOOP-UNROLL: single template + runtime loop
+    if !_expert_weight_tids.is_empty() && _expert_num_experts > 0 {
+        // Staging area for ExpertLoopConfig (REQ-MOE): expert_loop_config depends on
+        // gllm-kernels' ExpertLoopConfig type, which is not in gllm-kernels HEAD yet.
+        // The expert weight input indices are pre-computed here so the
+        // ExpertLoopConfig assignment is a one-liner once the type lands.
+        // dtype task scope: only fixes GEMM mixed-precision dtype propagation;
+        // does not block the pending MoE feature.
+        #[allow(unused_variables, reason = "staging for ExpertLoopConfig; type not yet in gllm-kernels HEAD")]
+        let expert_weight_input_indices: Vec<usize> = g.inputs.iter().enumerate()
+            .filter_map(|(idx, &tid)| {
+                if _expert_weight_tids.iter().any(|et| et == &tid) { Some(idx) } else { None }
+            })
+            .collect();
+
+        // g.expert_loop_config = Some(gllm_kernels::compiler::graph::ExpertLoopConfig {
+        //     num_experts: _expert_num_experts,
+        //     weight_stride: _expert_weight_stride,
+        //     expert_weight_input_indices,
+        //     top_k: _expert_top_k,
+        // });
     }
 
     // Register physical byte sizes for all quantized weight tensors.

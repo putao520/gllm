@@ -466,7 +466,58 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
                 let verify_result = crate::speculative::verify::VerifyResult::from_sequence_results(seq_results);
                 let kv_instructions =
-                    crate::speculative::verify::generate_kv_commit_instructions(&verify_result);
+                    crate::speculative::verify::generate_kv_commit_instructions(&verify_result, |req_id, accepted_count, rejected_count| {
+                        let page_size = self.dispatch.scheduler.page_size().max(1);
+                        let page_table = self.dispatch.scheduler.get_page_table(req_id).unwrap_or_default();
+                        let draft_count = accepted_count + rejected_count;
+                        if draft_count == 0 || page_table.is_empty() {
+                            return crate::speculative::verify::SpeculativePages {
+                                commit_pages: Vec::new(),
+                                rollback_pages: Vec::new(),
+                            };
+                        }
+                        // 投机 token 在 KV cache 尾部。page_table 已包含投机 forward 分配的 page。
+                        // 尾部 draft_count 个 token 覆盖的 page 范围:
+                        //   total_tokens = position + draft_count (已由 allocate_next_token 扩展)
+                        //   draft_start_page = (total_tokens - draft_count) / page_size
+                        //   draft_end_page = (total_tokens - 1) / page_size
+                        let total_pages = page_table.len();
+                        let draft_end_page = total_pages.saturating_sub(1);
+                        let draft_start_page = if total_pages * page_size > draft_count {
+                            (total_pages * page_size - draft_count) / page_size
+                        } else {
+                            0
+                        };
+                        // accepted token 覆盖的 page 范围
+                        let accepted_end_page = if accepted_count == 0 {
+                            draft_start_page
+                        } else {
+                            let accepted_last_token_offset = (draft_start_page * page_size).saturating_add(accepted_count).saturating_sub(1);
+                            accepted_last_token_offset / page_size
+                        };
+                        // commit_pages: accepted tokens 覆盖的 page
+                        let commit_pages: Vec<u64> = if accepted_count > 0 {
+                            page_table[draft_start_page..=accepted_end_page.min(draft_end_page)]
+                                .iter().map(|&p| p as u64).collect()
+                        } else {
+                            Vec::new()
+                        };
+                        // rollback_pages: 完全由 rejected tokens 独占的尾部 page
+                        // 如果 accepted 和 rejected 共享同一 page（边界 page），该 page 不释放
+                        let rejected_start_page = if accepted_count == 0 {
+                            draft_start_page
+                        } else {
+                            let rejected_first_token_offset = (draft_start_page * page_size).saturating_add(accepted_count);
+                            (rejected_first_token_offset + page_size - 1) / page_size // 上取整到下一个 page 边界
+                        };
+                        let rollback_pages: Vec<u64> = if rejected_count > 0 && rejected_start_page <= draft_end_page {
+                            page_table[rejected_start_page..=draft_end_page]
+                                .iter().map(|&p| p as u64).collect()
+                        } else {
+                            Vec::new()
+                        };
+                        crate::speculative::verify::SpeculativePages { commit_pages, rollback_pages }
+                    });
                 for instr in &kv_instructions {
                     match instr {
                         crate::speculative::verify::KvCommitInstruction::Commit {
@@ -1937,7 +1988,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             None => return, // no comm handle = single-node, skip
         };
 
-        let decision = match self.kv.resolve_kv_dist_decision(comm_handle) {
+        let decision = match self.kv.resolve_kv_dist_decision(comm_handle, self.model_ctx.model_config.num_kv_heads()) {
             Some(d) => d,
             None => return, // no distribution config = skip
         };
@@ -1953,7 +2004,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Delegate to KvCoordinator.kv_dist_dispatch for mode-specific logic.
         // ThreeTierSwapCoordinator is accessed from model_ctx for TieredCache mode.
-        if let Err(e) = self.kv.kv_dist_dispatch(comm_handle, &self.model_ctx.three_tier_swap) {
+        let total_kv_heads = self.model_ctx.model_config.num_kv_heads();
+        if let Err(e) = self.kv.kv_dist_dispatch(comm_handle, &self.model_ctx.three_tier_swap, total_kv_heads) {
             log::warn!(
                 "executor: REQ-DIST-012/013 KV distribution dispatch failed: {}",
                 e,
@@ -2043,7 +2095,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     /// No-op stub for non-nccl builds.
+    ///
+    /// Integration pending: REQ-DIST-016 Ring Attention integration into step loop.
+    /// Will be called from attention dispatch path once CP-aware attention is implemented.
     #[cfg(not(feature = "nccl"))]
+    #[allow(dead_code, reason = "REQ-DIST-016 integration pending: nccl variant is the active implementation")]
     fn ring_attention_cp_step(
         &mut self,
         _local_q: &[f32],
