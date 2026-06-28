@@ -20,6 +20,15 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
+        // Previously passed NULL causing SIGSEGV after tied-embeddings fix enabled KV cache path.
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 {
+            vec![0u8; kv_cache_bytes]
+        } else {
+            Vec::new()
+        };
+
         // Pre-fill RoPE cache
         // PERF: RoPE cos/sin table 用 F32 精度(三角函数标准精度),非统一精度假设
         // (具体 compute dtype 由 JIT codegen 按 op inputs 推导,RoPE table 是独立预处理)
@@ -54,7 +63,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no persistent KV
+                kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -77,13 +86,20 @@ impl MegaKernelExecutor {
             )
         };
 
-        // Read logits for last prompt token from scratchpad
+        // Read logits for last prompt token from scratchpad.
+        //
+        // ARCH-DECODE-LOGITS-ROW0 (BCE-20260629-002):
+        // decode mega-kernel (GenerateLoop) 每迭代只 embed 1 个 token, 所有 per-token
+        // GEMM 的 M=1, lm_head 把 last-token logits 写入 **row 0** (mega_kernel_emit.rs:1143/1257
+        // 三处 logits_output_tid override_source(Output{offset:0}) 确证)。旧 harness 误读
+        // row (prompt_len-1) 是单遍 prefill 布局假设残留 — decode 内核不按行累加写, 而是每代
+        // 覆盖 row 0。读 row (prompt_len-1) = 读从未写过的零初始化内存 → 全 0 (被 SIGSEGV
+        // 掩盖: 旧 M=8192 代码会先污染 row 0..6142 再崩, 修 M=1 后 row 4 回归零暴露此 bug)。
         let logits_off = mega.logits_scratch_offset;
         let vocab = self.vocab_size;
         let row_bytes = vocab * mega.elem_bytes();
-        // Last prompt token's logits are at row (prompt_len - 1)
-        // saturating_sub prevents underflow when prompt_len=0 (empty prompt)
-        let last_row_off = logits_off + prompt_len.saturating_sub(1) * row_bytes;
+        let _ = row_bytes;  // decode row-0 约定下不再用行步长 (保留变量便于审计 + BCE 横扫)
+        let last_row_off = logits_off;  // decode 内核把 last-token logits 写 row 0
 
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
@@ -116,6 +132,10 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: allocate KV cache for FromCache attention (avoid SIGSEGV on NULL).
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 { vec![0u8; kv_cache_bytes] } else { Vec::new() };
+
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = (prompt_len + 1) * rc.head_dim;
             let rope_bytes = rope_elems * std::mem::size_of::<f32>(); // RoPE cos/sin always F32 (math precision) (RoPE 数学精度)
@@ -146,7 +166,7 @@ impl MegaKernelExecutor {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
                 ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no persistent KV
+                kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL for FromCache
                 positions.as_ptr(),
                 std::ptr::null(),
                 1,
@@ -635,12 +655,13 @@ impl MegaKernelExecutor {
         let mega = self.mega_compiled.as_ref()?;
         mega.named_offsets
             .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, off)| *off)
+            .find(|(n, _, _)| n == name)
+            .map(|(_, off, _)| *off)
     }
 
     /// Returns all named weight offsets for diagnostic inspection.
-    pub fn weight_offsets(&self) -> Option<&[(String, usize)]> {
+    /// ARCH-BLOB-YIELDS-WEIGHT: each entry includes (name, offset, dtype).
+    pub fn weight_offsets(&self) -> Option<&[(String, usize, gllm_kernels::types::DType)]> {
         self.mega_compiled
             .as_ref()
             .map(|m| m.named_offsets.as_slice())
@@ -648,35 +669,38 @@ impl MegaKernelExecutor {
 
     /// Read weight data at a given blob offset + row offset.
     /// Returns F32 values regardless of storage dtype (BF16/F16 are widened on read).
-    /// TODO(ARCH-JIT-DATA-YIELDS): This function assumes F32 blob layout. When blob
-    /// preserves original dtype, this must use per-tensor dtype for offset calculation
-    /// and dtype-aware decoding.
+    /// ARCH-BLOB-YIELDS-WEIGHT: offset calculated per-tensor dtype, decoded by tensor's
+    /// actual dtype (not global compute_dtype).
     pub fn read_weight_row(&self, tensor_name: &str, row: usize, cols: usize) -> Option<Vec<f32>> {
         let mega = self.mega_compiled.as_ref()?;
-        let offset = mega
+        let (offset, dtype) = mega
             .named_offsets
             .iter()
-            .find(|(n, _)| n == tensor_name)
-            .map(|(_, off)| *off)?;
-        // ARCH-BLOB-YIELDS-WEIGHT: offset 计算 follow 数据实际 dtype。
-        // 当前 blob 打包时 BF16→F32 转换是违宪的（数据迁就代码），WF 重构中。
-        // 一旦 blob 保留原始 dtype，此处的 compute_dtype.size_bytes() 自然正确。
-        let elem_bytes = mega.compute_dtype.size_bytes();
+            .find(|(n, _, _)| n == tensor_name)
+            .map(|(_, off, dt)| (*off, *dt))?;
+        let elem_bytes = dtype.size_bytes();
         let row_offset = offset + row * cols * elem_bytes;
         if row_offset + cols * elem_bytes > mega.weight_blob.len() {
             return None;
         }
-        // TODO(ARCH-JIT-DATA-YIELDS): When blob preserves original dtype, decode
-        // based on actual tensor dtype (BF16→F32 widen, F16→F32 widen, F32→direct).
-        let data = unsafe {
-            std::slice::from_raw_parts(mega.weight_blob[row_offset..].as_ptr() as *const f32, cols)
-        };
-        Some(data.to_vec())
+        // ARCH-BLOB-YIELDS-WEIGHT: per-tensor dtype decode (was using global compute_dtype).
+        // decode_slice_to_f32 is in the same module (pack_observe.inc.rs, included together).
+        Some(decode_slice_to_f32(
+            &mega.weight_blob,
+            row_offset,
+            cols,
+            dtype,
+        ))
     }
 
     /// Returns the weight blob for GPU upload.
     pub fn weight_blob(&self) -> Option<&[u8]> {
         self.mega_compiled.as_ref().map(|m| m.weight_blob.as_slice())
+    }
+
+    /// BCE-DIAG: raw weight_blob bytes (for byte-level verification).
+    pub fn diagnostic_weight_blob_bytes(&self) -> Option<Vec<u8>> {
+        self.mega_compiled.as_ref().map(|m| m.weight_blob.clone())
     }
 
     /// Returns the GPU PTX/HIP code if available.
