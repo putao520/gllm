@@ -180,7 +180,10 @@ pub fn build_compiler_graph(
     };
 
     // ── Embedding: token_ids → Gather → hidden_0 (shared by decoder & encoder) ──
-    let token_ids = g.add_tensor("token_ids", vec![s.clone()], dt);
+    // BCE-20260629-003 (REQ-DTYPE-009): token_ids 是整数索引，dtype 标 U8（非浮点），
+    // 防止污染 graph_dtype（context.inc.rs 跳过非浮点 tensor）。dt 是激活 dtype（BF16），
+    // 若标 token_ids 会让 graph_dtype 误选 token_ids 的 dtype 当全图激活精度。
+    let token_ids = g.add_tensor("token_ids", vec![s.clone()], DType::U8);
     let embed_w = g.add_tensor_concrete("embed", &[vocab_size, hidden], tdt("embed"));
     let embedding = g.add_tensor("embedding", vec![s.clone(), SymDim::Concrete(hidden)], dt);
 
