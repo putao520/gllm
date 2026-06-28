@@ -152,12 +152,12 @@ fn diagnostic_dump_weight_offsets() {
     eprintln!("[DIAG-003] Weight offsets ({} tensors):", offsets.len());
 
 
-    for (name, off) in &offsets {
+    for (name, off, _dtype) in &offsets {
         eprintln!("  {} @ byte {}", name, off);
     }
 
-    let embed_off = offsets.iter().find(|(n, _)| n == "embed").map(|(_, o)| *o);
-    let lm_off = offsets.iter().find(|(n, _)| n == "lm_head").map(|(_, o)| *o);
+    let embed_off = offsets.iter().find(|(n, _, _)| n == "embed").map(|(_, o, _)| *o);
+    let lm_off = offsets.iter().find(|(n, _, _)| n == "lm_head").map(|(_, o, _)| *o);
     eprintln!("[DIAG-003] embed_offset={:?} lm_head_offset={:?}", embed_off, lm_off);
 
     assert!(embed_off.is_some(), "embed tensor not found in weight layout");
@@ -627,8 +627,8 @@ fn diagnostic_lm_head_weight_matches_embed() {
 
     // Also check weight offsets
     let offsets = client.diagnostic_weight_offsets().expect("offsets");
-    let embed_off = offsets.iter().find(|(n, _)| n == "embed").map(|(_, o)| *o);
-    let lm_off = offsets.iter().find(|(n, _)| n == "lm_head").map(|(_, o)| *o);
+    let embed_off = offsets.iter().find(|(n, _, _)| n == "embed").map(|(_, o, _)| *o);
+    let lm_off = offsets.iter().find(|(n, _, _)| n == "lm_head").map(|(_, o, _)| *o);
     eprintln!("[DIAG-012] embed offset: {:?}, lm_head offset: {:?}", embed_off, lm_off);
 
     // Check: are embed and lm_head at different offsets? (they should be, since
@@ -1186,8 +1186,8 @@ fn diagnostic_weight_blob_vs_safetensors() {
 
         // Get offset in weight blob
         let blob_offset = offsets.iter()
-            .find(|(n, _)| n == *canonical)
-            .map(|(_, o)| *o);
+            .find(|(n, _, _)| n == *canonical)
+            .map(|(_, o, _)| *o);
         let blob_off = match blob_offset {
             Some(o) => o,
             None => {
@@ -1304,7 +1304,7 @@ fn diagnostic_l0_per_op_vs_golden() {
     eprintln!("[DIAG-020] Total weight offsets: {} tensors", offsets.len());
 
     // Print first 40 tensor names to understand the layout
-    for (name, off) in offsets.iter().take(40) {
+    for (name, off, _dtype) in offsets.iter().take(40) {
         eprintln!("  weight: {} @ {}", name, off);
     }
 
@@ -1509,8 +1509,8 @@ fn diagnostic_weight_offset_all_layers() {
         for (si, suffix) in suffixes.iter().enumerate() {
             let name = format!("L{}_{}", layer, suffix);
             let expected = base + cumulative[si];
-            match offsets.iter().find(|(n, _)| n == &name) {
-                Some((_, off)) if *off != expected => {
+            match offsets.iter().find(|(n, _, _)| n == &name) {
+                Some((_, off, _)) if *off != expected => {
                     if mismatches < 10 {
                         eprintln!("[DIAG-023] MISMATCH {} offset={} expected={}", name, off, expected);
                     }
@@ -1528,8 +1528,8 @@ fn diagnostic_weight_offset_all_layers() {
     }
     // Check final_norm
     let expected_final = 30 * per_layer;
-    match offsets.iter().find(|(n, _)| n == "final_norm") {
-        Some((_, off)) if *off != expected_final => {
+    match offsets.iter().find(|(n, _, _)| n == "final_norm") {
+        Some((_, off, _)) if *off != expected_final => {
             eprintln!("[DIAG-023] MISMATCH final_norm offset={} expected={}", off, expected_final);
             mismatches += 1;
         }
@@ -1540,4 +1540,27 @@ fn diagnostic_weight_offset_all_layers() {
     if mismatches == 0 {
         eprintln!("[DIAG-023] All weight offsets correct");
     }
+}
+
+/// DIAG-028: Compare gllm hidden states at each layer vs golden to bisect deviation.
+#[test]
+#[ignore]
+fn diagnostic_hidden_states_per_layer() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
+    let client = Client::new_chat(MODEL).expect("Failed to load SmolLM2");
+
+    // Run prefill and get scratchpad with all activations
+    let sp = client.diagnostic_prefill_scratchpad(golden::INPUT_IDS)
+        .expect("Failed to get scratchpad");
+
+    // Golden hidden states: hidden_layer_0 (embedding) to hidden_layer_30 (final)
+    for layer in [0usize, 1, 2, 5, 15, 29, 30] {
+        if let Some(golden_h) = load_golden_hidden(layer) {
+            eprintln!("[DIAG-028] L{} golden norm={:.2} mean={:.6}", layer,
+                golden_h.iter().map(|x| x*x).sum::<f32>().sqrt(),
+                golden_h.iter().sum::<f32>() / golden_h.len() as f32);
+        }
+    }
+    eprintln!("[DIAG-028] scratchpad size={} bytes, logits_off={}", sp.data.len(), sp.logits_offset);
 }

@@ -807,12 +807,23 @@ fn e2e_generator_gemma4_qknorm() {
 ///   - swiglu_limit=7.0 (SwiGLU 钳位)
 ///   - tie_word_embeddings=false
 ///
-/// **期望结果**: 成功加载 openai/gpt-oss-20b SafeTensors 权重并生成语义合理的 token
+/// **期望结果**: 成功加载 unsloth/gpt-oss-20b-GGUF Q2_K 权重并生成语义合理的 token
+///
+/// E2E-QUANT-FIRST 铁律：使用 GGUF Q2_K（11.5GB）而非满血 BF16（13GB）。
+/// 满血 SafeTensors 已删除。此测试验证 MoE 架构（GateMask/MaskedGemm/MoEConditionalAdd）
+/// 的 JIT lowering，依赖 BCE-033（is_stub_op 删除）+ BCE-034（slot_at 边界检查）。
 #[test]
 fn e2e_generator_gptoss_20b() {
-    const MODEL: &str = "openai/gpt-oss-20b";
+    install_segv_handler();
+    let _ = env_logger::builder().is_test(true).try_init();
 
-    let client = Client::new_chat(MODEL).expect("Failed to load gpt-oss-20b");
+    // E2E-QUANT-FIRST: GGUF Q2_K（11.5GB）替代满血 BF16（13GB）
+    let client = Client::builder()
+        .model("unsloth/gpt-oss-20b-GGUF")
+        .kind(gllm::ModelKind::Chat)
+        .gguf_file_filter("Q2_K")
+        .build()
+        .expect("Failed to load gpt-oss-20b Q2_K GGUF");
     let response = client
         .generate("The capital of France is")
         .max_tokens(10)
@@ -822,7 +833,46 @@ fn e2e_generator_gptoss_20b() {
         .expect("Generation failed");
 
     let text = response.text.trim();
-    assert_generation_sane(text, "gptoss_20b");
+    eprintln!("[gpt-oss-20b-Q2_K] output={:?}", text);
+    assert_generation_sane(text, "gptoss_20b_q2k");
+
+    let lower = text.to_lowercase();
+    let is_reasonable =
+        lower.contains("paris") || lower.contains("capital") || lower.contains("france");
+    assert!(
+        is_reasonable,
+        "Output should mention Paris/capital/France, got: {:?}",
+        text
+    );
+}
+
+/// TEST-E2E-GEN-SMOLMOE: SmolMoE-4x360M 小型 MoE 架构端到端推理
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向
+/// **架构特征**: MoE (num_experts=4, num_experts_per_tok=2) mixtral 架构
+/// **用途**: 快速验证 MoE codegen 路径（GateMask/MaskedGemm/MoEConditionalAdd JIT lowering）
+///          体积仅 2GB（对比 gpt-oss-20b 11.5GB Q2_K），编译快 10x+。
+///          符合 E2E-QUANT-FIRST 铁律：用最小够用的模型测推理引擎路径。
+/// **期望结果**: 成功加载 SmolMoE 权重 + JIT 编译 + 生成合理 token
+#[test]
+fn e2e_generator_smolmoe_4x360m() {
+    install_segv_handler();
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let client = Client::new_chat("Fu01978/SmolMoE-4x360M-Instruct")
+        .expect("Failed to load SmolMoE-4x360M");
+
+    let response = client
+        .generate("The capital of France is")
+        .max_tokens(10)
+        .temperature(0.0)
+        .generate()
+        .response()
+        .expect("Generation failed");
+
+    let text = response.text.trim();
+    eprintln!("[SmolMoE-4x360M] output={:?}", text);
+    assert_generation_sane(text, "smolmoe_4x360m");
 
     let lower = text.to_lowercase();
     let is_reasonable =
