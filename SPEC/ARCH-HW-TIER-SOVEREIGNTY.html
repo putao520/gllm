@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>ARCH-HW-TIER-SOVEREIGNTY — 硬件能力等级主权架构</title>
+  <link rel="stylesheet" href="../spec.css">
+</head>
+<body><main data-spec-content="">
+  <spec id="ARCH-HW-TIER-SOVEREIGNTY" type="architecture" status="approved">
+    <h1>硬件能力等级主权架构 — 代码生成模块重设计</h1>
+
+    <section id="motivation">
+      <h2>动机与根因</h2>
+      <p>gllm 推理引擎在 BF16 模型推理时反复踩坑：</p>
+      <ul>
+        <li>dt 硬编码 F32，无视权重自描述 → 激活被强制 F32，违宪 ARCH-JIT-DATA-YIELDS</li>
+        <li>x86_elem_strategy 写在 QuantPrecision 上，BF16→WidenCompute 硬编码，无视硬件能力</li>
+        <li>硬件不支持时报错，无"该硬件等级最优实现"概念 → fallback 认知错误</li>
+        <li>VmInstr 指令名泄漏（Vp2Intersect），设备无关 IR 污染</li>
+      </ul>
+      <p><strong>核心认知纠正</strong>：不存在"fallback"概念。每个硬件能力等级都有它自己的最优实现，地位完全平等。JIT 职责 = 对当前硬件，从它能用的指令集里选出最快的那个实现。</p>
+      <ul>
+        <li>Sapphire Rapids（AVX-512 BF16）：BF16 GEMM 最优 = vcvtneps2bf16 + 原生指令</li>
+        <li>i9-10900KF（AVX2）：BF16 GEMM 最优 = AVX2 向量化序列</li>
+        <li>ARM：BF16 最优 = BFDOT/BFMMLA</li>
+      </ul>
+      <p>这三者不是"原生 vs 降级"，都是各自硬件上的最优实现。i9 用 AVX2 算 BF16 不是 fallback，是"这台机器上最快最正确"。</p>
+    </section>
+
+    <section id="core-philosophy">
+      <h2>核心哲学：能力等级主权（Tier Sovereignty）</h2>
+      <criterion id="CR-TIER-SOVEREIGNTY-001">
+        <p>每个 (算子, dtype) 在每个 ISA 上都有平等的最优实现。编译器从硬件能用的指令集里选吞吐最高的那个。底层永远有 scalar 保底，不存在"不支持的洞"。</p>
+      </criterion>
+      <criterion id="CR-TIER-SOVEREIGNTY-002">
+        <p>硬件特性是偏序非全序（AVX512_BF16 与 AVX512_FP16 不同轴，AVX10.2 vs AVX512 无法线性排）。禁止全局 CapabilityLevel enum，避免压成线性后丢失信息并复活"高等级=好"的 fallback 思维。</p>
+      </criterion>
+      <criterion id="CR-TIER-SOVEREIGNTY-003">
+        <p>哲学的必要锐化：①选择时按 throughput 排序（同硬件多个合法实现选最快）；②验证时 scalar reference 是正确性 oracle（标尺，不参与比较）。"完全平等"需加这两条限定。</p>
+      </criterion>
+    </section>
+
+    <section id="architecture">
+      <h2>架构设计</h2>
+
+      <h3>算子 × 硬件矩阵表达</h3>
+      <p>算子 = 一组 peer <code>OpImpl</code>，每个声明：</p>
+      <ul>
+        <li><code>requires: FeatureSet</code>（精确特性谓词，如 has_avx512_bf16）</li>
+        <li><code>throughput_class: u8</code>（粗排常量，1-10）</li>
+        <li>自包含 <code>emit(ctx, layout)</code>（不收 dtype/target，它本身就是特化实现）</li>
+      </ul>
+      <p>选择器 = <code>impls.filter(requires ⊆ isa.features).max_by(throughput)</code>。i9 的 Bf16Avx2Widen 和 SPR 的 Bf16AmxTile 都在同一张表里，是 peer。</p>
+
+      <h3>emit 签名的正确设计</h3>
+      <p>错误设计：<code>emit(dtype, target)</code> 或 <code>emit(target)</code> — 都把选择塞进 emit，内部必然 <code>match dtype</code> 爆炸。</p>
+      <p><strong>正确设计</strong>：select-then-emit 两阶段</p>
+      <pre><code>select(op, dtype, isa) -&gt; &amp;OpImpl  // 把 (dtype×isa) 折叠在 emit 之外
+OpImpl::emit(ctx, layout)       // 既不收 dtype 也不收 target — 它本身就是那个特化实现</code></pre>
+      <p>OpImpl 物理上看不到 dtype 身份，不会在内部复活 match。</p>
+
+      <h3>硬件特性矩阵 → 能力查询</h3>
+      <p>不映射 feature flag → "等级"。feature flag 就是矩阵本身，"等级"是 per-operation 的查询派生结果。保持细粒度 flag（has_avx2, has_avx512f, has_avx512_bf16, has_f16c, has_vnni, has_amx_tile 等），每个 OpImpl 声明精确谓词。</p>
+
+      <h3>跨等级数值正确性验证</h3>
+      <p>scalar 契约是正确性 oracle（不是 native）。所有等级实现对齐同一个 scalar 契约。</p>
+      <ul>
+        <li>容差按 dtype 精度定（BF16 不是固定 1e-5），按契约累加 dtype 比较</li>
+        <li>numerical_sim 能解释任意等级发射的 VmInstr 序列（host 无关）— 无 AMX 机器也能验证全等级</li>
+      </ul>
+      <criterion id="CR-TIER-SOVEREIGNTY-004">
+        <p>跨等级等价矩阵验证：每个 OpImpl 的 VmInstr 序列跑 numerical_sim，对齐 scalar reference。BF16 容差 = BF16 精度（~1e-2），不要求 bit-exact。</p>
+      </criterion>
+    </section>
+
+    <section id="vminstr-cleanup">
+      <h2>VmInstr 语义化重命名</h2>
+      <p>architect 发现 Vp2Intersect 等 x86 指令名泄漏进设备无关 IR。语义 op 是"稀疏掩码求交"，ARM 有自己的实现。</p>
+      <criterion id="CR-VMINSTR-SEMANTIC-001">
+        <p>VmInstr 指令名全部语义化：Vp2Intersect → SparseMaskIntersect，vpdpbusd → DotInt8Uint8 等。各硬件 lower 时从语义映射到硬件指令。设备无关 IR 禁止泄漏指令身份。</p>
+      </criterion>
+      <p>涉及改动：VmInstr enum + 全 lower 路径。</p>
+    </section>
+
+    <section id="isa-hook-evolution"><h2>IsaHook → OpImpl 重构（13 后端全重写）</h2>
+<p><strong>决策方向（用户确认）</strong>：将现有 method-per-strategy 的 IsaHook trait 重构为统一 OpImpl trait。13 个后端（x86 AVX2/AVX512/AMX, NVIDIA SM70/80/90/100, AMD CDNA2/3/4, ARM Neon/SVE/SME）全部迁移。</p>
+
+<h3>现状（重构前）</h3>
+<p>IsaHook trait（isa_hook.rs:167）用 method-per-strategy：select_fma / gemm_microkernel_shape / tile_config / transcendental_impl / epilogue_strategy / prefetch_hint / select_attention 等分散方法。select_fma_candidates() 已接收 <code>_dtype: DType</code> 参数但被下划线忽略（dtype 维未接通）。</p>
+
+<h3>重构目标（重构后）</h3>
+<ul>
+<li><strong>统一 OpImpl trait</strong>：<code>trait OpImpl { fn requires(&amp;self) -&gt; FeatureSet; fn throughput_class(&amp;self) -&gt; u8; fn emit(&amp;self, ctx: &amp;mut EmitCtx, layout: &amp;Layout); }</code></li>
+<li><strong>select-then-emit 两阶段</strong>：select(op, dtype, isa) 在 emit 之外折叠 (dtype×isa)；OpImpl::emit 不收 dtype/target（它本身就是特化实现）</li>
+<li><strong>dtype 维显式化</strong>：13 后端的 select_fma/gemm_microkernel_shape 全部接 dtype 参数，BF16/F16/F32/F8 各生成独立特化</li>
+<li><strong>Operator = peer impls 集合</strong>：每个算子（GEMM/Attention/Norm/...）持有一组 OpImpl，选择器 filter(requires ⊆ isa.features).max_by(throughput_class)</li>
+</ul>
+
+<h3>迁移纪律（铁律）</h3>
+<ul>
+<li>禁歛建并行新旧 trait（ARCH-UNCONSTITUTION-CONTAGION）—— 直接替换，不留向后兼容层</li>
+<li>13 后端逐一迁移，每个后端迁移后必须通过 numerical_sim 跨等级等价验证（CR-TIER-SOVEREIGNTY-004）</li>
+<li>迁移顺序：先建 OpImpl trait 骨架 + select 框架（Task #3）→ 硬件特性矩阵细粒度化（Task #4）→ BF16 各等级 OpImpl（Task #5）</li>
+</ul></section>
+
+    <section id="implementation-tasks">
+      <h2>实施 TASK（后续 PLAN 详细）</h2>
+      <req id="REQ-HW-TIER-001">硬件特性矩阵细化：DeviceProfile 从 has_avx512:bool 升级为细粒度 flags（has_avx512_bf16, has_f16c, has_vnni 等）</req>
+      <req id="REQ-HW-TIER-002">OpImpl trait 定义：requires + throughput_class + emit(ctx,layout)</req>
+      <req id="REQ-HW-TIER-003">select(op,dtype,isa) 选择器：FeatureSet 谓词匹配 + throughput 排序</req>
+      <req id="REQ-HW-TIER-004">BF16 各等级 OpImpl：AVX512_BF16(vcvtneps2bf16) + AVX2(vpsrld+vpackusdw) + Scalar</req>
+      <req id="REQ-HW-TIER-005">VmInstr 语义化重命名：指令泄漏 audit + 全 lower 路径映射</req>
+      <req id="REQ-HW-TIER-006">跨等级验证：numerical_sim VmInstr 解释 + scalar oracle 对齐</req>
+    </section>
+
+    <section id="references">
+      <h2>参考</h2>
+      <p>ARCH-JIT-DATA-YIELDS — 代码顺从数据</p>
+      <p>ARCH-DTYPE-MIXED-PRECISION — 每个 dtype 组合独立特化</p>
+      <p>NO-SILENT-FALLBACK — 已废弃，被本架构取代</p>
+      <p>IsaHook trait (codegen/vm/isa_hook.rs:167)</p>
+      <p>IsaProfile (codegen/vm/isa_profile.rs)</p>
+    </section>
+  </spec>
+</main></body>
+</html>

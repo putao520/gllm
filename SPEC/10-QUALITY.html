@@ -388,8 +388,42 @@
       </table>
     </section>
     <section id="s4" data-section="4">
-      <h3>4. Fallback 审计清单</h3>
-    </section>
+      <h3>4. Fallback 审计清单（注：硬件 fallback 概念已被 ARCH-HW-TIER-SOVEREIGNTY 能力等级主权取代，本节白名单仅保留非硬件降级类）</h3>
+    <section id="req-tier-sovereignty-001" data-req="REQ-TIER-SOVEREIGNTY-001" data-req-status="approved">
+<h3>REQ-TIER-SOVEREIGNTY-001 能力等级主权 — 硬件差异不是 fallback</h3>
+<p>能力等级主权契约（取代硬件 fallback 概念）：每个 (算子, dtype) 在每个 ISA 上都有平等地位的最优实现，不存在"原生 vs 降级"。
+1. JIT 职责 = 对当前硬件，从它能用的指令集里选出吞吐最高的 OpImpl
+2. 硬件不支持某指令 ≠ fallback 降级；该硬件有它自己的最优实现（如 i9-10900KF AVX2 算 BF16 是"这台机器最快最正确"，不是 SPR 的降级）
+3. 所有 OpImpl 对齐同一个 scalar reference oracle（CR-TIER-SOVEREIGNTY-004），BF16 容差按 BF16 精度（~1e-2），不要求 bit-exact
+4. 选择器公式：impls.filter(requires ⊆ isa.features).max_by(throughput_class)
+前置条件：ARCH-HW-TIER-SOVEREIGNTY CR-TIER-SOVEREIGNTY-001..004
+后置条件：select-then-emit 两阶段，OpImpl::emit 不收 dtype/target（折叠在 emit 之外）
+违规检测：代码出现"hardware not supported, fallback to..."措辞 = 违规；运行时 match dtype 分支 = 违规</p>
+<div data-criteria=""><strong>验收标准：</strong><ol>
+<li>每个 OpImpl 声明 requires（FeatureSet 谓词）+ throughput_class（u8 粗排）+ emit(ctx,layout)（自包含）</li>
+<li>select(op,dtype,isa) 选择器在 emit 之外折叠 (dtype×ISA)，OpImpl 物理上看不到 dtype 身份</li>
+<li>硬件不支持某 ISA 指令时，编译器选该硬件能用的指令集里 throughput 最高的实现，绝不报"unsupported"（底层 scalar 永远保底）</li>
+<li>跨等级等价：所有 OpImpl 的 VmInstr 序列跑 numerical_sim 对齐 scalar reference（BF16 容差 ~1e-2）</li>
+<li>代码中禁止出现 "fallback to" / "degrade to" / "降级" 措辞描述硬件差异</li>
+</ol></div>
+</section>
+
+<section id="req-tier-sovereignty-002" data-req="REQ-TIER-SOVEREIGNTY-002" data-req-status="approved">
+<h3>REQ-TIER-SOVEREIGNTY-002 硬件特性偏序矩阵 — 禁止全局 CapabilityLevel enum</h3>
+<p>硬件特性契约：feature flag 是偏序非全序矩阵，不映射成线性"等级"。
+1. 保持细粒度 flag：has_avx2, has_avx512f, has_avx512_bf16, has_f16c, has_vnni, has_amx_tile 等
+2. 禁止全局 CapabilityLevel enum（如 Low/Mid/High）——会压成线性后丢失信息并复活"高等级=好"的 fallback 思维
+3. AVX512_BF16 与 AVX512_FP16 是不同轴，AVX10.2 vs AVX512 无法线性排
+4. "等级"是 per-operation 的查询派生结果（select 时算），不是全局状态
+前置条件：ARCH-HW-TIER-SOVEREIGNTY CR-TIER-SOVEREIGNTY-002
+后置条件：DeviceProfile 用 FeatureSet bitflags，不用 enum Level
+违规检测：代码出现 enum CapabilityLevel / Level::High / "is_high_end" = 违规</p>
+<div data-criteria=""><strong>验收标准：</strong><ol>
+<li>DeviceProfile 包含细粒度 FeatureSet（bitflags），无全局等级 enum</li>
+<li>每个 OpImpl 的 requires 是 FeatureSet 谓词子集匹配</li>
+<li>capability 查询是 per-operation（select 时算），不预计算全局等级</li>
+</ol></div>
+</section></section>
     <section id="s4.1" data-section="4.1">
       <h4>4.1 SPEC 已授权 Fallback（5 个）</h4>
       <table>
@@ -849,7 +883,7 @@
         </tr>
       </table>
     </section>
-  <section id="req-fallback-001" data-req="REQ-FALLBACK-001" data-req-status="approved" data-req-domain="fallback" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FALLBACK-001 Fallback 白名单 — 仅 SPEC 授权的 5 个 fallback 合法</h3><p>Fallback 白名单契约：仅以下 5 个 SPEC 授权 fallback 合法：
+  <section id="req-fallback-001" data-req="REQ-FALLBACK-001" data-req-status="deprecated" data-req-domain="fallback" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FALLBACK-001 Fallback 白名单 — 仅 SPEC 授权的 5 个 fallback 合法</h3><p>Fallback 白名单契约：仅以下 5 个 SPEC 授权 fallback 合法：
 1. A2: HF→ModelScope 下载源切换（REQ-LOADER-016）
 2. A3: ONNX Fusion→Atomic（模式不匹配时）（ARCH-ONNX）
 3. A4: HW Fusion→Standalone（硬件约束违反时）（ARCH-DETAILED-DESIGNS）
@@ -862,7 +896,7 @@
 
 前置条件：SPEC 铁律 NO-FALLBACK + NO-SILENT-FALLBACK
 后置条件：代码中任何 fallback 路径必须在白名单内
-违规检测：grep 代码中 fallback/降级/default 路径，不在白名单内 = 违规</li><li>前置条件满足: SPEC 铁律 NO-FALLBACK + NO-SILENT-FALLBACK</li><li>后置条件验证: 代码中任何 fallback 路径必须在白名单内</li><li>违规可检测: grep 代码中 fallback/降级/default 路径，不在白名单内 = 违规</li></ol></div></section><section id="req-fallback-002" data-req="REQ-FALLBACK-002" data-req-status="approved" data-req-domain="fallback" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FALLBACK-002 Fallback 错误路径 — 非授权 fallback 必须返回 Err</h3><p>Fallback 错误路径契约：非授权 fallback 必须返回 Err：
+违规检测：grep 代码中 fallback/降级/default 路径，不在白名单内 = 违规</li><li>前置条件满足: SPEC 铁律 NO-FALLBACK + NO-SILENT-FALLBACK</li><li>后置条件验证: 代码中任何 fallback 路径必须在白名单内</li><li>违规可检测: grep 代码中 fallback/降级/default 路径，不在白名单内 = 违规</li></ol></div></section><section id="req-fallback-002" data-req="REQ-FALLBACK-002" data-req-status="deprecated" data-req-domain="fallback" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-FALLBACK-002 Fallback 错误路径 — 非授权 fallback 必须返回 Err</h3><p>Fallback 错误路径契约：非授权 fallback 必须返回 Err：
 1. 每个 REQ-FALLBACK-001 白名单外的 fallback 尝试必须返回 Err，不是静默 NOP
 2. Err 信息必须包含：触发条件 + 尝试的 fallback 路径 + 建议的修复方向
 3. 禁止 emit_nop_raw() / match _ =&gt; Ok(()) / eprintln!("[WARN]...") + 替代
@@ -874,7 +908,7 @@
 
 前置条件：NO-SILENT-FALLBACK 铁律
 后置条件：非授权 fallback 返回 Err，授权 fallback 有触发/降级/恢复文档
-违规检测：grep 静默 fallback 模式（emit_nop_raw/match _ =&gt; Ok/unwrap_or/default）</li><li>前置条件满足: NO-SILENT-FALLBACK 铁律</li><li>后置条件验证: 非授权 fallback 返回 Err，授权 fallback 有触发/降级/恢复文档</li><li>违规可检测: grep 静默 fallback 模式（emit_nop_raw/match _ =&gt; Ok/unwrap_or/default）</li></ol></div></section><section id="req-diff-test-001" data-req="REQ-DIFF-TEST-001" data-req-status="approved" data-req-domain="diff-test" data-req-category="architecture" data-req-entity="ENT-E2E-GENERATOR-MATRIX" data-req-api="POST /client/generate"><h3>REQ-DIFF-TEST-001 Differential Test — scalar reference 为 ground truth</h3><p>Differential Test 契约：scalar reference = ground truth，JIT 输出必须与之数值对齐：
+违规检测：grep 静默 fallback 模式（emit_nop_raw/match _ =&gt; Ok/unwrap_or/default）</li><li>前置条件满足: NO-SILENT-FALLBACK 铁律</li><li>后置条件验证: 非授权 fallback 返回 Err，授权 fallback 有触发/降级/恢复文档</li><li>违规可检测: grep 静默 fallback 模式（emit_nop_raw/match _ =&gt; Ok/unwrap_or/default）</li></ol></div><div data-criterion-id="CRT-PSC-001" data-criterion="任何函数/计算必须覆盖所有合法输入场景。场景需求取并集 max(scenario_A, scenario_B) 而非取部分 scenario_A。当某场景参数为0时，不代表该场景不存在。场景覆盖不完全会导致静默失效或崩溃（未覆盖场景产出空/零/错误值且无报错）。">任何函数/计算必须覆盖所有合法输入场景。场景需求取并集 max(scenario_A, scenario_B) 而非取部分 scenario_A。当某场景参数为0时，不代表该场景不存在。场景覆盖不完全会导致静默失效或崩溃（未覆盖场景产出空/零/错误值且无报错）。</div><div data-criterion-id="CRT-NOSILENT-001" data-criterion="禁止静默降级与错误吞咽。任何 codec/算法/资源操作的错误必须返回 Err 或 log::error!/log::warn!，禁止用 .ok().flatten() 或 .unwrap_or(default) 静默丢弃错误。资源释放错误（如 GPU mem_free 失败）禁止用 `let _ =` 吞咽。">禁止静默降级与错误吞咽。任何 codec/算法/资源操作的错误必须返回 Err 或 log::error!/log::warn!，禁止用 .ok().flatten() 或 .unwrap_or(default) 静默丢弃错误。资源释放错误（如 GPU mem_free 失败）禁止用 `let _ =` 吞咽。</div><div data-criterion-id="CRT-DTYPE-001" data-criterion="禁止跨侧 dtype 硬编码。Rust 侧 buffer/stride/size 计算必须用 compute_dtype.size_bytes() 或 elem_bytes 动态推导，禁止硬编码 * 4 假设 F32。GPU 下载后 dtype-aware 数据必须用 bytes_to_f32_vec_with_elem_bytes 等适配函数，禁止将 BF16/F16 字节流误读为 F32。">禁止跨侧 dtype 硬编码。Rust 侧 buffer/stride/size 计算必须用 compute_dtype.size_bytes() 或 elem_bytes 动态推导，禁止硬编码 * 4 假设 F32。GPU 下载后 dtype-aware 数据必须用 bytes_to_f32_vec_with_elem_bytes 等适配函数，禁止将 BF16/F16 字节流误读为 F32。</div><div data-criterion-id="CRT-UNWRAP-DIAG-001" data-criterion="推理热路径中禁止使用无上下文的 .unwrap()。Option::None 解包必须用 .expect(&quot;具体原因 — 修复建议&quot;) 替代 .unwrap()，确保 panic 时诊断信息可定位根因。">推理热路径中禁止使用无上下文的 .unwrap()。Option::None 解包必须用 .expect("具体原因 — 修复建议") 替代 .unwrap()，确保 panic 时诊断信息可定位根因。</div><div data-criterion-id="CRT-INT-ARITH-001" data-criterion="整数算术必须有界检查。f32→usize 转换前必须 .clamp(0.0, usize::MAX as f32)；wrapping_sub 提取索引必须用 checked_sub().expect() 替代；buffer.len() / world_size 必须有可整除性 assert。禁止静默截断、环绕、下溢出。">整数算术必须有界检查。f32→usize 转换前必须 .clamp(0.0, usize::MAX as f32)；wrapping_sub 提取索引必须用 checked_sub().expect() 替代；buffer.len() / world_size 必须有可整除性 assert。禁止静默截断、环绕、下溢出。</div></section><section id="req-diff-test-001" data-req="REQ-DIFF-TEST-001" data-req-status="approved" data-req-domain="diff-test" data-req-category="architecture" data-req-entity="ENT-E2E-GENERATOR-MATRIX" data-req-api="POST /client/generate"><h3>REQ-DIFF-TEST-001 Differential Test — scalar reference 为 ground truth</h3><p>Differential Test 契约：scalar reference = ground truth，JIT 输出必须与之数值对齐：
 1. ScalarOpRegistry 中的 scalar 参考实现是数值正确性的唯一标准
 2. JIT 编译产出的输出必须与 scalar 参考在 DType 容差内一致
 3. 容差标准：F32 ≤ 1e-6, BF16 ≤ 1e-2, F16 ≤ 1e-3, 量化格式按声明精度

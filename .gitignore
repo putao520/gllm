@@ -78,3 +78,6 @@ gllm-kernels/
 
 # SPEC is SSOT, tracked in git for rollback guarantee
 CLAUDE.md
+
+# Playwright MCP session artifacts
+.playwright-mcp/

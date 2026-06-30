@@ -416,7 +416,17 @@
       <p>&gt; <strong>核心原则</strong>: dtype 从模型 TensorMeta 自动推断，编译时穿透所有 emit 函数，</p>
       <p>&gt; 运行时零 dtype 分支。融合组内通过代数重关联消除不必要的 dtype 变换，</p>
       <p>&gt; 最小化数据搬移。</p>
-    </section>
+    <section id="s0.8.dtype-sovereignty" data-section="0.8.dtype-sovereignty" data-req="REQ-DTYPE-009" data-req-status="approved">
+<h5>§0.8.dtype-sovereignty dtype 主权 — 宪法3 违宪传染阻断（BCE-20260629-003）</h5>
+<p><strong>背景</strong>：SmolLM2 BF16 logits 全0/NaN 根因 — gather codegen 依赖"pack 已 BF16→F32 转换"的违宪前提，pack 转换被删后 gather 未补 read-time widen，BF16 字节直拷进 F32 声明 buffer → NaN。这是宪法3（ARCH-UNCONSTITUTION-CONTAGION）教科书形态。</p>
+<req id="REQ-DTYPE-009">索引类 tensor（token_ids/position_ids）dtype 必须 I32，禁止打激活 dtype（污染图首 tensor）</req>
+<req id="REQ-DTYPE-010">激活计算精度与权重 dtype 独立解耦；graph_dtype() 禁止用 tensors.first().dtype 作全图单一 dtype，各 op 从 inputs[weight_idx] 独立推断</req>
+<req id="REQ-DTYPE-011">gather/embedding 当 weight_dtype≠compute_dtype 时必须算术 widen（read-time decode），禁止原始字节直拷；weight blob 保留原始 dtype（宪法1），代码顺从数据（非数据迁就代码）</req>
+<req id="REQ-DTYPE-012">所有 row stride/offset 用对应 tensor 的 dtype.elem_bytes()，禁止硬编码 *4 / 256*4 / vocab*2</req>
+<req id="REQ-DTYPE-013">Gemm lowering 接收独立 a_dtype/b_dtype/c_dtype，禁止单 dtype 覆盖 A/B/C（ARCH-DTYPE-MIXED-PRECISION）</req>
+<criterion id="CR-DTYPE-SOVEREIGNTY-001"><p>scratchpad 物理 dtype 必须与声明 compute_dtype 同步。字节级验证：BF16 权重 widen 到 F32 后字节应是 00 00 e9 ff（低16位补零），禁止 e9 ff e9 ff（原始字节直拷）。</p></criterion>
+<criterion id="CR-DTYPE-SOVEREIGNTY-002"><p>禁止"weight_blob is F32 for BF16 models — pack converts"类违宪注释/前提。pack 不得做 dtype 转换，widen 责任在 JIT codegen read-time。</p></criterion>
+</section></section>
     <section id="s0.8.1" data-section="0.8.1">
       <h5>§0.8.1 问题诊断</h5>
       <p>当前实现存在两类架构缺陷：</p>

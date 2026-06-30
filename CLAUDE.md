@@ -29,6 +29,39 @@
 - ✅ Scratchpad / KV Cache / Weight Blob 都是内存区域，代码只是按既定布局读写这片内存
 - ✅ "BF16→F32"不是类型转换，是"2 字节宽内存重解释为 4 字节宽" — 这是布局违宪
 
+### 🚨 宪法 3: 违宪传染阻断（ARCH-UNCONSTITUTION-CONTAGION）
+
+**当发现代码中存在违宪实现时，禁止为迁就它而扭曲正确代码。违宪必须被切除，不能被"适配"。**
+
+**核心因果铁律**：数据方永远正确，代码方可能违宪。遇到"数据需要 X 才能喂给下游 Y"时，先查下游 Y 是否违宪——绝不能默认 Y 是既定前提去迁就它。
+
+**违宪传染的典型形态**：
+- 代码方（下游读取/打包/codegen）被实现成了只认识单一格式（如只认 F32）
+- 为了喂给这个违宪下游，在正确数据上加了转换层（如 `convert_tensor_to_f32` 把 BF16→F32）
+- 转换层存在的"理由"被记为"下游只认 F32" —— 但"下游只认 F32"本身就是违宪现状，不是正当理由
+- 结果：违宪从下游传染到上游，正确数据被改错
+
+**判定标准**：
+| 判断 | 结论 |
+|------|------|
+| "因为下游 Y 只认 X，所以把数据转成 X" | ❌ 违宪传染 — Y 违宪，改 Y 不改数据 |
+| "数据本来就是 X 格式，代码按 X 处理" | ✅ 代码顺从数据 |
+| "转换层是为了复用同一段代码" | ❌ 违宪 — 代码必须顺从数据，不是数据迁就代码复用 |
+
+**根治铁律**：
+1. **定位违宪方** — 永远是代码方（读取/打包/codegen 的假设错了），不是数据方
+2. **切除违宪** — 改代码方顺从数据方（blob 保留原始格式，读取按实际格式解码）
+3. **删除转换层** — 为迁就违宪下游而存在的转换层整体删除，不保留不降级
+4. **贯穿正确信息** — 数据自带的元信息（dtype/layout/shape）从源头贯穿到使用点，永不丢失
+
+**反例（必须避免的错误推理）**：
+- ❌ "convert_tensor_to_f32 存在是因为 blob 只认识 F32" — 把违宪的 blob 当前提
+- ❌ "既然下游只认 F32，那转 F32 也合理" — 这就是违宪传染
+- ❌ "转换层有性能优化（并行转换），所以有价值" — 不该转换，谈何优化
+- ✅ "blob 假设 F32 是 bug，read_weight_row 假设 F32 是 bug，convert_tensor_to_f32 是为喂给这两个 bug 而存在——三层全是 bug，全删"
+
+**适用范围**：所有"代码假设"与"数据实际"冲突的场景——dtype 假设、layout 假设、shape 假设、对齐假设。遇到"数据需要预处理才能用"，先质疑代码的假设，不要默认预处理合理。
+
 ## SPEC Location
 - `./SPEC/` (SSOT, 76 documents, ~1350 REQs)
 - `../gllm-kernels/SPEC/` (JIT codegen + VmInstr SSOT)
@@ -431,6 +464,58 @@ TensorMeta.dtype (DType)
 5. ❌ 禁止 dtype 身份匹配驱动指令选择：使用 `dtype.x86_elem_strategy()` 属性方法
 6. ❌ 禁止在 VmInstr 构造时省略 dtype 传播
 
+### 混合精度铁律 — 每个算子的每个精度都是独立算子（ARCH-DTYPE-MIXED-PRECISION）
+
+**这是本项目的核心设计点，多维度多层级反复踩坑的同一个 BUG。**
+
+混合精度推理（A 激活 F32 + B 权重 BF16）**不是**"一个 op 里塞 if-else 处理两种 dtype"——而是**编译时按 dtype 组合生成独立的特化代码实例，每个精度实例当独立算子用**。JIT 看到什么 dtype 就特化出什么代码，运行时零分支、零适配。
+
+**根本认知**：
+- 每个 op 的**每个输入 tensor 都有独立 dtype**，必须各自从 TensorMeta 正向传播，**禁止假设 A/B/C 同 dtype**
+- 同一个算子（GEMM/Attention/RoPE/Norm/Gather）的 **F32 实例、BF16 实例、混合精度实例是三段不同的机器码**，由编译时 dtype 决定生成哪个
+- 这与"为每个量化格式生成独立 GEMV"（ARCH-JIT-YIELDS）完全一致——dtype 就是量化格式的一种
+
+**正确架构（GEMM 混合精度示例）**：
+```
+权重 BF16 + 激活 F32:
+  VecLoad B 用 weight_dtype=BF16 → x86 WidenCompute (BF16→F32 zero-extend+shift)
+  VecLoad A 用 ctx.dtype=F32     → Native
+  FMA 累加用 F32 (accumulator_dtype)
+  VecStore C 用 F32
+→ 编译产物: 一段纯 F32 计算的机器码，B 加载时按 BF16 解码
+```
+
+**dtype 必须多路传播（禁止合并为单一 dtype）**：
+- emit 函数接收**独立的 weight_dtype 参数**（从 `op.inputs[1]` 或 `spec.dtype` 推断），不能复用 `ctx.dtype`
+- A 加载用激活 dtype，B 加载用权重 dtype，FMA/累加用 accumulator dtype，C 存储用输出 dtype
+- **elem/stride 计算必须按各输入的实际 dtype**：BF16 权重的行 stride = `n * 2`，不是 `n * 4`
+
+**违宪传染的典型形态（必须识别并切除）**：
+| 违宪形态 | 正解 |
+|---------|------|
+| `let tdt = \|_\| -> DType { F32 }` — 忽略参数，所有权重标 F32 | `tdt = \|name\| weight_dtypes.get(name).unwrap_or(F32)` — 顺从权重实际 dtype |
+| `GemmSpec { dtype: dt }` — 用激活 dtype 硬编码权重 dtype | `GemmSpec { dtype: tdt(weight_name) }` — 权重 dtype 独立推断 |
+| `emit_gemm(..., dtype: ctx.dtype)` — 单一 dtype 覆盖 A/B/C | `emit_gemm(..., a_dtype, weight_dtype)` — 多路 dtype 传播 |
+| `elem = dtype.elem_bytes()` 单一 elem 控制 B stride | A_elem / B_elem 分别计算 |
+| `ctx.dtype` 从 `graph.tensors.first()`（激活）推断，用于权重 load | 权重 load 从权重 tensor dtype 推断 |
+
+**因果铁律**：当出现"权重数据正确（raw 字节对）但计算结果错误"时，根因 100% 是 dtype 传播在某一层断裂——代码用错误的 dtype 解码了正确的字节。先查 dtype 传播链，不要怀疑数据。
+
+**完整 dtype 传播链（混合精度版，单向不可逆）**：
+```
+权重文件 dtype (safetensors/gguf metadata)
+  → loader 保留原始 dtype (RawFloatTensor.dtype, 禁止 BF16→F32 转换)
+    → weight_blob raw-pack (copy_from_slice 原始字节)
+      → weight_dtypes map (name → DType)
+        → build_graph: tdt(name) 写入 graph tensor dtype + spec.dtype
+          → lowering: 从 op.inputs[i].dtype / spec.dtype 独立推断每个输入
+            → emit_*(a_dtype, weight_dtype, ...): 多路 dtype 传播
+              → VmInstr { dtype } 按 B-load/A-load/累加 各自正确
+                → ISA lowering 按 dtype 特化机器码
+```
+
+**溯源要求**：任何"假设单一 dtype"的代码（`let dt = F32`、`ctx.dtype` 用于权重 load、单一 dtype 参数覆盖多输入）都是潜在违宪点，新增/修改算子 lowering 时必须验证 dtype 从 TensorMeta 到 VmInstr 的每一段传播都对齐。
+
 ---
 
 ## 🚨 铁律 ARCH-SYMDIM-NO-CONST-DEGRADE — SymDim 穿透禁止降级为编译时常量
@@ -598,6 +683,64 @@ TensorMeta.dtype (DType)
 
 - ❌ AI 禁止擅自引入新环境变量或为"灵活性"添加环境变量
 - ✅ 新增环境变量必须由用户明确要求，且有不可替代的使用场景
+
+---
+
+## 🚨 铁律 E2E-QUANT-FIRST — E2E 测试优先使用量化模型（ARCH-QUANT-FIRST-E2E）
+
+**E2E 测试用模型必须积极使用量化类（Q4_K_M / Q3_K_M / Q2_K / ONNX int8 等），参考本地服务器硬件能力，禁止使用超出设备能力的满血模型导致测试无法完成。**
+
+**核心原则**：测试推理引擎实现的正确性，不需要满血权重。量化版既完整验证了真实推理路径（权重加载 → JIT 编译 → 推理 → 解码），又不会因模型规模超出硬件导致测试卡死/超时。
+
+### 本地服务器硬件基线（pt-worker，测试参考）
+
+| 项 | 值 |
+|----|-----|
+| CPU | Intel i9-10900KF (10C/20T) |
+| RAM | 128 GB |
+| GPU | NVIDIA GTX 1060 6GB (consumer 2016, 无 Tensor Core) |
+| 推理路径 | CPU JIT（GPU 非必需；1060 6GB 仅够极小模型） |
+
+### 模型规模约束
+
+- ❌ 禁止 E2E 测试使用 >10GB 的满血/大权重模型（如 gpt-oss-20b BF16 13GB）
+- ✅ 优先选择量化版：
+  - Q4_K_M / Q3_K_M / Q2_K（GGUF，体积通常为满血的 30%-50%）
+  - ONNX int8 / 量化 safetensors
+- ✅ 小模型量化版优先（≤2GB）：SmolLM2-135M-Q4_0、Qwen3-0.6B-Q4_0 等
+- ⚠️ MoE 大模型量化版（如 gpt-oss-20b Q4_K_M ~11GB）仍可能超 RAM 预算 → 标注 `#[ignore]` 或待更强硬件
+
+### 选型决策树
+
+```
+E2E 测试需要某架构模型
+  │
+  ├─ 架构本身（如 MoE / MLA / AltUp）
+  │   → 先查是否有 ≤2GB 的量化小模型覆盖该架构
+  │   → 有则用量化版（首选）
+  │
+  ├─ 只有满血大模型（>10GB）
+  │   → 本地硬件跑不动 → 标注 #[ignore] + 注释说明
+  │   → 禁止强行下载满血死磕
+  │
+  └─ config.json 字段验证（非推理）
+      → 用 config.json 单测，不需下载权重
+```
+
+### 已验证可用的本地量化模型
+
+| 模型 | 架构 | 体积 | 用途 |
+|------|------|------|------|
+| `Mungert/SmolLM2-135M-Instruct-GGUF` (Q4_0) | decoder | 74MB | 生成 E2E |
+| `bartowski/Qwen_Qwen3-0.6B-GGUF` (Q4_0/Q4_K_M) | decoder | 450MB | GGUF 多量化测试 |
+| `intfloat/e5-small-v2` (F32) | embedding | 128MB | embedding E2E |
+| `onnx-community/bge-reranker-v2-m3-ONNX` | reranker | 166MB | ONNX E2E |
+
+### 禁止的反模式
+
+- ❌ 为了"真实"下载 13GB BF16 满血模型跑 E2E → 编译 37 分钟、推理卡死
+- ❌ 用"本机跑不动所以跳过测试"降级 → 应改用量化版而非跳过
+- ❌ 单元测试替代 E2E → 单测验证逻辑，E2E（量化版）验证真实路径，二者不可互代
 
 ---
 

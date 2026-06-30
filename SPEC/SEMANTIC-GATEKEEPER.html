@@ -1168,7 +1168,7 @@
       
       
       </div>
-    </section>
+    <div data-criterion-id="CRIT-SG-DTYPE-YIELDS" data-criterion="SG 模块权重/张量字节解码必须从 dtype 派生 elem_bytes（dtype.size_bytes()），禁止硬编码 * 4 / * 2 字节偏移。所有 dtype→f32 解码逻辑必须走 semantic_gatekeeper::decode::decode_slice_to_f32 单一 helper，禁止在新代码中复制粘贴 match dtype { F32/F16/BF16 } 三臂。">SG 模块权重/张量字节解码必须从 dtype 派生 elem_bytes（dtype.size_bytes()），禁止硬编码 * 4 / * 2 字节偏移。所有 dtype→f32 解码逻辑必须走 semantic_gatekeeper::decode::decode_slice_to_f32 单一 helper，禁止在新代码中复制粘贴 match dtype { F32/F16/BF16 } 三臂。</div></section>
 
     <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-SG-001" data-test="TEST-SG-001" id="test-sg-001">TEST-SG-001: Semantic Gatekeeper核心测试<p>验证REQ-SG-001相关功能正确性</p>
       <div id="semantic-gatekeeper-level-keys-预计算正确" data-criterion="Semantic Gatekeeper Level Keys 预计算正确">Semantic Gatekeeper Level Keys 预计算正确</div>

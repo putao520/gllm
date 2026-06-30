@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-spec-root>
+<head>
+  <meta charset="utf-8">
+  <meta name="spec-file" content="CONSULT-codegen-hw-op-dtype-redesign">
+  <meta name="spec-category" content="other">
+  <script type="application/ld+json">
+  { "@context":"https://spec.gsc.local/v1", "@type":"SpecDocument", "id":"CONSULT-codegen-hw-op-dtype-redesign", "dependencies":[], "children":[] }
+  </script>
+</head>
+<body>
+  <header data-spec-header>
+    <h1>架构咨询（重写版）：能力等级主权模型 — 硬件矩阵 × 算子接口 × dtype</h1>
+    <nav data-spec-breadcrumb>
+      <a href="00-INDEX.html">SPEC</a> &gt; <span>CONSULT-codegen-hw-op-dtype-redesign</span>
+    </nav>
+  </header>
+  <main data-spec-content>
+    <section id="s-架构咨询重写版能力等级主权模型硬件矩阵算子接口dtype" data-section="null">
+      <h2>架构咨询（重写版）：能力等级主权模型 — 硬件矩阵 × 算子接口 × dtype</h2>
+      <p>&gt; ⚠️ 本文档<strong>作废并替换</strong>前一版"三态 VERIFIED_FALLBACK"方案。</p>
+      <p>&gt; 前版根本概念错误：把非原生路径当"降级 fallback"、把 native 当正确性基准。用户已纠正。</p>
+      <p>&gt; 核心哲学（必须贯穿）：<strong>每个硬件能力等级都有它自己的最优实现，地位完全平等。JIT 职责 = 对当前硬件，从它能用的指令集选出最快的实现。没有"不支持"，只有"该等级用该等级的实现"。</strong></p>
+    </section>
+    <section id="s0" data-section="0">
+      <h3>0. 撤回与纠正</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>前版（错）</th>
+            <th>本版（对）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Native vs Fallback 二元</td>
+            <td>每个能力等级是平等的 sovereign 实现</td>
+          </tr>
+          <tr>
+            <td>不支持 → VERIFIED_FALLBACK 兜底</td>
+            <td>任何 (op,dtype) 在任何 ISA 都可实现，worst-case=scalar，无"不支持"</td>
+          </tr>
+          <tr>
+            <td>native 是正确性基准</td>
+            <td>scalar 契约是正确性 oracle，所有等级实现都对齐它</td>
+          </tr>
+          <tr>
+            <td><code>X86ElemStrategy{ Native, Widen, Dequant }</code> 三态枚举</td>
+            <td>溶解为按 throughput 排序的 peer 实现集</td>
+          </tr>
+        </tbody>
+      </table>
+      <p><strong>一句话</strong>：把"原生/降级"的纵向等级关系，改成"多个平等实现 + 按吞吐选最快"的横向选择关系。</p>
+    </section>
+    <section id="s1" data-section="1">
+      <h3>1. 决策1：算子 = 实现注册表（每个 op 一组 peer 实现），不是"全局能力等级 enum"</h3>
+      <p>回答用户 Q1 的"是否硬件能力等级 enum → 每算子每等级一方法"：<strong>方向对，但不要全局 enum</strong>。</p>
+      <pre><code>/// 一个算子的一个 sovereign 实现 —— peer，不分主次
+struct OpImpl {
+    name: &amp;'static str,          // 按"它是什么"命名: Bf16Avx512Native / Bf16Avx2WidenFma / Bf16AmxTile
+    requires: FeatureSet,        // 该实现需要的精确硬件特性集（不是"等级"）
+    throughput_class: u16,       // 该 ISA 上的相对吞吐（选择用，非地位高低）
+    emit: fn(&amp;mut EmitCtx, &amp;Layout),  // 自包含 codegen，零 dtype/isa 分支
+}
+
+/// 算子 = 同语义的一组 peer 实现
+struct Operator { semantic: OpKind, impls: Vec&lt;OpImpl&gt; }</code></pre>
+      <p><strong>为什么不用全局 <code>CapabilityLevel</code> enum</strong>：硬件能力是<strong>偏序非全序</strong>。AVX512_BF16 与 AVX512_FP16 是不同轴，不是"谁更高"；AVX10.2 vs AVX512 无法线性排。强行压成线性 level 会丢信息、并偷偷复活"高 level=好"的 fallback 思维。<strong>等级是 per-operation 的、查询派生的，不是存储的全局字段。</strong></p>
+    </section>
+    <section id="s2" data-section="2">
+      <h3>2. 决策2：feature flags 就是矩阵本身，"能力等级"是查询结果（回答 Q2）</h3>
+      <p>不要把 <code>has_avx512</code> 压缩成 level。<strong>保持细粒度 flag，每个 OpImpl 声明它要的精确特性集，选择器按特性谓词 + 吞吐排序选胜出者</strong>。</p>
+      <p>BF16-GEMM 的实现集（peer，按 throughput 降序）：</p>
+      <table>
+        <thead>
+          <tr>
+            <th>OpImpl</th>
+            <th>requires</th>
+            <th>该 ISA 上为何最优</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Bf16AmxTile</td>
+            <td><code>{ has_amx_bf16 }</code></td>
+            <td>SPR：tile MMA</td>
+          </tr>
+          <tr>
+            <td>Bf16Avx512Native</td>
+            <td><code>{ has_avx512, has_bf16 }</code></td>
+            <td>vcvtneps2bf16 + 原生</td>
+          </tr>
+          <tr>
+            <td>Bf16Avx512Widen</td>
+            <td><code>{ has_avx512 }</code></td>
+            <td>无 BF16 指令的 AVX512：F32 widen 向量</td>
+          </tr>
+          <tr>
+            <td>Bf16Avx2Widen</td>
+            <td><code>{ has_avx2 }</code></td>
+            <td>i9-10900KF：vpsrld+vpackusdw 截断序列 — 这就是该机最优</td>
+          </tr>
+          <tr>
+            <td>Bf16NeonBfmmla</td>
+            <td><code>{ arm_bf16 }</code></td>
+            <td>ARM：BFMMLA</td>
+          </tr>
+          <tr>
+            <td>Bf16Scalar</td>
+            <td><code>{ }</code></td>
+            <td>任何 ISA 的 worst-case，永远可选</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>选择器 = <code>impls.filter(|i| i.requires ⊆ isa.features).max_by_key(throughput_class)</code>。</p>
+      <p><strong>"按吞吐排序选最快" ≠ fallback</strong>：fallback 是"做不到才退"；这里是用户明确要的"从能用的里选最快"。差别在——<strong>底层全部可选（scalar 保底），没有"做不到"的洞</strong>。</p>
+    </section>
+    <section id="s3" data-section="3">
+      <h3>3. 决策3：select-then-emit，emit 既不收 dtype 也不收 target（回答 Q3）</h3>
+      <p>两阶段彻底分离：</p>
+      <pre><code>// 阶段1 选择（纯函数，(dtype×isa) 在此折叠成具体 impl）
+fn select(op: OpKind, dtype: QuantPrecision, isa: &amp;IsaProfile) -&gt; &amp;OpImpl
+
+// 阶段2 发射（impl 已是"该 dtype 该 ISA 的具体实现"，零再判断）
+op_impl.emit(ctx, layout)</code></pre>
+      <p>回答 Q3 的两个选项：<strong>都不对</strong>。</p>
+      <ul>
+        <li><code>emit(target, dtype)</code> 错：把选择塞进 emit，target 内部必然 <code>match dtype</code> → match 爆炸复活。</li>
+        <li><code>emit(target)</code> 自判断 错：同样在 emit 内分支。</li>
+      </ul>
+      <p>正确：emit <strong>不接收 dtype 也不接收 target</strong>——它本身<strong>就是</strong>那个 (dtype,ISA) 特化实现，只收 <code>(ctx, layout)</code>。这是正交性的最强形式：emit 物理上看不到 dtype 身份，无从写死。</p>
+    </section>
+    <section id="s4" data-section="4">
+      <h3>4. 决策4：scalar 契约是正确性 oracle，验证 = 跨等级数值等价矩阵（回答 Q4）</h3>
+      <p>新框架下数值锚点<strong>更重要且更对称</strong>：</p>
+      <ul>
+        <li><code>scalar_ops</code> 的 extern "C" 参考 = 每个 (op,dtype) 的<strong>语义契约 SSOT</strong>。它不是"native"也不是"fallback"，是<strong>正确输出的定义</strong>。scalar 身兼二职：worst-case 可选实现 + 正确性 oracle。</li>
+        <li><strong>所有等级实现必须对齐同一 scalar 契约</strong>（不是对齐 native）。验证 = 跨等级等价矩阵：</li>
+      </ul>
+      <pre><code>对每个 (op, dtype):
+  同一组输入 → 跑 {全部 satisfiable 的 OpImpl} + scalar 参考
+  断言所有输出 ≈ scalar（按 dtype ULP 容差，非固定 1e-5）</code></pre>
+      <p><strong>两个关键设计点</strong>：</p>
+      <ol>
+        <li><strong>容差按 dtype 精度定</strong>：BF16 ~3 位有效，容差必须反映 dtype 可表示精度。且不同等级有合法的不同舍入（AMX 内部 F32 累加 vs AVX2 widen-truncate），所以是"按契约累加 dtype 比较"而非 bit-exact。契约由 ARCH-DTYPE-MIXED-PRECISION 指定累加 dtype → 各等级累加一致 → 可比。</li>
+        <li><strong>跨等级验证不能依赖本机有 AMX</strong>：dev/CI 机器无法原生跑所有等级。<code>numerical_sim.rs</code> 须能<strong>解释任意等级发射的 VmInstr/TraceOp 序列</strong>（host 无关），这样一台机器即可验证全等级。次选 QEMU 仿真。<strong>推荐前者为主路径</strong>。</li>
+      </ol>
+      <p>设施现成：<code>numerical_sim.rs</code> + <code>scalar_ops</code> registry，从"验证 decode 正确"扩展为"全 (op,dtype,等级) 跨等级等价"。</p>
+    </section>
+    <section id="s5" data-section="5">
+      <h3>5. 决策5：IsaHook 13 后端增量演进，不重写（回答 Q5）</h3>
+      <p>13 个 Hook <strong>就是各等级的实现知识</strong>，已编码"SM90 BF16-GEMM 用 WGMMA 64×N×K"。它们不是 fallback 链——<code>select_hook(isa)</code> 已经是"按 platform 特性选该 ISA 最优 hook"，<strong>用户的模型已实现 ~70%</strong>。演进三步：</p>
+      <ol>
+        <li><strong>术语去 fallback</strong>：删 <code>Metal→SM80</code> 等"近似/退化"注释措辞，正名为 peer。</li>
+        <li><strong>dtype 维显式化</strong>：当前 <code>select_fma(m,n,k)</code> 缺 dtype；把 <code>elem_strategy</code> 的 dtype 折叠并入 hook 选择，hook 输出"具体 OpImpl 句柄"而非"待解释的 strategy"。</li>
+        <li><strong>strategy 连 emit</strong>：每个 strategy 绑定 emit_fn，使 impl 自包含、可独立验证。</li>
+      </ol>
+      <p>throughput 排序复用现成 <code>estimate_strategy_cost</code> + <code>ResourceBudget</code> 做形状相关微调；粗排用 <code>throughput_class</code> 常量。</p>
+    </section>
+    <section id="s6" data-section="6">
+      <h3>6. SPEC17 原则纠正：ARCH-TIER-SOVEREIGNTY</h3>
+      <p><strong>撤回</strong> <code>NO_SILENT_FALLBACK</code> 的"不支持→CodegenViolation"。<strong>改为</strong>：</p>
+      <p>&gt; 每个 (operation, dtype) 在每个 ISA 上都可实现。编译器按 (op,dtype,IsaProfile) 选 requires 满足、throughput 最高的 sovereign 实现。各实现是 peer，按"它是什么"命名，验证对齐 scalar 契约。唯一非法结果 = 静默 NOP / 错误结果。worst-case 永远是 scalar，不存在"不支持的洞"。</p>
+      <p><strong>附带审计项 — Vp2Intersect 是 IR 泄漏</strong>：<code>Vp2Intersect</code> 是 x86 <strong>指令名</strong>混进了设备无关 IR。语义 op 是"稀疏掩码求交"，ARM 用 predicate ops 有自己的 sovereign 实现，不是"x86 only 别处 Err"。设备无关 IR 应承载<strong>语义 op</strong>（SparseMaskIntersect），各等级 lower 到各自指令。须审计 VmInstr 中所有指令名变体，剥离指令身份泄漏（符合既有 ARCH-CPU-GPU-UNIFIED）。</p>
+    </section>
+    <section id="s7" data-section="7">
+      <h3>7. 需与调用方讨论的分歧点</h3>
+      <ol>
+        <li><strong>★ 哲学的一处必要锐化</strong>：等级在"合法性/正确性"上完全平等 ✅；但在<strong>选择</strong>上仍按 throughput 排序，在<strong>验证</strong>上 scalar 是特权 oracle（不是参与等价比较的 peer，是被比较的标尺）。"完全平等"需加这两条限定。是否认同？</li>
+        <li><strong>Vp2Intersect 等指令级 VmInstr 是否全部语义化重命名</strong>？工作量涉及 IR 改动 + 全 lower 路径。范围多大需确认。</li>
+        <li><strong>跨等级验证主路径</strong>：numerical_sim 解释 VmInstr（host 无关，主推）vs QEMU/硬件农场（真实但重）。确认接受前者为 V 节点门控。</li>
+        <li><strong>throughput_class 来源</strong>：声明常量（简单，IsaHook 现状）vs IsaProfile 推导成本模型（精确，复杂）。我推荐常量粗排 + 成本模型微调，复用现成 estimate_strategy_cost。</li>
+      </ol>
+    </section>
+  </main>
+  <footer data-spec-footer>
+    <address data-spec-ssot>SSOT 定义者：CONSULT-codegen-hw-op-dtype-redesign.html</address>
+  </footer>
+</body>
+</html>
