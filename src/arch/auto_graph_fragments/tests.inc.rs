@@ -742,12 +742,12 @@ mod tests {
         // Per-layer ops:
         //   input_norm + q + k + v + rope_q + rope_k + mha + o + resid + post_norm = 10
         //   MoE: moe_gate + topk = 2
-        //   Per expert (4): gate_gemm + gate_mask + up_gemm + swiglu + down_gemm + cond_add = 6×4 = 24
+        //   Expert template (NO-LAYER-EXPAND, single template): gate_gemm + gate_mask + up_gemm + swiglu + down_gemm + cond_add = 6
         //   moe_resid = 1
         //   (kv_write removed: attention FromCache internally handles KV write)
-        //   Total per-layer = 10 + 2 + 24 + 1 = 37
+        //   Total per-layer = 10 + 2 + 6 + 1 = 19
         // Global: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
-        let expected = 37 + 6;
+        let expected = 19 + 6;
         assert_eq!(
             graph.ops.len(),
             expected,
@@ -782,9 +782,8 @@ mod tests {
             .filter(|op| matches!(op.op, Op::MoEConditionalAdd { .. }))
             .count();
         assert_eq!(
-            cond_add_count, num_experts,
-            "should have {} MoEConditionalAdd ops",
-            num_experts
+            cond_add_count, 1,
+            "should have 1 MoEConditionalAdd op (single template, NO-LAYER-EXPAND)"
         );
 
         let swiglu_count = graph
@@ -793,9 +792,8 @@ mod tests {
             .filter(|op| matches!(op.op, Op::SwiGlu))
             .count();
         assert_eq!(
-            swiglu_count, num_experts,
-            "should have {} SwiGlu ops (one per expert)",
-            num_experts
+            swiglu_count, 1,
+            "should have 1 SwiGlu op (single template, NO-LAYER-EXPAND)"
         );
     }
 

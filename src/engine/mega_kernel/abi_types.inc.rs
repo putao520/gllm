@@ -291,8 +291,9 @@ pub enum MegaKernelError {
 /// 持有完整的 mega-kernel 机器码（embedding → layer loop → logits-producer → sampling → generate loop）
 /// + 全模型权重布局 + 缓冲布局。推理时通过单次 CALL 执行。
 struct MegaKernelCompiled {
-    /// (canonical_name, byte_offset) 对 — 用于诊断查询
-    named_offsets: Vec<(String, usize)>,
+    /// (canonical_name, byte_offset, dtype) 对 — 用于诊断查询
+    /// ARCH-BLOB-YIELDS-WEIGHT: dtype preserved per-tensor, not global.
+    named_offsets: Vec<(String, usize, gllm_kernels::types::DType)>,
     /// 运行时缓冲布局（activation ping/pong, logits, sampling workspace）
     buffer_layout: gllm_kernels::compiler::BufferLayout,
     /// Logits 区域在 scratchpad 中的偏移（alloc + RoPE cache 之后）
@@ -361,6 +362,23 @@ impl MegaKernelCompiled {
     #[inline]
     fn elem_bytes(&self) -> usize {
         self.compute_dtype.size_bytes()
+    }
+
+    /// BCE-20260629-006: 获取 named tensor 的 scratchpad offset（供 DIAG harness 动态查询）
+    ///
+    /// named_offsets 来自 JIT compile 阶段的 buffer_alloc，包含所有 intermediate tensor 的
+    /// 真实 scratchpad offset（随着 BCE 修复，layout 会变化，必须动态获取而非硬编码）。
+    pub fn named_tensor_offset(&self, name: &str) -> Option<usize> {
+        self.named_offsets.iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, off, _)| *off)
+    }
+
+    /// BCE-20260629-006: 获取 named tensor 的 dtype（供 DIAG harness 正确解析数据）
+    pub fn named_tensor_dtype(&self, name: &str) -> Option<gllm_kernels::types::DType> {
+        self.named_offsets.iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, _, dt)| *dt)
     }
 
     /// 计算运行时 scratchpad 大小：固定部分 + logits(max_total 行) + sampling + MTP + SG

@@ -84,6 +84,10 @@ pub fn build_compiler_graph(
     //     GemmSpec.dtype / MaskedGemm.dtype / weight_physical_bytes 必须用 tdt(权重名)。
     let act_dt = DType::F32;
     let tdt = |name: &str| -> DType { weight_dtypes.get(name).copied().unwrap_or(DType::F32) };
+    // @trace REQ-DTYPE-010 act_dt (激活计算精度) 与 tdt(name) (权重存储精度) 独立解耦，
+    //   禁止 graph_dtype() 用 tensors.first().dtype 作全图单一 dtype；各 op 从 inputs[weight_idx] 独立推断
+    // @trace REQ-DTYPE-013 GemmSpec/MaskedGemm.dtype 必须用 tdt(权重名)（独立 b_dtype），
+    //   禁止用 act_dt 单 dtype 覆盖 A/B/C（ARCH-DTYPE-MIXED-PRECISION）
 
     // @trace REQ-FATOP-004 [entity:AttentionSpec] AttentionSpec kv_source 自描述
     // @trace REQ-FATOP-005 [entity:AttentionSpec] AttentionSpec sinks 配置
@@ -348,6 +352,8 @@ pub fn build_compiler_graph(
         } else {
             // BCE-20260630-DT2: 按 per-weight 实际 dtype 计算字节（混合精度正确），
             // 不用统一的 act_dt。权重字节宽度 = 其存储精度，与激活计算精度无关。
+            // @trace REQ-DTYPE-012 row stride/offset 用 tdt(canonical).size_bytes()，
+            //   禁止硬编码 *4（避免 BF16 权重被当 F32 计算 stride → 越界）
             numel * tdt(canonical).size_bytes()
         }
     };

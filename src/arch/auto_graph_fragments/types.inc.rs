@@ -133,6 +133,19 @@ pub fn analyze_architecture(
 ) -> ArchitectureFeatures {
     // ── Family (BUILD-stage strategy selection — not a compiler branch) ──
     let has_output_head = role_index.contains_key(&(TensorRole::OutputHead, None));
+
+    // BCE-TIED-EMBED: When lm_head is tied to embed_tokens, role_index lacks OutputHead.
+    // Detect tied embeddings by checking if:
+    //   (a) No OutputHead in role_index
+    //   (b) Embedding tensor has vocab_size in its first dimension (embed.weight shape[0] == vocab)
+    // If tied, treat it as having OutputHead (family=Decoder) since the model can generate tokens.
+    let has_tied_lm_head = !has_output_head && role_index.get(&(TensorRole::Embedding, None))
+        .and_then(|embed_name| weight_shapes.get(embed_name))
+        .and_then(|shape| shape.first())
+        .map(|dim| *dim > 10000)  // vocab_size heuristic: >10K dims = likely vocab-sized embedding
+        .unwrap_or(false);
+
+    let effective_has_output_head = has_output_head || has_tied_lm_head;
     let has_classifier = role_index.contains_key(&(TensorRole::ClassifierDense, None))
         || role_index.contains_key(&(TensorRole::ClassifierOutProj, None));
     let _has_final_norm = role_index.contains_key(&(TensorRole::FinalNorm, None));
@@ -151,7 +164,7 @@ pub fn analyze_architecture(
     //   but no lm_head.weight (OutputHead). The old heuristic treated
     //   FinalNorm alone as Decoder, causing kv_source=FromCache and
     //   MemCopy to NULL kv_cache_ptr → SIGSEGV.
-    let family = if has_output_head {
+    let family = if effective_has_output_head {
         Family::Decoder
     } else {
         Family::Encoder
@@ -218,13 +231,25 @@ pub fn analyze_architecture(
         n.contains("altup.") || n.contains("correction_coefs") || n.contains("altup_corrections")
     });
     let altup_num_inputs = if has_altup {
-        // Derive P from correction_coefs.weight shape [P, P] or modality_router.weight [P, H].
-        weight_shapes.keys()
+        // NO-SILENT-FALLBACK: has_altup is true iff at least one AltUp correction
+        // tensor exists, so the shape filter below MUST find a match. An empty result
+        // means the detection condition and derivation condition diverged — an
+        // internal invariant violation, never a fallback-to-2 situation.
+        //
+        // Derive P from correction_coefs.weight shape [P, P] or altup.correction [P, H].
+        let p = weight_shapes.keys()
             .filter(|n| n.contains("correction_coefs") || n.contains("altup.correction"))
             .filter_map(|n| weight_shapes.get(n))
             .filter_map(|shape| shape.first().copied())
-            .next()
-            .unwrap_or(2)
+            .next();
+        match p {
+            Some(p) => p,
+            None => panic!(
+                "analyze_architecture invariant violated: has_altup=true but no \
+                 correction_coefs/altup.correction tensor shape found — \
+                 detection and derivation conditions diverged (NO-SILENT-FALLBACK)"
+            ),
+        }
     } else {
         0
     };
@@ -267,7 +292,18 @@ pub fn analyze_architecture(
     let has_gate = role_index.contains_key(&(TensorRole::FfnGate, Some(0)));
     let has_up = role_index.contains_key(&(TensorRole::FfnUp, Some(0)));
     let has_down = role_index.contains_key(&(TensorRole::FfnDown, Some(0)));
-    let is_moe = role_index.contains_key(&(TensorRole::MoEGate, Some(0)));
+
+    // BCE-036: MoE detection uses multiple signals (router OR expert weights exist),
+    // matching vLLM's behavior: if any MoE-related tensor is found, treat as MoE.
+    let has_moe_router = role_index.contains_key(&(TensorRole::MoEGate, Some(0)));
+    // Check for expert weights by looking for canonical MoE expert names
+    let has_expert_weights = role_index.keys().any(|(role, _)| {
+        matches!(role,
+            TensorRole::MoEExpert |
+            TensorRole::MoESharedExpert
+        )
+    });
+    let is_moe = has_moe_router || has_expert_weights;
 
     let ffn_type = if is_moe {
         FfnType::MoE

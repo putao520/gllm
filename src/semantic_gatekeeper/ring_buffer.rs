@@ -140,40 +140,39 @@ impl GatekeeperRingBuffer {
 
 /// 将 raw slot 字节解码为 `Vec<f32>`.
 ///
-/// 支持 4 字节 (F32) 和 2 字节 (F16/BF16). 其他宽度返回 `InsufficientCapacity`
+/// 支持 4 字节 (F32) 和 2 字节 (F16). 其他宽度返回 `InsufficientCapacity`
 /// (作为显式错误而非静默降级,符合 NO_SILENT_FALLBACK).
+///
+/// BCE-20260626-CC-002/004 根治：偏移从 `element_bytes` 派生，
+/// 消除硬编码 `i*4`/`i*2`；decode 逻辑复用共享 `decode::decode_slice_to_f32`。
 fn decode_q_slot(
     raw: &[u8],
     q_dim: usize,
     element_bytes: usize,
 ) -> Result<Vec<f32>, QTapReadError> {
-    match element_bytes {
-        4 => {
-            let mut out = Vec::with_capacity(q_dim);
-            for i in 0..q_dim {
-                let off = i * 4;
-                let bytes = [raw[off], raw[off + 1], raw[off + 2], raw[off + 3]];
-                out.push(f32::from_le_bytes(bytes));
-            }
-            Ok(out)
+    // element_bytes → DType 映射（Q-tap ring buffer 仅承载 F32/F16）。
+    let dtype = match element_bytes {
+        4 => gllm_kernels::types::DType::F32,
+        2 => gllm_kernels::types::DType::F16,
+        _ => {
+            return Err(QTapReadError::InsufficientCapacity {
+                capacity: element_bytes,
+                required: 4,
+            })
         }
-        2 => {
-            // 解析为 f16 再转 f32. BF16 在 JIT 写入时若使用 BF16 dtype 需走
-            // BF16 解码路径,此处先以 F16 为默认;BF16 差异在 Phase D
-            // 中按 FusedAttentionLayer 的实际输出 dtype 做分支.
-            let mut out = Vec::with_capacity(q_dim);
-            for i in 0..q_dim {
-                let off = i * 2;
-                let bytes = [raw[off], raw[off + 1]];
-                out.push(half::f16::from_le_bytes(bytes).to_f32());
+    };
+    super::decode::decode_slice_to_f32(raw, q_dim, dtype).map_err(|e| match e {
+        super::decode::DecodeError::ByteLengthMismatch { actual, expected } => {
+            QTapReadError::InsufficientCapacity {
+                capacity: actual,
+                required: expected,
             }
-            Ok(out)
         }
-        _ => Err(QTapReadError::InsufficientCapacity {
-            capacity: element_bytes,
-            required: 4,
-        }),
-    }
+        other => QTapReadError::InsufficientCapacity {
+            capacity: 0,
+            required: other.to_string().len(),
+        },
+    })
 }
 
 #[cfg(test)]

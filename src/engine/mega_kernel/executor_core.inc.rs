@@ -83,15 +83,25 @@ impl MegaKernelExecutor {
             None
         };
         let weight_layout = graph.weight_layout();
-        let named_offsets: Vec<(String, usize)> = weight_layout
+        // ARCH-BLOB-YIELDS-WEIGHT: preserve per-tensor dtype from graph tensors.
+        // dtype is taken from the graph TensorMeta (the source of truth) so the blob
+        // reader can decode each tensor by its actual storage dtype.
+        let mut named_offsets: Vec<(String, usize, gllm_kernels::types::DType)> = weight_layout
             .offsets
             .iter()
             .filter_map(|&(tid, offset)| {
                 graph
                     .tensors
                     .get(tid.0 as usize)
-                    .map(|t| (t.name.clone(), offset))
+                    .map(|t| (t.name.clone(), offset, t.dtype))
             })
+            .collect();
+        // BCE-20260629-006: clone graph tensor name map before graph is moved into compile()
+        // 用于后续 compile 返回 tensor_sources 时补全 intermediate tensor 的 named_offsets
+        let tensor_names: std::collections::HashMap<gllm_kernels::compiler::graph::TensorId, (String, gllm_kernels::types::DType)> = graph
+            .tensors
+            .iter()
+            .map(|t| (t.id, (t.name.clone(), t.dtype)))
             .collect();
         // Expand total_weight_bytes for layer loop: the layout only contains 1 copy of
         // per-layer weights (L0.*), but packing replicates to num_layers copies.
@@ -141,6 +151,38 @@ impl MegaKernelExecutor {
         let exec_code = output.layer_code;
         let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
 
+        // BCE-20260629-006: 追加 intermediate tensor offsets（供 DIAG harness 动态查询）
+        // 从 name_map（已包含 tensor_names 中的 intermediate）构建 named_offsets
+        // 对于 tensor_sources 中的 ActivationPing/Pong，直接用 buffer_layout 的 offset
+        // 因为 VAM 把 embedding 映射为 ActivationPing 但 Resolver 已强制覆盖为 Intermediate
+        // 所以从 output.tensor_sources 提取即可。对于 ActivationPing（被 VAM 覆盖的），
+        // 用 buffer_layout.activation_a_offset 而不是 0。
+        // 先收集 tensor_sources 中的所有 Intermediate 映射
+        let mut inter_map: std::collections::HashMap<gllm_kernels::compiler::graph::TensorId, usize> = std::collections::HashMap::new();
+        for (&tid, src) in &output.tensor_sources {
+            if let gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Intermediate { offset } = src {
+                inter_map.insert(tid, *offset);
+            }
+        }
+        // 构建 named_offsets：先用 weight_layout 的，再补上 intermediate（有 Intermediate 映射的）
+        for (&tid, src) in &output.tensor_sources {
+            if let Some((name, dt)) = tensor_names.get(&tid) {
+                if !named_offsets.iter().any(|(n, _, _)| n == name) {
+                    // 优先用 inter_map 中的 offset（Resolver 覆盖后的值）
+                    let offset = inter_map.get(&tid).copied().unwrap_or_else(|| {
+                        match src {
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Intermediate { offset } => *offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::ActivationPing => output.buffer_layout.activation_a_offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::ActivationPong => output.buffer_layout.activation_b_offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Output { offset } => *offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Weight { offset } => *offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Activation => 0,
+                        }
+                    });
+                    named_offsets.push((name.clone(), offset, *dt));
+                }
+            }
+        }
         // §19 KV-OPT-009: Compile KIVI4 variant for compressed KV attention.
         // TEMP: disable KIVI4 compilation for GGUF models (no raw_floats) —
         // RegAllocator on 28-layer N-layer takes 15min per compilation.

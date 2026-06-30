@@ -36,13 +36,69 @@ fn add_one_inplace(dst: &mut [u8], dtype: ::safetensors::Dtype) {
     }
 }
 
-/// 通用权重打包：按预解析的 (name, offset) 对将权重排列到连续 blob。
+/// Decode `count` elements starting at `byte_offset` from `src` (raw weight blob
+/// bytes) into `Vec<f32>`, using the per-tensor `dtype`.
 ///
+/// ARCH-BLOB-YIELDS-WEIGHT: blob preserves each tensor's original dtype, so the
+/// reader must decode by the tensor's actual dtype — not a global compute dtype.
+/// Panics on unsupported DType (NO-SILENT-FALLBACK).
+///
+/// Shared by `DiagnosticScratchpad::read_dtype_aware` (global compute dtype) and
+/// `read_weight_row` (per-tensor dtype).
+pub(crate) fn decode_slice_to_f32(
+    src: &[u8],
+    byte_offset: usize,
+    count: usize,
+    dtype: gllm_kernels::types::DType,
+) -> Vec<f32> {
+    let elem_bytes = dtype.size_bytes();
+    let byte_end = byte_offset + count * elem_bytes;
+    if byte_end > src.len() {
+        panic!(
+            "decode_slice_to_f32: byte_end {} > data len {}, offset={}, count={}, dtype={:?}",
+            byte_end, src.len(), byte_offset, count, dtype
+        );
+    }
+    match dtype {
+        gllm_kernels::types::DType::F32 => {
+            let slice = &src[byte_offset..byte_end];
+            let mut out = Vec::with_capacity(count);
+            for chunk in slice.chunks_exact(4) {
+                out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            out
+        }
+        gllm_kernels::types::DType::BF16 => {
+            let slice = &src[byte_offset..byte_end];
+            let mut out = Vec::with_capacity(count);
+            for chunk in slice.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.push(half::bf16::from_bits(bits).to_f32());
+            }
+            out
+        }
+        gllm_kernels::types::DType::F16 => {
+            let slice = &src[byte_offset..byte_end];
+            let mut out = Vec::with_capacity(count);
+            for chunk in slice.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.push(half::f16::from_bits(bits).to_f32());
+            }
+            out
+        }
+        _ => panic!(
+            "decode_slice_to_f32: unsupported dtype={:?}, only F32/BF16/F16 supported",
+            dtype
+        ),
+    }
+}
+
+
 /// 完全由图结构驱动，所有名字都是 canonical name。
 /// weight_ptrs/weight_sizes 以 canonical name 为 key。
 /// raw_floats 以外部名为 key，通过 name_map 做反向查找。
 fn pack_weights_from_graph(
-    named_offsets: &[(String, usize)],
+    named_offsets: &[(String, usize, gllm_kernels::types::DType)],
     total_bytes: usize,
     weight_ptrs: &std::collections::HashMap<String, *const u8>,
     weight_sizes: &std::collections::HashMap<String, usize>,
@@ -145,7 +201,7 @@ fn pack_weights_from_graph(
             (false, false) => 3, // full_large
         }
     }
-    for (canonical_name, offset) in named_offsets {
+    for (canonical_name, offset, _dtype) in named_offsets {
         let ext_name = name_map.resolve_external_to_string(canonical_name);
         if let Some(raw) = raw_floats.get(&ext_name) {
             // @trace REQ-DTYPE-CHAIN-001 REQ-DTYPE-CHAIN-003
@@ -593,46 +649,8 @@ impl DiagnosticScratchpad {
     /// the scratchpad's native dtype to f32. ARCH-JIT-DATA-YIELDS: dtype-aware read.
     /// Panics on unsupported DType (NO-SILENT-FALLBACK).
     pub fn read_dtype_aware(&self, byte_offset: usize, count: usize) -> Vec<f32> {
-        let elem_bytes = self.elem_bytes();
-        let byte_end = byte_offset + count * elem_bytes;
-        if byte_end > self.data.len() {
-            panic!(
-                "read_dtype_aware: byte_end {} > data len {}, offset={}, count={}, dtype={:?}",
-                byte_end, self.data.len(), byte_offset, count, self.compute_dtype
-            );
-        }
-        match self.compute_dtype {
-            gllm_kernels::types::DType::F32 => {
-                // F32: direct read
-                self.read_f32_at(byte_offset, count)
-            }
-            gllm_kernels::types::DType::BF16 => {
-                // BF16: read raw bytes and convert (8-bit exponent, bias=127)
-                let src = &self.data[byte_offset..byte_end];
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let off = i * 2;
-                    let bits = u16::from_le_bytes([src[off], src[off + 1]]);
-                    result.push(half::bf16::from_bits(bits).to_f32());
-                }
-                result
-            }
-            gllm_kernels::types::DType::F16 => {
-                // F16: read raw bytes and convert (5-bit exponent, bias=15)
-                let src = &self.data[byte_offset..byte_end];
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let off = i * 2;
-                    let bits = u16::from_le_bytes([src[off], src[off + 1]]);
-                    result.push(half::f16::from_bits(bits).to_f32());
-                }
-                result
-            }
-            _ => panic!(
-                "DiagnosticScratchpad::read_dtype_aware: unsupported compute_dtype={:?}, only F32/BF16/F16 supported",
-                self.compute_dtype
-            ),
-        }
+        // Reuse the shared per-tensor decoder with the scratchpad's compute dtype.
+        decode_slice_to_f32(&self.data, byte_offset, count, self.compute_dtype)
     }
 
     /// Read a single f32 element from scratchpad at `byte_offset`.

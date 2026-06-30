@@ -821,52 +821,61 @@ fn diagnostic_scratchpad_l0_q_vs_golden() {
     };
 
     let golden_hidden = load_f32_vec("hidden_layer_0");
-    let golden_normed = load_f32_vec("L0_input_norm");
     let golden_q = load_f32_vec("L0_q_proj");
     let seq = 5usize;
     let hidden = 576usize;
+    let last = seq - 1; // index of the last prompt token
 
-    // Manual RmsNorm with weight
-    let golden_q_weight = load_f32_vec("L0_q_weight");
-    let eps = 1e-5f32;
-
-    // Read scratchpad - embedding should be at offset 0
+    // Read scratchpad
+    // BCE-EMB/NaN1 dismissed (decode-only semantics):
+    //   SmolLM2 has Argmax → the compiled mega-kernel has GenerateLoop topology.
+    //   diagnostic_prefill_scratchpad runs ONE decode iteration, which processes
+    //   the LAST prompt token and writes its intermediate tensors at ROW 0 of
+    //   each scratchpad region (buffer is sized for max_seq_len, but only 1 row
+    //   is populated). Therefore the scratchpad is NOT a full prefill snapshot —
+    //   it carries decode semantics: row 0 == last prompt token.
+    //   Correct golden alignment: compare scratchpad row 0 against the golden's
+    //   LAST prompt token (golden_*[last*hidden..(last+1)*hidden]), not against
+    //   the full seq or row 0 of the golden (which is the FIRST prompt token).
     let scratch = client.diagnostic_prefill_scratchpad(golden::INPUT_IDS).expect("scratchpad");
 
-    // Embedding at offset 0
-    let embed = scratch.read_f32_at(0, seq * hidden);
-    let embed_sim = cosine_similarity(&embed, &golden_hidden);
-    eprintln!("[DIAG-015] Embedding sim={:.6}", embed_sim);
+    // BCE-20260629-006: 动态获取 tensor offset，禁止硬编码
+    let embed_offset = client.diagnostic_tensor_offset("embedding")
+        .unwrap_or_else(|| panic!("[DIAG-015] embedding tensor not in named_offsets"));
+    // Decode semantics: read only 1 row (the decoded last prompt token).
+    let embed_row0 = scratch.read_f32_at(embed_offset, hidden);
+    let golden_embed_last = &golden_hidden[last * hidden..(last + 1) * hidden];
+    let embed_sim = cosine_similarity(&embed_row0, golden_embed_last);
+    eprintln!("[DIAG-015] Embedding row0 vs golden[last_token] sim={:.6} (offset={}, decode-only)",
+        embed_sim, embed_offset);
 
-    // L0_normed should be at offset 18874368 (from buf-alloc debug)
-    // But this is max_seq_len * hidden * 4 = 8192 * 576 * 4 = 18874368
-    let normed_offset = 18874368;
-    let normed = scratch.read_f32_at(normed_offset, seq * hidden);
-    // Manual normed with weight
-    let mut manual_normed = vec![0.0f32; seq * hidden];
-    let norm_w = load_f32_vec("L0_input_norm");
-    for i in 0..seq {
-        let row = &golden_hidden[i * hidden..(i + 1) * hidden];
-        let ss: f32 = row.iter().map(|v| v * v).sum();
-        let inv_rms = 1.0 / (ss / hidden as f32 + eps).sqrt();
-        for j in 0..hidden {
-            manual_normed[i * hidden + j] = row[j] * inv_rms * norm_w[j];
-        }
-    }
-    let norm_sim = cosine_similarity(&normed, &manual_normed);
-    let norm_max_diff = max_abs_diff(&normed, &manual_normed);
-    eprintln!("[DIAG-015] L0_normed sim={:.6} max_diff={:.2e}", norm_sim, norm_max_diff);
-    eprintln!("[DIAG-015]   normed first4: {:?}", &normed[..4]);
-    eprintln!("[DIAG-015]   manual first4: {:?}", &manual_normed[..4]);
+    // BCE-20260629-006: 动态获取 layer.normed offset
+    let normed_offset = client.diagnostic_tensor_offset("layer.normed")
+        .unwrap_or_else(|| panic!("[DIAG-015] layer.normed tensor not in named_offsets"));
+    let normed_row0 = scratch.read_f32_at(normed_offset, hidden);
+    // Compare against golden L0_input_norm (the reference normed OUTPUT, [5,576]),
+    // last prompt token row. Not a manual recompute — L0_input_norm is itself the
+    // golden normed output, not a weight (it was misused as a weight before).
+    let golden_normed = load_f32_vec("L0_input_norm");
+    let golden_normed_last = &golden_normed[last * hidden..(last + 1) * hidden];
+    let norm_sim = cosine_similarity(&normed_row0, golden_normed_last);
+    let norm_max_diff = max_abs_diff(&normed_row0, golden_normed_last);
+    eprintln!("[DIAG-015] L0_normed row0 vs golden L0_input_norm[last_token] sim={:.6} max_diff={:.2e} (offset={}, decode-only)",
+        norm_sim, norm_max_diff, normed_offset);
+    eprintln!("[DIAG-015]   normed row0 first4: {:?}", &normed_row0[..4]);
+    eprintln!("[DIAG-015]   golden normed last first4: {:?}", &golden_normed_last[..4]);
 
-    // L0_q at offset 37748736
-    let q_offset = 37748736;
-    let q_out = scratch.read_f32_at(q_offset, seq * hidden);
-    let q_sim = cosine_similarity(&q_out, &golden_q);
-    let q_max_diff = max_abs_diff(&q_out, &golden_q);
-    eprintln!("[DIAG-015] L0_q_proj sim={:.6} max_diff={:.2e}", q_sim, q_max_diff);
-    eprintln!("[DIAG-015]   gllm_q first4: {:?}", &q_out[..4]);
-    eprintln!("[DIAG-015]   golden_q first4: {:?}", &golden_q[..4]);
+    // BCE-20260629-006: 动态获取 layer.q offset
+    let q_offset = client.diagnostic_tensor_offset("layer.q")
+        .unwrap_or_else(|| panic!("[DIAG-015] layer.q tensor not in named_offsets"));
+    let q_row0 = scratch.read_f32_at(q_offset, hidden);
+    let golden_q_last = &golden_q[last * hidden..(last + 1) * hidden];
+    let q_sim = cosine_similarity(&q_row0, golden_q_last);
+    let q_max_diff = max_abs_diff(&q_row0, golden_q_last);
+    eprintln!("[DIAG-015] L0_q_proj row0 vs golden[last_token] sim={:.6} max_diff={:.2e} (decode-only)",
+        q_sim, q_max_diff);
+    eprintln!("[DIAG-015]   gllm_q row0 first4: {:?}", &q_row0[..4]);
+    eprintln!("[DIAG-015]   golden_q last first4: {:?}", &golden_q_last[..4]);
 }
 
 /// DIAG-016: Compare encode-mode logits vs generate-mode logits vs golden.
@@ -975,50 +984,52 @@ fn diagnostic_final_hidden_vs_golden() {
     let hidden = golden::HIDDEN_SIZE;
     let vocab = golden::VOCAB_SIZE;
 
+    // BCE-EMB/NaN1 dismissed (decode-only semantics):
+    //   SmolLM2 has Argmax → compiled mega-kernel has GenerateLoop topology.
+    //   diagnostic_prefill_scratchpad runs ONE decode iteration processing the
+    //   LAST prompt token; every intermediate tensor is written at ROW 0 of its
+    //   scratchpad region (buffer sized for max_seq_len, only row 0 populated).
+    //   Reading rows [1..seq] yields uninitialized bytes — that was the false
+    //   positive (sim≈0.04 /全0). Correct alignment: row 0 ↔ golden last token.
     let scratch = client.diagnostic_prefill_scratchpad(golden::INPUT_IDS).expect("scratchpad");
+    let last = seq - 1; // last prompt token index
+    let g30_last = &golden_h30[last * hidden..(last + 1) * hidden];
 
-    // L29_ffn_resid at offset=18874368 (from buffer alloc debug)
-    // Only first seq*hidden f32 values are valid (rest is padding)
-    let l29_offset = 18874368usize;
-    let l29_data = scratch.read_f32_at(l29_offset, seq * hidden);
+    // BCE-20260629-006: 动态获取 tensor offset，禁止硬编码
+    let l29_offset = client.diagnostic_tensor_offset("layer.ffn_resid")
+        .unwrap_or_else(|| panic!("[DIAG-017] layer.ffn_resid not in named_offsets"));
+    // Decode semantics: row 0 holds the decoded last prompt token.
+    let l29_row0 = scratch.read_f32_at(l29_offset, hidden);
 
-    // Compare with golden hidden_layer_30
-    let h30_sim = cosine_similarity(&l29_data, &golden_h30);
-    let h30_diff = max_abs_diff(&l29_data, &golden_h30);
-    eprintln!("[DIAG-017] L29_ffn_resid vs golden hidden_layer_30: sim={:.6} max_diff={:.2e}",
+    // Compare scratchpad row 0 with golden hidden_layer_30 LAST token
+    let h30_sim = cosine_similarity(&l29_row0, g30_last);
+    let h30_diff = max_abs_diff(&l29_row0, g30_last);
+    eprintln!("[DIAG-017] L29_ffn_resid row0 vs golden h30[last_token]: sim={:.6} max_diff={:.2e} (decode-only)",
         h30_sim, h30_diff);
 
-    // Check last token (position 4) specifically
-    let l29_last = &l29_data[(seq-1)*hidden..seq*hidden];
-    let g30_last = &golden_h30[(seq-1)*hidden..seq*hidden];
-    let last_sim = cosine_similarity(l29_last, g30_last);
-    let last_diff = max_abs_diff(l29_last, g30_last);
-    eprintln!("[DIAG-017] Last token: sim={:.6} max_diff={:.2e}", last_sim, last_diff);
-
     // Print first few values for visual comparison
-    eprintln!("[DIAG-017] gllm L29 last_token first8: {:?}", &l29_last[..8]);
+    eprintln!("[DIAG-017] gllm L29 row0 first8: {:?}", &l29_row0[..8]);
     eprintln!("[DIAG-017] golden h30 last_token first8: {:?}", &g30_last[..8]);
 
     // Check amplitude
-    let gllm_rms = (l29_last.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / hidden as f64).sqrt();
+    let gllm_rms = (l29_row0.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / hidden as f64).sqrt();
     let gold_rms = (g30_last.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / hidden as f64).sqrt();
     eprintln!("[DIAG-017] Last token RMS: gllm={:.4} golden={:.4} ratio={:.4}",
         gllm_rms, gold_rms, gllm_rms / gold_rms);
 
-    // Also check final_normed (at offset=0, same size)
-    let normed_data = scratch.read_f32_at(0, seq * hidden);
-    let gllm_normed_last = &normed_data[(seq-1)*hidden..seq*hidden];
-    let normed_rms = (gllm_normed_last.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / hidden as f64).sqrt();
-    eprintln!("[DIAG-017] final_normed last_token first8: {:?}", &gllm_normed_last[..8]);
-    eprintln!("[DIAG-017] final_normed last_token RMS: {:.4}", normed_rms);
+    // BCE-20260629-006: 动态获取 final_normed offset (row 0 = decoded last token)
+    let normed_offset = client.diagnostic_tensor_offset("final_normed")
+        .unwrap_or_else(|| panic!("[DIAG-017] final_normed not in named_offsets"));
+    let gllm_normed_row0 = scratch.read_f32_at(normed_offset, hidden);
+    let normed_rms = (gllm_normed_row0.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / hidden as f64).sqrt();
+    eprintln!("[DIAG-017] final_normed row0 first8: {:?}", &gllm_normed_row0[..8]);
+    eprintln!("[DIAG-017] final_normed row0 RMS: {:.4} (decode-only)", normed_rms);
 
-    // Read logits from scratchpad at logits_offset
+    // Read logits from scratchpad — BCE-20260629-002: decode kernel writes row 0
     let logits_off = scratch.logits_offset;
-    let logits_row_bytes = vocab * 4;
-    let last_row_off = logits_off + (seq - 1) * logits_row_bytes;
-    let gllm_logits = scratch.read_f32_at(last_row_off, vocab);
-    let logit_sim = cosine_similarity(&gllm_logits, &golden_logits[(seq-1)*vocab..seq*vocab]);
-    eprintln!("[DIAG-017] Logits vs golden: sim={:.6}", logit_sim);
+    let gllm_logits = scratch.read_f32_at(logits_off, vocab);
+    let logit_sim = cosine_similarity(&gllm_logits, &golden_logits[last * vocab..(last + 1) * vocab]);
+    eprintln!("[DIAG-017] Logits row0 vs golden[last_token]: sim={:.6} (decode-only)", logit_sim);
 
     // Conclusion
     if h30_sim < 0.99 {

@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 
 use gllm_kernels::types::DType;
+#[cfg(test)]
 use half::{bf16, f16};
 
 use super::{
@@ -238,18 +239,12 @@ pub fn precompute(
             let embed_bytes = embed_graph.encode_tokens(&tokens)?;
             let k_bytes = kproj.run_on_embed(&embed_bytes)?;
 
-            // Step 4: decode bytes → f32 seq_len × kv_dim.
+            // Step 4-5: decode bytes → mean_pool, 直接在原始字节上按 dtype 现场解码累加，
+            // 无 Vec<f32> 中间表示（CC-001 根治：代码顺从数据，非数据迁就代码）。
             let seq_len = tokens.len();
-            let k_f32 = decode_bytes_to_f32(&k_bytes, seq_len, kv_dim, dtype).map_err(|e| {
+            let pooled = mean_pool_bytes(&k_bytes, seq_len, kv_dim, dtype).map_err(|e| {
                 SemanticGatekeeperError::PrecomputeFailed(format!(
-                    "decode k_proj output (layer {layer_idx} level {level_idx}) failed: {e}"
-                ))
-            })?;
-
-            // Step 5: mean_over_axis0 → [kv_dim].
-            let pooled = mean_pool_rows(&k_f32, seq_len, kv_dim).map_err(|e| {
-                SemanticGatekeeperError::PrecomputeFailed(format!(
-                    "mean_pool (layer {layer_idx} level {level_idx}) failed: {e}"
+                    "mean_pool k_proj output (layer {layer_idx} level {level_idx}) failed: {e}"
                 ))
             })?;
 
@@ -290,6 +285,71 @@ pub fn precompute(
 // dtype-aware bytes → f32 解码 + mean_pool
 // ============================================================================
 
+/// Decode raw weight bytes and mean-pool over rows in a single pass.
+///
+/// **宪法依据**: ARCH-BLOB-YIELDS-WEIGHT（宪法 1）+ ARCH-JIT-DATA-YIELDS —
+/// 不产生 `Vec<f32>` 中间表示（CC-001 根治），直接在原始字节上按 dtype 现场解码累加。
+/// 接受 per-tensor dtype（CC-003 根治：接口支持 per-channel dtype）。
+///
+/// `bytes`: 原始权重字节（seq_len × kv_dim × elem_bytes）。
+/// `dtype`: 权重的实际 dtype（从 TensorMeta 推断，非全局假设）。
+/// 返回 `[kv_dim]` 的 mean-pooled f32 向量。
+fn mean_pool_bytes(
+    bytes: &[u8],
+    seq_len: usize,
+    kv_dim: usize,
+    dtype: DType,
+) -> Result<Vec<f32>, String> {
+    if seq_len == 0 {
+        return Err("seq_len = 0".to_string());
+    }
+    let elem_bytes = dtype.size_bytes();
+    let total = seq_len
+        .checked_mul(kv_dim)
+        .and_then(|t| t.checked_mul(elem_bytes))
+        .ok_or_else(|| "seq_len * kv_dim * elem_bytes overflow".to_string())?;
+    if bytes.len() != total {
+        return Err(format!(
+            "bytes len {} != expected {} (seq_len={} * kv_dim={} * elem_bytes={})",
+            bytes.len(),
+            total,
+            seq_len,
+            kv_dim,
+            elem_bytes
+        ));
+    }
+
+    // 直接在原始字节上解码 + 累加，无 Vec<f32> 中间表示（CC-001 根治）。
+    let mut acc = vec![0.0f64; kv_dim];
+    for row in 0..seq_len {
+        let row_base = row * kv_dim * elem_bytes;
+        for col in 0..kv_dim {
+            let off = row_base + col * elem_bytes;
+            let val = match dtype {
+                DType::F32 => f32::from_le_bytes([
+                    bytes[off],
+                    bytes[off + 1],
+                    bytes[off + 2],
+                    bytes[off + 3],
+                ]),
+                DType::F16 => half::f16::from_le_bytes([bytes[off], bytes[off + 1]]).to_f32(),
+                DType::BF16 => half::bf16::from_le_bytes([bytes[off], bytes[off + 1]]).to_f32(),
+                _ => {
+                    return Err(format!("unsupported dtype {dtype:?}"));
+                }
+            };
+            acc[col] += val as f64;
+        }
+    }
+    let inv = 1.0f64 / seq_len as f64;
+    Ok(acc.into_iter().map(|v| (v * inv) as f32).collect())
+}
+
+/// Decode raw weight bytes to `Vec<f32>` (test/diagnostic helper).
+///
+/// 生产路径用 `mean_pool_bytes`（无 Vec<f32> 中间表示）。此函数仅供测试和诊断使用，
+/// 复用 `decode::decode_slice_to_f32` 共享 helper。
+#[cfg(test)]
 fn decode_bytes_to_f32(
     bytes: &[u8],
     seq_len: usize,
@@ -299,48 +359,11 @@ fn decode_bytes_to_f32(
     let total = seq_len
         .checked_mul(kv_dim)
         .ok_or_else(|| "seq_len * kv_dim overflow".to_string())?;
-    let elem = dtype.size_bytes();
-    let expected = total
-        .checked_mul(elem)
-        .ok_or_else(|| "byte length overflow".to_string())?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "bytes len {} != expected {}",
-            bytes.len(),
-            expected
-        ));
-    }
-
-    let mut out = Vec::with_capacity(total);
-    match dtype {
-        DType::F32 => {
-            for i in 0..total {
-                let off = i * 4;
-                out.push(f32::from_le_bytes([
-                    bytes[off],
-                    bytes[off + 1],
-                    bytes[off + 2],
-                    bytes[off + 3],
-                ]));
-            }
-        }
-        DType::F16 => {
-            for i in 0..total {
-                let off = i * 2;
-                out.push(f16::from_le_bytes([bytes[off], bytes[off + 1]]).to_f32());
-            }
-        }
-        DType::BF16 => {
-            for i in 0..total {
-                let off = i * 2;
-                out.push(bf16::from_le_bytes([bytes[off], bytes[off + 1]]).to_f32());
-            }
-        }
-        _ => return Err(format!("unsupported dtype {dtype:?}")),
-    }
-    Ok(out)
+    super::decode::decode_slice_to_f32(bytes, total, dtype).map_err(|e| e.to_string())
 }
 
+/// Mean-pool rows of f32 data (test helper for verifying mean_pool_bytes).
+#[cfg(test)]
 fn mean_pool_rows(data: &[f32], seq_len: usize, kv_dim: usize) -> Result<Vec<f32>, String> {
     if seq_len == 0 {
         return Err("seq_len = 0".to_string());

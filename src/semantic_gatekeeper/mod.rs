@@ -23,6 +23,7 @@ use crate::scheduler::types::RequestId;
 
 pub mod active_state;
 pub mod callback;
+pub mod decode;
 pub mod level_keys;
 pub mod ring_buffer;
 pub mod sg_shared_memory;

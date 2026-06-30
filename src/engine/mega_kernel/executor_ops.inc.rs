@@ -703,6 +703,19 @@ impl MegaKernelExecutor {
         self.mega_compiled.as_ref().map(|m| m.weight_blob.clone())
     }
 
+    /// BCE-20260629-006: 获取 named tensor 的 scratchpad offset（供 DIAG harness 动态查询）
+    ///
+    /// named_offsets 来自 JIT compile 阶段的 buffer_alloc，包含所有 intermediate tensor 的
+    /// 真实 scratchpad offset。随着 BCE 修复，buffer layout 会变化，DIAG harness 必须动态获取。
+    pub fn diagnostic_tensor_offset(&self, name: &str) -> Option<usize> {
+        self.mega_compiled.as_ref().and_then(|m| m.named_tensor_offset(name))
+    }
+
+    /// BCE-20260629-006: 获取 named tensor 的 dtype（供 DIAG harness 正确解析数据）
+    pub fn diagnostic_tensor_dtype(&self, name: &str) -> Option<gllm_kernels::types::DType> {
+        self.mega_compiled.as_ref().and_then(|m| m.named_tensor_dtype(name))
+    }
+
     /// Returns the GPU PTX/HIP code if available.
     pub fn gpu_code(&self) -> Option<&[u8]> {
         self.mega_compiled.as_ref().and_then(|m| m.gpu_code.as_deref())
