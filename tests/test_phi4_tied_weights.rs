@@ -25,7 +25,7 @@ fn phi4_tied_weight_check() {
     
     // Also check total weight blob size
     if let Some(offsets) = client.diagnostic_weight_offsets() {
-        let max_offset = offsets.iter().map(|(_, off)| *off).max().unwrap_or(0);
+        let max_offset = offsets.iter().map(|(_, off, _)| *off).max().unwrap_or(0);
         eprintln!("[TIED] Max offset: {} ({:.2} GB)", max_offset, max_offset as f64 / 1e9);
         eprintln!("[TIED] Total entries: {}", offsets.len());
     }

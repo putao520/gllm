@@ -37,8 +37,8 @@ fn phi4_weight_and_hidden_check() {
     // Check all weight offsets
     if let Some(offsets) = client.diagnostic_weight_offsets() {
         eprintln!("[WCHK] Total weight tensors: {}", offsets.len());
-        for (name, offset) in offsets.iter().filter(|(n, _)| n.contains("L0.") || n == "embed" || n == "lm_head") {
-            eprintln!("[WCHK]   {} @ offset {}", name, offset);
+        for (name, offset, _dtype) in offsets.iter().filter(|(n, _, _)| n.contains("L0.") || n == "embed" || n == "lm_head") {
+            eprintln!("[WCHK]   {} @ offset {} dtype {:?}", name, offset, _dtype);
         }
     }
 
