@@ -1273,7 +1273,6 @@ mod tests {
                 scratch.as_mut_ptr(),
             );
         }
-        eprintln!("ln output: {:?}", output);
         assert!(output.iter().all(|v| v.is_finite()));
         assert!(output.iter().any(|&v| v != 0.0));
     }
@@ -1310,7 +1309,6 @@ mod tests {
                 1, m,
                 output.as_mut_ptr() as *mut u8, scratch.as_mut_ptr());
         }
-        eprintln!("residual output: {:?}", output);
         assert!(output.iter().all(|v| v.is_finite()));
     }
 
@@ -1365,7 +1363,6 @@ mod tests {
                 scratch.as_mut_ptr(),
             );
         }
-        eprintln!("ln+gemm output: {:?}", output);
         assert!(output.iter().all(|v| v.is_finite()));
         assert!(output.iter().any(|&v| v != 0.0));
     }
@@ -1411,14 +1408,13 @@ mod tests {
                 scratch.as_mut_ptr(),
             );
         }
-        eprintln!("gemm output: {:?}", output);
         assert!(output.iter().all(|v| v.is_finite()));
         assert!(output.iter().any(|&v| v != 0.0));
     }
 
     #[test]
     fn single_gemm_layernorm_executes() {
-        // Minimal encoder stub: only LayerNorm + Gemm + Residual (no MHA).
+        // Minimal sub-graph for unit-testing LayerNorm + Gemm + Residual in isolation.
         use gllm_kernels::compiler::{CompilerGraph, SymDim};
         use gllm_kernels::compiler::graph::{GemmSpec, NormSpec, Op};
         use gllm_kernels::types::DType;
@@ -1477,7 +1473,6 @@ mod tests {
                 scratch.as_mut_ptr(),
             );
         }
-        eprintln!("ln+gemm+resid output: {:?}", output);
         assert!(output.iter().all(|v| v.is_finite()));
         assert!(output.iter().any(|&v| v != 0.0));
     }
@@ -1495,13 +1490,6 @@ mod tests {
         target: CompileTarget::Cpu,
         };
         let compiled = compiler.compile(graph, &mk_config, None).expect("compile").expect_cpu().layer_code;
-        eprintln!(
-            "SigLIP compile: code_size={}B scratchpad={}B, weights={} (specs={})",
-            compiled.code_size(),
-            compiled.scratchpad_bytes,
-            num_weight_inputs,
-            specs.len(),
-        );
         assert!(compiled.code_size() > 0);
         // Scratchpad must be non-zero for a graph with intermediate tensors.
         assert!(compiled.scratchpad_bytes > 0);

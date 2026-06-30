@@ -492,7 +492,8 @@ impl<E: Element> BackendExecutor<E> {
         }
     }
 
-    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize)>> {
+    /// ARCH-BLOB-YIELDS-WEIGHT: dtype preserved per-tensor (name, offset, dtype).
+    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize, gllm_kernels::types::DType)>> {
         match self {
             BackendExecutor::Cpu(e) => e.diagnostic_weight_offsets(),
             BackendExecutor::Cuda(e) => e.diagnostic_weight_offsets(),
@@ -507,6 +508,25 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cuda(e) => e.diagnostic_prefill_logits(prompt_tokens),
             BackendExecutor::Rocm(e) => e.diagnostic_prefill_logits(prompt_tokens),
             BackendExecutor::Metal(e) => e.diagnostic_prefill_logits(prompt_tokens),
+        }
+    }
+
+    pub fn diagnostic_weight_blob_bytes(&self) -> Option<Vec<u8>> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_weight_blob_bytes(),
+            BackendExecutor::Cuda(e) => e.diagnostic_weight_blob_bytes(),
+            BackendExecutor::Rocm(e) => e.diagnostic_weight_blob_bytes(),
+            BackendExecutor::Metal(e) => e.diagnostic_weight_blob_bytes(),
+        }
+    }
+
+    /// BCE-20260629-006: 动态获取 named tensor 的 scratchpad offset
+    pub fn diagnostic_tensor_offset(&self, name: &str) -> Option<usize> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_tensor_offset(name),
+            BackendExecutor::Cuda(e) => e.diagnostic_tensor_offset(name),
+            BackendExecutor::Rocm(e) => e.diagnostic_tensor_offset(name),
+            BackendExecutor::Metal(e) => e.diagnostic_tensor_offset(name),
         }
     }
 

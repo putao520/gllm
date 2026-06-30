@@ -315,9 +315,20 @@ impl Client {
         self.state.load().as_ref()?.backend.executor().diagnostic_weight_row(tensor_name, row, cols)
     }
 
-    /// Diagnostic: return all named weight offsets.
-    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize)>> {
+    /// Diagnostic: return all named weight offsets with per-tensor dtype.
+    /// ARCH-BLOB-YIELDS-WEIGHT: dtype preserved per-tensor (name, offset, dtype).
+    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize, gllm_kernels::types::DType)>> {
         self.state.load().as_ref()?.backend.executor().diagnostic_weight_offsets()
+    }
+
+    /// BCE-DIAG: raw weight_blob bytes for byte-level verification.
+    pub fn diagnostic_weight_blob_bytes(&self) -> Option<Vec<u8>> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_weight_blob_bytes()
+    }
+
+    /// BCE-20260629-006: 获取 named tensor 的 scratchpad offset（供 DIAG harness 动态查询）
+    pub fn diagnostic_tensor_offset(&self, name: &str) -> Option<usize> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_tensor_offset(name)
     }
 
     /// Diagnostic: run prefill on prompt tokens and return logits for the last token.
