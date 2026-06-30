@@ -401,10 +401,48 @@ impl SmPartitionConfig {
         Self { total_sms, comm_sms, compute_sms }
     }
 
-    /// 默认 SM 分区：通信占 10% SM，计算占 90% SM
+    /// 从通信带宽派生 SM 分区（SPEC REQ-SMPART-002 算法）
+    ///
+    /// **算法**: `comm_ratio = bandwidth_requirement / (peak_bw_per_sm × total_sm)`
+    /// - `bandwidth_requirement_gbs`: 通信带宽需求 (GB/s)，来自 `MemoryNetworkSensors.nic_bandwidth_gbs`
+    /// - `peak_bw_per_sm`: 单 SM 峰值带宽能力 (GB/s)
+    /// - `comm_sms = ceil(total_sms × comm_ratio)`，至少 1 个，至多 total_sm-1
+    ///
+    /// 通信密集型场景（高带宽需求）→ 更多 SM 给通信；计算密集型 → 更多 SM 给计算。
+    ///
+    /// **跨仓**: 三仓约定 gllm 不直接依赖 gllm-nccl，本函数是 gllm 侧的派生入口，
+    /// 完整 `partition_sm(total_sm, world_size, bandwidth_requirement)` 在 gllm-nccl 仓。
+    // @trace REQ-DIST-026 [entity:SmPartitionConfig]
+    pub fn from_bandwidth(total_sms: u32, bandwidth_requirement_gbs: f32) -> Self {
+        // 单 SM 峰值带宽能力（NVLink 级别保守估计）
+        // 完整实现应由 GpuDeviceProfile 探测提供；当前使用 SPEC 要求的派生路径
+        const PEAK_BW_PER_SM_GBS: f32 = 25.0;
+
+        if total_sms == 0 || bandwidth_requirement_gbs <= 0.0 {
+            return Self::default_for_gpu(total_sms);
+        }
+
+        let total_peak_bw = PEAK_BW_PER_SM_GBS * total_sms as f32;
+        let comm_ratio = (bandwidth_requirement_gbs / total_peak_bw).min(1.0);
+        let comm_sms = ((total_sms as f32) * comm_ratio).ceil() as u32;
+        let comm_sms = comm_sms.max(1).min(total_sms.saturating_sub(1));
+        let compute_sms = total_sms - comm_sms;
+        Self { total_sms, comm_sms, compute_sms }
+    }
+
+    /// 默认 SM 分区：保守 placeholder（无带宽探测时回退）
+    ///
+    /// **正确路径**: 优先使用 `from_bandwidth()` 从 `MemoryNetworkSensors` 派生；
+    /// 此函数仅用于无带宽探测的回退场景（如单元测试）。
+    ///
+    /// **跨仓依赖**: 完整 SM 分区算法在 gllm-nccl 仓 REQ-SMPART-002
+    /// (`partition_sm(total_sm, world_size, bandwidth_requirement)`)，本仓通过
+    /// VmInstr call stub 间接消费（三仓约定：gllm 不直接依赖 gllm-nccl）。
     // @trace REQ-DIST-026 [entity:SmPartitionConfig]
     pub fn default_for_gpu(total_sms: u32) -> Self {
-        let comm_sms = (total_sms * 10 / 100).max(1);
+        // 保守通信 SM 占比（命名常量，语义明确：通信流通常远小于计算流）
+        const CONSERVATIVE_COMM_RATIO_PERCENT: u32 = 10;
+        let comm_sms = (total_sms * CONSERVATIVE_COMM_RATIO_PERCENT / 100).max(1);
         let compute_sms = total_sms - comm_sms;
         Self { total_sms, comm_sms, compute_sms }
     }
@@ -1883,6 +1921,48 @@ mod tests {
         assert_eq!(config.total_sms, 10);
         assert_eq!(config.comm_sms, 1); // max(1)
         assert_eq!(config.compute_sms, 9);
+    }
+
+    #[test]
+    fn sm_partition_from_bandwidth_communication_light() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 低带宽需求 → 少量通信 SM（按 SPEC REQ-SMPART-002 算法派生）
+        let config = SmPartitionConfig::from_bandwidth(128, 100.0);
+        assert_eq!(config.total_sms, 128);
+        // comm_ratio = 100 / (25 * 128) = 0.03125 → comm_sms = ceil(128 * 0.03125) = 4
+        assert_eq!(config.comm_sms, 4);
+        assert_eq!(config.compute_sms, 124);
+        assert!(config.is_valid());
+        assert!(config.is_isolated());
+    }
+
+    #[test]
+    fn sm_partition_from_bandwidth_communication_heavy() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 高带宽需求 → 更多通信 SM（仍保留至少 1 个计算 SM）
+        let config = SmPartitionConfig::from_bandwidth(80, 5000.0);
+        assert_eq!(config.total_sms, 80);
+        // comm_ratio = min(1.0, 5000 / (25 * 80)) = min(1.0, 2.5) = 1.0
+        // comm_sms = min(80-1, ceil(80 * 1.0)) = 79
+        assert_eq!(config.comm_sms, 79);
+        assert_eq!(config.compute_sms, 1);
+        assert!(config.is_valid());
+    }
+
+    #[test]
+    fn sm_partition_from_bandwidth_zero_bandwidth_falls_back() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        // 零带宽需求 → 回退到 default_for_gpu
+        let config = SmPartitionConfig::from_bandwidth(128, 0.0);
+        let fallback = SmPartitionConfig::default_for_gpu(128);
+        assert_eq!(config, fallback);
+    }
+
+    #[test]
+    fn sm_partition_from_bandwidth_zero_total_falls_back() {
+        // @trace TEST-DIST-026 [req:REQ-DIST-026] [level:unit]
+        let config = SmPartitionConfig::from_bandwidth(0, 100.0);
+        assert_eq!(config.total_sms, 0);
     }
 
     #[test]

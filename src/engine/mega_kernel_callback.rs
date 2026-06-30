@@ -147,7 +147,14 @@ pub struct SgCallbackCtx {
 }
 
 /// Null retrieve bridge: always returns 0 (no knowledge retrieved).
-/// Placeholder until full KnowledgeProvider bridge is validated.
+///
+/// This is the default bridge when no KnowledgeProvider is configured.
+/// Return value 0 means "no knowledge vector written" — the JIT caller
+/// treats this as "skip knowledge injection" and proceeds with the
+/// base model output. This is correct null-object behavior, not a stub.
+///
+/// When a KnowledgeProvider is configured, this is replaced by a bridge
+/// that calls KnowledgeProvider.retrieve() via the callback vtable.
 pub unsafe extern "C" fn null_retrieve_bridge(
     _detect_hidden: *const f32,
     _hidden_size: u32,

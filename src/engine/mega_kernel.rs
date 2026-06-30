@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "read_dtype_aware")]
+    #[should_panic(expected = "decode_slice_to_f32")]
     fn scratchpad_embedding_buffer_too_small_returns_empty() {
         let buf = vec![0u8; 8]; // only 2 f32s, but need prompt_len=2 * hidden_size=4 = 8 f32s
         let sp = DiagnosticScratchpad {
@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "read_dtype_aware")]
+    #[should_panic(expected = "decode_slice_to_f32")]
     fn scratchpad_last_token_logits_out_of_bounds_returns_empty() {
         // logits_offset near end of buffer so (prompt_len-1)*row overflows
         let buf = vec![0u8; 8];
@@ -1846,7 +1846,7 @@ mod tests {
     // @trace TEST-MKO-097 [req:REQ-OBS] [level:unit]
 
     #[test]
-    #[should_panic(expected = "read_dtype_aware")]
+    #[should_panic(expected = "decode_slice_to_f32")]
     fn scratchpad_embedding_large_prompt_len_tiny_buffer() {
         let buf = vec![0u8; 8]; // Only 2 f32s
         let sp = DiagnosticScratchpad {
@@ -3227,7 +3227,7 @@ mod tests {
     // @trace TEST-MKO-155 [req:REQ-OBS] [level:unit]
 
     #[test]
-    #[should_panic(expected = "read_dtype_aware")]
+    #[should_panic(expected = "decode_slice_to_f32")]
     fn scratchpad_last_token_logits_large_vocab_small_buffer() {
         let buf = vec![0u8; 32];
         let sp = DiagnosticScratchpad {
@@ -4483,7 +4483,7 @@ mod tests {
     // @trace TEST-MKO-208 [req:REQ-OBS] [level:unit]
 
     #[test]
-    #[should_panic(expected = "read_dtype_aware")]
+    #[should_panic(expected = "decode_slice_to_f32")]
     fn scratchpad_last_token_logits_offset_at_buffer_end() {
         // Arrange: logits_offset points to the very end of the buffer
         let buf = vec![0u8; 16];
