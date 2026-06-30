@@ -8,7 +8,7 @@
 //! 3. Commits accepted tokens, rolls back rejected ones
 //! 4. Updates EMA acceptance tracker for adaptive backoff
 
-use crate::speculative::verify::{KvCommitInstruction, SequenceVerifyResult};
+use crate::speculative::verify::{KvCommitInstruction, SequenceVerifyResult, SpeculativePages};
 
 /// Result of an MTP-aware generate call.
 #[derive(Debug, Clone)]
@@ -314,26 +314,38 @@ impl Default for MtpController {
 /// Generate KV commit/rollback instructions from MTP verify results (REQ-MTP-004).
 ///
 /// For each step: accepted candidates → Commit, rejected candidates → Rollback.
-pub fn generate_mtp_kv_instructions(
+/// `page_provider` receives (request_id, accepted_count, rejected_count) and returns
+/// the physical page IDs for speculative tokens, computed from the scheduler's block_table.
+pub fn generate_mtp_kv_instructions<F>(
     request_id: u64,
     step_details: &[MtpStepDetail],
-) -> Vec<KvCommitInstruction> {
+    page_provider: F,
+) -> Vec<KvCommitInstruction>
+where
+    F: Fn(u64, usize, usize) -> SpeculativePages,
+{
     let mut instructions = Vec::new();
     for detail in step_details {
-        if detail.accepted_count > 0 {
-            instructions.push(KvCommitInstruction::Commit {
-                request_id,
-                accepted_tokens: detail.mtp_candidates[..detail.accepted_count].to_vec(),
-                kv_pages_to_commit: (0..detail.accepted_count as u64).collect(),
-            });
-        }
-        let rejected = detail.mtp_candidates.len().saturating_sub(detail.accepted_count);
-        if rejected > 0 {
-            instructions.push(KvCommitInstruction::Rollback {
-                request_id,
-                rejected_count: rejected,
-                kv_pages_to_free: (0..rejected as u64).collect(),
-            });
+        let accepted_count = detail.accepted_count;
+        let rejected_count = detail.mtp_candidates.len().saturating_sub(accepted_count);
+
+        if accepted_count > 0 || rejected_count > 0 {
+            let spec_pages = page_provider(request_id, accepted_count, rejected_count);
+
+            if accepted_count > 0 {
+                instructions.push(KvCommitInstruction::Commit {
+                    request_id,
+                    accepted_tokens: detail.mtp_candidates[..accepted_count].to_vec(),
+                    kv_pages_to_commit: spec_pages.commit_pages,
+                });
+            }
+            if rejected_count > 0 {
+                instructions.push(KvCommitInstruction::Rollback {
+                    request_id,
+                    rejected_count: rejected_count,
+                    kv_pages_to_free: spec_pages.rollback_pages,
+                });
+            }
         }
     }
     instructions
@@ -414,6 +426,25 @@ pub fn filter_verified_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: page_provider that generates sequential page IDs.
+    ///
+    /// commit_pages = [0, 1, ..., draft_count-1]
+    /// rollback_pages = [0, 1, ..., rejected_count-1] (all rejected) or [] (partial)
+    fn mtp_test_page_provider(
+        _request_id: u64,
+        accepted_count: usize,
+        rejected_count: usize,
+    ) -> SpeculativePages {
+        let draft_count = accepted_count + rejected_count;
+        let commit_pages: Vec<u64> = (0..draft_count as u64).collect();
+        let rollback_pages: Vec<u64> = if accepted_count == 0 && rejected_count > 0 {
+            (0..rejected_count as u64).collect()
+        } else {
+            Vec::new()
+        };
+        SpeculativePages { commit_pages, rollback_pages }
+    }
 
     #[test]
     fn test_mtp_output_parse_basic() {
@@ -637,7 +668,7 @@ mod tests {
         let details = vec![
             MtpStepDetail { main_token: 10, mtp_candidates: vec![20, 30], accepted_count: 2, main_token_is_eos: false },
         ];
-        let instrs = generate_mtp_kv_instructions(1, &details);
+        let instrs = generate_mtp_kv_instructions(1, &details, mtp_test_page_provider);
         assert_eq!(instrs.len(), 1);
         assert!(matches!(&instrs[0], KvCommitInstruction::Commit { request_id: 1, .. }));
     }
@@ -647,7 +678,7 @@ mod tests {
         let details = vec![
             MtpStepDetail { main_token: 10, mtp_candidates: vec![20, 30, 40], accepted_count: 1, main_token_is_eos: false },
         ];
-        let instrs = generate_mtp_kv_instructions(2, &details);
+        let instrs = generate_mtp_kv_instructions(2, &details, mtp_test_page_provider);
         assert_eq!(instrs.len(), 2);
         // First: commit 1 accepted
         assert!(matches!(&instrs[0], KvCommitInstruction::Commit { accepted_tokens, .. } if accepted_tokens.len() == 1));
@@ -660,7 +691,7 @@ mod tests {
         let details = vec![
             MtpStepDetail { main_token: 10, mtp_candidates: vec![20, 30], accepted_count: 0, main_token_is_eos: false },
         ];
-        let instrs = generate_mtp_kv_instructions(3, &details);
+        let instrs = generate_mtp_kv_instructions(3, &details, mtp_test_page_provider);
         assert_eq!(instrs.len(), 1);
         assert!(matches!(&instrs[0], KvCommitInstruction::Rollback { rejected_count: 2, .. }));
     }
@@ -858,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_mtp_kv_instructions_empty_details() {
-        let instrs = generate_mtp_kv_instructions(1, &[]);
+        let instrs = generate_mtp_kv_instructions(1, &[], mtp_test_page_provider);
         assert!(instrs.is_empty());
     }
 
@@ -869,7 +900,7 @@ mod tests {
             MtpStepDetail { main_token: 11, mtp_candidates: vec![21, 22], accepted_count: 0, main_token_is_eos: false },
             MtpStepDetail { main_token: 12, mtp_candidates: vec![23, 24, 25], accepted_count: 2, main_token_is_eos: false },
         ];
-        let instrs = generate_mtp_kv_instructions(10, &details);
+        let instrs = generate_mtp_kv_instructions(10, &details, mtp_test_page_provider);
         // Step 0: commit 1
         // Step 1: rollback 2
         // Step 2: commit 2 + rollback 1
@@ -886,7 +917,7 @@ mod tests {
         let details = vec![
             MtpStepDetail { main_token: 10, mtp_candidates: vec![], accepted_count: 0, main_token_is_eos: false },
         ];
-        let instrs = generate_mtp_kv_instructions(5, &details);
+        let instrs = generate_mtp_kv_instructions(5, &details, mtp_test_page_provider);
         // No candidates → no commit and no rollback
         assert!(instrs.is_empty());
     }
@@ -1489,7 +1520,7 @@ mod tests {
             accepted_count: 0,
             main_token_is_eos: false,
         }];
-        let instrs = generate_mtp_kv_instructions(42, &details);
+        let instrs = generate_mtp_kv_instructions(42, &details, mtp_test_page_provider);
         assert_eq!(instrs.len(), 1);
         match &instrs[0] {
             KvCommitInstruction::Rollback {
@@ -1512,7 +1543,7 @@ mod tests {
             accepted_count: 2,
             main_token_is_eos: false,
         }];
-        let instrs = generate_mtp_kv_instructions(7, &details);
+        let instrs = generate_mtp_kv_instructions(7, &details, mtp_test_page_provider);
         assert_eq!(instrs.len(), 2);
         match &instrs[0] {
             KvCommitInstruction::Commit {
@@ -1522,7 +1553,8 @@ mod tests {
             } => {
                 assert_eq!(*request_id, 7);
                 assert_eq!(*accepted_tokens, vec![100, 200]);
-                assert_eq!(*kv_pages_to_commit, vec![0, 1]);
+                // commit_pages = [0..draft_count] from page_provider
+                assert_eq!(*kv_pages_to_commit, vec![0, 1, 2]);
             }
             other => panic!("Expected Commit, got {:?}", other),
         }
@@ -1533,7 +1565,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*rejected_count, 1);
-                assert_eq!(*kv_pages_to_free, vec![0]);
+                // Partial accept: shared page cannot be freed
+                assert!(kv_pages_to_free.is_empty());
             }
             other => panic!("Expected Rollback, got {:?}", other),
         }
@@ -1547,7 +1580,7 @@ mod tests {
             accepted_count: 1,
             main_token_is_eos: false,
         }];
-        let instrs = generate_mtp_kv_instructions(u64::MAX, &details);
+        let instrs = generate_mtp_kv_instructions(u64::MAX, &details, mtp_test_page_provider);
         match &instrs[0] {
             KvCommitInstruction::Commit { request_id, .. } => {
                 assert_eq!(*request_id, u64::MAX);
@@ -1564,7 +1597,7 @@ mod tests {
             accepted_count: 3,
             main_token_is_eos: false,
         }];
-        let instrs = generate_mtp_kv_instructions(1, &details);
+        let instrs = generate_mtp_kv_instructions(1, &details, mtp_test_page_provider);
         match &instrs[0] {
             KvCommitInstruction::Commit {
                 kv_pages_to_commit, ..

@@ -461,15 +461,17 @@ impl RequestStateTable {
 
     #[cfg(feature = "metal")]
     fn allocate_metal(&mut self) -> Result<(), String> {
+        use gllm_kernels::gpu::metal::MetalDriver;
+
         let size = self.states.len() * std::mem::size_of::<RequestState>();
         if size == 0 {
             return Ok(());
         }
 
-        // Metal shared buffer allocation via MTLDevice.
-        // The actual Metal backend in gllm-kernels handles buffer creation;
-        // here we record the size for the device_memory bookkeeping.
-        self.device_memory = Some(DeviceMemory::Metal { buffer_id: 0, size });
+        let driver = MetalDriver::load().map_err(|e| format!("Failed to load Metal driver: {}", e))?;
+        let buffer_id = driver.mem_alloc(size).map_err(|e| format!("Metal mem_alloc failed: {}", e))?;
+
+        self.device_memory = Some(DeviceMemory::Metal { buffer_id, size });
         Ok(())
     }
 
@@ -507,18 +509,10 @@ impl Drop for RequestStateTable {
                 }
                 #[cfg(feature = "metal")]
                 DeviceMemory::Metal { buffer_id, .. } => {
-                    // Metal buffer release: when buffer_id is non-zero, the buffer
-                    // was allocated via MetalDevice and must be released via
-                    // [MTLBuffer release]. Currently MetalDriver does not expose
-                    // mem_free — once available, call it here.
-                    // TODO(port): implement MetalDriver::mem_free once metal feature is complete
-                    if *buffer_id != 0 {
-                        log::error!(
-                            "DeviceMemory::Metal with non-zero buffer_id ({}) cannot be freed — \
-                             MetalDriver::mem_free not yet available; leaking to avoid UB",
-                            buffer_id
-                        );
-                        // Intentionally leak: freeing without proper API is UB.
+                    if let Ok(driver) = gllm_kernels::gpu::metal::MetalDriver::load() {
+                        if let Err(e) = driver.mem_free(*buffer_id) {
+                            log::error!("Drop RequestStateTable: metal mem_free({}) failed: {}", buffer_id, e);
+                        }
                     }
                 }
                 DeviceMemory::Host { ptr, layout, .. } => {

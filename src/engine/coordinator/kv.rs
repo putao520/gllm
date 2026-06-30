@@ -27,10 +27,11 @@ impl KvCoordinator {
     pub fn resolve_kv_dist_decision(
         &self,
         comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
+        total_kv_heads: u32,
     ) -> Option<kv_distribution::KvDistDecision> {
         self.kv_distribution_config
             .as_ref()
-            .map(|cfg| kv_distribution::KvDistDecision::from_config(cfg, comm_handle))
+            .map(|cfg| kv_distribution::KvDistDecision::from_config(cfg, comm_handle, total_kv_heads))
     }
 
     /// Execute KV distribution dispatch for the current step.
@@ -50,8 +51,9 @@ impl KvCoordinator {
         &mut self,
         comm_handle: &crate::engine::distributed_config::CommHandleWrapper,
         three_tier_swap: &Option<std::sync::Arc<std::sync::Mutex<crate::scheduler::ThreeTierSwapCoordinator>>>,
+        total_kv_heads: u32,
     ) -> Result<(), String> {
-        let decision = match self.resolve_kv_dist_decision(comm_handle) {
+        let decision = match self.resolve_kv_dist_decision(comm_handle, total_kv_heads) {
             Some(d) => d,
             None => return Ok(()), // no distribution config = single-node, no-op
         };
@@ -126,25 +128,15 @@ impl KvCoordinator {
                     // and produces TierMigrationPlan for hot/cold page movement.
                     let plan = coordinator.build_batch(&[], 0.5);
                     // Apply the migration plan — execute eviction and swap-in requests.
-                    // Dropping the plan without execution would be a no-op (C-5.4: no stubs).
                     if !plan.eviction_candidates.is_empty() || !plan.swap_in_requests.is_empty() || !plan.tier_migrations.is_empty() {
+                        let applied = coordinator.execute_plan(&plan);
                         log::trace!(
-                            "[kv_dist_dispatch] TieredCache — migration plan: \
-                             {} evictions, {} swap-in requests, {} tier migrations",
+                            "[kv_dist_dispatch] TieredCache — migration plan applied: \
+                             {}/{} migrations executed, {} evictions, {} swap-in requests",
+                            applied,
+                            plan.tier_migrations.len(),
                             plan.eviction_candidates.len(),
                             plan.swap_in_requests.len(),
-                            plan.tier_migrations.len(),
-                        );
-                        // TODO: apply plan via coordinator.execute_plan(plan) —
-                        // pending scheduler integration (see ThreeTierSwapCoordinator).
-                        // Until integration, log::warn! to make the no-op observable.
-                        log::warn!(
-                            "[kv_dist_dispatch] TieredCache migration plan built but not yet \
-                             executed — {} evictions + {} swap-ins + {} tier migrations deferred \
-                             (requires scheduler integration)",
-                            plan.eviction_candidates.len(),
-                            plan.swap_in_requests.len(),
-                            plan.tier_migrations.len(),
                         );
                     } else {
                         log::trace!(
@@ -943,7 +935,7 @@ pub mod kv_distribution {
         /// 分布式模式下，会根据 NCCL 通信初始化状态和并行拓扑
         /// 决定实际的 KV 分布策略参数（预取、头分配、缓存层级比例）。
         // @trace REQ-DIST-013 [entity:ENT-DIST-KV-MODE]
-        pub fn from_config(config: &KvDistributionConfig, comm_handle: &CommHandleWrapper) -> Self {
+        pub fn from_config(config: &KvDistributionConfig, comm_handle: &CommHandleWrapper, total_kv_heads: u32) -> Self {
             if !comm_handle.is_distributed() {
                 return Self::Local;
             }
@@ -959,7 +951,7 @@ pub mod kv_distribution {
                 KvDistMode::Mirror => Self::Mirror,
                 KvDistMode::PartialHeadMirror => Self::PartialHeadMirror {
                     local_heads: config.mirror_heads,
-                    total_heads: 0, // 从 ModelConfig 获取，此处占位
+                    total_heads: total_kv_heads,
                 },
                 KvDistMode::TieredCache => {
                     // 根据是否初始化 NCCL 调整缓存层级比例
@@ -994,11 +986,8 @@ pub mod kv_distribution {
                 Self::OnDemand { .. } => 1.0,
                 Self::Mirror => tp_size as f64,
                 Self::PartialHeadMirror { total_heads, local_heads } => {
-                    if *total_heads == 0 {
-                        1.0 // placeholder, will be 1/tp_size when total_heads is known
-                    } else {
-                        *local_heads as f64 / *total_heads as f64
-                    }
+                    // total_heads is provided from ModelConfig.num_kv_heads at construction time.
+                    *local_heads as f64 / *total_heads as f64
                 }
                 Self::TieredCache { hbm_ratio, ddr_ratio } => hbm_ratio + ddr_ratio,
             }
@@ -1132,7 +1121,7 @@ pub mod kv_distribution {
         fn kv_dist_decision_local_when_not_distributed() {
             let handle = make_local_handle();
             let config = make_config(KvDistMode::Mirror, 0);
-            let decision = KvDistDecision::from_config(&config, &handle);
+            let decision = KvDistDecision::from_config(&config, &handle, 32);
             assert_eq!(decision, KvDistDecision::Local);
         }
 
@@ -1140,7 +1129,7 @@ pub mod kv_distribution {
         fn kv_dist_decision_local_mode() {
             let handle = make_distributed_handle();
             let config = make_config(KvDistMode::Local, 0);
-            let decision = KvDistDecision::from_config(&config, &handle);
+            let decision = KvDistDecision::from_config(&config, &handle, 32);
             assert_eq!(decision, KvDistDecision::Local);
             assert!(!decision.needs_cross_node_transfer());
         }
@@ -1149,7 +1138,7 @@ pub mod kv_distribution {
         fn kv_dist_decision_on_demand() {
             let handle = make_distributed_handle();
             let config = make_config(KvDistMode::OnDemand, 0);
-            let decision = KvDistDecision::from_config(&config, &handle);
+            let decision = KvDistDecision::from_config(&config, &handle, 32);
             assert_eq!(decision, KvDistDecision::OnDemand { prefetch: false });
             assert!(decision.needs_cross_node_transfer());
         }
@@ -1158,7 +1147,7 @@ pub mod kv_distribution {
         fn kv_dist_decision_mirror() {
             let handle = make_distributed_handle();
             let config = make_config(KvDistMode::Mirror, 0);
-            let decision = KvDistDecision::from_config(&config, &handle);
+            let decision = KvDistDecision::from_config(&config, &handle, 32);
             assert_eq!(decision, KvDistDecision::Mirror);
             assert!(decision.needs_cross_node_transfer());
         }
@@ -1167,12 +1156,12 @@ pub mod kv_distribution {
         fn kv_dist_decision_partial_head_mirror() {
             let handle = make_distributed_handle();
             let config = make_config(KvDistMode::PartialHeadMirror, 8);
-            let decision = KvDistDecision::from_config(&config, &handle);
+            let decision = KvDistDecision::from_config(&config, &handle, 32);
             assert_eq!(
                 decision,
                 KvDistDecision::PartialHeadMirror {
                     local_heads: 8,
-                    total_heads: 0,
+                    total_heads: 32,
                 }
             );
             assert!(decision.needs_cross_node_transfer());
@@ -1182,7 +1171,7 @@ pub mod kv_distribution {
         fn kv_dist_decision_tiered_cache_without_nccl() {
             let handle = make_distributed_handle();
             let config = make_config(KvDistMode::TieredCache, 0);
-            let decision = KvDistDecision::from_config(&config, &handle);
+            let decision = KvDistDecision::from_config(&config, &handle, 32);
             assert_eq!(
                 decision,
                 KvDistDecision::TieredCache {
@@ -1244,13 +1233,13 @@ pub mod kv_distribution {
         }
 
         #[test]
-        fn memory_overhead_partial_head_mirror_without_total() {
+        fn memory_overhead_partial_head_mirror_ratio() {
             let decision = KvDistDecision::PartialHeadMirror {
                 local_heads: 4,
-                total_heads: 0, // placeholder
+                total_heads: 16,
             };
-            // Falls back to 1.0 when total_heads is unknown
-            assert!((decision.memory_overhead_multiplier(4) - 1.0).abs() < f64::EPSILON);
+            // 4/16 = 0.25
+            assert!((decision.memory_overhead_multiplier(4) - 0.25).abs() < f64::EPSILON);
         }
 
         #[test]

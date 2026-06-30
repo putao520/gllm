@@ -571,8 +571,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.compute.mega_kernel.as_ref()?.read_weight_row(tensor_name, row, cols)
     }
 
-    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize)>> {
+    /// Diagnostic: all named weight offsets with per-tensor dtype.
+    /// ARCH-BLOB-YIELDS-WEIGHT: dtype preserved per-tensor (not global).
+    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize, gllm_kernels::types::DType)>> {
         self.compute.mega_kernel.as_ref().map(|m| m.weight_offsets().unwrap_or(&[]).to_vec())
+    }
+
+    /// BCE-DIAG: raw weight_blob bytes for byte-level verification.
+    pub fn diagnostic_weight_blob_bytes(&self) -> Option<Vec<u8>> {
+        self.compute.mega_kernel.as_ref()?.diagnostic_weight_blob_bytes()
+    }
+
+    /// BCE-20260629-006: 动态获取 named tensor 的 scratchpad offset
+    pub fn diagnostic_tensor_offset(&self, name: &str) -> Option<usize> {
+        self.compute.mega_kernel.as_ref()?.diagnostic_tensor_offset(name)
     }
 
     pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
@@ -1600,7 +1612,13 @@ mod tests {
             accepted_count: 0,
             main_token_is_eos: false,
         };
-        let instructions = super::super::mtp_executor::generate_mtp_kv_instructions(42, &[detail]);
+        let instructions = super::super::mtp_executor::generate_mtp_kv_instructions(42, &[detail], |_, accepted, rejected| {
+            let draft = accepted + rejected;
+            crate::speculative::verify::SpeculativePages {
+                commit_pages: (0..draft as u64).collect(),
+                rollback_pages: if accepted == 0 && rejected > 0 { (0..rejected as u64).collect() } else { Vec::new() },
+            }
+        });
         assert!(instructions.is_empty(), "no candidates should produce no instructions");
     }
 
@@ -2927,7 +2945,13 @@ mod tests {
             main_token_is_eos: false,
         };
         // Act
-        let instructions = super::super::mtp_executor::generate_mtp_kv_instructions(99, &[step1, step2]);
+        let instructions = super::super::mtp_executor::generate_mtp_kv_instructions(99, &[step1, step2], |_, accepted, rejected| {
+            let draft = accepted + rejected;
+            crate::speculative::verify::SpeculativePages {
+                commit_pages: (0..draft as u64).collect(),
+                rollback_pages: if accepted == 0 && rejected > 0 { (0..rejected as u64).collect() } else { Vec::new() },
+            }
+        });
         // Assert: 3 instructions — Commit for step1, Rollback for step1, Rollback for step2
         assert_eq!(instructions.len(), 3);
         // Step 1: Commit 2 accepted tokens

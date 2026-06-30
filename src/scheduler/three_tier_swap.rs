@@ -688,6 +688,144 @@ impl ThreeTierSwapCoordinator {
         }
     }
 
+    /// Execute a `TierMigrationPlan` produced by `build_batch`.
+    ///
+    /// Applies the plan's tier migrations by updating page metadata and address
+    /// table state to reflect the target tier for each migration. The actual
+    /// DMA data movement is handled by the background eviction and swap-in
+    /// workers on their next tick cycle; this method performs the immediate
+    /// state transitions that make the plan effective.
+    ///
+    /// # Returns
+    /// The number of migrations successfully applied.
+    ///
+    /// # Arguments
+    /// * `plan` — The migration plan to execute.
+    // @trace REQ-KV-ADDR-003 [entity:ENT-KV-CACHE]
+    pub fn execute_plan(&self, plan: &TierMigrationPlan) -> usize {
+        let mut applied = 0usize;
+
+        // Apply tier migrations: update addr_table.current_tier and page_metadata state.
+        for migration in &plan.tier_migrations {
+            // Update addr_table to reflect the target tier.
+            let mut addr_guard = match self.addr_table.write() {
+                Ok(g) => g,
+                Err(e) => {
+                    log::error!("addr_table write lock poisoned in execute_plan: {e}");
+                    continue;
+                }
+            };
+            let Some(entry) = addr_guard.get_mut(&migration.page_id) else {
+                log::trace!(
+                    "[execute_plan] page {} not in addr_table — skipping migration {:?}→{:?}",
+                    migration.page_id,
+                    migration.from_tier,
+                    migration.to_tier,
+                );
+                continue;
+            };
+
+            // Validate: skip if the page's current tier doesn't match the migration's from_tier
+            // (the page may have been migrated by the background worker already).
+            if entry.current_tier != migration.from_tier {
+                log::trace!(
+                    "[execute_plan] page {} tier mismatch: expected {:?}, actual {:?} — skipping",
+                    migration.page_id,
+                    migration.from_tier,
+                    entry.current_tier,
+                );
+                continue;
+            }
+
+            // Apply the tier transition.
+            let old_tier = entry.current_tier;
+            entry.current_tier = migration.to_tier;
+            entry.codec = migration.codec;
+
+            // Clear GPU pointer on eviction from HBM.
+            if old_tier == StorageTier::GpuHbm && migration.to_tier != StorageTier::GpuHbm {
+                entry.gpu_ptr = None;
+            }
+
+            drop(addr_guard);
+
+            // Update page_metadata state to reflect the migration.
+            let mut meta_guard = match self.page_metadata.write() {
+                Ok(g) => g,
+                Err(e) => {
+                    log::error!("page_metadata write lock poisoned in execute_plan: {e}");
+                    continue;
+                }
+            };
+            if let Some(meta) = meta_guard.get_mut(&migration.page_id) {
+                meta.state = match migration.to_tier {
+                    StorageTier::GpuHbm => crate::scheduler::types::PageState::Active,
+                    StorageTier::CpuDram => crate::scheduler::types::PageState::Standby,
+                    StorageTier::Nvme => crate::scheduler::types::PageState::SwappedOut,
+                };
+            }
+
+            applied += 1;
+            log::trace!(
+                "[execute_plan] page {} migrated {:?}→{:?} (reason: {:?})",
+                migration.page_id,
+                migration.from_tier,
+                migration.to_tier,
+                migration.reason,
+            );
+        }
+
+        // Re-enqueue swap-in requests in case they weren't already processed by
+        // the swap-in worker (e.g., if the worker hasn't ticked yet).
+        if !plan.swap_in_requests.is_empty() {
+            if let Some(ref sw) = self.swap_in_worker {
+                let enqueued = sw.prefetch_batch(&plan.swap_in_requests);
+                log::trace!(
+                    "[execute_plan] re-enqueued {}/{} swap-in requests",
+                    enqueued,
+                    plan.swap_in_requests.len(),
+                );
+            }
+        }
+
+        // Update statistics with per-migration-type counters.
+        if applied > 0 {
+            if let Ok(mut s) = self.stats.lock() {
+                for migration in &plan.tier_migrations {
+                    match (migration.from_tier, migration.to_tier) {
+                        (StorageTier::GpuHbm, StorageTier::CpuDram) => {
+                            s.evictions_gpu_to_dram += 1;
+                            s.total_bytes_evicted += migration.page_bytes as u64;
+                        }
+                        (StorageTier::CpuDram, StorageTier::Nvme) => {
+                            s.evictions_dram_to_nvme += 1;
+                            s.total_bytes_evicted += migration.page_bytes as u64;
+                        }
+                        (StorageTier::GpuHbm, StorageTier::Nvme) => {
+                            s.evictions_gpu_to_nvme += 1;
+                            s.total_bytes_evicted += migration.page_bytes as u64;
+                        }
+                        (StorageTier::CpuDram, StorageTier::GpuHbm) => {
+                            s.swap_ins_dram_to_gpu += 1;
+                            s.total_bytes_swapped_in += migration.page_bytes as u64;
+                        }
+                        (StorageTier::Nvme, StorageTier::CpuDram) => {
+                            s.swap_ins_nvme_to_dram += 1;
+                            s.total_bytes_swapped_in += migration.page_bytes as u64;
+                        }
+                        (StorageTier::Nvme, StorageTier::GpuHbm) => {
+                            s.swap_ins_nvme_to_gpu += 1;
+                            s.total_bytes_swapped_in += migration.page_bytes as u64;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        applied
+    }
+
     /// Snapshot current three-tier swap statistics.
     ///
     /// Reads the current tier distribution from the addr_table to compute

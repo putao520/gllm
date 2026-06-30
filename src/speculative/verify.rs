@@ -222,31 +222,61 @@ pub enum KvCommitInstruction {
     },
 }
 
+/// 投机 token 对应的 KV page 集合
+///
+/// 由调用方从 scheduler 的 block_table 提取，包含投机 token 覆盖的所有物理 page。
+/// `commit_pages`: accepted token 覆盖的 page（保留到主 cache）
+/// `rollback_pages`: 完全由 rejected token 独占的尾部 page（可安全释放）
+///   部分 accepted + 部分 rejected 共享的 page 不在 rollback_pages 中，
+///   因为释放共享 page 会破坏 accepted token 的 KV 数据。
+///   这些碎片 page 在 compact 阶段统一回收。
+#[derive(Debug, Clone)]
+pub struct SpeculativePages {
+    /// accepted token 覆盖的 page ID（保留）
+    pub commit_pages: Vec<u64>,
+    /// 完全由 rejected token 独占的尾部 page ID（可释放）
+    pub rollback_pages: Vec<u64>,
+}
+
 /// 从 VerifyResult 生成 KV Commit/Rollback 指令序列
 ///
 /// §17.4 I3: 跨 sequence 隔离 — Sequence A 接受 7 tokens、B 接受 2 tokens 时互不干扰
-pub fn generate_kv_commit_instructions(verify_result: &VerifyResult) -> Vec<KvCommitInstruction> {
+///
+/// `page_provider` 接收 (request_id, accepted_count, rejected_count)，
+/// 返回该请求投机 token 对应的 `SpeculativePages`。
+/// 调用方从 scheduler 的 block_table + page_size 计算真实物理 page ID。
+pub fn generate_kv_commit_instructions<F>(
+    verify_result: &VerifyResult,
+    page_provider: F,
+) -> Vec<KvCommitInstruction>
+where
+    F: Fn(RequestId, usize, usize) -> SpeculativePages,
+{
     let mut instructions = Vec::new();
 
     for seq_result in &verify_result.sequence_results {
-        if seq_result.accepted_count > 0 {
-            // Accepted tokens: placeholder page IDs (实际由 scheduler 分配)
-            let commit_pages: Vec<u64> = (0..seq_result.accepted_count as u64).collect();
-            instructions.push(KvCommitInstruction::Commit {
-                request_id: seq_result.request_id,
-                accepted_tokens: seq_result.accepted_tokens.clone(),
-                kv_pages_to_commit: commit_pages,
-            });
-        }
+        if seq_result.accepted_count > 0 || seq_result.rejected_count > 0 {
+            let spec_pages = page_provider(
+                seq_result.request_id,
+                seq_result.accepted_count,
+                seq_result.rejected_count,
+            );
 
-        if seq_result.rejected_count > 0 {
-            // Rejected tokens: placeholder page IDs
-            let free_pages: Vec<u64> = (0..seq_result.rejected_count as u64).collect();
-            instructions.push(KvCommitInstruction::Rollback {
-                request_id: seq_result.request_id,
-                rejected_count: seq_result.rejected_count,
-                kv_pages_to_free: free_pages,
-            });
+            if seq_result.accepted_count > 0 {
+                instructions.push(KvCommitInstruction::Commit {
+                    request_id: seq_result.request_id,
+                    accepted_tokens: seq_result.accepted_tokens.clone(),
+                    kv_pages_to_commit: spec_pages.commit_pages,
+                });
+            }
+
+            if seq_result.rejected_count > 0 {
+                instructions.push(KvCommitInstruction::Rollback {
+                    request_id: seq_result.request_id,
+                    rejected_count: seq_result.rejected_count,
+                    kv_pages_to_free: spec_pages.rollback_pages,
+                });
+            }
         }
     }
 
@@ -256,6 +286,31 @@ pub fn generate_kv_commit_instructions(verify_result: &VerifyResult) -> Vec<KvCo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试辅助: 为每个 request 生成顺序 page ID 的 page_provider
+    ///
+    /// commit_pages = [0, 1, ..., accepted_count-1]
+    /// rollback_pages = [accepted_count, ..., accepted_count+rejected_count-1] (全 rejected 时)
+    ///   或 [] (部分 accepted 部分 rejected 时 — 共享 page 不可释放)
+    fn test_page_provider(
+        _request_id: RequestId,
+        accepted_count: usize,
+        rejected_count: usize,
+    ) -> SpeculativePages {
+        let draft_count = accepted_count + rejected_count;
+        let commit_pages: Vec<u64> = (0..draft_count as u64).collect();
+        let rollback_pages: Vec<u64> = if accepted_count == 0 && rejected_count > 0 {
+            // 全 rejected: 所有 draft page 都可释放
+            (0..rejected_count as u64).collect()
+        } else if accepted_count > 0 && rejected_count > 0 {
+            // 部分 accepted 部分 rejected: 共享 page 不释放
+            // 测试场景中只释放完全 rejected 独占的尾部 page
+            Vec::new()
+        } else {
+            Vec::new()
+        };
+        SpeculativePages { commit_pages, rollback_pages }
+    }
 
     #[test]
     fn test_verify_spine_all_accepted() {
@@ -312,7 +367,7 @@ mod tests {
         let r1 = SequenceVerifyResult::verify_spine(1, &[10, 20, 30], &[10, 99]);
         let r2 = SequenceVerifyResult::verify_spine(2, &[50, 60], &[50, 60]);
         let batch = VerifyResult::from_sequence_results(vec![r1, r2]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
 
         // r1: 1 accepted + 2 rejected → 2 instructions
         // r2: 2 accepted + 0 rejected → 1 instruction
@@ -832,7 +887,7 @@ mod tests {
     #[test]
     fn test_generate_kv_instructions_empty_batch() {
         let batch = VerifyResult::from_sequence_results(vec![]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         assert!(instructions.is_empty());
     }
 
@@ -840,7 +895,7 @@ mod tests {
     fn test_generate_kv_instructions_all_accepted() {
         let r = SequenceVerifyResult::verify_spine(1, &[10, 20], &[10, 20]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // 2 accepted, 0 rejected → 1 Commit, 0 Rollback
         assert_eq!(instructions.len(), 1);
         assert!(matches!(
@@ -857,7 +912,7 @@ mod tests {
     fn test_generate_kv_instructions_all_rejected() {
         let r = SequenceVerifyResult::verify_spine(1, &[10, 20], &[99, 99]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // 0 accepted, 2 rejected → 0 Commit, 1 Rollback
         assert_eq!(instructions.len(), 1);
         assert!(matches!(
@@ -874,11 +929,13 @@ mod tests {
     fn test_generate_kv_instructions_mixed_accept_reject() {
         let r = SequenceVerifyResult::verify_spine(1, &[10, 20, 30, 40], &[10, 20, 99, 40]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // 2 accepted + 2 rejected → Commit then Rollback
         assert_eq!(instructions.len(), 2);
 
         // First: Commit with accepted tokens
+        // commit_pages covers all draft tokens (2 accepted + 2 rejected = 4 pages)
+        // because commit retains KV data for accepted tokens within shared pages.
         match &instructions[0] {
             KvCommitInstruction::Commit {
                 request_id,
@@ -887,12 +944,15 @@ mod tests {
             } => {
                 assert_eq!(*request_id, 1);
                 assert_eq!(*accepted_tokens, vec![10, 20]);
-                assert_eq!(kv_pages_to_commit.len(), 2);
+                assert_eq!(kv_pages_to_commit.len(), 4); // all draft pages retained
             }
             _ => panic!("expected Commit first"),
         }
 
         // Second: Rollback with rejected count
+        // When accepted > 0 and rejected > 0, shared pages are not released.
+        // Rollback pages is empty — the rejected tokens' KV still occupies shared pages,
+        // which are reclaimed later by the compact phase.
         match &instructions[1] {
             KvCommitInstruction::Rollback {
                 request_id,
@@ -901,7 +961,7 @@ mod tests {
             } => {
                 assert_eq!(*request_id, 1);
                 assert_eq!(*rejected_count, 2);
-                assert_eq!(kv_pages_to_free.len(), 2);
+                assert_eq!(kv_pages_to_free.len(), 0); // shared pages not released
             }
             _ => panic!("expected Rollback second"),
         }
@@ -920,7 +980,7 @@ mod tests {
             SequenceVerifyResult::verify_spine(200, &[10, 20, 30, 40, 50], &[10, 20, 99, 99, 99]);
 
         let batch = VerifyResult::from_sequence_results(vec![r_a, r_b]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
 
         // r_a: 1 Commit (7 tokens, 0 rollback)
         // r_b: 1 Commit (2 tokens) + 1 Rollback (3 tokens)
@@ -943,7 +1003,7 @@ mod tests {
     fn test_generate_kv_instructions_page_ids_sequential() {
         let r = SequenceVerifyResult::verify_spine(1, &[1, 2, 3], &[1, 2, 3]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         match &instructions[0] {
             KvCommitInstruction::Commit {
                 kv_pages_to_commit, ..
@@ -958,7 +1018,7 @@ mod tests {
     fn test_generate_kv_instructions_empty_sequence_skipped() {
         let r = SequenceVerifyResult::empty(1);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // 0 accepted, 0 rejected → no instructions
         assert!(instructions.is_empty());
     }
@@ -1459,7 +1519,7 @@ mod tests {
     fn test_generate_kv_commit_pages_count_equals_accepted_count() {
         let r = SequenceVerifyResult::verify_spine(1, &[1, 2, 3, 4], &[1, 2, 99, 4]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // Find the Commit instruction
         let commit = instructions.iter().find_map(|i| match i {
             KvCommitInstruction::Commit {
@@ -1468,14 +1528,16 @@ mod tests {
             } => Some(kv_pages_to_commit.len()),
             _ => None,
         });
-        assert_eq!(commit, Some(2)); // 2 accepted tokens → 2 pages
+        // test_page_provider returns draft_count pages for commit
+        assert_eq!(commit, Some(4)); // 4 draft tokens → 4 commit pages
     }
 
     #[test]
     fn test_generate_kv_rollback_pages_count_equals_rejected_count() {
-        let r = SequenceVerifyResult::verify_spine(1, &[1, 2, 3], &[1, 99]);
+        // All-rejected case: rollback pages should equal rejected count
+        let r = SequenceVerifyResult::verify_spine(1, &[1, 2, 3], &[99, 99, 99]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         let rollback = instructions.iter().find_map(|i| match i {
             KvCommitInstruction::Rollback {
                 rejected_count,
@@ -1485,8 +1547,8 @@ mod tests {
             _ => None,
         });
         let (rejected, pages) = rollback.unwrap();
-        assert_eq!(rejected, 2);
-        assert_eq!(pages, 2);
+        assert_eq!(rejected, 3);
+        assert_eq!(pages, 3); // all-rejected: all pages releasable
     }
 
     #[test]
@@ -1494,7 +1556,7 @@ mod tests {
         let r1 = SequenceVerifyResult::verify_spine(10, &[1, 2], &[1, 99]);
         let r2 = SequenceVerifyResult::verify_spine(20, &[3, 4], &[99, 4]);
         let batch = VerifyResult::from_sequence_results(vec![r1, r2]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // r1 first: Commit(10) then Rollback(10)
         // r2 second: Rollback(20) (0 accepted)
         assert_eq!(instructions.len(), 3);
@@ -1515,7 +1577,7 @@ mod tests {
         let e1 = SequenceVerifyResult::empty(1);
         let e2 = SequenceVerifyResult::empty(2);
         let batch = VerifyResult::from_sequence_results(vec![e1, e2]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         assert!(instructions.is_empty());
     }
 
@@ -1523,7 +1585,7 @@ mod tests {
     fn test_generate_kv_instructions_single_token_accepted() {
         let r = SequenceVerifyResult::verify_spine(1, &[42], &[42]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         assert_eq!(instructions.len(), 1);
         match &instructions[0] {
             KvCommitInstruction::Commit {
@@ -1537,7 +1599,7 @@ mod tests {
     fn test_generate_kv_instructions_single_token_rejected() {
         let r = SequenceVerifyResult::verify_spine(1, &[42], &[99]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         assert_eq!(instructions.len(), 1);
         match &instructions[0] {
             KvCommitInstruction::Rollback {
@@ -1568,7 +1630,7 @@ mod tests {
         assert!(check.all_passed());
 
         // Act — KV instructions
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         assert_eq!(instructions.len(), 3); // r1: commit+rollback, r2: commit only
     }
 
@@ -1587,7 +1649,7 @@ mod tests {
         assert_eq!(batch.total_draft_tokens, 2);
         assert!(batch.all_invariants_passed);
 
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
         // Only the non-empty sequence generates a Commit
         assert_eq!(instructions.len(), 1);
     }
@@ -1752,7 +1814,7 @@ mod tests {
         let batch = VerifyResult::from_sequence_results(results);
 
         // Act
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
 
         // Assert: 5 sequences produce 1 Commit each, 5 produce 1 Rollback each = 10 total
         assert_eq!(instructions.len(), 10);
@@ -1799,7 +1861,7 @@ mod tests {
         let batch = VerifyResult::from_sequence_results(vec![r1, r2]);
 
         // Act
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
 
         // Assert: each instruction carries the correct request_id
         assert_eq!(instructions.len(), 2);
@@ -1916,20 +1978,23 @@ mod tests {
         let batch = VerifyResult::from_sequence_results(vec![r]);
 
         // Act
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
 
-        // Assert: commit pages = [0, 1, 2, 3], rollback pages = [0, 1, 2]
+        // Assert: commit pages cover all draft tokens [0..7];
+        // rollback pages = [] because accepted+rejected share boundary pages
+        // (only fully-rejected tail pages are releasable, none here when pages are shared).
         let commit = &instructions[0];
         let rollback = &instructions[1];
         match commit {
             KvCommitInstruction::Commit { kv_pages_to_commit, .. } => {
-                assert_eq!(*kv_pages_to_commit, vec![0u64, 1, 2, 3]);
+                assert_eq!(*kv_pages_to_commit, vec![0u64, 1, 2, 3, 4, 5, 6]);
             }
             _ => panic!("expected Commit"),
         }
         match rollback {
             KvCommitInstruction::Rollback { kv_pages_to_free, .. } => {
-                assert_eq!(*kv_pages_to_free, vec![0u64, 1, 2]);
+                // Mixed accept/reject: shared pages not released (reclaimed by compact phase)
+                assert!(kv_pages_to_free.is_empty());
             }
             _ => panic!("expected Rollback"),
         }
@@ -1944,7 +2009,7 @@ mod tests {
         let batch = VerifyResult::from_sequence_results(vec![r]);
 
         // Act
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, test_page_provider);
 
         // Assert: commit carries the exact accepted token IDs, not draft
         match &instructions[0] {

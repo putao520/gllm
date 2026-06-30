@@ -2719,10 +2719,16 @@ mod tests {
 
     #[test]
     fn test_generate_kv_instructions_single_all_accepted() {
-        use super::super::verify::{generate_kv_commit_instructions, KvCommitInstruction};
+        use super::super::verify::{generate_kv_commit_instructions, KvCommitInstruction, SpeculativePages};
         let r = SequenceVerifyResult::verify_spine(1, &[10, 20], &[10, 20]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, |_, accepted, rejected| {
+            let draft = accepted + rejected;
+            SpeculativePages {
+                commit_pages: (0..draft as u64).collect(),
+                rollback_pages: if accepted == 0 && rejected > 0 { (0..rejected as u64).collect() } else { Vec::new() },
+            }
+        });
         assert_eq!(instructions.len(), 1);
         assert!(matches!(instructions[0], KvCommitInstruction::Commit { .. }));
     }
@@ -2731,10 +2737,16 @@ mod tests {
 
     #[test]
     fn test_generate_kv_instructions_single_all_rejected() {
-        use super::super::verify::{generate_kv_commit_instructions, KvCommitInstruction};
+        use super::super::verify::{generate_kv_commit_instructions, KvCommitInstruction, SpeculativePages};
         let r = SequenceVerifyResult::verify_spine(1, &[10, 20], &[99, 99]);
         let batch = VerifyResult::from_sequence_results(vec![r]);
-        let instructions = generate_kv_commit_instructions(&batch);
+        let instructions = generate_kv_commit_instructions(&batch, |_, accepted, rejected| {
+            let draft = accepted + rejected;
+            SpeculativePages {
+                commit_pages: (0..draft as u64).collect(),
+                rollback_pages: if accepted == 0 && rejected > 0 { (0..rejected as u64).collect() } else { Vec::new() },
+            }
+        });
         assert_eq!(instructions.len(), 1);
         assert!(matches!(instructions[0], KvCommitInstruction::Rollback { .. }));
     }

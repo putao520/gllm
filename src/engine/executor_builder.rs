@@ -797,12 +797,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         };
         let plan = coord.build_batch(active_pages, hbm_pressure);
-        // [BCE-021] TierMigrationPlan was previously discarded with `let _plan = ...`,
-        // making tier migration a no-op. Log a warning if the plan is non-empty so that
-        // the migration is at least observable until full scheduler integration is complete.
+        // Execute the migration plan — apply tier transitions and re-enqueue
+        // swap-in requests. Previously this was a no-op (BCE-021).
         if !plan.tier_migrations.is_empty() || !plan.eviction_candidates.is_empty() || !plan.swap_in_requests.is_empty() {
-            log::warn!(
-                "[BCE-021] TierMigrationPlan computed but not yet executed: {} tier_migrations, {} eviction_candidates, {} swap_in_requests",
+            let applied = coord.execute_plan(&plan);
+            log::trace!(
+                "[run_tier_swap_round] TierMigrationPlan executed: {}/{} migrations applied, \
+                 {} eviction_candidates, {} swap_in_requests",
+                applied,
                 plan.tier_migrations.len(),
                 plan.eviction_candidates.len(),
                 plan.swap_in_requests.len(),
@@ -4358,7 +4360,7 @@ mod tests {
 
             // This is the runtime resolution path that executor_step would use
             let decision = super::super::coordinator::kv::kv_distribution::KvDistDecision::from_config(
-                &kv_config, &handle,
+                &kv_config, &handle, 32,
             );
             assert_eq!(decision,
                 super::super::coordinator::kv::kv_distribution::KvDistDecision::Mirror);

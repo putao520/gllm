@@ -35,7 +35,7 @@ pub use mtp::{MtpConfig, MtpHead, mtp_candidates};
 pub use tree::{SpecTree, SpecNode, SpecTreeConfig, DraftSource, NgramIndex};
 pub use verify::{
     VerifyResult, SequenceVerifyResult, EqSpecInvariant, EqSpecCheckResult,
-    KvCommitInstruction, generate_kv_commit_instructions,
+    KvCommitInstruction, SpeculativePages, generate_kv_commit_instructions,
 };
 
 // SAGUARO 分布式推测解码 (REQ-DIST-017) — feature-gated

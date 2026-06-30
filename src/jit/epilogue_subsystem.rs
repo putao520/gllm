@@ -315,7 +315,12 @@ impl EpilogueSubsystem {
         // §13.5: 死神经元比例
         header.dead_ratio = f32_to_dead_ratio(telemetry.dead_density);
 
-        // §13.8: per-channel scale (placeholder)
+        // §13.8: per-channel V scale — encodes the max per-token scale for
+        // quantized V cache. When KV cache is unquantized (F32/BF16), scale = 0
+        // means "no quantization applied, no rescaling needed". This is the
+        // correct default for non-quantized KV cache paths.
+        // For quantized paths (KIVI/Mustafar), encode_scale_to_u8() computes
+        // the actual per-token max scale and writes it here (see kivi_mustafar.inc.rs).
         header.v_scale_factor = 0;
 
         // §7: logits 熵
@@ -1127,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_page_header_v_scale_factor_always_zero() {
+    fn test_write_page_header_v_scale_factor_default_unquantized() {
         let sub = EpilogueSubsystem::new(EpilogueConfig {
             num_layers: 12,
             ..Default::default()
@@ -1889,7 +1894,7 @@ mod tests {
         let t = make_telemetry(f32::NAN, f32::NAN, f32::NAN, f32::NAN);
         // Should not panic
         sub.write_page_header(&mut header, &decision, &t);
-        // v_scale_factor always 0
+        // v_scale_factor: 0 = unquantized KV cache (no rescaling needed)
         assert_eq!(header.v_scale_factor, 0);
     }
 
