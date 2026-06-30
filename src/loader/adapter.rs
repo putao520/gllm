@@ -11,7 +11,17 @@ pub fn safetensors_dtype_to_gllm(dtype: ::safetensors::Dtype) -> Option<gllm_ker
     }
 }
 
-/// Placeholder for packed quantized bits.
+/// Packed quantized bits per element.
+///
+/// Each variant specifies how many bits of quantized data are packed per element.
+/// The physical storage is always 1 byte (`size_bytes() == 1`), but the logical
+/// bit-width determines how many elements fit in a single byte:
+///   - Int1: 8 elements per byte
+///   - Int2: 4 elements per byte
+///   - Int3: ~2.67 elements per byte (padded to byte boundary in practice)
+///   - Int4: 2 elements per byte
+///   - Int5: ~1.6 elements per byte (padded)
+///   - Int6: ~1.33 elements per byte (padded)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PackedBits {
     Int1,
@@ -20,6 +30,25 @@ pub enum PackedBits {
     Int4,
     Int5,
     Int6,
+}
+
+impl PackedBits {
+    /// Number of quantized bits per element.
+    pub const fn bits_per_element(self) -> u8 {
+        match self {
+            Self::Int1 => 1,
+            Self::Int2 => 2,
+            Self::Int3 => 3,
+            Self::Int4 => 4,
+            Self::Int5 => 5,
+            Self::Int6 => 6,
+        }
+    }
+
+    /// Number of complete elements that fit in one byte of packed storage.
+    pub const fn elements_per_byte(self) -> u8 {
+        8 / self.bits_per_element()
+    }
 }
 
 /// StorageFormat — 适配层物理源格式扩展（文件中的原始物理存储格式，JIT 根据 QuantType 生成对应内核）

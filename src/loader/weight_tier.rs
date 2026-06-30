@@ -131,15 +131,15 @@ fn host_capacity_from_system(topo: &crate::sensors::SystemTopology, host_fractio
         return (total as f64 * host_fraction) as usize;
     }
 
-    // Fallback: L3*100 heuristic for non-Linux or when /proc/meminfo is unavailable.
+    // Fallback: L3*100 heuristic when all platform-specific queries fail
+    // (no /proc/meminfo, no sysctl, no GlobalMemoryStatusEx).
     // This is intentionally conservative — L3 is typically 1-2 orders of magnitude
     // smaller than DRAM, so the estimate is safe (under-estimates rather than over).
-    // TODO(PSC-26): add sysctl/GlobalMemoryStatusEx for macOS/Windows hosts.
     let host_estimate = (topo.cpu.l3_bytes as f64 * 100.0) as usize;
     host_estimate.max(16usize * 1024 * 1024 * 1024)
 }
 
-/// Read MemTotal from /proc/meminfo (Linux-only).
+/// Read MemTotal from /proc/meminfo (Linux), sysctl (macOS), or GlobalMemoryStatusEx (Windows).
 fn get_system_total_ram_bytes() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -156,6 +156,48 @@ fn get_system_total_ram_bytes() -> u64 {
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: sysctl hw.memsize returns total physical memory in bytes.
+        let output = match std::process::Command::new("sysctl")
+            .arg("-n")
+            .arg("hw.memsize")
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if let Ok(bytes) = s.trim().parse::<u64>() {
+                return bytes;
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: use GlobalMemoryStatusEx via kernel32.
+        // MEMORYSTATUSEX.dwTotalPhys gives total physical memory in bytes.
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalMemoryStatusEx(lpBuffer: *mut u8) -> i32;
+        }
+        // MEMORYSTATUSEX layout (64-bit):
+        //   dwLength: u32 (4 bytes, must be 64)
+        //   dwMemoryLoad: u32 (4 bytes)
+        //   ullTotalPhys: u64 (8 bytes, offset 8)
+        //   ullAvailPhys: u64 (8 bytes, offset 16)
+        //   ... remaining fields
+        let mut buf = [0u8; 64];
+        buf[0..4].copy_from_slice(&(64u32).to_le_bytes());
+        if unsafe { GlobalMemoryStatusEx(buf.as_mut_ptr()) } != 0 {
+            let total_phys = u64::from_le_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
+            return total_phys;
+        }
+    }
+
     0
 }
 

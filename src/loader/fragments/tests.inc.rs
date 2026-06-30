@@ -1382,32 +1382,24 @@ mod tests {
         assert!(!is_linear_weight("token_embd.weight", &[32000, 4096]));
     }
 
-    // ── parallel_f64_to_f32 (private) ──
+    // ── convert_tensor_preserve_dtype rejects F64 (ARCH-BLOB-YIELDS-WEIGHT) ──
 
     #[test]
-    fn parallel_f64_to_f32_matches_scalar() {
-        let n = 1000usize;
-        let src: Vec<f64> = (0..n).map(|i| (i as f64) * 0.123 - 50.0).collect();
-        let mut bytes = Vec::with_capacity(n * 8);
-        for v in &src {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        let out = parallel_f64_to_f32(&bytes).expect("f64→f32 conversion failed");
-        assert_eq!(out.len(), n);
-        for (i, (got, expected)) in out.iter().zip(src.iter()).enumerate() {
-            assert!(
-                (got - (*expected as f32)).abs() < 1e-6,
-                "mismatch at index {i}: got {got}, expected {}",
-                *expected as f32,
-            );
-        }
-    }
-
-    #[test]
-    fn parallel_f64_to_f32_rejects_non_multiple() {
-        let bytes = vec![0u8; 7]; // not a multiple of 8
-        let result = parallel_f64_to_f32(&bytes);
+    fn convert_tensor_preserve_dtype_rejects_f64() {
+        // F64 weights are rejected — original dtype must be preserved.
+        let meta = TensorMeta {
+            name: "test.weight".into(),
+            shape: vec![4, 3],
+            dtype: Dtype::F64,
+        };
+        let data: Vec<u8> = (0..96).map(|i| i as u8).collect(); // 96 bytes = 12 f64
+        let result = convert_tensor_preserve_dtype(&meta, &data, WeightFormat::SafeTensors, None);
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("F64 weight") || err.contains("not supported"),
+            "expected F64 rejection error, got: {err}"
+        );
     }
 
     // ── cache_blocked_transpose_bytes (private) ──

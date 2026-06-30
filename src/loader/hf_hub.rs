@@ -817,7 +817,49 @@ impl HfHubClient {
         Ok(None)
     }
 
+    /// 按 HF 标准缓存目录结构查找本地已完整下载的文件。
+    ///
+    /// HF 缓存标准结构：
+    ///   {cache_dir}/models--{org}--{model}/
+    ///     refs/main          # 内容为 commit hash
+    ///     snapshots/{hash}/  # {filename} → 软链接 → ../../blobs/{etag_sha256}
+    ///     blobs/{etag_sha256} # 实际文件
+    ///
+    /// 返回完整文件路径当且仅当 snapshot 软链接存在且指向的 blob 文件可读（大小 > 0）。
+    /// 这是 BCE-20260627-032 的核心：在调用 hf_hub 的 download_with_progress（它从不
+    /// 检查本地缓存）之前先跳过重下载。
+    fn find_cached_snapshot(&self, repo: &str, filename: &str) -> Option<PathBuf> {
+        // 构造 HF 标准缓存目录名：models--{org}--{model}
+        let dir_name = format!("models--{}", repo.replace('/', "--"));
+        let repo_cache_dir = self.cache_dir.join(&dir_name);
+
+        // 读取 refs/main 获取当前 commit hash
+        let refs_main = repo_cache_dir.join("refs").join("main");
+        let commit_hash = fs::read_to_string(&refs_main).ok()?;
+        let commit_hash = commit_hash.trim();
+
+        // 构造 snapshot 路径：{cache_dir}/models--{...}/snapshots/{commit}/{filename}
+        let snapshot_path = repo_cache_dir
+            .join("snapshots")
+            .join(commit_hash)
+            .join(filename);
+
+        // 验证文件存在且可读（snapshot 可能是软链接 → blobs/，用 fs::metadata
+        // follow symlinks 检查真实文件大小 > 0）
+        match std::fs::metadata(&snapshot_path) {
+            Ok(md) if md.len() > 0 => Some(snapshot_path),
+            _ => None,
+        }
+    }
+
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
+        // BCE-20260627-032: 本地缓存优先。hf_hub 0.4.3 的 download_with_progress
+        // 无缓存命中检查，每次重下整个文件（如 gpt-oss-20b 13GB）。此处先按 HF 标准
+        // 缓存结构查找 snapshot 文件，命中则直接返回，避免无谓重下载。
+        if let Some(cached) = self.find_cached_snapshot(repo, filename) {
+            return Ok(cached);
+        }
+        // 未命中，走 hf_hub 正常下载
         let repo_api = self.api.model(repo.to_string());
         // download_with_progress 提供下载进度可观测性（log::info 输出）
         let progress = HfLogProgress::new(filename);
@@ -843,35 +885,72 @@ impl HfHubClient {
     ) -> Result<Vec<PathBuf>> {
         let api = self.api.clone();
         let repo_id = repo.to_string();
-        let shard_paths_list: Vec<PathBuf> = shards.iter().map(PathBuf::from).collect();
 
-        if parallel.enabled() {
+        // BCE-20260627-032: 本地缓存优先。hf_hub 0.4.3 的 download_with_progress
+        // 无缓存命中检查，每次重下整个分片（如 gpt-oss-20b 的 13GB safetensors）。
+        // 先按 HF 标准缓存结构查找 snapshot，命中则直接返回，仅对缺失分片触发下载。
+        let mut result: Vec<PathBuf> = Vec::with_capacity(shards.len());
+        let mut to_download: Vec<String> = Vec::new();
+        for shard in shards {
+            if let Some(cached) = self.find_cached_snapshot(repo, shard) {
+                result.push(cached);
+            } else {
+                to_download.push(shard.clone());
+            }
+        }
+
+        if to_download.is_empty() {
+            log::info!("全部 {} 个分片已命中本地缓存，跳过下载", shards.len());
+            return Ok(result);
+        }
+
+        // 仅下载缺失分片，下载完成后按原始 shards 顺序重排结果
+        let downloaded_indices: Vec<usize> = shards
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| to_download.iter().any(|td| td == *s))
+            .map(|(i, _)| i)
+            .collect();
+
+        let shard_paths_list: Vec<PathBuf> = to_download.iter().map(PathBuf::from).collect();
+
+        let downloaded: Vec<PathBuf> = if parallel.enabled() {
             // 并行下载：每个分片独立进度
-            log::info!("并行下载 {} 个分片...", shards.len());
-            let shard_paths = parallel.map_paths(&shard_paths_list, |path| {
+            log::info!("并行下载 {} 个分片（缓存命中 {} 个）...", to_download.len(), result.len());
+            parallel.map_paths(&shard_paths_list, |path| {
                 let filename = path.to_string_lossy().to_string();
                 let progress = HfLogProgress::new(&filename);
                 api.model(repo_id.clone())
                     .download_with_progress(&filename, progress)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))
-            })?;
-            log::info!("并行下载完成");
-            Ok(shard_paths)
+            })?
         } else {
             // 串行下载：每个分片独立进度
-            let mut result = Vec::new();
+            let mut dl_result = Vec::new();
             for (idx, shard_path) in shard_paths_list.iter().enumerate() {
                 let filename = shard_path.to_string_lossy().to_string();
-                log::info!("[{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
+                log::info!("[{}/{}] 下载分片: {}", idx + 1, shard_paths_list.len(), filename);
                 let progress = HfLogProgress::new(&filename);
                 let path = api
                     .model(repo_id.clone())
                     .download_with_progress(&filename, progress)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))?;
-                result.push(path);
+                dl_result.push(path);
             }
-            Ok(result)
+            dl_result
+        };
+
+        // 将下载结果按原始 shards 顺序合并到 result
+        for (i, path) in downloaded_indices.into_iter().zip(downloaded.into_iter()) {
+            while result.len() <= i {
+                result.push(PathBuf::new());
+            }
+            result[i] = path;
         }
+        if parallel.enabled() {
+            log::info!("并行下载完成");
+        }
+        Ok(result)
     }
 }
 

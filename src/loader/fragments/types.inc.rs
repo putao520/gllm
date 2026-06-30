@@ -367,13 +367,20 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["w2"],                               TensorRole::FfnDown,           false),
     (&["w3"],                               TensorRole::FfnUp,             false),
 
-    // MoE
+    // MoE (BCE-036: 对齐 transformers/vLLM/llama.cpp 全量命名变体)
     (&["mlp", "gate"],                      TensorRole::MoEGate,           false),
     (&["mlp", "router"],                    TensorRole::MoEGate,           false),
+    (&["block_sparse_moe", "gate"],         TensorRole::MoEGate,           false), // BCE-036: Mixtral HF 原生
+    (&["block_sparse_moe", "router"],       TensorRole::MoEGate,           false), // BCE-036: Mixtral fork 变体
     (&["ffn_gate_inp"],                     TensorRole::MoEGate,           false),
+    // MoE shared expert (BCE-036: 多种命名变体)
     (&["mlp", "shared_experts", "gate_proj"], TensorRole::MoESharedExpert, false),
     (&["mlp", "shared_experts", "up_proj"], TensorRole::MoESharedExpert,   false),
     (&["mlp", "shared_experts", "down_proj"], TensorRole::MoESharedExpert, false),
+    // BCE-036: Qwen/DeepSeek GGUF 单数形式 + w1/w2/w3
+    (&["mlp", "shared_expert", "w1"],       TensorRole::MoESharedExpert,   false),
+    (&["mlp", "shared_expert", "w2"],       TensorRole::MoESharedExpert,   false),
+    (&["mlp", "shared_expert", "w3"],       TensorRole::MoESharedExpert,   false),
 
     // Audio/Vision special
     (&["conv_module", "depthwise_conv"],    TensorRole::DepthwiseConv,     false),
@@ -462,11 +469,23 @@ pub fn match_tensor_role_ext(
         content_segs
     };
 
+    // BCE-036: MoE 上下文守卫（同 match_tensor_role_static）
+    let is_moe_context = content_segs.iter().any(|s| {
+        matches!(*s, "experts" | "shared_expert" | "shared_experts" | "block_sparse_moe")
+    });
+
     for (suffix_segs, role, is_global) in extra_patterns {
         if *is_global != layer_idx.is_none() && !*is_global {
             continue;
         }
         if suffix_segs.len() > content_segs.len() {
+            continue;
+        }
+        // BCE-036: MoE 上下文下跳过 dense FFN 单 segment w1/w2/w3 模式
+        if is_moe_context
+            && suffix_segs.len() == 1
+            && matches!(suffix_segs[0].as_str(), "w1" | "w2" | "w3")
+        {
             continue;
         }
         let start = content_segs.len() - suffix_segs.len();
@@ -524,6 +543,15 @@ fn match_tensor_role_static(name: &str) -> Option<(TensorRole, Option<usize>)> {
         content_segs
     };
 
+    // BCE-036: MoE 上下文守卫。
+    // 当 content_segs 含 "experts" 或 "shared_expert" segment 时，单 segment `w1/w2/w3`
+    // 是 MoE expert/shared_expert 权重（Mixtral HF 原生命名），不是 dense FFN。
+    // 必须跳过 dense FFN 的单 segment w1/w2/w3 模式，让多 segment MoE 模式（如
+    // `mlp.shared_expert.w1`）或 name_map.rs Pass 1.5（experts.E.proj）处理。
+    let is_moe_context = content_segs.iter().any(|s| {
+        matches!(*s, "experts" | "shared_expert" | "shared_experts" | "block_sparse_moe")
+    });
+
     // Match against suffix patterns (longest first, already sorted in table)
     for &(suffix_segs, role, is_global) in SUFFIX_PATTERNS {
         if is_global != layer_idx.is_none() && !is_global {
@@ -531,6 +559,14 @@ fn match_tensor_role_static(name: &str) -> Option<(TensorRole, Option<usize>)> {
         }
 
         if suffix_segs.len() > content_segs.len() {
+            continue;
+        }
+
+        // BCE-036: MoE 上下文下跳过 dense FFN 单 segment w1/w2/w3 模式
+        if is_moe_context
+            && suffix_segs.len() == 1
+            && matches!(suffix_segs[0], "w1" | "w2" | "w3")
+        {
             continue;
         }
 

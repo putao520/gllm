@@ -55,11 +55,24 @@ impl TensorNameMap {
             if let Some((role, layer)) = super::match_tensor_role(name) {
                 let canonical = if role == crate::manifest::types::TensorRole::MoESharedExpert {
                     // MoESharedExpert needs projection suffix: L{N}.shared_expert.{gate_proj,up_proj,down_proj}
-                    let proj = if name.contains("gate_proj") || name.contains("gate.weight") {
+                    // BCE-036: 支持 gate_proj/up_proj/down_proj 和 w1/w2/w3 两套命名约定
+                    let proj = if name.contains("gate_proj")
+                        || name.contains("gate.weight")
+                        || name.ends_with(".w1.weight")
+                        || name.ends_with(".w1.bias")
+                    {
                         "gate_proj"
-                    } else if name.contains("up_proj") || name.contains("up.weight") {
+                    } else if name.contains("up_proj")
+                        || name.contains("up.weight")
+                        || name.ends_with(".w3.weight")
+                        || name.ends_with(".w3.bias")
+                    {
                         "up_proj"
-                    } else if name.contains("down_proj") || name.contains("down.weight") {
+                    } else if name.contains("down_proj")
+                        || name.contains("down.weight")
+                        || name.ends_with(".w2.weight")
+                        || name.ends_with(".w2.bias")
+                    {
                         "down_proj"
                     } else {
                         // GGUF shared expert uses mlp.gate_proj / mlp.up_proj / mlp.down_proj
@@ -372,6 +385,51 @@ mod tests {
         assert_eq!(map.to_canonical("blk.3.ffn_down_ex0.weight"), Some("L3.expert.0.down_proj"));
         assert_eq!(map.to_canonical("blk.3.ffn_gate_ex7.weight"), Some("L3.expert.7.gate_proj"));
         assert_eq!(map.to_canonical("blk.3.ffn_gate_inp.weight"), Some("L3.moe_gate"));
+    }
+
+    // BCE-036: Mixtral HF 原生 block_sparse_moe 命名变体回归测试
+    #[test]
+    fn moe_mixtral_block_sparse_moe_naming() {
+        // Mixtral HF 原生命名: block_sparse_moe.experts.{E}.{w1,w2,w3} + block_sparse_moe.gate
+        let names: Vec<String> = vec![
+            "model.layers.0.block_sparse_moe.gate.weight".into(),
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight".into(),
+            "model.layers.0.block_sparse_moe.experts.0.w2.weight".into(),
+            "model.layers.0.block_sparse_moe.experts.0.w3.weight".into(),
+            "model.layers.0.block_sparse_moe.experts.1.w1.weight".into(),
+            "model.layers.0.block_sparse_moe.experts.1.w2.weight".into(),
+            "model.layers.0.block_sparse_moe.experts.1.w3.weight".into(),
+        ].into_iter().collect();
+        let map = TensorNameMap::build_from_names(&names, None);
+
+        // MoE gate (block_sparse_moe.gate → moe_gate)
+        assert_eq!(map.to_canonical("model.layers.0.block_sparse_moe.gate.weight"), Some("L0.moe_gate"));
+
+        // Experts w1/w2/w3 → gate_proj/up_proj/down_proj (Pass 1.5 handles this)
+        assert_eq!(map.to_canonical("model.layers.0.block_sparse_moe.experts.0.w1.weight"), Some("L0.expert.0.gate_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.block_sparse_moe.experts.0.w2.weight"), Some("L0.expert.0.down_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.block_sparse_moe.experts.0.w3.weight"), Some("L0.expert.0.up_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.block_sparse_moe.experts.1.w1.weight"), Some("L0.expert.1.gate_proj"));
+
+        // Reverse mapping
+        assert_eq!(map.to_external("L0.moe_gate"), Some("model.layers.0.block_sparse_moe.gate.weight"));
+        assert_eq!(map.to_external("L0.expert.0.gate_proj"), Some("model.layers.0.block_sparse_moe.experts.0.w1.weight"));
+        assert_eq!(map.to_external("L0.expert.1.down_proj"), Some("model.layers.0.block_sparse_moe.experts.1.w2.weight"));
+    }
+
+    // BCE-036: Qwen/DeepSeek GGUF shared_expert 单数形式 + w1/w2/w3
+    #[test]
+    fn moe_shared_expert_singular_form() {
+        let names: Vec<String> = vec![
+            "model.layers.0.mlp.shared_expert.w1.weight".into(),
+            "model.layers.0.mlp.shared_expert.w2.weight".into(),
+            "model.layers.0.mlp.shared_expert.w3.weight".into(),
+        ].into_iter().collect();
+        let map = TensorNameMap::build_from_names(&names, None);
+
+        assert_eq!(map.to_canonical("model.layers.0.mlp.shared_expert.w1.weight"), Some("L0.shared_expert.gate_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.mlp.shared_expert.w2.weight"), Some("L0.shared_expert.down_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.mlp.shared_expert.w3.weight"), Some("L0.shared_expert.up_proj"));
     }
 
     #[test]
@@ -1237,9 +1295,12 @@ mod tests {
 
     #[test]
     fn moe_safetensors_w1_w2_w3_mapped_by_pass_1() {
-        // w1/w2/w3 are recognized by match_tensor_role as FfnGate/FfnDown/FfnUp
-        // in Pass 1 (not by Pass 1.5 MoE expert logic).
-        // They map to layer-level gate_proj/down_proj/up_proj, not expert-specific names.
+        // BCE-036: 在 MoE experts 上下文下，w1/w2/w3 必须映射到 expert-specific canonical，
+        // 而不是被 dense FFN 的单 segment w1/w2/w3 模式抢先映射到 layer-level gate_proj。
+        // 旧实现（BCE-036 之前）由于 SUFFIX_PATTERNS 中 `w1`/`w2`/`w3` 单 segment 模式
+        // 抢先于 Pass 1.5 的 MoE expert 处理，错误地映射成 dense FFN。
+        // BCE-036 通过 is_moe_context 守卫修复：experts/shared_expert/block_sparse_moe
+        // 上下文下跳过单 segment w1/w2/w3，让 Pass 1.5 正确处理。
         let names: Vec<String> = vec![
             "model.layers.0.experts.0.w1.weight".into(),
             "model.layers.0.experts.0.w3.weight".into(),
@@ -1247,10 +1308,10 @@ mod tests {
         ].into_iter().collect();
         let map = TensorNameMap::build_from_names(&names, None);
 
-        // w1 → FfnGate → gate_proj, w3 → FfnUp → up_proj, w2 → FfnDown → down_proj
-        assert_eq!(map.to_canonical("model.layers.0.experts.0.w1.weight"), Some("L0.gate_proj"));
-        assert_eq!(map.to_canonical("model.layers.0.experts.0.w3.weight"), Some("L0.up_proj"));
-        assert_eq!(map.to_canonical("model.layers.0.experts.0.w2.weight"), Some("L0.down_proj"));
+        // w1 → gate_proj, w3 → up_proj, w2 → down_proj（Mixtral HF 约定）
+        assert_eq!(map.to_canonical("model.layers.0.experts.0.w1.weight"), Some("L0.expert.0.gate_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.experts.0.w3.weight"), Some("L0.expert.0.up_proj"));
+        assert_eq!(map.to_canonical("model.layers.0.experts.0.w2.weight"), Some("L0.expert.0.down_proj"));
     }
 
     // ── Shared expert up.weight / down.weight variant ──

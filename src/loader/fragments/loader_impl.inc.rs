@@ -917,7 +917,7 @@ impl Loader {
                 let data = provider.load_tensor_data(&meta.name)?;
                 let explicit_hint = provider.weight_layout_hint(&meta.name);
                 let (cloned_meta, converted_f32, sp_meta_opt) =
-                    convert_tensor_to_f32(meta, data.as_ref(), format, explicit_hint)?;
+                    convert_tensor_preserve_dtype(meta, data.as_ref(), format, explicit_hint)?;
 
                 // Tier decision: DeviceLocal → HostLocal → DiskMmap
                 let tensor_size = converted_f32.len() * std::mem::size_of::<f32>();
