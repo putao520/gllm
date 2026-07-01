@@ -188,13 +188,13 @@ impl C1V2Tracker {
             }
         }
         for (pt_name, flat_name) in [
-            ("heads.label_queries", "heads_label_queries"),
-            ("heads.input_norm.weight", "heads_input_norm"),
-            ("heads.context_proj.weight", "heads_context_proj"),
-            ("heads.label_proj.weight", "heads_label_proj"),
-            ("heads.global_w1.weight", "heads_global_w1"),
-            ("heads.global_w2.weight", "heads_global_w2"),
-            ("heads.diff_w2.weight", "heads_diff_w2"),
+            ("multi_head.label_queries", "heads_label_queries"),
+            ("multi_head.input_norm.weight", "heads_input_norm"),
+            ("multi_head.context_proj.weight", "heads_context_proj"),
+            ("multi_head.label_proj.weight", "heads_label_proj"),
+            ("multi_head.global_w1.weight", "heads_global_w1"),
+            ("multi_head.global_w2.weight", "heads_global_w2"),
+            ("multi_head.diff_w2.weight", "heads_diff_w2"),
         ] {
             if let Some(shape) = self.weight_shapes.get(pt_name) {
                 out.insert(flat_name.to_string(), shape.clone());
@@ -210,9 +210,13 @@ impl C1V2Tracker {
 
     /// Single-turn state-recurrent step (REQ-C1-003).
     ///
-    /// `turn_embed` is the (hidden_dim,) encoder output for the current turn.
-    /// `h_prev` is one (hidden_dim,) vector per cell layer (caller-managed).
-    /// Returns the updated state + intent/difficulty readouts.
+    /// `turn_embed` is the (hidden_dim,) encoder output for the current turn
+    /// (used as both `q_t` and, when `pool_embed` is None, as `pool_t`).
+    /// `pool_embed` is the cumulative-mean encoder embedding across turns up to
+    /// and including the current turn (matches c1 `IntentModel.forward`'s
+    /// `pool = cumsum/counts`). For single-turn calls pass `None` to fall back
+    /// to `turn_embed`. `h_prev` is one (hidden_dim,) vector per cell layer
+    /// (caller-managed). Returns the updated state + intent/difficulty readouts.
     ///
     /// # Errors
     /// - `InvalidInput` if dimensions mismatch
@@ -222,12 +226,33 @@ impl C1V2Tracker {
         turn_embed: &[f32],
         h_prev: &[Vec<f32>],
     ) -> Result<C1V2StepResult, C1V2TrackerError> {
+        self.step_with_pool(turn_embed, None, h_prev)
+    }
+
+    /// Single-turn step with an explicit cumulative-mean pool embedding.
+    ///
+    /// `pool_embed` is the (hidden_dim,) cumulative-mean encoder output. When
+    /// `None`, `turn_embed` is used (single-turn / first-turn default).
+    pub fn step_with_pool(
+        &self,
+        turn_embed: &[f32],
+        pool_embed: Option<&[f32]>,
+        h_prev: &[Vec<f32>],
+    ) -> Result<C1V2StepResult, C1V2TrackerError> {
         let h = self.config.hidden_dim;
         if turn_embed.len() != h {
             return Err(C1V2TrackerError::InvalidInput(format!(
                 "turn_embed len {} != hidden_dim {h}",
                 turn_embed.len()
             )));
+        }
+        if let Some(p) = pool_embed {
+            if p.len() != h {
+                return Err(C1V2TrackerError::InvalidInput(format!(
+                    "pool_embed len {} != hidden_dim {h}",
+                    p.len()
+                )));
+            }
         }
         if h_prev.len() != self.config.num_cell_layers {
             return Err(C1V2TrackerError::InvalidInput(format!(
@@ -260,9 +285,9 @@ impl C1V2Tracker {
             cur_input = h_out;
         }
 
-        // ── IntentDifficultyHead (state readout from final cell layer) ──
-        let state = &cur_input;
-        let (intent_logits, diff_logits) = self.heads_forward(state)?;
+        // ── MultiFeatureHead (3-feature: h_t + q_proj(q_t) + pool_proj(pool_t)) ──
+        let pool = pool_embed.unwrap_or(turn_embed);
+        let (intent_logits, diff_logits) = self.heads_forward(&cur_input, turn_embed, pool)?;
 
         Ok(C1V2StepResult {
             h_next,
@@ -320,19 +345,53 @@ impl C1V2Tracker {
         Ok(add_vec(&alpha_h, &gate_cand))
     }
 
-    /// IntentDifficultyHead forward (label-query + global + CORN difficulty).
-    fn heads_forward(&self, state: &[f32]) -> Result<(Vec<f32>, Vec<f32>), C1V2TrackerError> {
+    /// MultiFeatureHead forward (label-query + global + CORN difficulty).
+    ///
+    /// Mirrors `c1/src/intent/model/multi_feature_head.py::forward`:
+    ///   q_proj_v = q_proj(q_t); pool_proj_v = pool_proj(pool_t)
+    ///   x = h_t + q_proj_v + pool_proj_v
+    ///   normed = RMSNorm(x, input_norm)
+    ///   context = context_proj(normed)
+    ///   queries = label_proj(label_queries)         (L,H)@(H,H)^T
+    ///   label_scores = (context @ queries^T) * (1/sqrt(H))
+    ///   global_scores = global_w2(silu(global_w1(normed)))
+    ///   intent_logits = label_scores + global_scores
+    ///   intent_summary = sigmoid(intent_logits) @ label_queries   (B,H)
+    ///   diff_input = cat([x, intent_summary], -1)  (B,2H)
+    ///   diff_normed = RMSNorm(diff_input, diff_norm)
+    ///   diff_logits = diff_w2(silu(diff_w1(diff_normed)))
+    ///
+    /// `h_t` = final cell state; `q_t` = current-turn encoder embed;
+    /// `pool_t` = cumulative-mean encoder embed.
+    fn heads_forward(
+        &self,
+        h_t: &[f32],
+        q_t: &[f32],
+        pool_t: &[f32],
+    ) -> Result<(Vec<f32>, Vec<f32>), C1V2TrackerError> {
         let d = self.config.hidden_dim;
         let num_intents = self.config.num_intents;
+        let prefix = "multi_head";
 
-        let input_norm = self.get_weight("heads.input_norm.weight")?;
-        let normed = rmsnorm(state, input_norm, d, 1e-6);
+        let q_proj = self.get_weight(&format!("{prefix}.q_proj.weight"))?;
+        let pool_proj = self.get_weight(&format!("{prefix}.pool_proj.weight"))?;
+        let q_proj_v = matvec_no_bias(q_t, q_proj, d, d)?;
+        let pool_proj_v = matvec_no_bias(pool_t, pool_proj, d, d)?;
+        // x = h_t + q_proj(q_t) + pool_proj(pool_t)
+        let mut x = add_vec(h_t, &q_proj_v);
+        for (xi, pv) in x.iter_mut().zip(pool_proj_v.iter()) {
+            *xi += pv;
+        }
 
-        let context_proj = self.get_weight("heads.context_proj.weight")?;
+        let input_norm = self.get_weight(&format!("{prefix}.input_norm.weight"))?;
+        let normed = rmsnorm(&x, input_norm, d, 1e-6);
+
+        let context_proj = self.get_weight(&format!("{prefix}.context_proj.weight"))?;
         let context = matvec_no_bias(&normed, context_proj, d, d)?;
 
-        let label_queries = self.get_weight("heads.label_queries")?;
-        let label_proj = self.get_weight("heads.label_proj.weight")?;
+        let label_queries = self.get_weight(&format!("{prefix}.label_queries"))?;
+        let label_proj = self.get_weight(&format!("{prefix}.label_proj.weight"))?;
+        // queries = label_proj(label_queries): (L,H)@(H,H)^T → (L,H)
         let mut queries = vec![0.0f32; num_intents * d];
         for l in 0..num_intents {
             let lq_row = &label_queries[l * d..(l + 1) * d];
@@ -340,6 +399,7 @@ impl C1V2Tracker {
             queries[l * d..(l + 1) * d].copy_from_slice(&q);
         }
 
+        // label_scores = (context @ queries^T) * (1/sqrt(H))
         let scale = 1.0_f32 / (d as f32).sqrt();
         let mut label_scores = vec![0.0f32; num_intents];
         for l in 0..num_intents {
@@ -350,15 +410,15 @@ impl C1V2Tracker {
             label_scores[l] = s * scale;
         }
 
-        let global_w1 = self.get_weight("heads.global_w1.weight")?;
-        let global_w2 = self.get_weight("heads.global_w2.weight")?;
+        let global_w1 = self.get_weight(&format!("{prefix}.global_w1.weight"))?;
+        let global_w2 = self.get_weight(&format!("{prefix}.global_w2.weight"))?;
         let global_h = matvec_no_bias(&normed, global_w1, self.config.intent_hidden_dim, d)?;
         let global_a: Vec<f32> = global_h.iter().map(|v| silu(*v)).collect();
         let global_scores = matvec_no_bias(&global_a, global_w2, num_intents, self.config.intent_hidden_dim)?;
 
         let intent_logits = add_vec(&label_scores, &global_scores);
 
-        // ── CORN difficulty head (real concat, per scorer.py) ──
+        // ── CORN difficulty head (real 3-feature concat) ──
         let intent_sig: Vec<f32> = intent_logits.iter().map(|v| sigmoid(*v)).collect();
         let mut intent_summary = vec![0.0f32; d];
         for l in 0..num_intents {
@@ -369,14 +429,14 @@ impl C1V2Tracker {
         }
 
         let mut diff_input = Vec::with_capacity(2 * d);
-        diff_input.extend_from_slice(state);
+        diff_input.extend_from_slice(&x);
         diff_input.extend_from_slice(&intent_summary);
 
-        let diff_norm = self.get_weight("heads.diff_norm.weight")?;
+        let diff_norm = self.get_weight(&format!("{prefix}.diff_norm.weight"))?;
         let diff_normed = rmsnorm(&diff_input, diff_norm, 2 * d, 1e-6);
 
-        let diff_w1 = self.get_weight("heads.diff_w1.weight")?;
-        let diff_w2 = self.get_weight("heads.diff_w2.weight")?;
+        let diff_w1 = self.get_weight(&format!("{prefix}.diff_w1.weight"))?;
+        let diff_w2 = self.get_weight(&format!("{prefix}.diff_w2.weight"))?;
         let diff_h = matvec_no_bias(&diff_normed, diff_w1, self.config.difficulty_hidden_dim, 2 * d)?;
         let diff_a: Vec<f32> = diff_h.iter().map(|v| silu(*v)).collect();
         let diff_logits = matvec_no_bias(&diff_a, diff_w2, self.config.num_difficulty, self.config.difficulty_hidden_dim)?;
@@ -414,15 +474,17 @@ impl C1V2Tracker {
         let ni = self.config.num_intents;
         let nd = self.config.num_difficulty;
         for (name, expected) in [
-            ("heads.label_queries", vec![ni, d]),
-            ("heads.input_norm.weight", vec![d]),
-            ("heads.context_proj.weight", vec![d, d]),
-            ("heads.label_proj.weight", vec![d, d]),
-            ("heads.global_w1.weight", vec![ih, d]),
-            ("heads.global_w2.weight", vec![ni, ih]),
-            ("heads.diff_norm.weight", vec![2 * d]),
-            ("heads.diff_w1.weight", vec![dh, 2 * d]),
-            ("heads.diff_w2.weight", vec![nd, dh]),
+            ("multi_head.q_proj.weight", vec![d, d]),
+            ("multi_head.pool_proj.weight", vec![d, d]),
+            ("multi_head.label_queries", vec![ni, d]),
+            ("multi_head.input_norm.weight", vec![d]),
+            ("multi_head.context_proj.weight", vec![d, d]),
+            ("multi_head.label_proj.weight", vec![d, d]),
+            ("multi_head.global_w1.weight", vec![ih, d]),
+            ("multi_head.global_w2.weight", vec![ni, ih]),
+            ("multi_head.diff_norm.weight", vec![2 * d]),
+            ("multi_head.diff_w1.weight", vec![dh, 2 * d]),
+            ("multi_head.diff_w2.weight", vec![nd, dh]),
         ] {
             self.check_shape(name, &expected)?;
         }
@@ -525,15 +587,17 @@ mod tests {
             }
             add(&format!("tracker.stack.cells.{i}.bias_α"), &[d]);
         }
-        add("heads.label_queries", &[7, d]);
-        add("heads.input_norm.weight", &[d]);
-        add("heads.context_proj.weight", &[d, d]);
-        add("heads.label_proj.weight", &[d, d]);
-        add("heads.global_w1.weight", &[384, d]);
-        add("heads.global_w2.weight", &[7, 384]);
-        add("heads.diff_norm.weight", &[2 * d]);
-        add("heads.diff_w1.weight", &[384, 2 * d]);
-        add("heads.diff_w2.weight", &[3, 384]);
+        add("multi_head.q_proj.weight", &[d, d]);
+        add("multi_head.pool_proj.weight", &[d, d]);
+        add("multi_head.label_queries", &[7, d]);
+        add("multi_head.input_norm.weight", &[d]);
+        add("multi_head.context_proj.weight", &[d, d]);
+        add("multi_head.label_proj.weight", &[d, d]);
+        add("multi_head.global_w1.weight", &[384, d]);
+        add("multi_head.global_w2.weight", &[7, 384]);
+        add("multi_head.diff_norm.weight", &[2 * d]);
+        add("multi_head.diff_w1.weight", &[384, 2 * d]);
+        add("multi_head.diff_w2.weight", &[3, 384]);
         C1V2Tracker::from_weights(config, weights, shapes).expect("valid weights")
     }
 
@@ -582,8 +646,8 @@ mod tests {
     #[test]
     fn from_weights_rejects_missing_weight() {
         let mut t = dummy_tracker();
-        t.weights.remove("heads.diff_w2.weight");
-        t.weight_shapes.remove("heads.diff_w2.weight");
+        t.weights.remove("multi_head.diff_w2.weight");
+        t.weight_shapes.remove("multi_head.diff_w2.weight");
         assert!(t.validate_weights().is_err());
     }
 }

@@ -823,6 +823,40 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
 
 ---
 
+## BCE-20260702-001 — c1 v2 tracker 使用错误 head 权重前缀 + 省略 3-feature 合成
+
+**patternId**: BCE-20260702-001
+**title**: c1 v2_granite tracker 的 heads_forward 用 heads.* (无 q_proj/pool_proj) 替代 multi_head.*，且省略三特征合成 x=h_t+q_proj(q_t)+pool_proj(pool_t)
+**layer**: 设计
+
+**codePattern**:
+- `heads_forward(state)` 单参数，用 `heads.input_norm`/`heads.context_proj`/... 旧前缀
+- `x = state` (单路 state)，无 `q_proj(q_t) + pool_proj(pool_t)` 合成
+- difficulty 路用 `state` (768) 而非真实 `cat([x, intent_summary], -1)` (1536)
+
+**triggerCondition**: checkpoint 同时含 `heads.*` (旧 MultiFeatureHead 无 q/pool proj) 和 `multi_head.*` (现版含 q/pool proj)，config `use_multi_feature=True` 选 multi_head；实现误用 heads.* 前缀，导致 intent_logits 偏差 2.47、diff_logits 偏差 4.53 (vs PyTorch reference)
+
+**detectionSignatures**:
+- literal: `heads.input_norm.weight` / `heads.context_proj.weight` 在 c1_v2_tracker.rs 出现 = 违宪 (应 multi_head.*)
+- literal: `heads_forward(state: &[f32])` 单参数 = 缺 q_t/pool_t 三特征
+- structural: `heads_forward` 签名无 `q_t`/`pool_t` 参数 = 三特征缺失
+
+**sameClassCriterion**: 任何 head 权重前缀与 checkpoint config 选定的 use_multi_feature 分支不一致；任何 head forward 省略 checkpoint 权重拓扑要求的合成步骤 (q_proj/pool_proj/concat)
+
+**fixTemplate**:
+- 权重前缀统一改 `multi_head.*` (validate_weights + graph_weight_shapes + heads_forward + dummy_tracker 测试夹具)
+- `heads_forward(h_t, q_t, pool_t)` 三参数：`x = h_t + q_proj(q_t) + pool_proj(pool_t)`
+- difficulty 真实 concat：`diff_input = cat([x, intent_summary], -1)` (1536)
+- `step_with_pool(turn_embed, pool_embed, h_prev)` 新 API，`step` 保持向后兼容 (pool=None 回退 turn_embed)
+
+**regressionAssertion**: `tests/test_c1_v2_numerical_ref.rs` 加载 PyTorch reference (`ref_single.json`) 对比 Rust forward，max_abs_diff < 1e-5 (intent/diff/h_next 三项)，偏差 >1e-3 fail
+
+**归因时间**: 2026-07-02
+
+**根治状态**: 根治 ✅ | residual: 0 | heads_forward 全路径 multi_head.* + 三特征合成 + 真实 1536 concat；数值对齐 torch: h_next 7e-7 / intent 1e-6 / diff 7e-7。SPEC REQ-C1-002 更新为 multi_head 三特征契约 + 数值对齐验收标准
+
+---
+
 ## 硬编码 HACK (Hardcoded Hardware/Model Params)
 
 > 来自三组审计（硬件参数 / 模型参数 / 孤岛模块）的硬编码与未接入符号发现归档。按 smellClass 聚类：AP-HARDCODED-HW（硬件参数字面量，应从 DeviceProfile 派生）、AP-HARDCODED-MODEL（模型参数字面量，应从 ModelConfig 派生）、AS-ISLAND-MODULE（有定义无生产调用）。状态：待根治。
