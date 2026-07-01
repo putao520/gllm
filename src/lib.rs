@@ -74,7 +74,10 @@ pub use cot_reasoner::{
     DEFAULT_STOP_PATTERNS,
 };
 pub use embeddings::{EmbedConfig, Embedding, EmbeddingsBuilder, EmbeddingsResponse, RagResponse};
-pub use classify::{ClassifyResponse, ClassificationResult};
+pub use classify::{
+    ClassifyResponse, ClassificationResult, StreamModerateBuilder, StreamModerationOutcome,
+    StreamModerateRole,
+};
 pub use qwen3_guard::{
     GuardModerationResult, Qwen3GuardConfig, Qwen3GuardError, Qwen3GuardHead,
     RESPONSE_CATEGORIES, RESPONSE_RISK_LEVELS,

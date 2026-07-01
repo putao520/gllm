@@ -8,7 +8,7 @@
 
 use gllm::C1V2Tracker;
 
-const PT_PATH: &str = "/tmp/c1_v2_extract/v2_granite_best.pt";
+const PT_PATH: &str = "/home/putao/.cache/c1_v2/v2_granite_best.pt";
 
 fn pt_available() -> bool {
     std::path::Path::new(PT_PATH).exists()

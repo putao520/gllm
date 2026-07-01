@@ -170,7 +170,7 @@ impl Qwen3GuardHead {
         let nc = config.num_category;
         let nqr = config.num_query_risk_level;
         let nqc = config.num_query_category;
-        let mut take = |name: &str, expected: &[usize], src: &mut HashMap<String, Vec<f32>>, shapes: &HashMap<String, Vec<usize>>| -> Result<Vec<f32>, Qwen3GuardError> {
+        let take = |name: &str, expected: &[usize], src: &mut HashMap<String, Vec<f32>>, shapes: &HashMap<String, Vec<usize>>| -> Result<Vec<f32>, Qwen3GuardError> {
             let shape = shapes
                 .get(name)
                 .ok_or_else(|| Qwen3GuardError::MissingWeight(name.to_string()))?;
