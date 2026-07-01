@@ -583,6 +583,7 @@ mod tests {
     fn from_weights_rejects_missing_weight() {
         let mut t = dummy_tracker();
         t.weights.remove("heads.diff_w2.weight");
+        t.weight_shapes.remove("heads.diff_w2.weight");
         assert!(t.validate_weights().is_err());
     }
 }

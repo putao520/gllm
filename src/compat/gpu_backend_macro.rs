@@ -144,8 +144,7 @@ macro_rules! impl_gpu_backend {
                             ids_gpu, weight_gpu, kv_ptr, pos_gpu,
                             0, 1, seq_len, sp_gpu, out_gpu,
                             0, 0, 0, 1, 0, 0,
-                            0, 0, seq.position, 0, 0, 0,
-                            page_table_gpu,
+                            0, seq.position, 0, 0, 0, page_table_gpu,
                             0,
                         );
                         bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
@@ -275,7 +274,6 @@ macro_rules! impl_gpu_backend {
                         0, 1, seq_len, sp_gpu, out_gpu,
                         0, 0, 0, 1, 0, 0,
                         0, 0, 0, 0, 0, 0,
-                        0,
                         0,
                     );
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
@@ -632,7 +630,6 @@ impl GpuEncoderOps for super::cuda_backend::CudaBackend<f32> {
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
             0,
-            0,
         );
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
@@ -670,7 +667,6 @@ impl GpuEncoderOps for super::hip_backend::HipBackend<f32> {
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
             0,
-            0,
         );
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
@@ -707,7 +703,6 @@ impl GpuEncoderOps for super::metal_backend::MetalBackend<f32> {
             0, 1, seq_len, sp_gpu, out_gpu,
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
-            0,
             0,
         );
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;

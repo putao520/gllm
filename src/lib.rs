@@ -87,6 +87,9 @@ pub use guardrail::{
     GuardProbe, GuardProbeWeights, GuardrailAttachment, GuardrailError, SafetyPolicy,
 };
 pub use intent::{IntentEncoding, IntentError};
+pub use arch::c1_v2_tracker::{
+    C1V2StepResult, C1V2Tracker, C1V2TrackerError, INTENT_LABELS,
+};
 pub use intent_tracker::{
     classify_conversation_turn, Classification, IntentTracker, TaskType, TrackerError,
     TrackerTurnInput,
