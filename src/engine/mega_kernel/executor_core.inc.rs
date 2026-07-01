@@ -221,7 +221,8 @@ impl MegaKernelExecutor {
                     target: gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Gpu { sm_version: sm },
                 };
                 match compiler.compile(g, &gpu_config, None) {
-                    Ok(gpu_output) => {
+                    Ok(compile_output) => {
+                        let gpu_output = compile_output.expect_gpu();
                         log::info!(
                             "[mega] GPU PTX compiled: {} bytes, {} layers",
                             gpu_output.gpu_code.len(),
