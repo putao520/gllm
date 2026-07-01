@@ -22,6 +22,7 @@ pub mod intent_tracker;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
+pub mod qwen3_guard;
 pub mod classify;
 pub mod rerank;
 pub mod semantic_gatekeeper;
@@ -74,6 +75,10 @@ pub use cot_reasoner::{
 };
 pub use embeddings::{EmbedConfig, Embedding, EmbeddingsBuilder, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};
+pub use qwen3_guard::{
+    GuardModerationResult, Qwen3GuardConfig, Qwen3GuardError, Qwen3GuardHead,
+    RESPONSE_CATEGORIES, RESPONSE_RISK_LEVELS,
+};
 pub use rerank::{RerankBuilder, RerankResponse, RerankResult};
 pub use semantic_gatekeeper::{
     AstContext, AstSentinel, KnowledgeEntry, KnowledgeProvider, RetrieveContext,
