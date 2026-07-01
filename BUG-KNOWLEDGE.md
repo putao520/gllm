@@ -12,6 +12,7 @@
 | PSC 横扫嫌疑点（BCE-20260623 综合归因） | 33 | 33 ✅ | 0 | 初轮 3 + 横扫 30，commits `bd7924e`~`99a73a7` |
 | 违宪传染 CC（BCE-20260626-CC-001~004，SG 模块） | 4 | 4 ✅ | 0 | 全部根治：CC-002/004 提取 `decode.rs` 共享 helper 消除硬编码偏移+DRY；CC-001/003 生产路径合并为 `mean_pool_bytes`（直接在原始字节上按 dtype 现场解码累加，无 Vec<f32> 中间表示）。SPEC criterion CRIT-SG-DTYPE-YIELDS 约束防复发 |
 | 硬编码 HACK（BCE-HACK-HW/MODEL/ISLAND-001~003，硬件/模型/孤岛审计） | 8 | 8 ✅ | 0 | HW: Metal API 动态查询+型号查表 / planner SMEM 驱动探测；MODEL: d_rope/num_experts 改 Err 传播 / builder 空串占位符；ISLAND: mega_kernel_gpu 删除孤岛（2909→380行）/ IsaProfile 移至 cfg(test) / default_for_gpu 新增 from_bandwidth 派生算法 |
+| 流式分类模式（c1 DialogueGate + Qwen3Guard-Stream，非 BUG 归档，模式知识沉淀） | — | — | — | c1: granite encoder(冻结)+3层 DialogueGateCell 跨turn递推 h'=αh+gate·candidate + label-query attention head(intent7+diff3)；Qwen3Guard: Qwen3-0.6B backbone + per-token 多类分类头(risk 3 + category 8/9) + stream_state 复用 KV cache 增量。两者共享"backbone 复用 + 独立分类头 + 状态跨调用存活"模式。SPEC REQ-C1-001/002 + REQ-QGUARD-001/002/003 |
 
 **全库残影总计**: 0
 
