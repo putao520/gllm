@@ -5,6 +5,8 @@
 //! - `registry`: Architecture token 别名查找表
 
 pub mod auto_graph;
+pub mod c1_v2_graph;
+pub mod c1_v2_tracker;
 pub mod intent_tracker_graph;
 mod registry;
 pub mod resolve;
