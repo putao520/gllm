@@ -1834,6 +1834,12 @@ Machine Code
       </section>
 
     </section>
-</main>
+<section data-decision-dimension="technical" data-decision="DEC-MKEMIT-001" id="dec-mkemit-001"><script type="application/ld+json">{
+  "@type": "Decision",
+  "id": "DEC-MKEMIT-001",
+  "title": "mega_kernel_emit 编排层 ctx 重构(B类长序列根治)与A/B分层根治策略",
+  "context": "BCE-LOWER-INSTR-GOD-MATCH 周期发现 compile_mega_kernel_vm (mega_kernel_emit.rs L924-2427, ~1503行, 圈复杂度~88) 是 long_method。调研确认: 过程式 emit 长序列(单函数 197 次 prog.emit, 占文件 316 的 62%) + 25 个游离编排级局部变量, 非 god-match dispatch。extract_function 抽出后 helper 需 15-25 参数, 违反 P-2 并产生 long_parameter_list。入口本身已 15 参数。",
+  "dimension": "technical"
+}</script></section></main>
 </body>
 </html>

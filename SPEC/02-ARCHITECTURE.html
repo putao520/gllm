@@ -2499,7 +2499,19 @@
       
       
       </a></div>
-    </section>
+    <div data-criterion-id="REQ-ARCH-001-CODEGEN-DISCIPLINE" data-criterion="JIT codegen 函数纪律 (P-1/P-2 + OCP, BCE-20260630-LONG-METHOD-ERADICATION 全量根治防复发):
+1. JIT codegen fn 必须 ≤500 行, 圈复杂度 ≤10, 参数 ≤5 (P-2 复杂度限制)。
+2. 新增 TraceOp/OpKind/VmInstr 变体禁内联业务逻辑, 必须 1 行 dispatch arm + 1 个独立 per-pattern handler (OCP; ARCH-AUTO-INSTR-SELECT ComputePattern 通用处理器)。
+3. dispatch arm 必须单表达式委托 (如 `ComputePattern::Reduction => self.lower_reduction(...)`), 禁在 arm 内联 emit 序列。
+4. 过程式长序列 emit (batch_mode/fusion_groups) 必须按职责抽子 fn + ctx 结构打包只读引用 (prog/&mut 独立保留避 borrow 冲突)。
+5. 禁 eprintln/println/dbg! 调试输出入库 (P-1 红线), 用 tracing 或删除。
+根治模式: A 类 god-match dispatch 按 ComputePattern/Op 族查表化; B 类过程式长序列按职责抽子 fn + ctx 化; C 类单 handler 超长抽 per-arm emit helper。">JIT codegen 函数纪律 (P-1/P-2 + OCP, BCE-20260630-LONG-METHOD-ERADICATION 全量根治防复发):
+1. JIT codegen fn 必须 ≤500 行, 圈复杂度 ≤10, 参数 ≤5 (P-2 复杂度限制)。
+2. 新增 TraceOp/OpKind/VmInstr 变体禁内联业务逻辑, 必须 1 行 dispatch arm + 1 个独立 per-pattern handler (OCP; ARCH-AUTO-INSTR-SELECT ComputePattern 通用处理器)。
+3. dispatch arm 必须单表达式委托 (如 `ComputePattern::Reduction =&gt; self.lower_reduction(...)`), 禁在 arm 内联 emit 序列。
+4. 过程式长序列 emit (batch_mode/fusion_groups) 必须按职责抽子 fn + ctx 结构打包只读引用 (prog/&amp;mut 独立保留避 borrow 冲突)。
+5. 禁 eprintln/println/dbg! 调试输出入库 (P-1 红线), 用 tracing 或删除。
+根治模式: A 类 god-match dispatch 按 ComputePattern/Op 族查表化; B 类过程式长序列按职责抽子 fn + ctx 化; C 类单 handler 超长抽 per-arm emit helper。</div></section>
     <section data-level="unit" data-test-categories="unit" data-req-ref="REQ-ARCH-001" data-test="TEST-ARCH-001" id="test-arch-001">TEST-ARCH-001: 架构自动检测测试<p>验证REQ-ARCH-001相关功能正确性</p>
       <div id="架构自动检测实现完整" data-criterion="架构自动检测实现完整">架构自动检测实现完整</div>
       <div id="tensor-name-driven-graph-builder-正确" data-criterion="Tensor-Name-Driven Graph Builder 正确">Tensor-Name-Driven Graph Builder 正确</div>
