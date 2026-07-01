@@ -35,6 +35,13 @@ const ARCH_TABLE: &[(&str, &str, &str, Option<&str>)] = &[
     ("deepseekr1",      "deepseek",   "decoder", Some("deepseek")),
     ("kimi_k2",         "deepseek",   "decoder", Some("deepseek")),
     ("gptoss",          "gptoss",     "decoder", Some("gptoss")),
+    // Guard classifiers (REQ-QGUARD-001): qwen3_guard_stream 复用 qwen3 backbone
+    // + per-token 多类分类头 (Qwen3Guard-Stream-0.6B). canonical=qwen3 复用
+    // backbone 权重拓扑与 KV cache 机制, guard head 在 qwen3_guard.rs 独立加载.
+    ("qwen3_guard_stream", "qwen3",  "decoder", Some("qwen")),
+    ("qwen3guard",         "qwen3",  "decoder", Some("qwen")),
+    ("qwen3_guard",        "qwen3",  "decoder", Some("qwen")),
+    ("qwen3guardstream",   "qwen3",  "decoder", Some("qwen")),
     // Encoder family
     ("xlmr",            "xlmr",       "encoder", None),
     ("xlm_roberta",     "xlmr",       "encoder", None),
@@ -827,6 +834,43 @@ mod tests {
         assert_eq!(name, Some("qwen3"));
         assert_eq!(family, Some(ArchFamily::Decoder));
         assert_eq!(router, Some(crate::manifest::RouterType::Qwen));
+    }
+
+    // @trace TEST-REG-QGUARD [req:REQ-QGUARD-001] [level:unit]
+    #[test]
+    fn resolve_qwen3_guard_stream_aliases() {
+        // REQ-QGUARD-001: qwen3_guard_stream 复用 qwen3 backbone
+        // 三种 token 变体均 resolve 到 canonical qwen3, family=decoder
+        for token in ["qwen3_guard_stream", "qwen3guard", "qwen3_guard"] {
+            let name = resolve_template_name(token);
+            let family = resolve_family(token);
+            assert_eq!(
+                name,
+                Some("qwen3"),
+                "{token} should resolve to canonical qwen3"
+            );
+            assert_eq!(
+                family,
+                Some(ArchFamily::Decoder),
+                "{token} should be Decoder family"
+            );
+            // resolve_moe_router 接收 canonical name (resolve_template_name 的输出)
+            let router = resolve_moe_router(name.unwrap());
+            assert_eq!(
+                router,
+                Some(crate::manifest::RouterType::Qwen),
+                "{token} canonical qwen3 should have Qwen router"
+            );
+        }
+    }
+
+    // @trace TEST-REG-QGUARD-CASE [req:REQ-QGUARD-001] [level:unit]
+    #[test]
+    fn resolve_qwen3_guard_stream_case_and_forcausallm() {
+        // 大小写 + ForCausalLM 后缀派生
+        assert_eq!(resolve_template_name("Qwen3GuardStream"), Some("qwen3"));
+        assert_eq!(resolve_template_name("Qwen3Guard"), Some("qwen3"));
+        assert_eq!(resolve_template_name("Qwen3GuardStreamForCausalLM"), Some("qwen3"));
     }
 
     // @trace TEST-REG-76 [req:REQ-ARCH-AUTO-001] [level:unit]
