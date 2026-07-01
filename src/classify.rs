@@ -59,6 +59,190 @@ pub struct ClassificationResult {
     pub logits: Vec<f32>,
 }
 
+// ============================================================================
+// StreamModerateBuilder — Qwen3Guard-Stream per-token 流式审核 (REQ-QGUARD-003)
+// ============================================================================
+
+/// 流式审核角色 — 决定提取哪一组 logits (REQ-QGUARD-003).
+///
+/// - `Query`: 提取 query_risk_level (3) + query_category (9, 含 Jailbreak)
+/// - `Response`: 提取 risk_level (3) + category (8)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamModerateRole {
+    Query,
+    Response,
+}
+
+/// 单 token 流式审核结果 (per-role 提取的 risk + category logits).
+///
+/// `stream_state` 概念由调用者管理: gllm 的 Qwen3 backbone forward 独立维护
+/// KV cache 增量, guard head 跨 token 无状态 (见 `Qwen3GuardHead`).
+/// 调用者每 token 喂入 backbone 产出的 last-layer hidden state, 本结构
+/// 仅承载该 token 的 guard head 输出.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamModerationOutcome {
+    /// risk_level logits (长度 3: Safe/Unsafe/Controversial).
+    pub risk_logits: Vec<f32>,
+    /// category logits (Query=9 含 Jailbreak / Response=8).
+    pub category_logits: Vec<f32>,
+    /// 该 token 的角色.
+    pub role: StreamModerateRole,
+}
+
+impl StreamModerationOutcome {
+    /// risk argmax (0=Safe, 1=Unsafe, 2=Controversial).
+    pub fn risk_argmax(&self) -> usize {
+        argmax(&self.risk_logits)
+    }
+
+    /// category argmax.
+    pub fn category_argmax(&self) -> usize {
+        argmax(&self.category_logits)
+    }
+
+    /// risk softmax 概率 (和为 1).
+    pub fn risk_softmax(&self) -> Vec<f32> {
+        softmax(&self.risk_logits)
+    }
+
+    /// category softmax 概率 (和为 1).
+    pub fn category_softmax(&self) -> Vec<f32> {
+        softmax(&self.category_logits)
+    }
+}
+
+/// Builder for Qwen3Guard-Stream per-token streaming moderation.
+///
+/// 包装 `Qwen3GuardHead`, 提供 role-aware 的 per-token API. 调用者负责
+/// 驱动 Qwen3 backbone 的增量 decode (KV cache), 每生成一个 token 取其
+/// last-layer hidden state 喂入 `stream_moderate`.
+///
+/// # Example
+///
+/// ```no_run
+/// use gllm::StreamModerateBuilder;
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut sm = StreamModerateBuilder::from_safetensors("model.safetensors")?;
+/// // hidden: Qwen3 backbone 产出的 last-layer hidden state (1024,)
+/// # let hidden: &[f32] = &[0.0; 1024];
+/// let outcome = sm.stream_moderate(hidden, gllm::StreamModerateRole::Response)?;
+/// println!("risk={} category={}", outcome.risk_argmax(), outcome.category_argmax());
+/// # Ok(())
+/// # }
+/// ```
+pub struct StreamModerateBuilder {
+    head: crate::qwen3_guard::Qwen3GuardHead,
+}
+
+impl StreamModerateBuilder {
+    /// 从 Qwen3Guard safetensors 文件加载 guard head.
+    ///
+    /// 文件可为完整 Qwen3Guard-Stream-0.6B model.safetensors (backbone 张量
+    /// 被忽略) 或 head-only 提取. dtype 顺从权重文件 (ARCH-JIT-DATA-YIELDS).
+    pub fn from_safetensors<P: AsRef<std::path::Path>>(path: P) -> Result<Self, GllmError> {
+        let head = crate::qwen3_guard::Qwen3GuardHead::from_safetensors(path)
+            .map_err(|e| GllmError::RuntimeError(format!("qwen3guard load: {e}")))?;
+        Ok(Self { head })
+    }
+
+    /// 用已加载的 head 构造 (用于测试 / 复用已加载权重).
+    pub fn from_head(head: crate::qwen3_guard::Qwen3GuardHead) -> Self {
+        Self { head }
+    }
+
+    /// 单 token 流式审核 (REQ-QGUARD-003).
+    ///
+    /// `token_hidden`: backbone 产出的该 token last-layer hidden state (hidden_size,).
+    /// `role`: Query (审核用户输入) / Response (审核模型生成).
+    ///
+    /// 返回该 token 的 (risk_logits, category_logits). stream_state 由调用者
+    /// 管理 (backbone KV cache), guard head 跨 token 无状态.
+    pub fn stream_moderate(
+        &self,
+        token_hidden: &[f32],
+        role: StreamModerateRole,
+    ) -> Result<StreamModerationOutcome, GllmError> {
+        let result = self
+            .head
+            .moderate_token(token_hidden)
+            .map_err(|e| GllmError::RuntimeError(format!("qwen3guard moderate: {e}")))?;
+        let (risk_logits, category_logits) = match role {
+            StreamModerateRole::Query => (
+                result.query_risk_level_logits,
+                result.query_category_logits,
+            ),
+            StreamModerateRole::Response => (result.risk_level_logits, result.category_logits),
+        };
+        Ok(StreamModerationOutcome {
+            risk_logits,
+            category_logits,
+            role,
+        })
+    }
+
+    /// 批量序列审核 (非流式便捷方法).
+    ///
+    /// `hidden_seq`: `[T, hidden_size]` 行主序. 返回 T 个 outcome.
+    pub fn stream_moderate_sequence(
+        &self,
+        hidden_seq: &[f32],
+        role: StreamModerateRole,
+    ) -> Result<Vec<StreamModerationOutcome>, GllmError> {
+        let results = self
+            .head
+            .moderate_sequence(hidden_seq)
+            .map_err(|e| GllmError::RuntimeError(format!("qwen3guard moderate_sequence: {e}")))?;
+        results
+            .into_iter()
+            .map(|result| {
+                let (risk_logits, category_logits) = match role {
+                    StreamModerateRole::Query => (
+                        result.query_risk_level_logits,
+                        result.query_category_logits,
+                    ),
+                    StreamModerateRole::Response => {
+                        (result.risk_level_logits, result.category_logits)
+                    }
+                };
+                Ok(StreamModerationOutcome {
+                    risk_logits,
+                    category_logits,
+                    role,
+                })
+            })
+            .collect()
+    }
+
+    /// 访问内部 head (用于复用 / 测试).
+    pub fn head(&self) -> &crate::qwen3_guard::Qwen3GuardHead {
+        &self.head
+    }
+}
+
+/// argmax helper.
+fn argmax(v: &[f32]) -> usize {
+    v.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// softmax helper (数值稳定版).
+fn softmax(v: &[f32]) -> Vec<f32> {
+    if v.is_empty() {
+        return Vec::new();
+    }
+    let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = v.iter().map(|&x| (x - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum <= 0.0 {
+        return vec![0.0; v.len()];
+    }
+    exps.into_iter().map(|e| e / sum).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3071,5 +3255,160 @@ mod tests {
         let (max_idx, &max_val) = max_entry.unwrap();
         assert_eq!(max_idx, r.label_id, "argmax position equals label_id");
         assert!((max_val - r.score).abs() < 1e-6, "argmax value equals score");
+    }
+
+    // ── StreamModerateBuilder tests (REQ-QGUARD-003) ──
+
+    use crate::qwen3_guard::{Qwen3GuardConfig, Qwen3GuardHead};
+
+    fn small_head() -> Qwen3GuardHead {
+        // Tiny config: hidden=8, guard_inner=4, risk=3, category=8,
+        // query_risk=3, query_category=9.
+        let cfg = Qwen3GuardConfig {
+            hidden_size: 8,
+            guard_inner_size: 4,
+            num_risk_level: 3,
+            num_category: 8,
+            num_query_risk_level: 3,
+            num_query_category: 9,
+            rms_norm_eps: 1e-6,
+        };
+        let h = cfg.hidden_size;
+        let g = cfg.guard_inner_size;
+        // weights all 0.5 → deterministic output
+        let risk_pre = vec![0.5; g * h];
+        let risk_norm = vec![1.0; g]; // identity-ish norm weight
+        let risk_head = vec![0.5; cfg.num_risk_level * g];
+        let category_head = vec![0.5; cfg.num_category * g];
+        let query_pre = vec![0.25; g * h];
+        let query_norm = vec![1.0; g];
+        let query_risk_head = vec![0.25; cfg.num_query_risk_level * g];
+        let query_category_head = vec![0.25; cfg.num_query_category * g];
+        Qwen3GuardHead::from_weights(
+            cfg,
+            risk_pre,
+            risk_norm,
+            risk_head,
+            category_head,
+            query_pre,
+            query_norm,
+            query_risk_head,
+            query_category_head,
+        )
+        .expect("small head from_weights")
+    }
+
+    #[test]
+    fn stream_moderate_response_role_output_dims() {
+        let sm = StreamModerateBuilder::from_head(small_head());
+        let hidden = vec![0.1; 8];
+        let outcome = sm
+            .stream_moderate(&hidden, StreamModerateRole::Response)
+            .expect("stream_moderate response");
+        // Response path: risk 3 + category 8
+        assert_eq!(outcome.risk_logits.len(), 3);
+        assert_eq!(outcome.category_logits.len(), 8);
+        assert_eq!(outcome.role, StreamModerateRole::Response);
+        // All logits finite
+        for &v in outcome.risk_logits.iter().chain(outcome.category_logits.iter()) {
+            assert!(v.is_finite(), "logit finite");
+        }
+    }
+
+    #[test]
+    fn stream_moderate_query_role_output_dims() {
+        let sm = StreamModerateBuilder::from_head(small_head());
+        let hidden = vec![0.1; 8];
+        let outcome = sm
+            .stream_moderate(&hidden, StreamModerateRole::Query)
+            .expect("stream_moderate query");
+        // Query path: query_risk 3 + query_category 9 (含 Jailbreak)
+        assert_eq!(outcome.risk_logits.len(), 3);
+        assert_eq!(outcome.category_logits.len(), 9);
+        assert_eq!(outcome.role, StreamModerateRole::Query);
+    }
+
+    #[test]
+    fn stream_moderate_rejects_bad_hidden_dim() {
+        let sm = StreamModerateBuilder::from_head(small_head());
+        let bad_hidden = vec![0.1; 7]; // hidden_size=8, wrong
+        let err = sm
+            .stream_moderate(&bad_hidden, StreamModerateRole::Response)
+            .unwrap_err();
+        assert!(format!("{err}").contains("hidden len"), "error mentions dim");
+    }
+
+    #[test]
+    fn stream_moderate_role_selects_correct_logit_group() {
+        // Query vs Response must produce different category lengths AND
+        // different magnitudes (different pre weights 0.5 vs 0.25).
+        let sm = StreamModerateBuilder::from_head(small_head());
+        let hidden = vec![1.0; 8];
+        let resp = sm
+            .stream_moderate(&hidden, StreamModerateRole::Response)
+            .unwrap();
+        let qry = sm
+            .stream_moderate(&hidden, StreamModerateRole::Query)
+            .unwrap();
+        assert_ne!(resp.category_logits.len(), qry.category_logits.len());
+        // Response pre weight (0.5) > Query pre weight (0.25) → response logits larger
+        let resp_sum: f32 = resp.risk_logits.iter().sum();
+        let qry_sum: f32 = qry.risk_logits.iter().sum();
+        assert!(
+            resp_sum > qry_sum,
+            "response risk logits {resp_sum} > query {qry_sum}"
+        );
+    }
+
+    #[test]
+    fn stream_moderate_sequence_multi_token() {
+        let sm = StreamModerateBuilder::from_head(small_head());
+        // 3 tokens × hidden_size=8
+        let hidden_seq = vec![0.2; 3 * 8];
+        let outcomes = sm
+            .stream_moderate_sequence(&hidden_seq, StreamModerateRole::Response)
+            .expect("sequence");
+        assert_eq!(outcomes.len(), 3);
+        for o in &outcomes {
+            assert_eq!(o.risk_logits.len(), 3);
+            assert_eq!(o.category_logits.len(), 8);
+        }
+    }
+
+    #[test]
+    fn stream_moderation_outcome_softmax_sums_to_one() {
+        let sm = StreamModerateBuilder::from_head(small_head());
+        let hidden = vec![0.5; 8];
+        let outcome = sm
+            .stream_moderate(&hidden, StreamModerateRole::Response)
+            .unwrap();
+        let probs = outcome.risk_softmax();
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sums to 1, got {sum}");
+    }
+
+    #[test]
+    fn stream_moderation_outcome_argmax_in_range() {
+        let sm = StreamModerateBuilder::from_head(small_head());
+        let hidden = vec![0.3; 8];
+        let outcome = sm
+            .stream_moderate(&hidden, StreamModerateRole::Query)
+            .unwrap();
+        assert!(outcome.risk_argmax() < 3);
+        assert!(outcome.category_argmax() < 9);
+    }
+
+    #[test]
+    fn argmax_and_softmax_helpers_basic() {
+        assert_eq!(argmax(&[0.1, 0.9, 0.5]), 1);
+        assert_eq!(argmax(&[-1.0, -2.0, -0.5]), 2);
+        let s = softmax(&[1.0, 2.0, 3.0]);
+        let sum: f32 = s.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+        // softmax monotonic: larger input → larger prob
+        assert!(s[2] > s[1] && s[1] > s[0]);
+        // empty
+        assert_eq!(argmax(&[]), 0); // returns 0 on empty (safe default)
+        assert!(softmax(&[]).is_empty());
     }
 }
