@@ -424,7 +424,7 @@ impl<E: Element> CudaBackend<E> {
         &self,
         ptx_code: &[u8],
         kernel_name: &str,
-        args: &[usize; 23],
+        args: &[usize; 22],
     ) -> Result<(), String> {
         use gllm_kernels::gpu::GpuDevice;
         let module = self.device.load_ptx(ptx_code)
@@ -436,8 +436,9 @@ impl<E: Element> CudaBackend<E> {
         let block = (warp_size, 1u32, 1u32);
         let grid = (1u32, 1u32, 1u32);
 
-        let kernel_args: [*mut std::ffi::c_void; 23] = std::array::from_fn(|i| {
-            unsafe { &args[i] as *const usize as *mut std::ffi::c_void }
+        // BCE-20260702-GPU-ABI: 22 kernelParams aligned to CPU MegaKernelFn 22-param SSOT.
+        let kernel_args: [*mut std::ffi::c_void; 22] = std::array::from_fn(|i| {
+            &args[i] as *const usize as *mut std::ffi::c_void
         });
 
         let stream = self.device.default_stream();

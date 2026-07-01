@@ -16,7 +16,7 @@
 /// - `get_cached_ptx(&str) -> Option<Vec<u8>>`
 /// - `get_weight_gpu_ptr() -> Option<u64>`
 /// - `get_cached_scratchpad_bytes() -> usize`
-/// - `gpu_launch_mega_kernel(&[u8], &str, &[usize; 23]) -> Result<(), String>`
+/// - `gpu_launch_mega_kernel(&[u8], &str, &[usize; 22]) -> Result<(), String>`
 macro_rules! impl_gpu_backend {
     (
         backend = $backend_ty:ident,

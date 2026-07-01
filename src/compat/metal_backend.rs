@@ -361,13 +361,14 @@ impl<E: Element> MetalBackend<E> {
         &self,
         gpu_code: &[u8],
         kernel_name: &str,
-        args: &[usize; 23],
+        args: &[usize; 22],
     ) -> Result<(), String> {
         use gllm_kernels::gpu::GpuDevice;
         let library = self.device.load_library_data(gpu_code)
             .map_err(|e| format!("load_library_data failed: {e}"))?;
 
         let threadgroup_size = self.gpu_profile.warp_size;
+        // BCE-20260702-GPU-ABI: 22 buffers aligned to CPU MegaKernelFn 22-param SSOT.
         let buffers: Vec<(u64, usize)> = args.iter()
             .map(|&a| (a as u64, 0))
             .collect();
