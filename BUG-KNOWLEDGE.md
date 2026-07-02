@@ -1587,48 +1587,58 @@ regressionAssertion:
 
 ---
 
-## BCE-20260702-GPU-OOM — compile_mega_kernel_vm 多次调用累积不释放致 23.5GB OOM
+## BCE-20260702-GPU-OOM — GPU GEMM Rust 端循环展开 2.84 亿 VmInstr 致 23.5GB OOM (违宪 ARCH-SYMDIM-NO-CONST-DEGRADE + ARCH-NO-LOOP-UNROLL)
 
 ```yaml
 patternId: BCE-20260702-GPU-OOM
-title: compile_mega_kernel_vm 被多次调用, program/中间数据不释放, RSS 累积至 23.5GB OOM
-layer: 设计缺陷
+title: GPU GEMM codegen 把 SymDim::Symbolic seq_len 降级为编译常量 + Rust for 展开, VmInstr Vec 爆炸 2.84 亿 → 23.5GB OOM
+layer: 范式缺陷 (违宪)
 codePattern:
-  - "executor_core.inc.rs 对 SmolLM2 触发 3+ 次 compile_mega_kernel_vm (主graph CPU / kivi4 / GPU)"
-  - "每次 compile_mega_kernel_vm 返回的 program (5739 instrs, 2543 vregs) 不释放, RSS 累积"
-  - "单次编译内存正常 (680MB), 多次累积 (679→683→994→...→23.5GB) OOM"
+  - "gemm_emit.rs:134-136 SymDim::Symbolic{max_value} → usize m 降级 (违 ARCH-SYMDIM-NO-CONST-DEGRADE)"
+  - "gemm_emit.rs:435/624 emit_gemm_gpu_tiled_inline/pipelined 的 for i_cta in (0..m).step_by Rust 编译时展开 (违 ARCH-NO-LOOP-UNROLL)"
+  - "gemm_emit.rs:171-179 GPU 调度路径绕过 !m_dim.is_symbolic() 守卫 (CPU 路径有守卫)"
 triggerCondition:
-  - "GPU E2E 测试 SmolLM2-135M (5070Ti, max_seq_len=8192)"
-  - "编译流程触发多个 compile target (CPU + GPU + kivi4)"
+  - "GPU E2E SmolLM2-135M (5070Ti, max_seq_len=8192, hidden=576, vocab=49152)"
+  - "GEMM M=Symbolic seq_len(max=8192) N=vocab(49152) K=hidden(576)"
 detectionSignatures:
   structural:
-    - "compile_mega_kernel_vm 在 executor_core.inc.rs 被多处调用 (147/192/223), 返回的 program 未显式 drop"
+    - "for i_cta in (0..m).step_by 在 gemm_emit.rs GPU GEMM 函数 (m 是 SymDim 降级的 usize)"
+    - "SymDim::Symbolic { max_value, .. } => max_value 在 GEMM M/N 维度解析"
   literal:
-    - "Out of memory: Killed process.*test_e2e_gpu.*anon-rss:23559036kB"
+    - "Out of memory: Killed process.*anon-rss:23.*test_e2e_gpu"
   antipattern:
-    - "multiple-compile-no-release"
+    - "rust-loop-unroll-vminstr"  # 违 ARCH-NO-LOOP-UNROLL
+    - "symdim-const-degrade"      # 违 ARCH-SYMDIM-NO-CONST-DEGRADE
 sameClassCriterion:
-  - "编译流程多次调用 compile_mega_kernel_vm 或 compiler.compile, 每次返回的大对象 (program/graph/alloc) 不释放累积"
+  - "GPU codegen 任何 SymDim (seq_len/num_heads/等大维度) 被降级为编译常量 + Rust for 展开 VmInstr (CPU 路径用 emit_loop 运行时循环)"
 fixTemplate:
-  - "定位多次编译触发源 (hetero/kivi4/多 target), 减少不必要的编译"
-  - "每次编译后显式 drop program/中间数据 (提取需要的信息后立即 drop)"
-  - "或确保编译结果提取后, 原大对象离开作用域释放"
+  - "line 134-136 删 Symbolic→max_value 降级, m 保持 SymDim 传入 GPU 函数"
+  - "line 435/624 for i_cta in (0..m).step_by → prog.emit_loop(BoundExpr::Symbolic(\"seq_len\"), cta_m*elem, |prog,i_ctr,i_off|{...})"
+  - "line 171-179 GPU 调度补 is_symbolic() 守卫, Symbolic 时走运行时循环路径"
+  - "参考 CPU 路径 emit_gemm_inline_with_epilogue (line 1211+) 正确用 emit_loop(m_bound,...)"
+  - "内层微维度 (head_dim/lanes/mma_k, 编译时确定且极小) 可保留 BoundExpr::Const (ARCH-NO-LOOP-UNROLL 例外)"
 regressionAssertion:
-  - "GPU E2E SmolLM2 编译期 RSS 不超过 2GB (单次 ~680MB, 多次不累积)"
+  - "GPU 编译 SmolLM2 VmInstr 数 < 10万 (非 2.84 亿), 编译期 RSS < 2GB"
+  - "SmolLM2 GPU E2E 黄金值 cosine > 0.9999 (重构后数值对齐)"
 归因时间: 2026-07-02
 根因:
-  location: "gllm/src/engine/mega_kernel/executor_core.inc.rs (compile_mega_kernel_vm 多次调用 :147/:192/:223)"
-  layer: 设计缺陷
-  why: "SmolLM2 编译触发 3+ 次 compile_mega_kernel_vm (CPU 主graph + kivi4 + GPU), 每次返回 program (5739 instrs/2543 vregs) 不释放, RSS 累积 679→683→994→...→23.5GB OOM。单次编译内存正常 (680MB)。"
+  location: "gllm-kernels/src/compiler/codegen/vm/gemm_emit.rs (line 134-136 降级 + 435/624 Rust 展开 + 171-179 调度无守卫)"
+  layer: 范式缺陷 (违宪)
+  why: "GPU GEMM codegen 把 Symbolic seq_len(max=8192) 降级为编译常量 m=8192, 用 Rust for 循环展开成扁平 VmInstr。M=8192 N=49152 K=576 的 GEMM 展开到数千万 instrs, 30 层 → 2.84 亿 VmInstr × ~80 bytes × Vec 容量倍增 = 23GB → OOM。CPU 路径同图只 5874 instrs (用 emit_loop 运行时循环)。"
   evidence:
-    - "OOMPROBE-CMKE 诊断: 3 组 cmke-vm-pre-return, RSS 679/683/994 递增不降"
-    - "单次 cmke-vm-pre-return: instrs=5739 vregs=2581/2543, RSS=680MB (正常)"
-    - "buffer_alloc 正常 (234MB, 3f337307 预算门控未触发) —— 排除 architect 最初假设"
-    - "time -v: 峰值 RSS 23.5GB, 运行 84 秒, 虚拟地址空间 112GB"
-    - "heaptrack: malloc 峰值仅 243KB —— 23.5GB 是 mmap/大对象累积非 malloc"
-  architect_misattribution: "architect 最初假设 buffer_alloc 全 VReg 物化 (11db587d 副作用) 是错的 —— buffer_alloc 234MB 正常, OOM 在 compile_mega_kernel_vm 多次调用累积"
+    - "instrument 实测 emit #142750000 = 284,392,445 instrs @ RSS 23GB → OOM SIGKILL"
+    - "CPU 编译同图 5739 instrs (emit_loop 运行时循环, 未展开)"
+    - "buffer_alloc 正常 (378MB, 19 slots) —— 排除 buffer/weight_blob 爆炸"
+    - "OOMPROBE: gpu-pre-vm-emit RSS=994MB, OOM 在 compile_mega_kernel_vm 内 emit_fusion_groups → GEMM emit"
+    - "time -v: 峰值 RSS 23.6GB, 84 秒运行, 虚拟地址空间 112GB"
+    - "heaptrack: malloc 峰值 243KB —— 23GB 是 Vec<VmInstr> 容量膨胀 (mmap), 非 malloc"
+  architect_misattribution_history:
+    - "初判 buffer_alloc 全 VReg 物化 (11db587d 副作用) —— 实测 buffer_alloc 378MB 正常, 排除"
+    - "次判 compile_mega_kernel_vm 多次调用累积 —— 实测单次 GEMM 展开即爆炸, 排除"
+    - "终判 (instrument 定位): GPU GEMM Rust 端循环展开违宪"
 根治:
-  strategy: "定位多次编译触发源 + 确保每次编译后 program/中间数据释放"
-  status: 根治中 | residual: 待验证
-  排序: "已修 5 个前序 BUG (RegAlloc×2/hook/fallback/spill), OOM 是第 6 个"
+  strategy: "GPU GEMM 函数 for (0..m) → emit_loop(BoundExpr::Symbolic), 删 SymDim 降级; 架构级重构需 architect 确认分层设计 (哪些循环转 Symbolic, 哪些微维度保留 Const)"
+  status: 待根治 | residual: 待验证
+  注意: "warp/CTA 三级分块 + mma_k 内层微维度混合, 需仔细分层; a_off=((i_cta+i_warp)*k+k_tile+k_inner)*a_elem 等常量算术全转 VReg 运行时计算; 必须保数值对齐 (SmolLM2 黄金值 cosine>0.9999)"
+  安全网: "3f337307 buffer_alloc GPU 预算门控保留 (对真超 4GiB buffer 的大模型有效, 非 OOM 修复)"
 ```
