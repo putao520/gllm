@@ -24,6 +24,9 @@
 
 use gllm::{BackendType, Client, ModelKind};
 
+// OOM 诊断: stderr flush 需要 Write trait
+use std::io::Write as _;
+
 // ─── Golden value helpers ─────────────────────────────────────────────
 
 /// Load a single f32 tensor from safetensors by name.
@@ -117,6 +120,9 @@ fn gpu_reranker_client(model_id: &str) -> Client {
 #[test]
 #[ignore = "GPU E2E: requires 5070Ti + cuda feature; run with --ignored"]
 fn gpu_e2e_smollm2_135m_logits_alignment() {
+    // OOM 诊断: 强制刷新 stderr, 确认 test harness 探针链路通畅 (配合 --nocapture)
+    eprintln!("[OOMPROBE-TEST] gpu_e2e_smollm2 entered, stderr flushed");
+    std::io::stderr().flush().ok();
     const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
     const PROMPT: &str = "The meaning of life is";
     const SEQ_LEN: usize = 5;
@@ -171,6 +177,9 @@ fn gpu_e2e_smollm2_135m_logits_alignment() {
 #[test]
 #[ignore = "GPU E2E: requires 5070Ti + cuda feature; run with --ignored"]
 fn gpu_e2e_qwen3_0_6b_gguf_q4_0_generation() {
+    // OOM 诊断: 强制刷新 stderr, 确认 test harness 探针链路通畅 (配合 --nocapture)
+    eprintln!("[OOMPROBE-TEST] gpu_e2e_qwen3 entered, stderr flushed");
+    std::io::stderr().flush().ok();
     const MODEL: &str = "bartowski/Qwen_Qwen3-0.6B-GGUF";
     const PROMPT: &str = "The capital of France is";
     const GGUF_FILE: &str = "Qwen3-0.6B-Q4_0.gguf";
