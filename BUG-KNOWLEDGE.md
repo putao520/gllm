@@ -1642,3 +1642,104 @@ regressionAssertion:
   注意: "warp/CTA 三级分块 + mma_k 内层微维度混合, 需仔细分层; a_off=((i_cta+i_warp)*k+k_tile+k_inner)*a_elem 等常量算术全转 VReg 运行时计算; 必须保数值对齐 (SmolLM2 黄金值 cosine>0.9999)"
   安全网: "3f337307 buffer_alloc GPU 预算门控保留 (对真超 4GiB buffer 的大模型有效, 非 OOM 修复)"
 ```
+
+---
+
+## BCE-20260703-CODEGEN-AUDIT — 全设备 codegen 审计 (x86/aarch64/GPU) 违宪 + 缺失硬件指令
+
+> /loop 触发全设备 codegen 路径审计。3 Explore agent 横扫 x86/aarch64/GPU 三路径。
+
+### P0 严重 (数值错误 + 硬件指令缺失)
+
+```yaml
+patternId: BCE-20260703-KIVI-DEQUANT-NUMERICAL
+title: KiviDequantLoad 循环写入地址不推进 (x86) / 同寄存器覆盖 (GPU), 解码值全丢
+layer: 设计缺陷 (数值错误)
+codePattern:
+  - "x86 finalize_quant.inc.rs:362,367 dst_offset 编译时常量, 循环内不 +ecx*8, 所有迭代覆盖同一栈位置"
+  - "GPU lower_instr_dispatch.inc.rs:3181,3190 所有 pair/nibble 写同一 {d} 寄存器, 覆盖前面结果"
+  - "影响 3 函数: lower_kivi_dequant_load / lower_kivi_quant_channel / lower_kivi_quant_token"
+triggerCondition: "KIVI 量化 KV cache 解码 (attention Q·K 点积用错 K → argmax=0)"
+sameClassCriterion: "循环内写/读地址不随迭代推进, 或同寄存器覆盖多值"
+fixTemplate: "x86: dst_offset + ecx*8 (每对 8 字节); GPU: 每 pair 独立寄存器/shared memory 位置"
+regressionAssertion: "KIVI 解码后所有 nibble 值独立保留, 不覆盖; SmolLM2 argmax=253"
+归因时间: 2026-07-03
+根因: { x86: "finalize_quant.inc.rs:362,367 dst 写地址不推进", GPU: "lower_instr_dispatch.inc.rs:3158-3233 {d} 覆盖" }
+status: 根治中 (fix-kivi-dequant-numerical)
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-FEATURES-DROPPED
+title: AArch64Features 结构体丢弃 has_bf16/has_dotprod/has_i8mm/has_sve 4 特性
+layer: 范式缺陷 (NO-HW-DEGRADATION + ARCH-JIT-YIELDS)
+codePattern:
+  - "aarch64_lower.rs:47-51 AArch64Features 只保留 has_sve2/has_sme2/sve_vl"
+  - "helpers.inc.rs:17-24 with_profile 用 .. 丢弃 has_bf16/has_dotprod/has_i8mm/has_sve"
+triggerCondition: "aarch64 codegen 全路径 (BFDOT/SDOT 无条件发不检查特性, SVE1 降级 NEON, SVE2 i8mm/bf16 指令无法启用)"
+sameClassCriterion: "Platform 枚举有硬件特性但 lower 层快照结构体未保留, 导致无法做指令选择"
+fixTemplate: "扩展 AArch64Features 含全部 8 特性 + with_profile 提取全字段 + lower 层按特性门控指令"
+归因时间: 2026-07-03
+根因: { location: "aarch64_lower.rs:47-51 + helpers.inc.rs:17-24", why: "特性结构体只保留 3/8 字段" }
+status: 待根治
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-VECLEAK-SILENT
+title: aarch64 VecLoad/VecStore/Broadcast 的 OffsetExpr _ => {} 静默丢弃 Add/Mul/ScalarVReg 变体
+layer: 范式缺陷 (NO-SILENT-FALLBACK)
+codePattern: "lower_instr_dispatch.inc.rs:340,359,404,422,566 _ => {} 不生成指令"
+triggerCondition: "OffsetExpr Add(loop_offset+const)/Mul/ScalarVReg 变体的 load/store"
+sameClassCriterion: "match 的 _ => {} 静默 NOP (非 Reshape/Transpose 例外)"
+fixTemplate: "_ => {} 改 Err(CodegenViolation) 或补全 Add/Mul/ScalarVReg emit"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:340,359,404,422,566" }
+status: 待根治
+```
+
+```yaml
+patternId: BCE-20260703-GPU-GEMM-PLACEHOLDER
+title: GPU RDNA/Metal GEMM TileMma 只发注释无计算指令 (静默占位符)
+layer: 范式缺陷 (NO-SILENT-FALLBACK)
+codePattern: "lower_instr_dispatch.inc.rs:2901-2906 RDNA 'scalar FMA fallback' + Metal 'simdgroup_matrix_multiply' 只注释无 emit"
+triggerCondition: "RDNA (gfx<908) / Metal GPU 的 TileMma"
+fixTemplate: "返回 Err(CodegenViolation) 而非静默占位; 或实现 RDNA MFMA / Metal simdgroup_matrix_multiply"
+归因时间: 2026-07-03
+status: 待根治
+```
+
+```yaml
+patternId: BCE-20260703-GPU-BLACKWELL-UNUSED
+title: Blackwell SM120 NVFP6/2-CTA/block-scaled GEMM IsaFeature 声明但 codegen 无 emit
+layer: 设计缺陷 (缺失硬件指令)
+codePattern: "isa_profile.rs:598-606 声明 Tmem/BlockScaled/NativeFp4/NativeFp6/ThreadBlockCluster/TwoCta, 但 gpu_lower 无 cta_group::2/NVFP6 emit/block-scaled GEMM"
+triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
+fixTemplate: "gpu_lower emit tcgen05.mma cta_group::2 + block-scaled scale factor + NVFP4/NVFP6 GEMM kind"
+归因时间: 2026-07-03
+status: 待根治
+```
+
+```yaml
+patternId: BCE-20260703-X86-APX-EGPR-UNUSED
+title: x86 APX egpr (r16-r31) 完全不可用, gpr()/gpr32() 只映射 0..15
+layer: 设计缺陷 (缺失硬件指令 + NO-HW-DEGRADATION)
+codePattern: "helpers.inc.rs:109-127 gpr()/gpr32()/gpr64_to_32() 只 0..15, 16..31 unreachable!"
+triggerCondition: "APX 硬件 (isa_profile.rs:438 max_gpr=31 已分配但 lower 不可用)"
+fixTemplate: "扩展 gpr/gpr32/gpr64_to_32 映射到 r16-r31 (APX egpr)"
+归因时间: 2026-07-03
+status: 待根治
+```
+
+### P1 高
+
+- BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM)
+- BCE-20260703-AARCH64-ARGMAX-U8-OVERFLOW: lower_instr.inc.rs:347 `elem_count as u8` 当寄存器编号 (vocab>124 溢出)
+- BCE-20260703-AARCH64-ARGMAX-HARDCODED-F32: lower_instr.inc.rs:321,382 + dispatch:4056 硬编码 elem_bytes=4 (BF16 logits错)
+- BCE-20260703-AARCH64-SVE2-DOT-MISSING: SVE2 SMMLA/UMMLA/USDOT/BFDOT-Z/FDOT-Z 缺失 (只 NEON)
+- BCE-20260703-X86-AVX512FP16-BF16DOT-MISSING: vfmaddph/vdpbf16ps 缺失 (hardware_profile.rs:65 has_avx512fp16 硬编码 false)
+- BCE-20260703-GPU-TCGEN05-PLACEHOLDER: tcgen05.mma 占位符式 (无 block-scaled scale factor, 无 cta_group::2)
+- BCE-20260703-GPU-DIALECT-DEADCODE: gpu_dialect_fragments trait impl 是 dead code (声称用 trait 对象实际用枚举 match)
+
+### 审计来源
+- x86 Explore: 6 NO-LOOP-UNROLL + 3 SYMDIM-DEGRADE + APX/AVX10.2/FP16/BF16 dot 缺失 + KiviDequantLoad 地址不推进
+- aarch64 Explore: AArch64Features 丢弃 + VecLoad/Store 静默 + argmax u8 溢出 + SVE2 dot 缺失
+- GPU Explore: KiviDequantLoad {d} 覆盖 + RDNA/Metal GEMM 占位 + Blackwell 指令未用 + attention head 串行 + tcgen05 占位
