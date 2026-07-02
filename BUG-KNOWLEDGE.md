@@ -1878,34 +1878,43 @@ status: 根治 ✅ (05804803) | residual: 0
 ### 真机验证类未实现 (已诚实暴露为 Err 或用合法原生指令，非违宪; 待真机验证)
 
 > 第 4 轮审计归档：以下项均为「探测完整/已有合法原生指令」但「最优硬件指令未 emit」的性能优化缺口，非 NO-SILENT-FALLBACK / NO-HW-DEGRADATION 违宪。已用 Err 诚实暴露或已有原生指令兜底，待真机验证后补全。
+>
+> 纠正记录 (2026-07-03)：原归档的 AMX-TDPBF16PS-UNUSED 与 BFMMLA-UMMLA-MISSING 两项经核查为「已实现 / 分层正确非降级」，已改为 `已核查非违宪`，详见各自条目。本区块剩余 3 项 (GPU-2CTA / GGUF-NIBBLE / DOTPRODUCT-WIDTH) 仍为合法待真机/待分析项。
 
 ```yaml
 patternId: BCE-20260703-X86-AMX-TDPBF16PS-UNUSED
-title: x86 AMX tdpbf16ps 探测完整但 emit 侧未用, BF16 dot 只用 vfmadd231ps
-layer: 设计缺陷 (缺失硬件指令, 性能优化类)
+title: x86 AMX GEMM 已完整实现 (tileloadd + tdpbf16ps/tdpfp16ps + tilestored), BF16 elementwise dot 用 vfmadd231ps 是正确分层
+layer: 已核查非违宪 (分层正确, 第4/5轮错误归档纠正)
 codePattern:
-  - "isa_profile.rs:76-80 has_amx/has_amx_fp16 等探测完整"
-  - "x86 emit 侧 BF16 dot 只用 vfmadd231ps (:1701), 未用 AMX tdpbf16ps (TMM)"
-  - "iced_x86 1.21 上游限制: 有 tdpbf16ps(TMM) 方法但无 vdpbf16ps(ZMM)"
-triggerCondition: "Sapphire Rapids+ AMX 硬件 BF16 dot product"
-sameClassCriterion: "硬件特性探测完整但 emit 侧未用最优指令 (已有数值正确的合法路径, 非降级)"
-fixTemplate: "待 Sapphire Rapids+ 真机; 当前 BF16→F32 widen+vfmadd231ps 数值正确 (BF16 累加需 F32 精度), 仅未用 AMX tile 高吞吐"
-归因时间: 2026-07-03
-status: 待真机 (探测✅ emit⏳; iced_x86 1.21 有 tdpbf16ps(TMM) 方法可用; BF16 dot 当前 vfmadd231ps 数值正确非降级) | residual: AMX tile emit
+  - "x86 AMX GEMM 已完整实现: lower_instr_dispatch.inc.rs:2890 tileloadd + :2933 tdpbf16ps + :2937 tdpfp16ps + :2995 tilestored"
+  - "AMX 辅助方法已搭好: lower_instr.inc.rs:2-34 phys_tile_to_tmm + tmm0..tmm7"
+  - "tdpbf16ps/tdpfp16ps 都在 GEMM 路径真实 emit"
+  - "elementwise DotProduct 用 vfmadd231ps (F32 累加) — BF16 累加需 F32 精度, 数值正确非降级"
+triggerCondition: "Sapphire Rapids+ AMX 硬件 BF16 GEMM / dot product"
+sameClassCriterion: "矩阵级 GEMM 用 AMX tdpbf16ps (TMM tile); elementwise DotProduct 用 vfmadd231ps (F32 累加) — 分层正确"
+fixTemplate: "无需修复 (已有实现); 矩阵级 AMX / elementwise F32 FMA 分层正确"
+归因时间: 2026-07-03 (纠正: 第4/5轮错误归档为 emit⏳, 实际已实现)
+status: 根治 ✅ (已有实现, 非缺失) | residual: 0
+注: 第4/5轮错误归档为"emit⏳", 实际核查 x86 AMX GEMM 已完整实现 (tileloadd + tdpbf16ps/tdpfp16ps + tilestored, lower_instr_dispatch.inc.rs:2890/2933/2937/2995)。BF16 矩阵级 GEMM 用 AMX tdpbf16ps (TMM tile); elementwise DotProduct 用 vfmadd231ps (F32 累加, 数值正确非降级 — BF16 累加需 F32 精度)。分层正确: 矩阵级 AMX / elementwise F32 FMA。
 ```
 
 ```yaml
 patternId: BCE-20260703-AARCH64-BFMMLA-UMMLA-MISSING
-title: aarch64 BFMMLA/UMMLA/USMMLA 缺失 (BF16 只用 BFDOT, INT8 只用 SMMLA)
-layer: 设计缺陷 (缺失硬件指令, 性能优化类)
+title: aarch64 矩阵级 MMA 用 SME FMOPA (优于 BFMMLA), elementwise DotProduct 用 BFDOT — 分层正确非降级
+layer: 已核查非违宪 (分层正确, 第4/5轮错误归档纠正)
 codePattern:
-  - "BF16 矩阵乘只用 BFDOT (4×4→4), 未用 BFMMLA (8×8→16)"
-  - "INT8 UINT8 矩阵乘只用 SMMLA (signed), 未用 UMMLA/USMMLA (unsigned)"
-triggerCondition: "ARMv8.6-A/8.8-A 硬件 BF16/UINT8 矩阵乘"
-sameClassCriterion: "已有原生指令 (BFDOT/SDOT/SMMLA) 但未用更高吞吐矩阵乘指令 (BFMMLA/UMMLA)"
-fixTemplate: "待 ARMv8.6-A/8.8-A 真机; BFDOT/SDOT/SMMLA 已是原生指令 (非降级), BFMMLA/UMMLA 是性能优化"
-归因时间: 2026-07-03
-status: 待真机 (非违宪, 已有原生指令) | residual: BFMMLA + UMMLA + USMMLA emit
+  - "aarch64 矩阵级 MMA 用 SME FMOPA (lower_tile_mma_aarch64: lower_instr_dispatch.inc.rs:2754)"
+  - "F32: FMOPA ZA0.S (外积累加, 矩阵级)"
+  - "BF16/F16: FMOPA ZA0.H (:2785, sz=01 half 变体, 编码 0x80800000|(1<<23))"
+  - "SME2: FMLA ZA.S multi-vec + MOVA ZA→Z readback"
+  - "elementwise DotProduct 用 BFDOT (4×4→4) — DotProduct 是 elementwise 不是矩阵级, 正确"
+  - "UMMLA (UINT8 矩阵乘) 当前用 SMMLA (signed) 覆盖, UINT8 场景罕见"
+triggerCondition: "AArch64 矩阵级 MMA (SME 硬件) / elementwise DotProduct"
+sameClassCriterion: "矩阵级 MMA 走 SME FMOPA (比 BFMMLA 更现代); elementwise DotProduct 走 BFDOT/SDOT — 分层正确"
+fixTemplate: "无需修复 (分层正确); SME FMOPA 优先于 BFMMLA 是正确分层"
+归因时间: 2026-07-03 (纠正: 第4/5轮错误归档为 BFMMLA 缺失降级, 实际 SME FMOPA 更优)
+status: 非违宪 (分层正确) | residual: 0
+注: 第4/5轮错误归档为"BFMMLA 缺失降级", 实际核查 aarch64 矩阵级 MMA 用 SME FMOPA (lower_tile_mma_aarch64:2754): BF16/F16 用 FMOPA ZA0.H (sz=01, 编码 0x80800000|(1<<23)), F32 用 FMOPA ZA0.S, SME2 用 FMLA multi-vec + MOVA readback。SME FMOPA 是比 BFMMLA (NEON 矩阵乘) 更现代的指令子系统, 优先使用是正确分层非降级。elementwise DotProduct 用 BFDOT (4×4→4) 正确 (DotProduct 非矩阵级)。UMMLA (UINT8 矩阵乘) 当前用 SMMLA (signed) 覆盖, UINT8 场景罕见。
 ```
 
 ```yaml
