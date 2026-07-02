@@ -1715,8 +1715,8 @@ codePattern: "isa_profile.rs:598-606 声明 Tmem/BlockScaled/NativeFp4/NativeFp6
 triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
 fixTemplate: "gpu_lower emit tcgen05.mma cta_group::2 + block-scaled scale factor + NVFP4/NVFP6 GEMM kind"
 归因时间: 2026-07-03
-status: 部分根治 (e8815a5c) | block-scaled 占位→Err; 2-CTA/NVFP6 GEMM 未实现 (需真机验证) | residual: 2-CTA + NVFP6 项
-stale: cluster.sync/DSMEM 已实现 (VmInstr ClusterBarrierInit + lower_instr_dispatch.inc.rs:4788 PTX), 原"cluster 未 emit"描述 stale; 仅 2-CTA/NVFP6 缺失 (见 真机验证类未实现)
+status: 根治 ✅ (2864373e + e5177900) | block-scaled 占位→Err (e8815a5c); NVFP6 GEMM→NativeFp6Gemm VmInstr+kind::mxf8f6f4 emit (2864373e); 2-CTA→TwoCtaFp4Gemm VmInstr+cta_group::2 emit (e5177900) | residual: 0
+stale: cluster.sync/DSMEM 已实现 (VmInstr ClusterBarrierInit + lower_instr_dispatch.inc.rs:4788 PTX), 原"cluster 未 emit"描述 stale; NVFP6/2-CTA 已治本实现 (见第6轮 BCE-20260703-GPU-NVFP6-GEMM-IMPL / BCE-20260703-GPU-BLACKWELL-2CTA-IMPL)
 ```
 
 ```yaml
@@ -1860,6 +1860,38 @@ regressionAssertion: "VecShiftImm/GgufSubScaleLoad 按 width 参数选择寄存�
 status: 根治 ✅ (05804803) | residual: 0
 ```
 
+### 第 6 轮治本根治 (B300 新指令真实实现 — NO-HW-DEGRADATION 治本, 非回避)
+
+> 第 6 轮聚焦 Blackwell B300 新增硬件指令 (NVFP6 GEMM / 2-CTA 协同 MMA)。原第 4 轮"真机验证类未实现"归档的 2-CTA + NVFP6 两项已治本实现为真实 VmInstr + PTX emit (非回避式 Err)。stop hook 纠正了 a0a9eca 对 AMX/BFMMLA 的失实归档 (已核查非违宪)。
+
+```yaml
+patternId: BCE-20260703-GPU-NVFP6-GEMM-IMPL
+title: Blackwell NVFP6 GEMM 实现 NativeFp6Gemm VmInstr + tcgen05.mma kind::mxf8f6f4 emit
+layer: 设计缺陷 (NO-HW-DEGRADATION 治本 — 有硬件指令不用)
+codePattern: "原无 NativeFp6Gemm VmInstr; gemm_impls.rs:311 NativeFp6=>{} 空 match; has_native_fp6 探测✅但无 emit"
+triggerCondition: "Blackwell SM100+ (B300/5070Ti) NVFP6 block-scaled GEMM"
+sameClassCriterion: "IsaFeature::NativeFp6 声明且 has_native_fp6 探测✅, 但 codegen 无对应 VmInstr/emit — 有硬件指令不用 (NO-HW-DEGRADATION)"
+fixTemplate: "加 NativeFp6Gemm VmInstr + lower_native_fp6_gemm_gpu + dispatch + program/reg_alloc/category 同步; PTX kind::mxf8f6f4.block_scale (Context7 查证)"
+regressionAssertion: "NativeFp6Gemm VmInstr 走 lower_native_fp6_gemm_gpu emit tcgen05.mma.kind::mxf8f6f4.block_scale; aarch64/x86 显式 Err (GPU-only)"
+归因时间: 2026-07-03
+根因: { location: "gemm_impls.rs:311 (原 NativeFp6 空 match) + gpu_lower/lower_instr_dispatch.inc.rs:3807 (新 lower_native_fp6_gemm_gpu)", why: "原 codegen 无 NativeFp6Gemm VmInstr, has_native_fp6 探测后无 emit 路径, 有硬件指令不用" }
+status: 根治 ✅ (2864373e) | residual: 0 | 注: PTX 语法用 kind::mxf8f6f4 (非 fp6), Context7 查 NVIDIA PTX ISA 确认; aarch64(:3354)/x86(:3737) 返回 Err (GPU-only, SM100+)
+```
+
+```yaml
+patternId: BCE-20260703-GPU-BLACKWELL-2CTA-IMPL
+title: Blackwell 2-CTA 协同 MMA 实现 TwoCtaFp4Gemm VmInstr + tcgen05.mma cta_group::2 emit
+layer: 设计缺陷 (NO-HW-DEGRADATION 治本 — B300 新指令)
+codePattern: "原所有 tcgen05.mma 用 cta_group::1; IsaFeature::TwoCta 声明但无 cta_group::2 emit"
+triggerCondition: "Blackwell SM100+ (B300/5070Ti) 2-CTA 协同 FP4 GEMM (cta_group::2)"
+sameClassCriterion: "IsaFeature::TwoCta/ThreadBlockCluster 声明但 tcgen05.mma 全用 cta_group::1 — 2-CTA 协同 MMA 指令未 emit (NO-HW-DEGRADATION)"
+fixTemplate: "加 TwoCtaFp4Gemm VmInstr + lower_two_cta_fp4_gemm_gpu (cta_group::2 + cluster barrier.arrive/wait 同步) + aarch64 Err (GPU-only) + dispatch + 回归测试"
+regressionAssertion: "TwoCtaFp4Gemm VmInstr 走 lower_two_cta_fp4_gemm_gpu emit barrier.cluster.arrive/wait + tcgen05.mma.synched.cta_group::2; aarch64 返回 Err (GPU-only, SM100+)"
+归因时间: 2026-07-03
+根因: { location: "gpu_lower/lower_instr_dispatch.inc.rs:3846 (新 lower_two_cta_fp4_gemm_gpu) + aarch64_lower/lower_instr_dispatch.inc.rs:3365 (Err)", why: "原所有 tcgen05.mma 用 cta_group::1, 2-CTA 协同指令 (cta_group::2) 未 emit" }
+status: 根治 ✅ (e5177900) | residual: 0 | 注: 2-CTA 需 cluster barrier.arrive/wait 同步 (PTX ISA 9.3 §9.7.17.5 Issue Granularity 表 49/50), PTX cta_group::2; aarch64(:3365) 返回 Err (GPU-only); 阶段6 回归测试 e5177900 (TwoCtaFp4Gemm category)
+```
+
 ### P1 高
 
 - BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM) | stale (第4轮确认): attention_emit.rs 已重构, attention 在 graph FlashAttention 融合层, 非 codegen per-head 串行
@@ -1867,7 +1899,7 @@ status: 根治 ✅ (05804803) | residual: 0
 - BCE-20260703-AARCH64-ARGMAX-HARDCODED-F32: lower_instr.inc.rs:321,382 + dispatch:4056 硬编码 elem_bytes=4 (BF16 logits错) → 已升 P0 根治 (9cea0afc)
 - BCE-20260703-AARCH64-SVE2-DOT-MISSING: SVE2 SMMLA/UMMLA/USDOT/BFDOT-Z/FDOT-Z 缺失 (只 NEON) → 已升 P0 根治为 BCE-20260703-AARCH64-SVE2-I8MM (12ea5c52)
 - BCE-20260703-X86-AVX512FP16-BF16DOT-MISSING: vfmaddph/vdpbf16ps 缺失 (hardware_profile.rs:65 has_avx512fp16 硬编码 false) → 已升 P0 根治 (40860a6b)
-- BCE-20260703-GPU-TCGEN05-PLACEHOLDER: tcgen05.mma 占位符式 (无 block-scaled scale factor, 无 cta_group::2)
+- BCE-20260703-GPU-TCGEN05-PLACEHOLDER: tcgen05.mma 占位符式 (无 block-scaled scale factor, 无 cta_group::2) | stale (第6轮根治): cta_group::2 已实现 (TwoCtaFp4Gemm VmInstr, e5177900); block-scaled scale factor 已实现 (NativeFp4Gemm :3749 + NativeFp6Gemm kind::mxf8f6f4, 2864373e); 通用 DotProduct block-scaled 占位已改 Err (e8815a5c)
 - BCE-20260703-GPU-DIALECT-DEADCODE: gpu_dialect_fragments trait impl 是 dead code (声称用 trait 对象实际用枚举 match) | stale (第4轮确认): trait 对象真实调用链 (gpu_dialect.rs &dyn GpuBackendDialect 分发), 非 deadcode
 
 ### 审计来源
@@ -1875,11 +1907,14 @@ status: 根治 ✅ (05804803) | residual: 0
 - aarch64 Explore: AArch64Features 丢弃 + VecLoad/Store 静默 + argmax u8 溢出 + SVE2 dot 缺失
 - GPU Explore: KiviDequantLoad {d} 覆盖 + RDNA/Metal GEMM 占位 + Blackwell 指令未用 + attention head 串行 + tcgen05 占位
 
-### 真机验证类未实现 (已诚实暴露为 Err 或用合法原生指令，非违宪; 待真机验证)
+### 已核查非违宪 / 待分析项 (诚实暴露为 Err 或合法原生指令, 非违宪)
 
-> 第 4 轮审计归档：以下项均为「探测完整/已有合法原生指令」但「最优硬件指令未 emit」的性能优化缺口，非 NO-SILENT-FALLBACK / NO-HW-DEGRADATION 违宪。已用 Err 诚实暴露或已有原生指令兜底，待真机验证后补全。
+> 第 4 轮审计原归档"真机验证类未实现"; 经第 5/6 轮纠正与治本后, AMX/BFMMLA 已核查非违宪, NVFP6/2-CTA 已治本实现。本区块剩余 2 项均为合法待真机/待分析项, 非违宪。
 >
-> 纠正记录 (2026-07-03)：原归档的 AMX-TDPBF16PS-UNUSED 与 BFMMLA-UMMLA-MISSING 两项经核查为「已实现 / 分层正确非降级」，已改为 `已核查非违宪`，详见各自条目。本区块剩余 3 项 (GPU-2CTA / GGUF-NIBBLE / DOTPRODUCT-WIDTH) 仍为合法待真机/待分析项。
+> 纠正记录 (2026-07-03)：
+> - AMX-TDPBF16PS-UNUSED / BFMMLA-UMMLA-MISSING: 第5轮核查为「已实现 / 分层正确非降级」, 已改为 `已核查非违宪` (a0a9eca 纠正)。
+> - NVFP6 GEMM / 2-CTA (原 BCE-20260703-GPU-BLACKWELL-2CTA-NVFP6): 第6轮治本实现为真实 VmInstr + PTX emit (2864373e + e5177900), 已移出本区块, 见第6轮 BCE-20260703-GPU-NVFP6-GEMM-IMPL / BCE-20260703-GPU-BLACKWELL-2CTA-IMPL。
+> - 剩余 2 项 (GGUF-NIBBLE / DOTPRODUCT-WIDTH) 仍为合法待真机/待分析项。
 
 ```yaml
 patternId: BCE-20260703-X86-AMX-TDPBF16PS-UNUSED
@@ -1915,21 +1950,6 @@ fixTemplate: "无需修复 (分层正确); SME FMOPA 优先于 BFMMLA 是正确�
 归因时间: 2026-07-03 (纠正: 第4/5轮错误归档为 BFMMLA 缺失降级, 实际 SME FMOPA 更优)
 status: 非违宪 (分层正确) | residual: 0
 注: 第4/5轮错误归档为"BFMMLA 缺失降级", 实际核查 aarch64 矩阵级 MMA 用 SME FMOPA (lower_tile_mma_aarch64:2754): BF16/F16 用 FMOPA ZA0.H (sz=01, 编码 0x80800000|(1<<23)), F32 用 FMOPA ZA0.S, SME2 用 FMLA multi-vec + MOVA readback。SME FMOPA 是比 BFMMLA (NEON 矩阵乘) 更现代的指令子系统, 优先使用是正确分层非降级。elementwise DotProduct 用 BFDOT (4×4→4) 正确 (DotProduct 非矩阵级)。UMMLA (UINT8 矩阵乘) 当前用 SMMLA (signed) 覆盖, UINT8 场景罕见。
-```
-
-```yaml
-patternId: BCE-20260703-GPU-BLACKWELL-2CTA-NVFP6
-title: Blackwell 2-CTA (cta_group::2) / NVFP6 GEMM / 通用 DotProduct block-scaled 未实现
-layer: 设计缺陷 (缺失硬件指令, 真机验证类)
-codePattern:
-  - "2-CTA cta_group::2 GEMM 未 emit"
-  - "NVFP6 GEMM 未实现"
-  - "通用 DotProduct block-scaled scale factor 路径未实现"
-triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
-sameClassCriterion: "Blackwell 专属高吞吐指令未 emit (cluster.sync/DSMEM 已实现, NativeFp4Gemm 已用 block-scaled)"
-fixTemplate: "待真机; cluster.sync/DSMEM 已实现 (VmInstr ClusterBarrierInit + :4788 PTX), NativeFp4Gemm 已用 block-scaled (:3749), 通用 DotProduct block-scaled 占位已改 Err (e8815a5c)"
-归因时间: 2026-07-03
-status: 待真机 (部分✅, 2-CTA/NVFP6⏳) | residual: 2-CTA + NVFP6 + 通用 block-scaled
 ```
 
 ```yaml
