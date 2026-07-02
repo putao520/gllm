@@ -1582,5 +1582,53 @@ regressionAssertion:
   files:
     - "gllm-kernels/src/compiler/mod.rs (compile_gpu select_hook 前移 + 传 hook_ref)"
     - "gllm/src/engine/mega_kernel/executor_core.inc.rs (None→Err)"
+  status: 根治 ✅ (14ac47b8 hook + ba4a728 Err 不 fallback) | residual: 0
+```
+
+---
+
+## BCE-20260702-GPU-OOM — compile_mega_kernel_vm 多次调用累积不释放致 23.5GB OOM
+
+```yaml
+patternId: BCE-20260702-GPU-OOM
+title: compile_mega_kernel_vm 被多次调用, program/中间数据不释放, RSS 累积至 23.5GB OOM
+layer: 设计缺陷
+codePattern:
+  - "executor_core.inc.rs 对 SmolLM2 触发 3+ 次 compile_mega_kernel_vm (主graph CPU / kivi4 / GPU)"
+  - "每次 compile_mega_kernel_vm 返回的 program (5739 instrs, 2543 vregs) 不释放, RSS 累积"
+  - "单次编译内存正常 (680MB), 多次累积 (679→683→994→...→23.5GB) OOM"
+triggerCondition:
+  - "GPU E2E 测试 SmolLM2-135M (5070Ti, max_seq_len=8192)"
+  - "编译流程触发多个 compile target (CPU + GPU + kivi4)"
+detectionSignatures:
+  structural:
+    - "compile_mega_kernel_vm 在 executor_core.inc.rs 被多处调用 (147/192/223), 返回的 program 未显式 drop"
+  literal:
+    - "Out of memory: Killed process.*test_e2e_gpu.*anon-rss:23559036kB"
+  antipattern:
+    - "multiple-compile-no-release"
+sameClassCriterion:
+  - "编译流程多次调用 compile_mega_kernel_vm 或 compiler.compile, 每次返回的大对象 (program/graph/alloc) 不释放累积"
+fixTemplate:
+  - "定位多次编译触发源 (hetero/kivi4/多 target), 减少不必要的编译"
+  - "每次编译后显式 drop program/中间数据 (提取需要的信息后立即 drop)"
+  - "或确保编译结果提取后, 原大对象离开作用域释放"
+regressionAssertion:
+  - "GPU E2E SmolLM2 编译期 RSS 不超过 2GB (单次 ~680MB, 多次不累积)"
+归因时间: 2026-07-02
+根因:
+  location: "gllm/src/engine/mega_kernel/executor_core.inc.rs (compile_mega_kernel_vm 多次调用 :147/:192/:223)"
+  layer: 设计缺陷
+  why: "SmolLM2 编译触发 3+ 次 compile_mega_kernel_vm (CPU 主graph + kivi4 + GPU), 每次返回 program (5739 instrs/2543 vregs) 不释放, RSS 累积 679→683→994→...→23.5GB OOM。单次编译内存正常 (680MB)。"
+  evidence:
+    - "OOMPROBE-CMKE 诊断: 3 组 cmke-vm-pre-return, RSS 679/683/994 递增不降"
+    - "单次 cmke-vm-pre-return: instrs=5739 vregs=2581/2543, RSS=680MB (正常)"
+    - "buffer_alloc 正常 (234MB, 3f337307 预算门控未触发) —— 排除 architect 最初假设"
+    - "time -v: 峰值 RSS 23.5GB, 运行 84 秒, 虚拟地址空间 112GB"
+    - "heaptrack: malloc 峰值仅 243KB —— 23.5GB 是 mmap/大对象累积非 malloc"
+  architect_misattribution: "architect 最初假设 buffer_alloc 全 VReg 物化 (11db587d 副作用) 是错的 —— buffer_alloc 234MB 正常, OOM 在 compile_mega_kernel_vm 多次调用累积"
+根治:
+  strategy: "定位多次编译触发源 + 确保每次编译后 program/中间数据释放"
   status: 根治中 | residual: 待验证
+  排序: "已修 5 个前序 BUG (RegAlloc×2/hook/fallback/spill), OOM 是第 6 个"
 ```
