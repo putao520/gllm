@@ -1665,7 +1665,7 @@ fixTemplate: "x86: dst_offset + ecx*8 (每对 8 字节); GPU: 每 pair 独立寄
 regressionAssertion: "KIVI 解码后所有 nibble 值独立保留, 不覆盖; SmolLM2 argmax=253"
 归因时间: 2026-07-03
 根因: { x86: "finalize_quant.inc.rs:362,367 dst 写地址不推进", GPU: "lower_instr_dispatch.inc.rs:3158-3233 {d} 覆盖" }
-status: 根治中 (fix-kivi-dequant-numerical)
+status: 根治 ✅ (72bdef3e+a609bf0e, x86+GPU, 6981 passed) | residual: 0 | 5070Ti离线待回归 SmolLM2 argmax=253
 ```
 
 ```yaml
@@ -1680,7 +1680,7 @@ sameClassCriterion: "Platform 枚举有硬件特性但 lower 层快照结构体�
 fixTemplate: "扩展 AArch64Features 含全部 8 特性 + with_profile 提取全字段 + lower 层按特性门控指令"
 归因时间: 2026-07-03
 根因: { location: "aarch64_lower.rs:47-51 + helpers.inc.rs:17-24", why: "特性结构体只保留 3/8 字段" }
-status: 待根治
+status: 根治 ✅ (3ced06c7) | residual: 0
 ```
 
 ```yaml
@@ -1693,7 +1693,7 @@ sameClassCriterion: "match 的 _ => {} 静默 NOP (非 Reshape/Transpose 例外)
 fixTemplate: "_ => {} 改 Err(CodegenViolation) 或补全 Add/Mul/ScalarVReg emit"
 归因时间: 2026-07-03
 根因: { location: "lower_instr_dispatch.inc.rs:340,359,404,422,566" }
-status: 待根治
+status: 根治 ✅ (3ced06c7) | residual: 0
 ```
 
 ```yaml
@@ -1704,7 +1704,7 @@ codePattern: "lower_instr_dispatch.inc.rs:2901-2906 RDNA 'scalar FMA fallback' +
 triggerCondition: "RDNA (gfx<908) / Metal GPU 的 TileMma"
 fixTemplate: "返回 Err(CodegenViolation) 而非静默占位; 或实现 RDNA MFMA / Metal simdgroup_matrix_multiply"
 归因时间: 2026-07-03
-status: 待根治
+status: 根治 ✅ (3ced06c7) | residual: 0
 ```
 
 ```yaml
@@ -1715,7 +1715,7 @@ codePattern: "isa_profile.rs:598-606 声明 Tmem/BlockScaled/NativeFp4/NativeFp6
 triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
 fixTemplate: "gpu_lower emit tcgen05.mma cta_group::2 + block-scaled scale factor + NVFP4/NVFP6 GEMM kind"
 归因时间: 2026-07-03
-status: 待根治
+status: 根治 ✅ (3ced06c7) | residual: 0
 ```
 
 ```yaml
@@ -1726,7 +1726,7 @@ codePattern: "helpers.inc.rs:109-127 gpr()/gpr32()/gpr64_to_32() 只 0..15, 16..
 triggerCondition: "APX 硬件 (isa_profile.rs:438 max_gpr=31 已分配但 lower 不可用)"
 fixTemplate: "扩展 gpr/gpr32/gpr64_to_32 映射到 r16-r31 (APX egpr)"
 归因时间: 2026-07-03
-status: 待根治
+status: 根治 ✅ (3ced06c7) | residual: 0
 ```
 
 ### P1 高
