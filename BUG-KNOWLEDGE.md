@@ -1800,6 +1800,66 @@ fixTemplate: "VmInstr Argmax/BatchPerSeqArgmax 加 dtype 字段, elem_bytes 用 
 status: 根治 ✅ (9cea0afc) | residual: 0
 ```
 
+### 第 5 轮治本根治 (有硬件指令但用软件序列 — NO-HW-DEGRADATION 深层违宪)
+
+> 第 5 轮重新聚焦"有硬件指令但用软件序列"的深层 NO-HW-DEGRADATION 违宪 (比第 4 轮"真机验证类"归档更治本)。以下 4 项已根治。
+
+```yaml
+patternId: BCE-20260703-AARCH64-SVE-PROD-NOP
+title: aarch64 SVE/NEON ReduceOp::Prod/LogSum 静默 mov NOP (非真实 reduction)
+layer: 范式缺陷 (NO-SILENT-FALLBACK)
+codePattern: "lower_instr_dispatch.inc.rs:1430/1437 Prod+LogSum `if vd != vs { emit mov }` — 注释说 produce error 实际 mov NOP"
+triggerCondition: "aarch64 ReduceOp::Prod / LogSum 进入 SVE/NEON reduction 路径"
+sameClassCriterion: "reduction 路径用 mov 伪实现代替真实 reduction 计算 (注释声称报错实际 NOP, 静默降级)"
+fixTemplate: "mov NOP → Err(CodegenViolation); Prod 需 trace 层 pairwise mul 分解, LogSum 需 Exp+Sum+Log 分解"
+regressionAssertion: "Prod/LogSum 触发时不再静默 mov; 未分解前显式 Err, 分解后真实 reduction"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:1430,1437", why: "Prod+LogSum 用 mov 占位, 注释 'produce error' 但实际 NOP 静默" }
+status: 根治 ✅ (feca6bae) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-X86-FP16-DOT-SOFTWARE-DEGRADATION
+title: x86 FP16 dot 用 vfmadd231ps 软件 FMA, 错误注释 "no native FP16", 实际 has_avx512fp16+iced_x86 有 vfmadd231ph
+layer: 设计缺陷 (NO-HW-DEGRADATION + 错误注释)
+codePattern: "lower_instr_dispatch.inc.rs:1724 DotDtype::Fp16 `vfmadd231ps` + 注释 'x86 has no native FP16 dot-product'; iced_x86 1.21 有 vfmadd231ph(XMM/YMM/ZMM)"
+triggerCondition: "x86 has_avx512fp16=true 硬件 FP16 dot product"
+sameClassCriterion: "已有原生硬件指令 (vfmadd231ph) 但用软件 FMA (vfmadd231ps) + 错误注释掩盖 (NO-HW-DEGRADATION)"
+fixTemplate: "has_avx512fp16 → vfmadd231ph 原生 FP16 FMA; 无 FP16 → widen+F32 vfmadd231ps (数值正确); AVX2 → ymm"
+regressionAssertion: "has_avx512fp16=true 路径 emit vfmadd231ph 而非 vfmadd231ps; 错误注释删除"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:1724", why: "FP16 dot 用 vfmadd231ps + 注释否认原生指令; iced_x86 1.21 实有 vfmadd231ph 编码" }
+status: 根治 ✅ (d4358b39) | residual: 0 | 注: 修正错误注释, iced_x86 1.21 支持 vfmadd231ph 编码
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-VECLEAK-W256-DEGRADE
+title: aarch64 TableLookup/VecLoad/VecStore W256/W512 `let _ = width; Ok(())` 静默丢 lane (只加载 128-bit)
+layer: 范式缺陷 (NO-SILENT-FALLBACK + NO-HW-DEGRADATION)
+codePattern: "lower_instr_dispatch.inc.rs :385/:1138/:1149 三处 `let _ = width; Ok(())` — W256 请求只返回 4 lane (丢 4 lane)"
+triggerCondition: "aarch64 路径收到 W256/W512 请求 (源自 x86 gemm 误传, aarch64 PhysVec 仅 128-bit)"
+sameClassCriterion: "按 width 分流缺失, `let _ = width` 静默丢 lane 而非 Err 或正确分流 (NO-SILENT-FALLBACK)"
+fixTemplate: "按 width 分流: W128/Scalable 保留; W256/W512 → Err (aarch64 PhysVec 128-bit, reg_alloc 不分连续寄存器对, 架构异常)"
+regressionAssertion: "W256/W512 请求在 aarch64 显式 Err 而非静默丢 lane; W128 正常工作"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:385,1138,1149", why: "`let _ = width` 忽略请求宽度, 静默只加载 128-bit 丢 lane" }
+status: 根治 ✅ (e8f352df) | residual: 0 | 注: 架构事实 aarch64 只产生 W128/Scalable, W256/W512 是 x86 gemm 误传
+```
+
+```yaml
+patternId: BCE-20260703-X86-WIDTH-SILENT-DEGRADE
+title: x86 VecShiftImm/GgufSubScaleLoad `let _ = width` 静默按 use_avx512 硬选 reg 宽度 (忽略请求 width)
+layer: 范式缺陷 (NO-HW-DEGRADATION + ARCH-JIT-YIELDS)
+codePattern: "lower_instr_dispatch.inc.rs:1293 VecShiftImm `let _ = width` + use_avx512 硬选 zmm/ymm; :3149 GgufSubScaleLoad `let _ = width.f32_lanes()` 硬编码 YMM"
+triggerCondition: "x86 VecShiftImm / GgufSubScaleLoad 传入 width 参数"
+sameClassCriterion: "按 width 分流缺失, `let _ = width` 静默按 use_avx512 硬选宽度, 忽略调用方请求 (ARCH-JIT-YIELDS 违宪)"
+fixTemplate: "按 width 分流: W128→xmm, W256→ymm, W512→zmm(use_avx512 gate), Warp/Scalable→Err"
+regressionAssertion: "VecShiftImm/GgufSubScaleLoad 按 width 参数选择寄存器宽度, 不再 `let _ = width`"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:1293,3149", why: "`let _ = width` 忽略请求, 按 use_avx512 硬选宽度" }
+status: 根治 ✅ (05804803) | residual: 0
+```
+
 ### P1 高
 
 - BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM) | stale (第4轮确认): attention_emit.rs 已重构, attention 在 graph FlashAttention 融合层, 非 codegen per-head 串行
@@ -1831,7 +1891,7 @@ triggerCondition: "Sapphire Rapids+ AMX 硬件 BF16 dot product"
 sameClassCriterion: "硬件特性探测完整但 emit 侧未用最优指令 (已有数值正确的合法路径, 非降级)"
 fixTemplate: "待 Sapphire Rapids+ 真机; 当前 BF16→F32 widen+vfmadd231ps 数值正确 (BF16 累加需 F32 精度), 仅未用 AMX tile 高吞吐"
 归因时间: 2026-07-03
-status: 待真机 (非违宪, 探测✅ emit⏳) | residual: AMX tile emit
+status: 待真机 (探测✅ emit⏳; iced_x86 1.21 有 tdpbf16ps(TMM) 方法可用; BF16 dot 当前 vfmadd231ps 数值正确非降级) | residual: AMX tile emit
 ```
 
 ```yaml
@@ -1873,4 +1933,16 @@ sameClassCriterion: "aarch64 nibble load 变体未实现 (NEON 可实现, 非真
 fixTemplate: "NEON 实现 nibble load 三变体 (非真机类, 新功能补全)"
 归因时间: 2026-07-03
 status: 功能缺失 (Err 暴露, 非违宪) | residual: 3 nibble load 变体
+```
+
+```yaml
+patternId: BCE-20260703-GPU-DOTPRODUCT-WIDTH-IGNORED
+title: GPU DotProduct `let _ = width` 忽略 width 参数 (MMA 形状由指令固定)
+layer: 待分析 (可能合理, SIMT 隐式覆盖)
+codePattern: "lower_instr_dispatch.inc.rs:1299 GPU DotProduct `let _ = width` — GPU SIMT 模型 width 语义与 CPU 不同 (MMA 形状 m16n8k16 由指令固定, width 可能无意义)"
+triggerCondition: "GPU DotProduct 进入 codegen 路径"
+sameClassCriterion: "GPU 上下文 width 字段语义是否与 CPU 等价 (CPU width=寄存器宽度, GPU width 可能由 MMA 指令形状隐式决定)"
+fixTemplate: "需架构级判断 width 字段在 GPU dot 上下文语义; 若 SIMT 隐式覆盖则合理 (标注), 若误传则补全 width 分流"
+归因时间: 2026-07-03
+status: 待分析 (可能合理, SIMT 隐式覆盖; 需架构级判断 width 在 GPU dot 上下文语义) | residual: 架构语义判定
 ```
