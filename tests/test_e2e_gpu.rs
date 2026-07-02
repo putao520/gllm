@@ -271,14 +271,15 @@ fn gpu_e2e_e5_small_v2_embedding_alignment() {
     eprintln!("[GPU-EMB] e5-small-v2: dim={} cos={cos:.6}", emb.len());
 }
 
-// ─── TEST-GPU-RERANK-001: bge-reranker-v2-m3 (SafeTensors) ───────────
+// ─── TEST-GPU-RERANK-001: bge-reranker-v2-m3 (ONNX 量化版, E2E-QUANT-FIRST) ───
 //
 // 验证 GPU 路径 rerank 排序 sane + 与文档相关性方向一致。
+// E2E-QUANT-FIRST: 用 onnx-community/bge-reranker-v2-m3-ONNX (166MB) 而非满血 SafeTensors (2.2GB)。
 
 #[test]
 #[ignore = "GPU E2E: requires 5070Ti + cuda feature; run with --ignored"]
 fn gpu_e2e_bge_reranker_v2_m3() {
-    const MODEL: &str = "BAAI/bge-reranker-v2-m3";
+    const MODEL: &str = "onnx-community/bge-reranker-v2-m3-ONNX";
     const QUERY: &str = "What is the capital of France?";
 
     let documents = [
