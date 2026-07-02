@@ -1892,6 +1892,38 @@ regressionAssertion: "TwoCtaFp4Gemm VmInstr 走 lower_two_cta_fp4_gemm_gpu emit 
 status: 根治 ✅ (e5177900) | residual: 0 | 注: 2-CTA 需 cluster barrier.arrive/wait 同步 (PTX ISA 9.3 §9.7.17.5 Issue Granularity 表 49/50), PTX cta_group::2; aarch64(:3365) 返回 Err (GPU-only); 阶段6 回归测试 e5177900 (TwoCtaFp4Gemm category)
 ```
 
+```yaml
+patternId: BCE-20260703-GPU-PREFETCH-STALE
+title: GPU Prefetch HIP/Metal 静默 NOP + FP6 stale Err 消息 (NativeFp6Gemm 已实现)
+layer: 范式缺陷 (NO-SILENT-FALLBACK) + 文档 stale
+codePattern:
+  - "lower_instr_dispatch.inc.rs:511 `_ => {} // GPU prefetch 由 texture cache 自动管理` (HIP/Metal 静默丢)"
+  - "lower_instr_dispatch.inc.rs:2850 Err 说 'NativeFp6Gemm not yet implemented' 但 2864373e 已实现"
+triggerCondition: "GPU HIP/Metal Prefetch 指令 / FP6 GEMM 路径 (Stale Err 误导)"
+sameClassCriterion: "Prefetch match _ => {} 静默 NOP (非 Reshape/Transpose 例外) + Err 消息描述与实现现状不一致 (stale 文档)"
+fixTemplate: "Prefetch _ => {} → Err (HIP/Metal prefetch 未实现, PTX SM80+ only); FP6 Err 消息更新为委托 NativeFp6Gemm"
+regressionAssertion: "GPU HIP/Metal Prefetch 触发时显式 Err 而非静默 NOP; FP6 路径走 NativeFp6Gemm 而非 stale Err"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:511 (Prefetch _ => {}) + :2850 (FP6 stale Err)", why: "Prefetch HIP/Metal 静默丢; FP6 Err 消息未随 2864373e 实现同步更新" }
+status: 根治 ✅ (77b2d1b2) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-GPU-TRANSCENDENTAL-NOP
+title: GPU Transcendental `_ => mov` 静默 NOP (Sigmoid/Fwht) + HIP/Metal 用 PTX 语法生成无效代码
+layer: 范式缺陷 (NO-SILENT-FALLBACK + NO-HW-DEGRADATION)
+codePattern:
+  - "lower_instr_dispatch.inc.rs:1246 `_ => \"mov\"` (Sigmoid/Fwht 变 mov NOP)"
+  - "lower_instr_dispatch.inc.rs:1251 HIP/Metal 用 PTX 语法 `ex2.approx(tanh.approx)` 无效"
+triggerCondition: "GPU Transcendental Sigmoid/Fwht 进入 codegen 路径 / HIP/Metal Transcendental (PTX 语法在非 PTX 后端无效)"
+sameClassCriterion: "Transcendental match _ => mov 静默 NOP (非 Reshape/Transpose 例外) + 跨 dialect 用错误语法 (PTX 语法用于 HIP/Metal)"
+fixTemplate: "_ => mov → Err (Sigmoid=ex2+rcp 组合, Fwht=trace 分解); PTX/HIP/Metal 按 dialect 分流正确函数名 (PTX ex2.approx/tanh.approx, HIP exp2f/tanhf, Metal exp2/tanh)"
+regressionAssertion: "GPU Sigmoid/Fwht 触发时显式 Err 或正确组合实现而非 mov NOP; HIP/Metal Transcendental 用本 dialect 语法"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:1246 (`_ => \"mov\"`) + :1251 (HIP/Metal 用 PTX 语法)", why: "Transcendental 未知分支用 mov 占位 NOP; 跨 dialect 未分流, HIP/Metal 错用 PTX 语法生成无效代码" }
+status: 根治 ✅ (5ede109b) | residual: 0
+```
+
 ### P1 高
 
 - BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM) | stale (第4轮确认): attention_emit.rs 已重构, attention 在 graph FlashAttention 融合层, 非 codegen per-head 串行
@@ -1974,4 +2006,118 @@ sameClassCriterion: "GPU 上下文 width 字段语义是否与 CPU 等价 (CPU w
 fixTemplate: "需架构级判断 width 字段在 GPU dot 上下文语义; 若 SIMT 隐式覆盖则合理 (标注), 若误传则补全 width 分流"
 归因时间: 2026-07-03
 status: 待分析 (可能合理, SIMT 隐式覆盖; 需架构级判断 width 在 GPU dot 上下文语义) | residual: 架构语义判定
+```
+
+### 第 6 轮已核查非违宪路径 (深度扫描量化 decode/async copy/prefetch/attention/transcendental/atomic, 避免重复审计)
+
+> 第 6 轮深度扫描量化 decode / async copy / prefetch / attention / transcendental / atomic 路径。以下路径均已核查使用正确硬件指令或合法 Err, 非违宪, 归档以避免后续重复审计。
+
+```yaml
+patternId: BCE-20260703-GPU-TMA-ASYNC-COPY-OK
+title: GPU TMA async copy 已用硬件指令 (cp.async.bulk SM90+ / cp.async SM80+)
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "lower_instr_dispatch.inc.rs:4012-4046 cp.async.bulk (SM90+) / cp.async (SM80+) 已用硬件指令"
+triggerCondition: "GPU TMA async copy 路径"
+sameClassCriterion: "async copy 用硬件指令 (cp.async.bulk / cp.async) 而非软件序列"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-03 (第6轮深度扫描确认)
+status: 非违宪 (硬件指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-GPU-ATOMIC-BARRIER-OK
+title: GPU atomic/barrier 已用硬件指令 (atom.global.add.u32 + bar.sync + membar.gl)
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "lower_instr_dispatch.inc.rs:883-920 atom.global.add.u32 + bar.sync + membar.gl 已用"
+triggerCondition: "GPU atomic / barrier / memory fence 路径"
+sameClassCriterion: "atomic/barrier 用硬件指令 (atom.global / bar.sync / membar) 而非软件模拟"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-03 (第6轮深度扫描确认)
+status: 非违宪 (硬件指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-ATOMIC-OK
+title: aarch64 atomic 已用硬件指令 (AtomicAdd/AtomicCAS LDXR/STXR)
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "aarch64 AtomicAdd/AtomicCAS (LDXR/STXR exclusive) 已用"
+triggerCondition: "aarch64 atomic 路径"
+sameClassCriterion: "atomic 用 LDXR/STXR 硬件 exclusive 指令而非软件模拟"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-03 (第6轮深度扫描确认)
+status: 非违宪 (硬件指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-X86-FP16-CONVERT-OK
+title: x86 FP16 转换已用硬件指令 (vcvtph2ps)
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "x86 finalize_quant + lower_instr_dispatch vcvtph2ps 已用 (FP16→F32 转换)"
+triggerCondition: "x86 FP16 量化路径 (FP16→F32 半精度转换)"
+sameClassCriterion: "FP16→F32 转换用 vcvtph2ps 硬件指令而非软件逐位解码"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-03 (第6轮深度扫描确认)
+status: 非违宪 (硬件指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-X86-VECNARROW-WIDEN-OK
+title: x86 VecNarrow/Widen 已用硬件指令 (BF16→F32 vpmovzxwd+vpslld, F16→F32 vcvtph2ps), 未支持组合返回 Err (合法)
+layer: 已核查非违宪 (硬件指令已用 + 合法 Err)
+codePattern: "x86 BF16→F32 vpmovzxwd+vpslld; F16→F32 vcvtph2ps; 未支持组合返回 Err (合法, 非静默 NOP)"
+triggerCondition: "x86 VecNarrow/VecWiden 路径 (BF16/F16 半精度扩展)"
+sameClassCriterion: "VecNarrow/Widen 用硬件指令; 未支持组合显式 Err 而非静默 NOP"
+fixTemplate: "无需修复 (硬件指令已用, 未支持组合合法 Err)"
+归因时间: 2026-07-03 (第6轮深度扫描确认)
+status: 非违宪 (硬件指令已用 + 合法 Err) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-X86-AARCH64-TRANSCENDENTAL-OK
+title: x86/aarch64 Transcendental 已正确实现 (x86 Cephes, aarch64 2*sigmoid(2x)-1), 无 _ => mov
+layer: 已核查非违宪 (真实实现, 非 NOP)
+codePattern: "x86 Sigmoid/Tanh/Fwht Cephes 实现; aarch64 2*sigmoid(2x)-1 实现; 无 _ => mov 静默 NOP"
+triggerCondition: "x86/aarch64 Transcendental (Sigmoid/Tanh/Fwht) 路径"
+sameClassCriterion: "Transcendental 用真实数学实现 (Cephes / 2*sigmoid(2x)-1) 而非 mov NOP"
+fixTemplate: "无需修复 (真实实现)"
+归因时间: 2026-07-03 (第6轮深度扫描确认, 与 GPU BCE-20260703-GPU-TRANSCENDENTAL-NOP 对照 — 仅 GPU 路径有 mov NOP)
+status: 非违宪 (真实实现) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-SME2-OK
+title: aarch64 SME2 已用硬件指令 (FMOPA/FMLA/MOVA)
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "emit_math.inc.rs:378-403 FMOPA/FMLA/MOVA 已用 (SME2 矩阵级 MMA)"
+triggerCondition: "aarch64 SME2 硬件矩阵级 MMA 路径"
+sameClassCriterion: "SME2 用 FMOPA/FMLA/MOVA 硬件指令而非软件模拟"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-03 (第6轮深度扫描确认, a0a9eca 已纠正)
+status: 非违宪 (硬件指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-X86-AMX-OK
+title: x86 AMX 已用硬件指令 (tdpbf16ps/tdpfp16ps)
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "x86 AMX tdpbf16ps/tdpfp16ps 已用 (矩阵级 BF16/FP16 GEMM)"
+triggerCondition: "x86 AMX 硬件矩阵级 GEMM 路径"
+sameClassCriterion: "AMX 用 tdpbf16ps/tdpfp16ps 硬件指令而非软件 FMA"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-03 (第6轮深度扫描确认, a0a9eca 已纠正)
+status: 非违宪 (硬件指令已用) | residual: 0
+注: 详见 BCE-20260703-X86-AMX-TDPBF16PS-UNUSED (第4/5轮错误归档已纠正, AMX GEMM 已完整实现)
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-MMA-OK
+title: aarch64 矩阵级 MMA 已用 SME FMOPA.H (BFMMLA 非降级, SME 更优)
+layer: 已核查非违宪 (分层正确)
+codePattern: "aarch64 矩阵级 MMA 用 SME FMOPA.H (BF16/F16), 非 BFMMLA 降级"
+triggerCondition: "aarch64 矩阵级 MMA (SME 硬件) 路径"
+sameClassCriterion: "矩阵级 MMA 用 SME FMOPA (比 BFMMLA 更现代), 非降级"
+fixTemplate: "无需修复 (分层正确)"
+归因时间: 2026-07-03 (第6轮深度扫描确认, a0a9eca 已纠正)
+status: 非违宪 (分层正确) | residual: 0
+注: 详见 BCE-20260703-AARCH64-BFMMLA-UMMLA-MISSING (第4/5轮错误归档已纠正)
 ```
