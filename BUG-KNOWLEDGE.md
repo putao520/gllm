@@ -1716,6 +1716,23 @@ triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
 fixTemplate: "gpu_lower emit tcgen05.mma cta_group::2 + block-scaled scale factor + NVFP4/NVFP6 GEMM kind"
 归因时间: 2026-07-03
 status: 部分根治 (e8815a5c) | block-scaled 占位→Err; 2-CTA/NVFP6 GEMM 未实现 (需真机验证) | residual: 2-CTA + NVFP6 项
+stale: cluster.sync/DSMEM 已实现 (VmInstr ClusterBarrierInit + lower_instr_dispatch.inc.rs:4788 PTX), 原"cluster 未 emit"描述 stale; 仅 2-CTA/NVFP6 缺失 (见 真机验证类未实现)
+```
+
+```yaml
+patternId: BCE-20260703-GPU-WARP-SKIP-PLACEHOLDER
+title: GPU warp reduce 未知 op + HIP/Metal warp reduce + GprBranchAction::Skip(count) 静默注释占位
+layer: 范式缺陷 (NO-SILENT-FALLBACK)
+codePattern:
+  - "lower_instr_dispatch.inc.rs:4371 _ => emit_line('// unsupported') 未知 op 静默注释"
+  - "lower_instr_dispatch.inc.rs:4376/4379 HIP/Metal warp reduce 只注释无 emit"
+  - "lower_instr_dispatch.inc.rs:2432/2475 for _ in 0..*count emit_line('// skip') Skip(count) 占位"
+triggerCondition: "GPU warp reduce (HIP/Metal) / GprBranchAction::Skip / 未知 op 进入 warp reduce 路径"
+sameClassCriterion: "match arm 用注释占位 ('// unsupported' / '// skip') 代替 Err, 静默 NOP (非 Reshape/Transpose 例外)"
+fixTemplate: "占位注释 → Err(CodegenViolation); HIP/Metal/Skip 未实现暴露为 Err (真机验证类不实现)"
+归因时间: 2026-07-03
+根因: { location: "lower_instr_dispatch.inc.rs:4371,4376,4379,2432,2475", why: "占位注释代替 Err, 静默 NOP" }
+status: 根治 ✅ (937cc044) | residual: 0 | 注: 占位均为未被测试覆盖的死代码
 ```
 
 ```yaml
@@ -1785,15 +1802,75 @@ status: 根治 ✅ (9cea0afc) | residual: 0
 
 ### P1 高
 
-- BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM) | stale: attention_emit.rs 已重构删除, attention 在 graph FlashAttention 融合
+- BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM) | stale (第4轮确认): attention_emit.rs 已重构, attention 在 graph FlashAttention 融合层, 非 codegen per-head 串行
 - BCE-20260703-AARCH64-ARGMAX-U8-OVERFLOW: lower_instr.inc.rs:347 `elem_count as u8` 当寄存器编号 (vocab>124 溢出) → 已升 P0 根治 (9cea0afc)
 - BCE-20260703-AARCH64-ARGMAX-HARDCODED-F32: lower_instr.inc.rs:321,382 + dispatch:4056 硬编码 elem_bytes=4 (BF16 logits错) → 已升 P0 根治 (9cea0afc)
 - BCE-20260703-AARCH64-SVE2-DOT-MISSING: SVE2 SMMLA/UMMLA/USDOT/BFDOT-Z/FDOT-Z 缺失 (只 NEON) → 已升 P0 根治为 BCE-20260703-AARCH64-SVE2-I8MM (12ea5c52)
 - BCE-20260703-X86-AVX512FP16-BF16DOT-MISSING: vfmaddph/vdpbf16ps 缺失 (hardware_profile.rs:65 has_avx512fp16 硬编码 false) → 已升 P0 根治 (40860a6b)
 - BCE-20260703-GPU-TCGEN05-PLACEHOLDER: tcgen05.mma 占位符式 (无 block-scaled scale factor, 无 cta_group::2)
-- BCE-20260703-GPU-DIALECT-DEADCODE: gpu_dialect_fragments trait impl 是 dead code (声称用 trait 对象实际用枚举 match) | stale: trait 对象真实调用链 (gpu_dialect.rs &dyn GpuBackendDialect 分发), 非 deadcode
+- BCE-20260703-GPU-DIALECT-DEADCODE: gpu_dialect_fragments trait impl 是 dead code (声称用 trait 对象实际用枚举 match) | stale (第4轮确认): trait 对象真实调用链 (gpu_dialect.rs &dyn GpuBackendDialect 分发), 非 deadcode
 
 ### 审计来源
 - x86 Explore: 6 NO-LOOP-UNROLL + 3 SYMDIM-DEGRADE + APX/AVX10.2/FP16/BF16 dot 缺失 + KiviDequantLoad 地址不推进
 - aarch64 Explore: AArch64Features 丢弃 + VecLoad/Store 静默 + argmax u8 溢出 + SVE2 dot 缺失
 - GPU Explore: KiviDequantLoad {d} 覆盖 + RDNA/Metal GEMM 占位 + Blackwell 指令未用 + attention head 串行 + tcgen05 占位
+
+### 真机验证类未实现 (已诚实暴露为 Err 或用合法原生指令，非违宪; 待真机验证)
+
+> 第 4 轮审计归档：以下项均为「探测完整/已有合法原生指令」但「最优硬件指令未 emit」的性能优化缺口，非 NO-SILENT-FALLBACK / NO-HW-DEGRADATION 违宪。已用 Err 诚实暴露或已有原生指令兜底，待真机验证后补全。
+
+```yaml
+patternId: BCE-20260703-X86-AMX-TDPBF16PS-UNUSED
+title: x86 AMX tdpbf16ps 探测完整但 emit 侧未用, BF16 dot 只用 vfmadd231ps
+layer: 设计缺陷 (缺失硬件指令, 性能优化类)
+codePattern:
+  - "isa_profile.rs:76-80 has_amx/has_amx_fp16 等探测完整"
+  - "x86 emit 侧 BF16 dot 只用 vfmadd231ps (:1701), 未用 AMX tdpbf16ps (TMM)"
+  - "iced_x86 1.21 上游限制: 有 tdpbf16ps(TMM) 方法但无 vdpbf16ps(ZMM)"
+triggerCondition: "Sapphire Rapids+ AMX 硬件 BF16 dot product"
+sameClassCriterion: "硬件特性探测完整但 emit 侧未用最优指令 (已有数值正确的合法路径, 非降级)"
+fixTemplate: "待 Sapphire Rapids+ 真机; 当前 BF16→F32 widen+vfmadd231ps 数值正确 (BF16 累加需 F32 精度), 仅未用 AMX tile 高吞吐"
+归因时间: 2026-07-03
+status: 待真机 (非违宪, 探测✅ emit⏳) | residual: AMX tile emit
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-BFMMLA-UMMLA-MISSING
+title: aarch64 BFMMLA/UMMLA/USMMLA 缺失 (BF16 只用 BFDOT, INT8 只用 SMMLA)
+layer: 设计缺陷 (缺失硬件指令, 性能优化类)
+codePattern:
+  - "BF16 矩阵乘只用 BFDOT (4×4→4), 未用 BFMMLA (8×8→16)"
+  - "INT8 UINT8 矩阵乘只用 SMMLA (signed), 未用 UMMLA/USMMLA (unsigned)"
+triggerCondition: "ARMv8.6-A/8.8-A 硬件 BF16/UINT8 矩阵乘"
+sameClassCriterion: "已有原生指令 (BFDOT/SDOT/SMMLA) 但未用更高吞吐矩阵乘指令 (BFMMLA/UMMLA)"
+fixTemplate: "待 ARMv8.6-A/8.8-A 真机; BFDOT/SDOT/SMMLA 已是原生指令 (非降级), BFMMLA/UMMLA 是性能优化"
+归因时间: 2026-07-03
+status: 待真机 (非违宪, 已有原生指令) | residual: BFMMLA + UMMLA + USMMLA emit
+```
+
+```yaml
+patternId: BCE-20260703-GPU-BLACKWELL-2CTA-NVFP6
+title: Blackwell 2-CTA (cta_group::2) / NVFP6 GEMM / 通用 DotProduct block-scaled 未实现
+layer: 设计缺陷 (缺失硬件指令, 真机验证类)
+codePattern:
+  - "2-CTA cta_group::2 GEMM 未 emit"
+  - "NVFP6 GEMM 未实现"
+  - "通用 DotProduct block-scaled scale factor 路径未实现"
+triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
+sameClassCriterion: "Blackwell 专属高吞吐指令未 emit (cluster.sync/DSMEM 已实现, NativeFp4Gemm 已用 block-scaled)"
+fixTemplate: "待真机; cluster.sync/DSMEM 已实现 (VmInstr ClusterBarrierInit + :4788 PTX), NativeFp4Gemm 已用 block-scaled (:3749), 通用 DotProduct block-scaled 占位已改 Err (e8815a5c)"
+归因时间: 2026-07-03
+status: 待真机 (部分✅, 2-CTA/NVFP6⏳) | residual: 2-CTA + NVFP6 + 通用 block-scaled
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-GGUF-NIBBLE-LOAD-MISSING
+title: aarch64 GGUF Q4_1/Q4_K nibble load 返回 Err (SignedNibbleHigh/UnsignedNibbleLow/UnsignedNibbleHigh)
+layer: 功能缺失 (非违宪根治, 新功能)
+codePattern: "finalize_quant.inc.rs:232-250 aarch64 nibble load 三变体返回 Err"
+triggerCondition: "aarch64 GGUF Q4_1/Q4_K 量化权重 nibble 解码"
+sameClassCriterion: "aarch64 nibble load 变体未实现 (NEON 可实现, 非真机类, 属新功能)"
+fixTemplate: "NEON 实现 nibble load 三变体 (非真机类, 新功能补全)"
+归因时间: 2026-07-03
+status: 功能缺失 (Err 暴露, 非违宪) | residual: 3 nibble load 变体
+```
