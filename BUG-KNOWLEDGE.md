@@ -1693,7 +1693,7 @@ sameClassCriterion: "match 的 _ => {} 静默 NOP (非 Reshape/Transpose 例外)
 fixTemplate: "_ => {} 改 Err(CodegenViolation) 或补全 Add/Mul/ScalarVReg emit"
 归因时间: 2026-07-03
 根因: { location: "lower_instr_dispatch.inc.rs:340,359,404,422,566" }
-status: 根治 ✅ (3ced06c7) | residual: 0
+status: 根治 ✅ (5eefb5d6) | residual: 0
 ```
 
 ```yaml
@@ -1704,7 +1704,7 @@ codePattern: "lower_instr_dispatch.inc.rs:2901-2906 RDNA 'scalar FMA fallback' +
 triggerCondition: "RDNA (gfx<908) / Metal GPU 的 TileMma"
 fixTemplate: "返回 Err(CodegenViolation) 而非静默占位; 或实现 RDNA MFMA / Metal simdgroup_matrix_multiply"
 归因时间: 2026-07-03
-status: 根治 ✅ (3ced06c7) | residual: 0
+status: 根治 ✅ (1ec1ac11) | residual: 0
 ```
 
 ```yaml
@@ -1715,7 +1715,7 @@ codePattern: "isa_profile.rs:598-606 声明 Tmem/BlockScaled/NativeFp4/NativeFp6
 triggerCondition: "Blackwell SM120 (B300/5070Ti) GPU"
 fixTemplate: "gpu_lower emit tcgen05.mma cta_group::2 + block-scaled scale factor + NVFP4/NVFP6 GEMM kind"
 归因时间: 2026-07-03
-status: 根治 ✅ (3ced06c7) | residual: 0
+status: 部分根治 (e8815a5c) | block-scaled 占位→Err; 2-CTA/NVFP6 GEMM 未实现 (需真机验证) | residual: 2-CTA + NVFP6 项
 ```
 
 ```yaml
@@ -1726,18 +1726,72 @@ codePattern: "helpers.inc.rs:109-127 gpr()/gpr32()/gpr64_to_32() 只 0..15, 16..
 triggerCondition: "APX 硬件 (isa_profile.rs:438 max_gpr=31 已分配但 lower 不可用)"
 fixTemplate: "扩展 gpr/gpr32/gpr64_to_32 映射到 r16-r31 (APX egpr)"
 归因时间: 2026-07-03
-status: 根治 ✅ (3ced06c7) | residual: 0
+status: 根治 ✅ (7fb7dc83) | iced_x86 1.21 上游限制: 无 R16-R31 变体, has_apx() 探测 TBD | residual: 0 (当前版本不可编码)
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-SVE2-I8MM
+title: aarch64 INT8 dot 只发 NEON SDOT, 未用 SVE2 i8mm SMMLA 矩阵乘
+layer: 设计缺陷 (缺失硬件指令)
+codePattern: "lower_instr.inc.rs lower_dot_product_native INT8 分支只 emit SDOT (0x4E409C00), has_i8mm 字段未用"
+triggerCondition: "aarch64 INT8 dot product (has_i8mm=true 硬件, 应发 SMMLA)"
+sameClassCriterion: "硬件特性字段声明但 lower 层未据此选择最优指令 (NO-HW-DEGRADATION)"
+fixTemplate: "has_i8mm=true 优先发 SMMLA (i8mm 8×8→16 矩阵乘), 否则 SDOT (has_dotprod gate)"
+归因时间: 2026-07-03
+根因: { location: "lower_instr.inc.rs lower_dot_product_native INT8 分支", why: "只 emit SDOT, has_i8mm 字段未用" }
+status: 根治 ✅ (12ea5c52) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-X86-AVX512FP16-BF16DOT-MISSING
+title: x86 has_avx512fp16 硬编码 false, vfmaddph/vdpbf16ps 永不发出
+layer: 设计缺陷 (NO-HW-DEGRADATION + 缺失硬件指令)
+codePattern: "hardware_profile.rs:65,204 has_avx512fp16: false 硬编码, CPUID.7.1:EAX[23] 未探测"
+triggerCondition: "x86 AVX512_FP16 硬件 (BF16/FP16 dot product 路径)"
+sameClassCriterion: "CPUID 探测位硬编码 false 导致硬件指令永不 emit"
+fixTemplate: "CPUID 探测 AVX512_FP16 bit, 填入 profile, emit 侧 vfmaddph/vdpbf16ps"
+归因时间: 2026-07-03
+根因: { location: "hardware_profile.rs:65,204", why: "has_avx512fp16 硬编码 false, CPUID.7.1:EAX[23] 未探测" }
+status: 根治 ✅ (40860a6b) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-ARGMAX-U8-OVERFLOW
+title: aarch64 argmax elem_count as u8 当寄存器号 (vocab>124 溢出) + 硬编码 elem_bytes=4 (BF16 logits 错)
+layer: 设计缺陷 (数值错误)
+codePattern:
+  - "lower_instr.inc.rs:347 elem_count as u8 当寄存器号 (vocab>124 溢出)"
+  - "lower_instr.inc.rs:321,382 vocab_bytes/4 硬编码 F32 elem_bytes"
+triggerCondition: "aarch64 argmax (vocab>124 或 BF16/非 F32 logits)"
+sameClassCriterion: "VmInstr Argmax/BatchPerSeqArgmax 缺 dtype 字段, elem_bytes 硬编码 4"
+fixTemplate: "VmInstr Argmax/BatchPerSeqArgmax 加 dtype 字段, elem_bytes 用 dtype.elem_bytes()"
+归因时间: 2026-07-03
+根因: { location: "lower_instr.inc.rs:347,321,382", why: "elem_count as u8 溢出 + elem_bytes 硬编码 F32" }
+status: 根治 ✅ (9cea0afc) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260703-AARCH64-ARGMAX-HARDCODED-F32
+title: aarch64 argmax 硬编码 elem_bytes=4 (BF16 logits 错) — 与 ARGMAX-U8-OVERFLOW 同 commit 根治
+layer: 设计缺陷 (数值错误)
+codePattern: "lower_instr.inc.rs:321,382 + dispatch:4056 硬编码 elem_bytes=4 (BF16 logits 错)"
+triggerCondition: "aarch64 argmax BF16/非 F32 logits"
+sameClassCriterion: "argmax 路径 elem_bytes 硬编码 4, 未用 dtype.elem_bytes()"
+fixTemplate: "VmInstr Argmax/BatchPerSeqArgmax 加 dtype 字段, elem_bytes 用 dtype.elem_bytes()"
+归因时间: 2026-07-03
+根因: { location: "lower_instr.inc.rs:321,382 + dispatch:4056", why: "vocab_bytes/4 硬编码 F32" }
+status: 根治 ✅ (9cea0afc) | residual: 0
 ```
 
 ### P1 高
 
-- BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM)
-- BCE-20260703-AARCH64-ARGMAX-U8-OVERFLOW: lower_instr.inc.rs:347 `elem_count as u8` 当寄存器编号 (vocab>124 溢出)
-- BCE-20260703-AARCH64-ARGMAX-HARDCODED-F32: lower_instr.inc.rs:321,382 + dispatch:4056 硬编码 elem_bytes=4 (BF16 logits错)
-- BCE-20260703-AARCH64-SVE2-DOT-MISSING: SVE2 SMMLA/UMMLA/USDOT/BFDOT-Z/FDOT-Z 缺失 (只 NEON)
-- BCE-20260703-X86-AVX512FP16-BF16DOT-MISSING: vfmaddph/vdpbf16ps 缺失 (hardware_profile.rs:65 has_avx512fp16 硬编码 false)
+- BCE-20260703-GPU-ATTENTION-HEAD-SERIAL: attention_emit.rs:762 `for h in 0..num_heads` 单 CTA 串行, 缺 head grid 并行 (SIMT 只修了 GEMM) | stale: attention_emit.rs 已重构删除, attention 在 graph FlashAttention 融合
+- BCE-20260703-AARCH64-ARGMAX-U8-OVERFLOW: lower_instr.inc.rs:347 `elem_count as u8` 当寄存器编号 (vocab>124 溢出) → 已升 P0 根治 (9cea0afc)
+- BCE-20260703-AARCH64-ARGMAX-HARDCODED-F32: lower_instr.inc.rs:321,382 + dispatch:4056 硬编码 elem_bytes=4 (BF16 logits错) → 已升 P0 根治 (9cea0afc)
+- BCE-20260703-AARCH64-SVE2-DOT-MISSING: SVE2 SMMLA/UMMLA/USDOT/BFDOT-Z/FDOT-Z 缺失 (只 NEON) → 已升 P0 根治为 BCE-20260703-AARCH64-SVE2-I8MM (12ea5c52)
+- BCE-20260703-X86-AVX512FP16-BF16DOT-MISSING: vfmaddph/vdpbf16ps 缺失 (hardware_profile.rs:65 has_avx512fp16 硬编码 false) → 已升 P0 根治 (40860a6b)
 - BCE-20260703-GPU-TCGEN05-PLACEHOLDER: tcgen05.mma 占位符式 (无 block-scaled scale factor, 无 cta_group::2)
-- BCE-20260703-GPU-DIALECT-DEADCODE: gpu_dialect_fragments trait impl 是 dead code (声称用 trait 对象实际用枚举 match)
+- BCE-20260703-GPU-DIALECT-DEADCODE: gpu_dialect_fragments trait impl 是 dead code (声称用 trait 对象实际用枚举 match) | stale: trait 对象真实调用链 (gpu_dialect.rs &dyn GpuBackendDialect 分发), 非 deadcode
 
 ### 审计来源
 - x86 Explore: 6 NO-LOOP-UNROLL + 3 SYMDIM-DEGRADE + APX/AVX10.2/FP16/BF16 dot 缺失 + KiviDequantLoad 地址不推进
