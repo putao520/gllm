@@ -231,8 +231,12 @@ impl MegaKernelExecutor {
                         Some(gpu_output.gpu_code)
                     }
                     Err(e) => {
-                        eprintln!("[mega] GPU compilation FAILED (NO_SILENT_FALLBACK): {e}");
-                        None
+                        // BCE-20260702-GPU-SILENT-FALLBACK: user explicitly requested GPU (Cuda/Hip),
+                        // so GPU compilation failure MUST propagate as Err — NO silent fallback to
+                        // CPU x86 codegen. This is the NO-SILENT-FALLBACK constitutional requirement.
+                        return Err(MegaKernelError::Compilation(
+                            format!("GPU mega-kernel compilation failed (target=sm{}): {}", sm, e),
+                        ));
                     }
                 }
             },

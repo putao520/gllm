@@ -1476,3 +1476,111 @@ Rust 侧多处 buffer 大小/stride 计算硬编码 `* 4`（F32 elem_bytes），
     - "HACK 关键词清理: BCE-HACK-HW-001/BCE-HACK-MODEL-003 注释改为普通说明"
     - "commit_gate: canCommit=true"
 ```
+
+---
+
+## BCE-20260702-REGALLOC-AVX2-OOB — x86 RegAllocator AVX2 YMM 范围未覆盖 AVX-512 扩展寄存器 (PhysVec 16..31)
+
+```yaml
+patternId: BCE-20260702-REGALLOC-AVX2-OOB
+title: x86 YMM/XMM 寄存器映射硬编码 0..15, AVX-512 下 PhysVec 16..31 越界 panic
+layer: 范式缺陷
+codePattern:
+  - "x86_lower helpers 的 ymm()/ymm_to_xmm() match 只覆盖 0..15 (AVX2 范围)"
+  - "AVX-512 IsaProfile 分配 scratch_vec_regs 从 32 宽寄存器文件顶部 (PhysVec 26..31)"
+  - "scratch_xmm/scratch_ymm 调用 ymm(PhysVec(29)) → unreachable! panic (AVX2 range [0..15])"
+triggerCondition:
+  - "use_avx512=true 的硬件 (AMD 9950X3D / 任何 AVX-512 CPU)"
+  - "寄存器压力使 RegAllocator 分配到 PhysVec ≥ 16 的 scratch vec"
+  - "GPU E2E 测试触发 CPU 编译路径 (executor_core.inc.rs:147 CompileTarget::Cpu)"
+detectionSignatures:
+  structural:
+    - "match phys.0 { 0..15 => ymmN, other => unreachable!(\"AVX2 range [0..15]\")"
+  literal:
+    - "RegAllocator produced invalid PhysVec.*for YMM; AVX2 range"
+  antipattern:
+    - "hardcoded-isa-range-mismatch"
+sameClassCriterion:
+  - "任何 x86 vec 寄存器映射 (ymm/zmm/xmm) 的 match 未覆盖 AVX-512 扩展范围 16..31, 而 IsaProfile 在 use_avx512=true 时分配 PhysVec ≥ 16"
+fixTemplate:
+  - "ymm() match 扩展到 0..31, 添加 ymm16..ymm31 (iced_x86 暴露为 zmm16..31 的低 256-bit 别名)"
+  - "ymm_to_xmm() 配套扩展到 xmm16..xmm31 (避免 scratch_xmm 走默认 xmm0 静默错误)"
+  - "回归测试: 构造 AVX-512 IsaProfile, 注入 scratch_vec_regs(26..31), 完整 lower_instr 流程验证不 panic"
+regressionAssertion:
+  - "avx512_scratch_vec_ids_26_31_lowers_without_panic: use_avx512=true + scratch_vec_regs(26..31) 必须不 panic"
+归因时间: 2026-07-02
+根因:
+  location: "gllm-kernels/src/compiler/codegen/vm/x86_lower/helpers.inc.rs:130-137 (ymm) + :87 (scratch_xmm→ymm_to_xmm)"
+  layer: 范式缺陷
+  why: "isa_profile.rs:446 vec_count = use_avx512 ? 32 : 16, AVX-512 分配 PhysVec(26..31) 作 scratch_vec_regs; 但 ymm()/ymm_to_xmm() 硬编码 0..15 范围, 未跟进 AVX-512 扩展。设计意图 (注释 'ymm/zmm 13 or 29') 知道双形态但代码只走 ymm 分支。"
+  evidence:
+    - "5070Ti (AMD 9950X3D AVX-512) GPU E2E SmolLM2 panic: PhysVec(29) for YMM; AVX2 range [0..15]"
+    - "backtrace: scratch_xmm(helpers:87) → ymm(PhysVec(29)) (helpers:136) → panic"
+    - "isa_profile.rs:450 PhysVec(vec_count-3)=PhysVec(29) when use_avx512=true"
+根治:
+  strategy: "扩展 ymm()/ymm_to_xmm() match 到 0..31, 用 iced_x86 的 ymm16-31/xmm16-31 (zmm16-31 的低 256/128-bit 别名, AVX-512 硬件原生支持)"
+  files:
+    - "gllm-kernels/src/compiler/codegen/vm/x86_lower/helpers.inc.rs (ymm +16..31)"
+    - "gllm-kernels/src/compiler/codegen/vm/x86_lower/lower_instr.inc.rs (ymm_to_xmm +16..31)"
+    - "gllm-kernels/src/compiler/codegen/vm/x86_lower/tests.inc.rs (回归测试)"
+  横扫:
+    - "x86: scratch_ymm/scratch_xmm/scratch_zmm 调用点 (emit_helpers.inc.rs 25+ 处) 签名不变, 仅内部实现改, 调用点无需改"
+    - "aarch64: NEON v0-31, SVE 未发现同类 (aarch64 不用 ymm/zmm 双形态)"
+  自愈轮次:
+    - "第 1 轮 (1a12d61d): ymm()/ymm_to_xmm() match 扩展 0..31, 用 iced_x86 ymm16-31/xmm16-31 别名. PhysVec(29) YMM panic 消失."
+    - "第 2 轮 (5c062f62): 次生 XMM29 编码错误 (vmovss 不接受 xmm16-31 SSE 编码). architect 方向 A: AVX-512 内部 scratch 0-2 固定 PhysVec(13/14/15) ≤15 (S 类, SSE scalar 兼容), spill scratch 3-5 用 29-31 (V 类, 向量 VEX/EVEX). isa_profile.rs S/V 分区 + helpers.inc.rs scratch_xmm debug_assert 防复发."
+  architect_decision: "方向 A (内部 scratch ≤15 + spill 16-31) 治本零回归; C (全回 10-15) 倒退丢失 AVX-512 32 寄存器优势"
+status: 根治 ✅ | residual: 0
+  根治记录:
+    - "1a12d61d: ymm/ymm_to_xmm 扩展 0..31 (AVX-512 ymm16-31 别名)"
+    - "5c062f62: isa_profile.rs AVX-512 内部 scratch 固定 13-15 (S 类 ≤15) + spill 29-31 (V 类) + scratch_xmm debug_assert"
+    - "cargo test --lib: 6975 passed 0 failed"
+    - "5070Ti 回归: PhysVec(29) YMM panic + XMM29 编码错误均消失, 暴露下一层 GPU hook 缺口 (BCE-20260702-GPU-SILENT-FALLBACK)"
+```
+
+---
+
+## BCE-20260702-GPU-SILENT-FALLBACK — GPU PTX 编译失败 log::warn!+None 静默 fallback CPU x86 codegen
+
+```yaml
+patternId: BCE-20260702-GPU-SILENT-FALLBACK
+title: GPU PTX 编译失败静默 fallback CPU x86 codegen, 违反 NO-SILENT-FALLBACK
+layer: 范式缺陷
+codePattern:
+  - "executor_core.inc.rs GPU 编译 Err(e) 分支: log::warn!(...GPU path unavailable) + None"
+  - "gpu_code=None → executor 走 CPU x86 codegen (CompileTarget::Cpu) → 掩盖 GPU codegen 真实缺口"
+triggerCondition:
+  - "GPU PTX 编译 compiler.compile(g, &gpu_config, None) 返回 Err"
+  - "用户设 .backend(BackendType::Cuda) 但实际走 CPU codegen (静默降级)"
+detectionSignatures:
+  structural:
+    - "Err(e) => { log::warn!(\"GPU compilation failed\"); None }"
+  literal:
+    - "GPU compilation failed (GPU path unavailable)"
+  antipattern:
+    - "silent-fallback-on-compile-err"
+sameClassCriterion:
+  - "任何 GPU/加速器编译失败时用 warn+None 静默 fallback CPU, 而非返回 Err 暴露真实失败原因"
+fixTemplate:
+  - "GPU 编译 Err(e) → 返回 CompilerError (不 fallback None), 错误信息贯穿真实失败原因 (lowering 缺口/SM 不支持)"
+  - "用户显式 .backend(Cuda) 时, GPU 编译失败 = Err, 禁止静默 CPU 降级"
+  - "自动检测路径 (state.backend=None) 无 GPU 时选 CPU 是合法兜底, 不在此列"
+regressionAssertion:
+  - "GPU 编译失败时必须返回 Err, 不得产生 cpu_code 兜底; 测试构造 GPU lowering 缺口必须见 Err 不见 x86 panic"
+归因时间: 2026-07-02
+根因:
+  location: "gllm/src/engine/mega_kernel/executor_core.inc.rs:233-236 (GPU Err 分支)"
+  layer: 范式缺陷
+  why: "GPU PTX 编译失败用 log::warn!+None 静默 fallback CPU x86 codegen, 违反 NO-SILENT-FALLBACK。掩盖 GPU codegen 真实缺口 (SM120 lowering 缺 op 等), 让用户以为 GPU 在跑实际 CPU 在跑。"
+  evidence:
+    - "executor_core.inc.rs:233 Err(e) => { log::warn!; None }"
+    - "architect consult 确认: 违反 NO-SILENT-FALLBACK + P2 用户配置优先"
+  note: "SmolLM2 GPU E2E 的 panic 实际发生在 CPU 编译阶段 (RegAlloc BUG, BCE-20260702-REGALLOC-AVX2-OOB), GPU 编译未跑到。此 BCE 案独立, RegAlloc 修完后若 GPU 编译仍有 Err 需暴露真实缺口。"
+  真实缺口 (RegAlloc 修完后暴露): "GPU compile_gpu (mod.rs:901-904) 调 compile_mega_kernel_vm 第 6 参数 hook=None, 但 plan_lower 的 emit_gemm_inline_with_hook 要求 mandatory hook (gemm_emit.rs:130). compile_gpu:910 select_hook 但没传给 compile_mega_kernel_vm. 对比 compile_cpu:643 传 hook_ref. 根治: compile_gpu 把 select_hook 移到 compile_mega_kernel_vm 之前, 传 hook_ref."
+根治:
+  strategy: "(1) compile_gpu 传 hook_ref 给 compile_mega_kernel_vm (修 GPU GEMM IsaHook mandatory); (2) executor_core GPU Err → 返回 CompilerError 不 fallback CPU (NO-SILENT-FALLBACK 正式根治)"
+  files:
+    - "gllm-kernels/src/compiler/mod.rs (compile_gpu select_hook 前移 + 传 hook_ref)"
+    - "gllm/src/engine/mega_kernel/executor_core.inc.rs (None→Err)"
+  status: 根治中 | residual: 待验证
+```
