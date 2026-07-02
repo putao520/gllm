@@ -188,6 +188,7 @@ fn gpu_e2e_qwen3_0_6b_gguf_q4_0_generation() {
         .max_tokens(20)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("GPU Qwen3 generate failed");
     let text = response.text.trim();
     assert!(!text.is_empty(), "GPU Qwen3 output is empty");
@@ -202,6 +203,7 @@ fn gpu_e2e_qwen3_0_6b_gguf_q4_0_generation() {
         .max_tokens(20)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("GPU Qwen3 second generate failed");
     assert_eq!(
         response2.text.trim(),
@@ -287,7 +289,7 @@ fn gpu_e2e_bge_reranker_v2_m3() {
 
     let client = gpu_reranker_client(MODEL);
     let response = client
-        .rerank(QUERY, &documents)
+        .rerank(QUERY, documents)
         .expect("GPU rerank failed");
     assert_eq!(response.results.len(), documents.len(), "rerank result count mismatch");
 
