@@ -2232,3 +2232,138 @@ fixTemplate: "无需修复 (合法 Err 暴露); 若真机出现可按需 PTX 实
 归因时间: 2026-07-03 (第7轮深度扫描确认)
 status: 非违宪 (合法 Err 暴露, 非静默 NOP) | residual: 0 | 注: QhBitExpand:GPU 与 aarch64 QhBitExpand 不同 — aarch64 已有 NEON 参照属 NO-HW-DEGRADATION (3cd9d8ac 已治本); GPU 无 PTX 参照属真机类待实现, Err 合法
 ```
+
+---
+
+## 第 8 轮 codegen 审计 — executor ABI/调度器/panic/dtype 强转/RLE/Kernels trait/cpu_backend
+
+> 第 8 轮深度扫描 executor ABI/调度器/panic/dtype 强转/RLE/Kernels trait/cpu_backend。发现 1 个架构级违宪 (cpu_backend Rust fallback) + 1 个 trait 设计级 stub 死代码, 均为架构级待根治 (需用户确认 SPEC 授权)。其余路径已核查非违宪, 归档避免重复审计。
+
+### 架构级违宪待根治 (报告用户, 需 SPEC 授权确认)
+
+```yaml
+patternId: BCE-20260708-CPU-BACKEND-FALLBACK-UNCONSTITUTIONAL
+title: cpu_backend.rs decoder_forward 是 Rust operator-by-operator fallback 推理路径, 违反 NO-FALLBACK + ARCH-RUST-IS-CODEGEN
+layer: 范式缺陷 (架构级)
+codePattern: "src/compat/cpu_backend.rs (任务派发原标 src/inference/cpu_backend.rs, 实际位于 compat/cpu_backend.rs) decoder_forward 直接走 'Fallback path: operator-by-operator execution', 用 self.kernels.rms_norm/gemm/vec_add 等 Rust 方法 + for layer_idx in 0..num_layers 循环 + Vec 分配在热路径; 注释自述 'Single-token path, multi-token requires JIT' (文件中 for layer in 0..nl 循环多处: :3677/:3711/:3849/:3877/:5969 等)"
+违宪依据: "SPEC/23-QUANT-CODEGEN-ALGO.html:535/546 明确 '仍然是 JIT 生成, 不 fallback 到 Rust'; NO-FALLBACK 铁律授权的 5 个 fallback (A2 HF→ModelScope / A3 ONNX Fusion→Atomic / A4 HW Fusion→Standalone / A5 Reshape/Transpose 元数据 NOP + 安全网) 不含 cpu_backend; ARCH-RUST-IS-CODEGEN 禁止 Rust 参与推理/循环/Vec/计算"
+triggerCondition: "单 token decode 路径走 cpu_backend (非 JIT mega_kernel)"
+sameClassCriterion: "Rust 层 operator-by-operator 逐算子执行推理 (rms_norm/gemm/vec_add Rust 方法 + for layer 循环), 而非单次 CALL JIT mega_kernel — NO-FALLBACK + ARCH-RUST-IS-CODEGEN 双违宪"
+fixTemplate: "根治建议 (二选一, 需用户确认): (1) 让 JIT 覆盖单 token 路径 (现 multi-token 已 JIT), 移除 cpu_backend fallback, 单 token 也走 mega_kernel; (2) 若确为 SPEC 授权单 token fallback, 在 SPEC 中显式追加第 6 个授权 fallback 并标注理由 (当前 SPEC 未授权)"
+regressionAssertion: "cpu_backend decoder_forward 不再出现 for layer_idx 循环 + Rust kernels 方法调用; 单 token 路径走 JIT mega_kernel; 或 SPEC 显式授权此 fallback"
+归因时间: 2026-07-08 (第8轮审计新增)
+status: 待架构级根治 (C-2 升级, 需用户确认是否 SPEC 授权) | residual: 1 (未修复)
+rootCause: { location: "src/compat/cpu_backend.rs decoder_forward (任务原标 src/inference/cpu_backend.rs)", layer: "范式缺陷 (架构级)", why: "单 token 路径绕过 JIT 走 Rust 逐算子循环, 违反 ARCH-RUST-IS-CODEGEN (Rust=代码生成器, 推理只一次 CALL) + NO-FALLBACK (5 授权 fallback 不含 cpu_backend); 注释自述 multi-token 才需 JIT 暴露了单 token 路径未 JIT 化的架构缺口", evidence: "SPEC/23:535/546 '不 fallback 到 Rust'; ARCH-RUST-IS-CODEGEN 铁律; NO-FALLBACK 授权清单" }
+```
+
+```yaml
+patternId: BCE-20260708-KERNELS-TRAIT-DEAD-STUB
+title: Kernels trait 12+ 个 unimplemented!() 默认体是死代码 stub (CpuKernels 全覆写)
+layer: 范式缺陷 (P-1 红线 stub 禁止)
+codePattern: "gllm-kernels/src/traits.rs:214-262 (任务原标 src/traits.rs, 实际位于 gllm-kernels 仓) Kernels trait 默认方法 unimplemented!(): vec_dot/vec_sub/vec_scale/vec_axpy/vec_sum/vec_max/vec_sum_squares/gemv/gemm_bt/gemm_bias/pack_b/gemm_prepacked/gemm_bias_prepacked 等 12+ 个; gllm-kernels/src/cpu_kernels/mod.rs:1076 (任务原标 src/cpu_kernels/mod.rs) impl Kernels<E> for CpuKernels<E> 覆写全部方法; 默认体永不执行 = 死代码 stub"
+triggerCondition: "任意 backend 未覆写某个 Kernels trait 默认方法时 (当前 CpuKernels 全覆写, 默认体永不触发)"
+sameClassCriterion: "trait 默认方法用 unimplemented!() 提供 stub 默认体, 而非 required method (无默认体); 当所有 backend 全覆写时, 默认体是死代码 — 违反 P-1 红线 (TODO/FIXME/stub 禁止)"
+fixTemplate: "根治建议 (二选一, 需架构判断): (1) 把 unimplemented!() 默认体改为 required method (去默认体), 强制所有 backend 显式实现, 编译期保证完整性; (2) 保留作增量实现默认体 (Rust 惯用法), 但需确认不违反 P-1 红线 (P-1 是否对 trait 默认体豁免需 architect 裁定)"
+regressionAssertion: "Kernels trait 不含 unimplemented!() 默认体; 或 architect 裁定 trait 默认体豁免 P-1 并在 SPEC 记录"
+归因时间: 2026-07-08 (第8轮审计新增)
+status: 待架构级判断 (trait 设计选择 vs P-1 红线) | residual: 1 (未修复)
+rootCause: { location: "gllm-kernels/src/traits.rs:214-262 Kernels trait 默认方法", layer: "范式缺陷 (trait 设计选择 vs P-1 红线)", why: "trait 用 unimplemented!() 默认体而非 required method, 当 backend 全覆写时默认体成死代码 stub; 是 Rust trait 增量实现惯用法, 但与 P-1 红线 (stub 禁止) 冲突, 需 architect 裁定是否豁免", evidence: "12+ unimplemented!() 默认体; CpuKernels impl 全覆写 (cpu_kernels/mod.rs:1076)" }
+```
+
+### 第 8 轮已核查非违宪路径 (executor ABI/调度器/RLE/dtype 强转/weight paging/GPU 指令, 避免重复审计)
+
+```yaml
+patternId: BCE-20260708-GPU-BITPACK-RLE-SERIAL-OK
+title: GPU bitpack RLE decode 单线程 tid==0 处理合法 (RLE 串行依赖, 非降级)
+layer: 已核查非违宪 (算法固有串行依赖)
+codePattern: "lower_gpu_bitpack_rle_decode:163 let _ = lanes (RLE decode 串行依赖, 单线程 tid==0 处理)"
+triggerCondition: "GPU bitpack RLE decode 路径"
+sameClassCriterion: "RLE decode 因串行依赖 (后一元素依赖前一元素状态) 单线程处理, 是算法固有特性, 非 SIMT 降级/非硬件能力不足"
+fixTemplate: "无需修复 (算法固有串行依赖)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (算法固有串行依赖) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-EXECUTOR-MEGA-KERNEL-NO-MAGIC-OK
+title: executor mega_kernel 无硬编码 magic number/assume
+layer: 已核查非违宪 (无硬编码)
+codePattern: "executor mega_kernel 路径无 magic number / assume 硬编码"
+triggerCondition: "executor mega_kernel 推理路径"
+sameClassCriterion: "executor mega_kernel 无 magic number/assume 硬编码, 参数从配置/ABI 读取"
+fixTemplate: "无需修复 (无硬编码)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (无硬编码) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-SCHEDULER-KV-CACHE-NO-TODO-OK
+title: 调度器 KV cache 无 todo!/FIXME (实现完整)
+layer: 已核查非违宪 (无 todo/FIXME)
+codePattern: "调度器 KV cache 路径无 todo!()/FIXME 注释"
+triggerCondition: "调度器 KV cache 管理路径"
+sameClassCriterion: "调度器 KV cache 无 todo!/FIXME 占位, 实现完整"
+fixTemplate: "无需修复 (无 todo/FIXME)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (无 todo/FIXME) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-GPU-DMA-TMA-SHUFFLE-OK
+title: GPU DMA 用 cp.async.bulk (TMA SM90+), softmax reduce 用 shfl.sync.down.b32 硬件 warp shuffle
+layer: 已核查非违宪 (硬件指令已用)
+codePattern: "GPU DMA: cp.async.bulk (TMA SM90+); GPU softmax reduce: shfl.sync.down.b32 硬件 warp shuffle"
+triggerCondition: "GPU DMA / softmax reduce 路径"
+sameClassCriterion: "GPU DMA 用 TMA cp.async.bulk, softmax reduce 用硬件 warp shuffle, 非软件 fallback"
+fixTemplate: "无需修复 (硬件指令已用)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (硬件指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-GPU-ATTN-GRAPH-FUSION-OK
+title: GPU attention 融合在 graph 融合层 (planner FlashAttention), 非 codegen per-op
+layer: 已核查非违宪 (分层正确)
+codePattern: "GPU attention 融合在 graph planner 层 (FlashAttention 融合模式), 非 codegen per-OpKind 特殊分支"
+triggerCondition: "GPU attention 融合路径"
+sameClassCriterion: "attention 融合在 graph 层 (fusion rule 生成融合图), 非 codegen 层 per-OpKind 特殊分支 (与第7轮 BCE-20260703-GPU-FLASH-ATTN-FUSION-LAYER-OK 一致)"
+fixTemplate: "无需修复 (分层正确)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (分层正确) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-AARCH64-GEMM-SME-FMOPA-OK
+title: aarch64 GEMM 用 TileMma → SME FMOPA 矩阵级指令 (a0a9eca 已确认)
+layer: 已核查非违宪 (硬件矩阵指令已用)
+codePattern: "aarch64 GEMM lower 用 TileMma → SME FMOPA 矩阵级指令 (commit a0a9eca 已确认)"
+triggerCondition: "aarch64 GEMM 路径"
+sameClassCriterion: "aarch64 GEMM 用 SME FMOPA 矩阵级指令, 非标量降级 (NO-HW-DEGRADATION 不违宪)"
+fixTemplate: "无需修复 (硬件矩阵指令已用)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (硬件矩阵指令已用) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-WEIGHT-PAGING-JIT-OK
+title: weight paging 用 JIT VmInstr (非软件 fallback)
+layer: 已核查非违宪 (JIT 实现)
+codePattern: "weight paging 走 JIT VmInstr 生成, 非软件 Rust fallback"
+triggerCondition: "权重分页换入换出路径"
+sameClassCriterion: "weight paging 用 JIT VmInstr, 非 Rust 软件 fallback (NO-FALLBACK 不违宪)"
+fixTemplate: "无需修复 (JIT 实现)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (JIT 实现) | residual: 0
+```
+
+```yaml
+patternId: BCE-20260708-DTYPE-AS-F32-COMPILE-CONST-OK
+title: dtype as f32/u32 强转用于编译时常量计算 (partial_dim/stack_offset), 非传播断裂
+layer: 已核查非违宪 (编译时常量, 非运行时传播)
+codePattern: "dtype as f32/u32 强转出现在 partial_dim/stack_offset 等编译时常量计算 (offset 算术), 非运行时 dtype 传播链"
+triggerCondition: "JIT codegen 编译时常量算术"
+sameClassCriterion: "as f32/u32 强转用于编译时已确定的常量算术 (偏移/步幅计算), 非运行时 dtype 传播链断裂 (ARCH-DTYPE-JIT-TYPED 不违宪; dtype 传播仍走 TensorMeta→VmInstr→ISA lowering)"
+fixTemplate: "无需修复 (编译时常量)"
+归因时间: 2026-07-08 (第8轮深度扫描确认)
+status: 非违宪 (编译时常量) | residual: 0
+```
