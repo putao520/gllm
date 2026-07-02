@@ -231,7 +231,7 @@ impl MegaKernelExecutor {
                         Some(gpu_output.gpu_code)
                     }
                     Err(e) => {
-                        log::warn!("[mega] GPU compilation failed (GPU path unavailable): {e}");
+                        eprintln!("[mega] GPU compilation FAILED (NO_SILENT_FALLBACK): {e}");
                         None
                     }
                 }
