@@ -109,6 +109,7 @@ impl MegaKernelExecutor {
             prompt_len,
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
+            named_offsets: mega.named_offsets.clone(),
         };
         let logits = sp.read_dtype_aware(last_row_off, vocab);
 
@@ -196,6 +197,9 @@ impl MegaKernelExecutor {
             prompt_len,
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
+            // BCE-20260703-NaN-LOCATE: carry intermediate tensor (name,offset,dtype) so the
+            // diagnostic harness can locate the first NaN-producing layer/op without hardcoding.
+            named_offsets: mega.named_offsets.clone(),
         })
     }
 
@@ -288,6 +292,7 @@ impl MegaKernelExecutor {
             prompt_len,
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
+            named_offsets: mega.named_offsets.clone(),
         };
         let output = sp.read_dtype_aware(mega.logits_scratch_offset, output_elems);
         Ok(output)
@@ -384,6 +389,7 @@ impl MegaKernelExecutor {
             prompt_len,
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
+            named_offsets: mega.named_offsets.clone(),
         };
         let logits_off = mega.logits_scratch_offset;
 
@@ -481,6 +487,7 @@ impl MegaKernelExecutor {
             prompt_len: seq_len,
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
+            named_offsets: mega.named_offsets.clone(),
         };
 
         let mut scores = Vec::with_capacity(target_token_ids.len());
@@ -569,6 +576,7 @@ impl MegaKernelExecutor {
             prompt_len: seq_len,
             hidden_size,
             compute_dtype: mega.compute_dtype,
+            named_offsets: mega.named_offsets.clone(),
         };
         let output = sp.read_dtype_aware(0, output_elems);
 
@@ -969,6 +977,7 @@ impl MegaKernelExecutor {
             prompt_len,
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
+            named_offsets: mega.named_offsets.clone(),
         };
         let logits = sp.read_dtype_aware(last_row_off, vocab);
 

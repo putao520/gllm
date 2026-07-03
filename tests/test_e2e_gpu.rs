@@ -265,6 +265,110 @@ fn gpu_diag_smollm2_nan_locate() {
     assert!(hidden.len() > 0, "hidden state empty");
 }
 
+// ─── BCE-NaN-LAYER: scratchpad 层探针定位 NaN 首现层 ─────────────────
+// logits 全 NaN (49152 个). 用 diagnostic_prefill_scratchpad 拿完整 scratchpad +
+// named_offsets (中间 tensor 的 name/offset/dtype), 遍历找首个含 NaN 的 tensor.
+// NaN 传播: 首个 NaN tensor 的层/op = NaN 源指令; 其后 tensor 多为 NaN-by-contagion.
+
+#[test]
+#[ignore = "GPU E2E: requires 5070Ti + cuda feature; run with --ignored"]
+fn gpu_diag_smollm2_nan_layer() {
+    eprintln!("[OOMPROBE-TEST] gpu_diag_smollm2_nan_layer entered, stderr flushed");
+    std::io::stderr().flush().ok();
+    const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
+    const PROMPT: &str = "The meaning of life is";
+
+    let client = gpu_chat_client(MODEL);
+    let tokens = client.encode(PROMPT).expect("encode failed");
+    eprintln!("[DIAG-LAYER] tokens={:?}", tokens);
+
+    let sp = client
+        .diagnostic_prefill_scratchpad(&tokens)
+        .expect("GPU prefill scratchpad unavailable (GPU backend not active?)");
+
+    eprintln!(
+        "[DIAG-LAYER] scratchpad bytes={}, named_offsets={}, logits_off={}, vocab={}, hidden={}, prompt_len={}, dtype={:?}",
+        sp.data.len(), sp.named_offsets.len(), sp.logits_offset, sp.vocab_size, sp.hidden_size, sp.prompt_len, sp.compute_dtype
+    );
+
+    // Dump named_offsets (sorted by offset) for layer mapping
+    let mut sorted: Vec<&(String, usize, gllm_kernels::types::DType)> =
+        sp.named_offsets.iter().collect();
+    sorted.sort_by_key(|e| e.1);
+    eprintln!("[DIAG-LAYER] === named_offsets (offset order, first 40) ===");
+    for (name, off, dt) in sorted.iter().take(40) {
+        eprintln!("[DIAG-LAYER]   off={:>8} dt={:?} name={}", off, dt, name);
+    }
+    let total_named = sorted.len();
+    eprintln!("[DIAG-LAYER] ... (total {} named tensors)", total_named);
+
+    // Scan every intermediate tensor for NaN
+    let hits = sp.find_nan_tensors();
+    eprintln!("[DIAG-LAYER] === NaN tensor hits ({} total) ===", hits.len());
+    for h in &hits {
+        eprintln!(
+            "[DIAG-LAYER]   NaN name={} off={} dt={:?} nan={}/{} unsupported={}",
+            h.name, h.offset, h.dtype, h.nan_count, h.sample_count, h.unsupported_dtype
+        );
+    }
+
+    // Also check logits region for NaN
+    let logits = sp.last_token_logits();
+    let logits_nan = logits.iter().filter(|x| x.is_nan()).count();
+    eprintln!(
+        "[DIAG-LAYER] logits: len={} nan={} first5={:?}",
+        logits.len(),
+        logits_nan,
+        &logits[..5.min(logits.len())]
+    );
+
+    // Also check embedding (offset 0) for NaN — upstream of all layers
+    let emb = sp.embedding();
+    let emb_nan = emb.iter().filter(|x| x.is_nan()).count();
+    eprintln!(
+        "[DIAG-LAYER] embedding: len={} nan={} first5={:?}",
+        emb.len(),
+        emb_nan,
+        &emb[..5.min(emb.len())]
+    );
+
+    // First NaN tensor (by offset order) = NaN source candidate
+    if let Some(first) = sp.first_nan_tensor() {
+        eprintln!(
+            "[DIAG-LAYER] *** FIRST NaN TENSOR: name={} off={} dt={:?} nan={}/{} ***",
+            first.name, first.offset, first.dtype, first.nan_count, first.sample_count
+        );
+        // Find tensors immediately before (finite) and after (NaN-contagion) to bracket the bug
+        let first_off = first.offset;
+        let mut before: Vec<&(String, usize, gllm_kernels::types::DType)> = sorted
+            .iter()
+            .copied()
+            .filter(|(_, off, _)| *off < first_off)
+            .collect();
+        before.sort_by_key(|e| e.1);
+        let mut after: Vec<&(String, usize, gllm_kernels::types::DType)> = sorted
+            .iter()
+            .copied()
+            .filter(|(_, off, _)| *off > first_off)
+            .collect();
+        after.sort_by_key(|e| e.1);
+        eprintln!(
+            "[DIAG-LAYER] upstream-finite (last 3 before NaN): {:?}",
+            before.iter().rev().take(3).map(|(n, o, d)| (n.clone(), *o, format!("{:?}", d))).collect::<Vec<_>>()
+        );
+        eprintln!(
+            "[DIAG-LAYER] downstream (first 3 after NaN): {:?}",
+            after.iter().take(3).map(|(n, o, d)| (n.clone(), *o, format!("{:?}", d))).collect::<Vec<_>>()
+        );
+    } else {
+        eprintln!("[DIAG-LAYER] no NaN tensor found in named_offsets — NaN may be in logits region only (lm_head) or in un-named scratchpad region");
+    }
+
+    std::io::stderr().flush().ok();
+    // Diagnostic probe — no hard assertion, just print the NaN source location.
+    assert!(sp.data.len() > 0, "scratchpad empty");
+}
+
 // ─── TEST-GPU-GEN-002: Qwen3-0.6B generator (GGUF Q4_0) ──────────────
 //
 // 量化模型 GPU 路径验证。无 PyTorch Q4_0 黄金值 (量化后数值非确定性一致),

@@ -636,6 +636,11 @@ pub struct DiagnosticScratchpad {
     /// ARCH-JIT-DATA-YIELDS: dtype stored as DType, not just elem_bytes, so that
     /// BF16 (8-bit exponent) and F16 (5-bit exponent) bit patterns decode correctly.
     pub compute_dtype: gllm_kernels::types::DType,
+    /// BCE-20260703-NaN-LOCATE: intermediate tensor (name, scratchpad byte_offset, dtype)
+    /// from JIT compile `named_offsets`. Used by `find_first_nan_tensor` to locate the
+    /// first NaN-producing layer/op by reading each intermediate tensor from scratchpad.
+    /// Empty for test fixtures / GPU-logits-only path (no intermediate inspection).
+    pub named_offsets: Vec<(String, usize, gllm_kernels::types::DType)>,
 }
 
 impl DiagnosticScratchpad {
@@ -744,5 +749,148 @@ impl DiagnosticScratchpad {
         let row_bytes = self.vocab_size * self.elem_bytes();
         let off = self.logits_offset + (self.prompt_len - 1) * row_bytes;
         self.read_dtype_aware(off, self.vocab_size)
+    }
+
+    /// BCE-20260703-NaN-LOCATE: scan every intermediate tensor in `named_offsets` for NaN,
+    /// return the list of tensors that contain at least one NaN, ordered by scratchpad
+    /// byte offset (proxy for computation order). The first entry is the **first NaN-producing
+    /// tensor** — the layer/op that generated NaN. Tensors before it are finite (upstream of
+    /// the bug), tensors after are likely NaN-by-contagion.
+    ///
+    /// ARCH-JIT-DATA-YIELDS: each tensor decoded by its own dtype (not global compute_dtype).
+    /// NO-SILENT-FALLBACK: unsupported dtype skipped with a warning entry (name, NaN=true, reason).
+    ///
+    /// Returns `Vec<NanTensorHit>` where each hit has name, offset, dtype, nan_count, sample_count.
+    pub fn find_nan_tensors(&self) -> Vec<NanTensorHit> {
+        if self.named_offsets.is_empty() {
+            return Vec::new();
+        }
+        // Sort by offset to establish computation order proxy. Resolve each tensor's byte
+        // extent as the gap to the next higher offset (or logits_offset / data.len() bounds).
+        let mut indexed: Vec<(usize, &(String, usize, gllm_kernels::types::DType))> =
+            self.named_offsets.iter().enumerate().map(|(i, e)| (i, e)).collect();
+        indexed.sort_by_key(|&(_, (_, off, _))| *off);
+
+        let n = indexed.len();
+        let mut hits: Vec<NanTensorHit> = Vec::new();
+        for (k, &(_, (name, off, dt))) in indexed.iter().enumerate() {
+            let elem_bytes = dt.size_bytes();
+            if elem_bytes == 0 {
+                continue;
+            }
+            // Byte extent: gap to next distinct offset, capped by data.len() - off.
+            let next_off = indexed[k + 1..]
+                .iter()
+                .map(|&(_, (_, no, _))| *no)
+                .filter(|no| *no > *off)
+                .min()
+                .unwrap_or_else(|| self.data.len());
+            let avail = data_len_minus(self.data.len(), *off);
+            let byte_extent = (next_off - *off).min(avail);
+            let count = byte_extent / elem_bytes;
+            if count == 0 {
+                continue;
+            }
+            // Decode per-tensor dtype; NaN only meaningful for FP dtypes (F32/BF16/F16).
+            let (nan_count, sample_count, decoded_ok) = scan_tensor_for_nan(
+                &self.data, *off, count, *dt,
+            );
+            if !decoded_ok {
+                // Unsupported dtype — record as a hit with reason (NO-SILENT-FALLBACK: surface,
+                // not silently skip). This shouldn't happen for FP compute dtypes.
+                hits.push(NanTensorHit {
+                    name: name.clone(), offset: *off, dtype: *dt,
+                    nan_count: 0, sample_count: 0, unsupported_dtype: true,
+                });
+                continue;
+            }
+            if nan_count > 0 {
+                hits.push(NanTensorHit {
+                    name: name.clone(), offset: *off, dtype: *dt,
+                    nan_count, sample_count, unsupported_dtype: false,
+                });
+            }
+        }
+        let _ = n;
+        hits
+    }
+
+    /// Convenience: return the first NaN tensor (by offset order) if any.
+    pub fn first_nan_tensor(&self) -> Option<NanTensorHit> {
+        self.find_nan_tensors().into_iter().next()
+    }
+}
+
+/// Result of scanning one intermediate tensor for NaN (BCE-20260703-NaN-LOCATE).
+#[derive(Debug, Clone)]
+pub struct NanTensorHit {
+    pub name: String,
+    pub offset: usize,
+    pub dtype: gllm_kernels::types::DType,
+    pub nan_count: usize,
+    pub sample_count: usize,
+    /// true if dtype is non-FP (e.g. int8 weight) and NaN scan was skipped.
+    pub unsupported_dtype: bool,
+}
+
+impl NanTensorHit {
+    pub fn is_nan(&self) -> bool {
+        self.nan_count > 0
+    }
+}
+
+fn data_len_minus(data_len: usize, off: usize) -> usize {
+    if off >= data_len { 0 } else { data_len - off }
+}
+
+/// Scan `count` elements of dtype `dt` starting at `byte_offset` in `src` for NaN.
+/// Returns (nan_count, sample_count, decoded_ok). `decoded_ok=false` for non-FP dtypes.
+fn scan_tensor_for_nan(
+    src: &[u8],
+    byte_offset: usize,
+    count: usize,
+    dt: gllm_kernels::types::DType,
+) -> (usize, usize, bool) {
+    use gllm_kernels::types::DType;
+    let elem_bytes = dt.size_bytes();
+    if elem_bytes == 0 { return (0, 0, false); }
+    let byte_end = match byte_offset.checked_add(count * elem_bytes) {
+        Some(e) if e <= src.len() => e,
+        _ => {
+            // OOB — clamp to available
+            if byte_offset >= src.len() { return (0, 0, false); }
+            src.len()
+        }
+    };
+    let avail = (byte_end - byte_offset) / elem_bytes;
+    match dt {
+        DType::F32 => {
+            let mut nan = 0;
+            for i in 0..avail {
+                let b = byte_offset + i * 4;
+                let v = f32::from_le_bytes([src[b], src[b+1], src[b+2], src[b+3]]);
+                if v.is_nan() { nan += 1; }
+            }
+            (nan, avail, true)
+        }
+        DType::BF16 => {
+            let mut nan = 0;
+            for i in 0..avail {
+                let b = byte_offset + i * 2;
+                let bits = u16::from_le_bytes([src[b], src[b+1]]);
+                if half::bf16::from_bits(bits).is_nan() { nan += 1; }
+            }
+            (nan, avail, true)
+        }
+        DType::F16 => {
+            let mut nan = 0;
+            for i in 0..avail {
+                let b = byte_offset + i * 2;
+                let bits = u16::from_le_bytes([src[b], src[b+1]]);
+                if half::f16::from_bits(bits).is_nan() { nan += 1; }
+            }
+            (nan, avail, true)
+        }
+        _ => (0, 0, false),  // int8/i8/etc — NaN not applicable
     }
 }

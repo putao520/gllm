@@ -2804,6 +2804,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act: request beyond data length — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(0, 100);
@@ -2823,6 +2824,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act
         let result = sp.read_f32_at(0, 2);

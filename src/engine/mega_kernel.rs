@@ -192,6 +192,7 @@ mod tests {
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
             vocab_size: 8,
+            named_offsets: Vec::new(),
         };
         let vals = sp.read_f32_at(0, 4);
         assert_eq!(vals.len(), 4);
@@ -574,6 +575,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let debug_str = format!("{sp:?}");
         assert!(debug_str.contains("DiagnosticScratchpad"));
@@ -590,6 +592,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Request 5 f32s starting at offset 0 — needs 20 bytes, only 16 available — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(0, 5);
@@ -606,6 +609,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Start at byte 16 — beyond buffer — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(16, 1);
@@ -628,6 +632,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let vals = sp.read_f32_at(0, 2);
         assert_eq!(vals.len(), 2);
@@ -645,6 +650,7 @@ mod tests {
             prompt_len: 3,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // embedding = prompt_len * hidden_size = 3 * 4 = 12 f32s
         let emb = sp.embedding();
@@ -663,6 +669,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Buffer too small — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.embedding();
@@ -687,6 +694,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 2);
@@ -706,6 +714,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // OOB — panics (NO-SILENT-FALLBACK)
         let _ = sp.last_token_logits();
@@ -925,6 +934,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Read 4 f32s starting at offset 0 — exactly fits the buffer
         let vals = sp.read_f32_at(0, 4);
@@ -944,6 +954,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // prompt_len=0 → count=0 → empty vec
         let emb = sp.embedding();
@@ -968,6 +979,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 2);
@@ -989,6 +1001,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let vals = sp.read_f32_at(4, 1);
         assert_eq!(vals.len(), 1);
@@ -1061,6 +1074,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let vals = sp.read_f32_at(0, 0);
         assert!(vals.is_empty());
@@ -1082,6 +1096,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let vals = sp.read_f32_at(8, 1);
         assert_eq!(vals.len(), 1);
@@ -1249,6 +1264,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Should not panic — prompt_len=0 returns empty Vec
         let logits = sp.last_token_logits();
@@ -1416,6 +1432,7 @@ mod tests {
             prompt_len: 5,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // prompt_len * hidden_size = 5 * 0 = 0 → empty vec
         let emb = sp.embedding();
@@ -1437,6 +1454,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 1,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let emb = sp.embedding();
         assert_eq!(emb.len(), 1);
@@ -1677,6 +1695,7 @@ mod tests {
             prompt_len: 3,
             hidden_size: 1,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // 3 tokens * 1 hidden = 3 f32s
         let emb = sp.embedding();
@@ -1705,6 +1724,7 @@ mod tests {
             prompt_len: 3,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 2);
@@ -1834,6 +1854,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Read 2 f32s starting at offset 0 (aligned) — should get both values
         let vals = sp.read_f32_at(0, 2);
@@ -1856,6 +1877,7 @@ mod tests {
             prompt_len: 100, // Wants 100 * 4 = 400 f32s = 1600 bytes
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Buffer too small for the request — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.embedding();
@@ -2061,6 +2083,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
 
         // Verify embedding reads correctly
@@ -2092,6 +2115,7 @@ mod tests {
             prompt_len: 3,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let logits = sp.last_token_logits();
         assert_eq!(logits.len(), 1);
@@ -2219,6 +2243,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // count=0 but offset 1000 + 0*4 = 1000 > 16 — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(1000, 0);
@@ -2522,6 +2547,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 8,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Read 3 f32s starting at offset 8 (the middle of the buffer)
         let result = sp.read_f32_at(8, 3);
@@ -2553,6 +2579,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Request exactly the buffer capacity
         let vals = sp.read_f32_at(0, 2);
@@ -2572,6 +2599,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // One more than buffer capacity — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(0, 3);
@@ -2683,6 +2711,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Offset 16 == buffer length, count=0: end=16, not > 16 => returns empty vec
         let vals = sp.read_f32_at(16, 0);
@@ -2700,6 +2729,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Offset 16 with count=1: end=20 > 16 — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(16, 1);
@@ -2846,6 +2876,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // last_token_logits: row_bytes = 0 * 4 = 0, off = 0 + 0 * 0 = 0
         // read_f32_at(0, 0) returns empty vec
@@ -3038,6 +3069,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Read 1 f32 starting at offset 12 — exactly at end of buffer
         let vals = sp.read_f32_at(12, 1);
@@ -3056,6 +3088,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Reading 2 f32s at offset 12 would overflow — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(12, 2);
@@ -3237,6 +3270,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // read_dtype_aware(0, 1000) requires 4000 bytes, buffer has 32 — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.last_token_logits();
@@ -3391,6 +3425,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 8,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Read from offset 8 onwards — these are unwritten (zero)
         let vals = sp.read_f32_at(8, 4);
@@ -3446,6 +3481,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 1,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let emb = sp.embedding();
         assert_eq!(emb.len(), 1);
@@ -3642,6 +3678,7 @@ mod tests {
             prompt_len: 3,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act
         let emb = sp.embedding();
@@ -3774,6 +3811,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 1,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act: request even a single f32 (needs 4 bytes) — OOB panics (NO-SILENT-FALLBACK)
         let _ = sp.read_f32_at(0, 1);
@@ -3790,6 +3828,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 1,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let zero_vals = sp.read_f32_at(0, 0);
         assert!(zero_vals.is_empty());
@@ -3984,6 +4023,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 8,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act: read all 8 f32s
         let all = sp.read_f32_at(0, 8);
@@ -4112,6 +4152,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 2,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act: embedding = prompt_len * hidden_size = 2 * 2 = 4 f32s
         let emb = sp.embedding();
@@ -4362,6 +4403,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act
         let emb = sp.embedding();
@@ -4494,6 +4536,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act: last_token_logits at offset = 16 + 0 = 16, read 4 f32s needs 16 bytes
         // but buffer is only 16 bytes so offset 16 is out of bounds — OOB panics (NO-SILENT-FALLBACK)
@@ -4737,6 +4780,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 2, // embedding = 2 * 2 = 4 f32s from offset 0
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act
         let emb = sp.embedding();
@@ -4766,6 +4810,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 4,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Act
         let vals = sp.read_f32_at(0, 1);

@@ -531,6 +531,12 @@ impl<E: Element> BackendExecutor<E> {
     }
 
     pub fn diagnostic_prefill_scratchpad(&self, prompt_tokens: &[u32]) -> Option<crate::engine::mega_kernel::DiagnosticScratchpad> {
+        // BCE-20260703-NaN-LOCATE: GPU/Rocm/Metal previously routed to `diagnostic_prefill_logits`
+        // (logits-only, no intermediate tensors) — making layer-level NaN localization impossible.
+        // GPU E2E inference actually runs the host mega-kernel `entry_fn` (CPU x86 JIT, host
+        // scratchpad), so `diagnostic_prefill_scratchpad` on the Executor returns the REAL
+        // scratchpad with all intermediate tensors via `named_offsets`. Route all backends to
+        // the full-scratchpad diagnostic to enable `find_first_nan_tensor`.
         fn logits_to_scratchpad(logits: Vec<f32>, prompt_len: usize) -> crate::engine::mega_kernel::DiagnosticScratchpad {
             let vocab_size = logits.len();
             let logits_bytes = unsafe {
@@ -543,13 +549,22 @@ impl<E: Element> BackendExecutor<E> {
                 prompt_len,
                 hidden_size: 0,
                 compute_dtype: gllm_kernels::types::DType::F32,
+                named_offsets: Vec::new(),
             }
         }
         match self {
             BackendExecutor::Cpu(e) => e.diagnostic_prefill_scratchpad(prompt_tokens),
-            BackendExecutor::Cuda(e) => e.diagnostic_prefill_logits(prompt_tokens).map(|l| logits_to_scratchpad(l, prompt_tokens.len())),
-            BackendExecutor::Rocm(e) => e.diagnostic_prefill_logits(prompt_tokens).map(|l| logits_to_scratchpad(l, prompt_tokens.len())),
-            BackendExecutor::Metal(e) => e.diagnostic_prefill_logits(prompt_tokens).map(|l| logits_to_scratchpad(l, prompt_tokens.len())),
+            // GPU: prefer full-scratchpad diagnostic (returns intermediate tensors for NaN locate).
+            // Falls back to logits_to_scratchpad only if full scratchpad unavailable.
+            BackendExecutor::Cuda(e) => e
+                .diagnostic_prefill_scratchpad(prompt_tokens)
+                .or_else(|| e.diagnostic_prefill_logits(prompt_tokens).map(|l| logits_to_scratchpad(l, prompt_tokens.len()))),
+            BackendExecutor::Rocm(e) => e
+                .diagnostic_prefill_scratchpad(prompt_tokens)
+                .or_else(|| e.diagnostic_prefill_logits(prompt_tokens).map(|l| logits_to_scratchpad(l, prompt_tokens.len()))),
+            BackendExecutor::Metal(e) => e
+                .diagnostic_prefill_scratchpad(prompt_tokens)
+                .or_else(|| e.diagnostic_prefill_logits(prompt_tokens).map(|l| logits_to_scratchpad(l, prompt_tokens.len()))),
         }
     }
 
@@ -2167,6 +2182,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Request 5 f32s from offset 0 but only 4 available — OOB panics (NO-SILENT-FALLBACK)
         let _ = pad.read_f32_at(0, 5);
@@ -2188,6 +2204,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let result = pad.read_f32_at(0, 1);
         assert_eq!(result.len(), 1);
@@ -2209,6 +2226,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let result = pad.read_f32_at(12, 1);
         assert_eq!(result.len(), 1);
@@ -2783,6 +2801,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let emb = pad.embedding();
         assert_eq!(emb.len(), 3);
@@ -2812,6 +2831,7 @@ mod tests {
             prompt_len: 2,
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let logits = pad.last_token_logits();
         assert_eq!(logits.len(), 3);
@@ -3496,6 +3516,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         assert!(pad.embedding().is_empty());
     }
@@ -3511,6 +3532,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Offset at data boundary — OOB panics (NO-SILENT-FALLBACK)
         let _ = pad.read_f32_at(16, 1);
@@ -3526,6 +3548,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let result = pad.read_f32_at(0, 0);
         assert!(result.is_empty(), "Count=0 should return empty vec");
@@ -3546,6 +3569,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let emb = pad.embedding();
         assert_eq!(emb.len(), 3);
@@ -5038,6 +5062,7 @@ mod tests {
             prompt_len: 1,
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         let logits = pad.last_token_logits();
         assert_eq!(logits.len(), 3);
@@ -5063,6 +5088,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Request 2 f32s starting at byte offset 12, but only 1 fits — OOB panics (NO-SILENT-FALLBACK)
         let _ = pad.read_f32_at(12, 2);
@@ -5515,6 +5541,7 @@ mod tests {
             prompt_len: 0,
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
+            named_offsets: Vec::new(),
         };
         // Offset 32 is exactly at end, even count=0 returns empty
         let result = pad.read_f32_at(32, 0);
