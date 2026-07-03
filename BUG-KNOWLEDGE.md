@@ -2518,3 +2518,55 @@ status: 根治 (代码已改 2d2e5dbd, 6993 passed) | residual: 0 (5 命中全�
 3. **CPU 也错** (非 GPU 特有): argmax=9212 vs 黄金 253, value 17.4 vs 24.3 — 证明是 codegen 层 BUG 非 GPU 路径专属
 4. **AVX-512 放大为 NaN** (5070Ti AMD 9950X3D 有 AVX-512): 未初始化高 lanes / BF16 解码错误 → NaN; 本地 i9-10900KF 无 AVX-512 → 有限但错
 5. **GEMM 已有正确先例** (gemm_emit.rs:345-367): `b_elem = b_dtype.elem_bytes()`, `OffsetExpr::Mul(LoopOffset(k_ctr), b_row_stride×k_unroll)` — weight 独立 stride 模式，NormLike 漏抄
+
+## BCE-20260703-AVX512-HALF-LANES — 7处 AVX-512 "半lanes" BUG: reduction/scan 按16lane步长跳但只处理低8lanes → SmolLM2 argmax=6
+
+> SmolLM2-135M GPU E2E (5070Ti AMD 9950X3D AVX-512): argmax=6 ❌ (黄金253), max=21.53 (黄金24.28), NaN=0。本地 i9-10900KF (AVX2): argmax=253 ✅ 正确。A/B 唯一变量=AVX-512(ZMM/16lane) vs AVX2(YMM/8lane)。这是 broadcast NaN (59629b4d) + NormLike stepbytes (2d2e5dbd/e24a2e49) 根治 NaN 后暴露的下一层精度 BUG。
+
+```yaml
+patternId: BCE-20260703-AVX512-HALF-LANES
+title: "x86 codegen reduction/scan 函数按 width.f32_lanes()(16) 算步长 step=64, 但 load/reduce 只用 scratch_ymm+ymmword_ptr(32B/8lanes), 步长按16跳实际只处理低8lanes, 每64B块高8lanes(lanes 8-15)完全跳过"
+layer: 设计缺陷 (width 与 load/reduce 宽度不一致, 系统性 — ARCH-JIT-YIELDS 违宪)
+codePattern:
+  - "let lanes = width.f32_lanes(); let step = lanes * 4; // AVX-512: 16*4=64"
+  - "let tmp = self.scratch_ymm(0); // YMM (8 lanes), 非 ZMM (16 lanes)"
+  - "self.asm.vmovups(tmp, ymmword_ptr(base)); // load 32B (8 lanes), 步长却按64跳"
+  - "h-reduce: vextractf128(ymm→xmm lanes 4-7) + vmaxps → 只归约 lanes 0-7, 高8lanes(lanes 8-15)从未参与"
+  - "HReduce/Accumulate 无 use_avx512 分支: resolve_ymm_or_spill 读src(物理别名只看低8 或 spill只load32B)"
+triggerCondition: "AVX-512 硬件 (use_avx512=true, width=W512, lanes=16) + reduction/scan/argmax/softmax/norm 算子"
+sameClassCriterion: "任何 lower_*_x86 函数: (1) VmInstr 无 width 字段 + 无 use_avx512 分支 + 盲用 resolve_ymm; OR (2) 有 width 但 step=lanes*4(64) 而 load/reduce 用 scratch_ymm(32B) — 步长与实际处理宽度不一致"
+rootCause: "已修 broadcast NaN (59629b4d) 是同源'YMM-only算子在W512只填低8lanes'。本次是该模式在 reduction/scan 类算子的残留: argmax/softmax_reduce_max/HReduce/Accumulate/softmax_normalize/temperature/Transcendental 7处。broadcast 修了'写'半lanes, 这7处是'读/归约'半lanes"
+fixTemplate: |
+  统一按 use_avx512 分流 (参考 lower_broadcast_x86 59629b4d + lower_vec_load_x86 W512 分支):
+  if self.use_avx512 {
+      // ZMM 路径: scratch_zmm + zmmword_ptr(64B) + 16-lane reduce
+      // 16-lane reduce 辅助 zmm_hreduce_to_xmm (lower_instr.inc.rs:958):
+      //   vextractf64x4(ymm_hi, zmm, 1) 提取高256位(lanes 8-15)到ymm_hi
+      //   ymm_lo = zmm 低256位别名 (zmm_to_ymm)
+      //   vmaxps/vaddps(ymm_lo, ymm_lo, ymm_hi) → 8 lanes (lanes 0-7与8-15对位归约)
+      //   复用 8→4→2→1 xmm reduce链 (vextractf128/vmovhlps/vshufps)
+      // HReduce 广播回ZMM: vbroadcastss zmm, xmm (填满16lanes)
+  } else { 保持原YMM实现 (use_avx512=false) }
+detectionSignatures:
+  structural: "fn lower_*_x86: 无 'if self.use_avx512' 分支 + 含 'scratch_ymm' + 'ymmword_ptr' + 'width.f32_lanes()' 或 'lanes * 4'"
+  literal: "let step = lanes * 4; ... scratch_ymm(0) ... ymmword_ptr"
+  antipattern: "avx512-half-lanes-reduction"
+residualEvidence:
+  - "重扫 lower_*_x86 无 use_avx512 守卫的 vec 算子: 7处全治 (argmax/softmax_reduce_max/HReduce/Accumulate/softmax_normalize/temperature/Transcendental)"
+  - "VecLoad/VecStore/Broadcast/FMA/DotProduct/VecBinOp/VecCmp/ConditionalSelect/VecCast/VecWiden/VecNarrow: 均已有 use_avx512 分支正确 (architect 逐一核对)"
+  - "lower_softmax_exp_sum / lower_batch_per_seq_argmax: 标量循环逐元素, 正确 (非同类)"
+  - "GEMM (gemm_emit.rs): 通过 VecLoad/VecStore/FMA 组合各走 use_avx512 ZMM 分支, 正确"
+  - "cargo check --lib: pass"
+  - "cargo test --lib: 6996 passed 0 failed (本地 i9 AVX2 无回归)"
+  - "5070Ti 真机验证: 待机器上线 (192.168.1.200 当前 No route to host) — 静态确认7处半lanes全切除"
+归因时间: 2026-07-03
+status: 根治 (代码已改 1d2da241, 6996 passed) | residual: 0 (7处全治, 误报排除)
+```
+
+### 关键判定证据
+
+1. **A/B 对照铁证**: 本地 i9 (AVX2, W256, 8lanes) HReduce/argmax YMM读全部8lanes → argmax=253正确; 5070Ti (AVX-512, W512, 16lanes) 同函数YMM只读低8丢高8 → argmax=6错
+2. **BUG 1 argmax 直接致 argmax=6**: vocab=49152 每64B块高8lanes从未被argmax扫描, 黄金id=253(logit=24.28)落高lanes被跳过, 报局部max=21.53的lane索引6
+3. **BUG 3 HReduce 无 use_avx512 分支** (lower_instr_dispatch.inc.rs:1642): resolve_ymm_or_spill 读src, 物理寄存器返回ymm(phys)(ZMM低256别名), spill返回vmovups ymm(32B) — 都丢高8lanes。NormLike mean/var只基于8/16数据
+4. **与 broadcast NaN (59629b4d) 同源**: 都是"YMM-only算子在W512模式只处理低8lanes"。broadcast修了"写"半lanes(未初始化→NaN), 本次7处是"读/归约"半lanes(丢弃有效数据→精度偏差)
+5. **VmInstr::HReduce 无 width 字段** (vminstr.inc.rs:242): lower无法从指令知道src宽度, 只能靠 use_avx512 推断 — 这是HReduce漏修的结构原因
