@@ -2700,3 +2700,26 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (116079a5) | residual: 0
 ```
+
+## BCE-20260704-ENCODER-JIT-DELEGATE — encoder_forward Rust operator 未走 JIT (ARCH-RUST-IS-CODEGEN, 与 decoder 250dd001 同类)
+
+> cpu_backend.rs encoder_forward 仍用 Rust operator (vec!+self.kernels.*+for 循环), 违反 ARCH-RUST-IS-CODEGEN。decoder_forward 已 JIT 化 (250dd001), encoder 漏修。architect-encoder-jit 确认: execute_as_mega_kernel 支持 seq_len>1, gllm Executor 已走 mega.execute_encode JIT, CpuInferenceBackend.encoder_forward 是兼容死路径但仍违宪。
+
+```yaml
+patternId: BCE-20260704-ENCODER-JIT-DELEGATE
+title: "cpu_backend encoder_forward 用 Rust operator (vec!+kernels.*+for) 而非 delegate JIT MegaKernel, 违反 ARCH-RUST-IS-CODEGEN"
+layer: 设计缺陷 (ARCH-RUST-IS-CODEGEN, 与 250dd001 decoder 同类)
+codePattern:
+  - "fn encoder_forward { vec![0.0f32; ...]; for layer_idx { self.kernels.gemm/softmax/gelu/layer_norm } }"
+  - "未检查 compiled_layer + weight_blob_addr delegate execute_as_mega_kernel"
+triggerCondition: "CpuInferenceBackend::encoder_forward 调用 (兼容路径, gllm Executor 走 mega.execute_encode 不触发)"
+sameClassCriterion: "任何 cpu_backend forward 函数 (decoder/encoder) 用 Rust operator 而非 JIT delegate"
+rootCause: "250dd001 修了 decoder_forward JIT delegate, encoder_forward 漏修。两处对称, encoder 是 prefill (seq_len>1), decoder 是单 token (seq=1)"
+fixTemplate: "方案B (与 decoder 对称): 生产 encoder_forward delegate 到 layer.execute_as_mega_kernel(batch=1, seq_len=input.num_elements()/h), 无 CompiledLayer 返回 Err (NO-FALLBACK); Rust operator 移 #[cfg(test)] encoder_forward_reference_impl"
+residualEvidence:
+  - "encoder_forward delegate 到 JIT (a161ed70)"
+  - "Rust operator 移 #[cfg(test)] encoder_forward_reference_impl"
+  - "cargo test --lib: 7024 passed 0 failed"
+归因时间: 2026-07-04
+status: 根治 (a161ed70) | residual: 0
+```
