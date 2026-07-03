@@ -2233,6 +2233,40 @@ fixTemplate: "无需修复 (合法 Err 暴露); 若真机出现可按需 PTX 实
 status: 非违宪 (合法 Err 暴露, 非静默 NOP) | residual: 0 | 注: QhBitExpand:GPU 与 aarch64 QhBitExpand 不同 — aarch64 已有 NEON 参照属 NO-HW-DEGRADATION (3cd9d8ac 已治本); GPU 无 PTX 参照属真机类待实现, Err 合法
 ```
 
+### 第 8+ 轮治本根治 (Q4_0 GPU 寄存器覆盖 — SmolLM2 NaN/SIGSEGV 源, 跨仓 gllm-kernels)
+
+> 第 8 轮后续: 主会话独立确认 Q4_0 GPU dequant 的 for-lane 循环 + 同一 {d} 寄存器覆盖 BUG (架构级 NaN 源, 违 NO-LOOP-UNROLL + REG_OVERWRITE)。fix 落地在跨仓 gllm-kernels (commit 1c1f1a40), 本知识库跨仓归档以避免重复审计。第 12 轮 ultracode audit 工作流全 stall (环境问题非代码无违宪), 主会话改用直接 Read 确认 + 单 Executor 根治更可靠。
+
+```yaml
+patternId: BCE-20260711-GPU-REG-OVERWRITE
+title: GPU quant_load 全部 BlockUnpackMode/BiPlaneMode 的 for-lane 循环 + 同一 {d} 寄存器覆盖 (SmolLM2 NaN/SIGSEGV 相关)
+layer: 范式缺陷 (NO-LOOP-UNROLL + REG_OVERWRITE, 架构级 NaN 源)
+codePattern:
+  - "quant_load.inc.rs 15 处 `for lane in 0..lanes` Rust 循环展开 PTX, 每个 lane 的 cvt.rn.f32.u32 {d} + sub.rn.f32 {d} 写同一 {d} 寄存器 (reg_name_with_kind 返回 %f{N} 单标量), 后覆盖前只剩 lane[lanes-1]"
+  - "SignedNibbleHigh/UnsignedNibbleLow/UnsignedNibbleHigh 还用 {d}<lane> 伪数组语法 (PTX 非法)"
+triggerCondition: "GPU 任意 BlockUnpackMode/BiPlaneMode 量化权重 dequant (Q4_0/Q4_1/Q2K/Q5_0/Q5_1/Q6K/Q3Merge 等); SmolLM2 Q4_0 GPU 推理 argmax=0/SIGSEGV (logits 全 NaN)"
+sameClassCriterion: "GPU PTX/HIP/Metal dequant 用 Rust for-lane 循环展开 + per-lane 写同一标量 {d} 寄存器覆盖 (GPU %f 是标量非向量, 后覆盖前); 或用 {d}<lane> 伪数组语法 (PTX 非法)"
+fixTemplate: "参照 lower_kivi_dequant_load_gpu / Q3KDecodeStep SIMT 范式: 消除 for lane 循环, 每线程解码 1 元素 (lane=%tid.x), byte_idx/nibble/merge 全 tid.x 驱动, 64-bit 地址计算, OOB 守卫 (tid>=lanes → {d}=0.0)"
+regressionAssertion: "quant_load 全部 9 个 match arm (BlockUnpackMode Int8/SignedNibbleLow/High/UnsignedNibbleLow/High/Bitpack2 + BiPlaneMode Low5/Low6/Q3Merge) 无 for-lane 循环, 无同 {d} 覆盖, 无 {d}<lane> 伪语法; F16Broadcast 保持 (单元素无 lanes 维度)"
+归因时间: 2026-07-11
+根因: { location: "gllm-kernels/src/compiler/codegen/vm/gpu_lower/quant_load.inc.rs 15 处 for-lane 循环", why: "GPU %f 寄存器是标量非向量, per-lane 写同一 {d} 后覆盖前; Rust for 展开 PTX 违 NO-LOOP-UNROLL; {d}<lane> 伪数组语法 PTX 非法" }
+违宪: "NO-LOOP-UNROLL (Rust for 展开 PTX); REG_OVERWRITE (per-lane 同 {d} 覆盖, GPU %f 是标量非向量); {d}<lane> PTX 非法语法"
+改动: 534 insertions / 374 deletions, quant_load.inc.rs 全部 BlockUnpackMode/BiPlaneMode (SignedNibbleLow/High, UnsignedNibbleLow/High, Bitpack2, Q3Merge, QhBitExpand 等)
+status: 根治 ✅ (1c1f1a40, 跨仓 gllm-kernels) | residual: 0
+V阶段: cargo test --lib 6993 passed 0 failed (5070Ti 离线, 真机 NaN 源回归待恢复验证)
+相关: SmolLM2 GPU argmax=0/SIGSEGV (logits 全 NaN) — Q4_0 覆盖产生错误权重值 → GEMM NaN/越界读, 此修复可能是 NaN 源根治 (待 5070Ti 恢复验证)
+横扫确认: lower_instr_dispatch.inc.rs Q3KDecodeStep (a5214f1b) 已是正确 per-thread SIMT (用 %tid.x + lane_offset, 无 for-lane 循环, 无覆盖) — 同类 BUG 不存在, 无需改动
+注: F16Broadcast 保持 (单元素加载, 无 lanes 维度, 无覆盖问题)
+```
+
+### 工作流 stall 记录 (归档, 非违宪)
+
+> 第 12 轮 ultracode audit 工作流 (6 finder 跨设备×违宪类) 全部 stalled — 6 agent 各 retry 6 次因 180s 无进展失败。环境/agent 问题, 非代码无违宪。synthesis 基于空清单, 但明确指出"空清单是假阴性, codegen 嫌疑未排除"。主会话独立确认 Q4_0 覆盖 BUG (不依赖工作流)。
+
+- 第 12 轮 ultracode 工作流: 6 finder agent (跨设备 × 违宪类) 全 stall (各 retry 6 次, 180s 无进展) — 环境/agent 问题非代码违宪
+- synthesis 基于空清单, 明确标注"空清单是假阴性, codegen 嫌疑未排除" — 主会话不依赖工作流, 独立 Read 确认 Q4_0 覆盖 BUG
+- 教训: 大型 audit 工作流在当前环境易 stall, 改用主会话直接 Read 确认 + 单 Executor 根治更可靠
+
 ---
 
 ## 第 8 轮 codegen 审计 — executor ABI/调度器/panic/dtype 强转/RLE/Kernels trait/cpu_backend
