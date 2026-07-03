@@ -211,7 +211,8 @@ fn diag_finite(label: &str, v: &[f32]) -> bool {
     let max_v = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let min_v = v.iter().cloned().fold(f32::INFINITY, f32::min);
     eprintln!(
-        "[DIAG-{label}] len={} sum={sum:.4} min={min_v:.4} max={max_v:.4} nan={nan} inf={inf}"
+        "[DIAG-{label}] len={} sum={sum:.4} min={min_v:.4} max={max_v:.4} nan={nan} inf={inf}",
+        v.len()
     );
     std::io::stderr().flush().ok();
     nan == 0 && inf == 0
