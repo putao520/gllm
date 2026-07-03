@@ -2254,9 +2254,36 @@ regressionAssertion: "quant_load 全部 9 个 match arm (BlockUnpackMode Int8/Si
 改动: 534 insertions / 374 deletions, quant_load.inc.rs 全部 BlockUnpackMode/BiPlaneMode (SignedNibbleLow/High, UnsignedNibbleLow/High, Bitpack2, Q3Merge, QhBitExpand 等)
 status: 根治 ✅ (1c1f1a40, 跨仓 gllm-kernels) | residual: 0
 V阶段: cargo test --lib 6993 passed 0 failed (5070Ti 离线, 真机 NaN 源回归待恢复验证)
-相关: SmolLM2 GPU argmax=0/SIGSEGV (logits 全 NaN) — Q4_0 覆盖产生错误权重值 → GEMM NaN/越界读, 此修复可能是 NaN 源根治 (待 5070Ti 恢复验证)
+相关: SmolLM2 GPU argmax=0/SIGSEGV (logits 全 NaN) — ❌ 此修复(Q4_0 覆盖)**不是** NaN 源根治。SmolLM2 测试用 `HuggingFaceTB/SmolLM2-135M-Instruct` 是 **F32 SafeTensors 非 Q4_0**, 不走 quant_load 路径。真因见 BCE-20260703-AVX512-BROADCAST-NAN (下方)。Q4_0 覆盖修复仅影响 GGUF Q4_0 等量化模型路径。
 横扫确认: lower_instr_dispatch.inc.rs Q3KDecodeStep (a5214f1b) 已是正确 per-thread SIMT (用 %tid.x + lane_offset, 无 for-lane 循环, 无覆盖) — 同类 BUG 不存在, 无需改动
 注: F16Broadcast 保持 (单元素加载, 无 lanes 维度, 无覆盖问题)
+```
+
+### 第 8+ 轮治本根治 (AVX-512 broadcast 半初始化 ZMM — SmolLM2 logits 全 NaN 真因, 跨仓 gllm-kernels)
+
+> 真因定位 (5070Ti 实跑实证, 非猜测): SmolLM2 logits 全 NaN 的根因是 AVX-512 x86 codegen 的 `lower_broadcast_x86` 半初始化 ZMM 高 lanes, **非** GPU PTX 也**非** Q4_0 dequant。`diagnostic_prefill_logits` 调 `mega.entry_fn`(CPU x86 机器码) 不 launch GPU PTX; SmolLM2 是 F32 不走 quant_load。5070Ti AMD 9950X3D 触发 AVX-512 路径, Intel 10900KF 无 AVX-512 走 AVX2 路径(有限但错误)。
+
+```yaml
+patternId: BCE-20260703-AVX512-BROADCAST-NAN
+title: AVX-512 lower_broadcast_x86 用 YMM(8 floats) 广播, dst ZMM(16 floats) 高 8 lanes 未初始化 → FMA 读垃圾 → NaN 传播
+layer: 范式缺陷 (ARCH-JIT-YIELDS: codegen 未顺从 use_avx512 硬件信息; 寄存器宽度不一致)
+codePattern:
+  - "lower_broadcast_x86 无视 self.use_avx512, 总用 resolve_ymm_or_spill_write + vbroadcastss ymm (256-bit/8 floats)"
+  - "AVX-512 模式 dst 是 ZMM(512-bit/16 floats), vbroadcastss ymm 只填低 8 lanes, 高 8 lanes 留未初始化"
+  - "下游 lower_fma_x86 use_avx512=true 用 resolve_zmm + vfmadd231ps zmm 读完整 16 lanes → 高 8 lanes = 垃圾 → garbage + garbage*b = NaN"
+  - "GEMM acc init (Broadcast 0.0) + a_broadcast 都半初始化 → 全链 NaN 传播到 logits"
+triggerCondition: "AVX-512 CPU (AMD 9950X3D / Intel Xeon Scalable+) 上 F32 模型推理; 5070Ti SmolLM2 logits 全 NaN (49152)"
+sameClassCriterion: "x86 codegen 函数无视 use_avx512 用 YMM(256-bit) 操作 dst/consumer 为 ZMM(512-bit) 的 VReg → 半初始化/半读 → 未初始化 lanes 产生 NaN 或漏读半数据"
+fixTemplate: "use_avx512=true 时走 ZMM 路径: resolve_zmm_or_spill_write + vbroadcastss zmm / vpermilps zmm (填满 16 lanes), 匹配下游 ZMM 消费者(FMA/VecStore W512)"
+regressionAssertion: "AVX-512 模式下 lower_broadcast_x86 用 ZMM 寄存器, 输出全部 16 lanes 被填; FMA 读 ZMM 不含未初始化 lanes; 5070Ti SmolLM2 logits nan=0"
+归因时间: 2026-07-03
+根因: { location: "gllm-kernels/src/compiler/codegen/vm/x86_lower/lower_instr_dispatch.inc.rs:742 lower_broadcast_x86", why: "无视 use_avx512, YMM 广播只填 8/16 lanes, 高 8 lanes 未初始化被 ZMM FMA 读取 → NaN 传播" }
+违宪: "ARCH-JIT-YIELDS (codegen 未顺从 use_avx512 硬件信息); 寄存器宽度生产者/消费者不一致 (Broadcast YMM vs FMA ZMM)"
+改动: 1 file (lower_instr_dispatch.inc.rs), +63 lines (use_avx512 ZMM 分支)
+status: 根治 ✅ (59629b4d, 跨仓 gllm-kernels) | residual: 0
+V阶段: 5070Ti 实跑 — CPU logits nan=49152→0, GPU 测试 nan=49152→0 (与 CPU 完全一致, 证实 GPU 测试走 CPU entry_fn); cargo test --lib broadcast/avx512 全过 (34+63)
+残留: GPU/CPU 测试仍 argmax=6 vs golden=253 (数值偏差非 NaN) — 同类 YMM/ZMM 宽度不匹配疑似存在于 lower_h_reduce_x86 / lower_softmax_reduce_max/exp_sum/normalize (用 YMM 但 width=W512 时 step 按 16 lanes 算→漏读半数据), 产生错误值不产 NaN, 待下一轮 BCE 横扫
+方向纠正: 原任务归因 "GPU PTX codegen" 是误判 — GPU 测试 diagnostic_prefill_logits 走 CPU entry_fn 非 GPU PTX; SmolLM2 是 F32 非 Q4_0, 1c1f1a40 Q4_0 修复与此 NaN 无关
 ```
 
 ### 工作流 stall 记录 (归档, 非违宪)
