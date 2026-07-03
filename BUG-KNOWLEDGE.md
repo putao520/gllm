@@ -2570,3 +2570,52 @@ status: 根治 (代码已改 1d2da241, 6996 passed) | residual: 0 (7处全治, �
 3. **BUG 3 HReduce 无 use_avx512 分支** (lower_instr_dispatch.inc.rs:1642): resolve_ymm_or_spill 读src, 物理寄存器返回ymm(phys)(ZMM低256别名), spill返回vmovups ymm(32B) — 都丢高8lanes。NormLike mean/var只基于8/16数据
 4. **与 broadcast NaN (59629b4d) 同源**: 都是"YMM-only算子在W512模式只处理低8lanes"。broadcast修了"写"半lanes(未初始化→NaN), 本次7处是"读/归约"半lanes(丢弃有效数据→精度偏差)
 5. **VmInstr::HReduce 无 width 字段** (vminstr.inc.rs:242): lower无法从指令知道src宽度, 只能靠 use_avx512 推断 — 这是HReduce漏修的结构原因
+
+## BCE-20260703-L2NORMALIZE-INPUTS-OOB — L2Normalize/QkNorm op inputs[1] 越界 panic (NO-ISLAND-MODULE)
+
+> L2Normalize (x/||x||) 和 QkNorm (L2+√head_dim) 数学上无 learned weight, 但 lower_op.inc.rs 访问 op.inputs[1] 取 weight_ptr/weight_dtype。构造时只传 1 input (graph_impl.inc.rs:685 / fusion/pass.rs:2092 / fusion/helpers.rs:2260), inputs[1] 越界 panic。此前路径未被测试覆盖 (NO-ISLAND-MODULE)。
+
+```yaml
+patternId: BCE-20260703-L2NORMALIZE-INPUTS-OOB
+title: "无 weight 的 NormLike op (L2Normalize/QkNorm, NormKind::ValueNorm has_weight()=false) 的 lower 分支访问 op.inputs[1] 取 weight_ptr/dtype, 但构造只传 1 input → 越界 panic"
+layer: 设计缺陷 (NO-ISLAND-MODULE — 路径存在但未被测试覆盖)
+codePattern:
+  - "Op::L2Normalize { hidden } => { ... resolver.materialize(prog, op.inputs[1], abi) ... } (inputs.len()==1, OOB)"
+  - "Op::QkNorm { .. } => { ... graph.tensor(op.inputs[1]) ... } (inputs.len()==1, OOB)"
+  - "NormKind::ValueNorm has_weight()=false (norm_softmax_emit.rs:19-21), emit_normlike_inline 不 emit weight VecLoad, 但 lower 提前访问 inputs[1]"
+triggerCondition: "L2Normalize/QkNorm op 被 lower (encoder graph / fusion pass 触发)"
+sameClassCriterion: "任何 NormKind::ValueNorm (has_weight=false) 的 op, lower 分支访问 inputs[1] 取 weight, 但构造只传 1 input"
+rootCause: "lower_op.inc.rs 复用 emit_normlike_inline 路径, 该路径需要 weight_ptr 参数。L2Normalize/QkNorm 无 weight 但仍访问 inputs[1] 取 weight_ptr/dtype, 越界。emit_normlike 对 ValueNorm 不用 weight_ptr (has_weight=false 跳过), 所以 weight_ptr 参数实际不被使用"
+fixTemplate: "无 weight 的 NormLike op: weight_ptr 复用 input_ptr (占位, has_weight=false 不用), weight_dtype 用 ctx.dtype。禁止访问 op.inputs[1]"
+residualEvidence:
+  - "重扫 Op::L2Normalize / Op::QkNorm lower 分支: 已不访问 inputs[1] (9b441ab3)"
+  - "回归测试 test_compile_layer_l2_normalize_single_input_no_panic / test_compile_layer_qk_norm_single_input_no_panic: pass (027b3236)"
+  - "cargo test --lib: 7007 passed 0 failed"
+归因时间: 2026-07-04
+status: 根治 (9b441ab3 + 027b3236) | residual: 0
+```
+
+## BCE-20260703-AVX512-HALF-LANES-2 — x86 4处 AVX-512 半lanes同类 (Workflow 审计 confirmed)
+
+> BCE-20260703-AVX512-HALF-LANES (1d2da241, 7处) 的同类漏网。Workflow 全设备审计 x86 finder 发现 4 处: ScaleApply/QuantBlockLoad Int8/VecUnaryOp/VecCmp 仍无视 use_avx512 盲用 YMM。
+
+```yaml
+patternId: BCE-20260703-AVX512-HALF-LANES-2
+title: "x86 codegen 4处 YMM-only 算子无视 use_avx512 在 W512 只处理低8lanes (BCE-20260703-AVX512-HALF-LANES 同类漏网)"
+layer: 设计缺陷 (与 1d2da241 同源 — YMM-only 算子在 W512 丢弃高8lanes)
+codePattern:
+  - "lower_scale_apply_x86: 无 use_avx512 守卫, resolve_ymm + vmovaps/vcvtdq2ps/vmulps/vaddps 全 YMM。ScaleApply 携带 width, W512 上 DotProduct 走 ZMM 16-lane, ScaleApply 却读 YMM 8 lanes — acc 高8lanes 丢弃"
+  - "lower_quant_block_load BlockUnpackMode::Int8: resolve_ymm + vpmovsxbd ymm,qword_ptr(8 i8) + vcvtdq2ps ymm, 忽略 width。W512 上 DotProduct 读 ZMM 16 lanes, QuantBlockLoad 只填低8"
+  - "lower_vec_unary_op_x86: 无 use_avx512 守卫, resolve_ymm + vsqrtps/vrsqrtps/vrcpps/vroundps ymm。VecUnaryOp 无 width 字段, W512 只处理低8lanes"
+  - "lower_vec_cmp_x86: use_avx512 分支只改 imm, dst/va/vb 仍 resolve_ymm + vcmpps ymm。未用 AVX-512 k-mask + vcmpps zmm, W512 只比较低8lanes"
+triggerCondition: "AVX-512 硬件 (use_avx512=true, W512) + ScaleApply/QuantBlockLoad Int8/VecUnaryOp/VecCmp 算子"
+sameClassCriterion: "与 BCE-20260703-AVX512-HALF-LANES 同类: YMM-only 算子无视 use_avx512, W512 只处理低8lanes"
+rootCause: "1d2da241 修了 7 处 (argmax/softmax_reduce_max/HReduce/Accumulate/softmax_normalize/temperature/Transcendental), 漏了 ScaleApply/QuantBlockLoad Int8/VecUnaryOp/VecCmp 4 处。Workflow 审计横扫发现"
+fixTemplate: "统一 if self.use_avx512 { resolve_zmm + zmm 指令 (16 lanes) + spill_store_zmm } else { 原 YMM }。参考 1d2da241 的 lower_h_reduce_x86/accumulate ZMM 分支"
+residualEvidence:
+  - "重扫 x86_lower 无 use_avx512 守卫的 vec 算子: 4 处全治 (482c44f5)"
+  - "cargo test --lib: 7023 passed 0 failed (含新增回归测试)"
+  - "BCE-20260703-AVX512-HALF-LANES (1d2da241) + 本轮 (482c44f5) 合计 11 处 AVX-512 半lanes 全根治"
+归因时间: 2026-07-04
+status: 根治 (482c44f5) | residual: 0
+```
