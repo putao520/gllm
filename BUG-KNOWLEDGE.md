@@ -2723,3 +2723,33 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (a161ed70) | residual: 0
 ```
+
+## BCE-20260704-STRUCTURED-SYMEXEC-LOOP-MISCLASSIFY — symexec 误分类 RmsNorm 为 LayerNorm 致 Input(3) 越界 panic (阻塞 embedding/reranker E2E)
+
+> e2e_embedding_safetensors (release) 在 norm_softmax_emit.rs:224 panic: "TraceOp::Input(3) 越界: 调用方仅提供 3 个输入 VReg"。阻塞所有 BERT/XLM-R encoder E2E。architect-input3-oob 归因。
+
+```yaml
+patternId: BCE-20260704-STRUCTURED-SYMEXEC-LOOP-MISCLASSIFY
+title: "structured symexec 误分类 2-循环 NormLike (RmsNorm) 为 3-循环 LayerNorm, 生成含 Input(3) weight+bias 的 transform 覆盖 manual trace, 致 emit_normlike 传 3 输入时越界 panic"
+layer: 范式缺陷 (symexec loop_analyzer 误分类 + register Level 1 无校验覆盖 manual)
+codePattern:
+  - "register_with_symexec_fallback: Level 1 Ok(Some(_)) 直接 return, 未比对 manual_trace.pattern"
+  - "combine_three_loops: r1.kind==Sum && r2.kind==Sum → combine_layer_norm, 无 fn_sig.bias 校验"
+  - "combine_layer_norm: 生成 Input(3)+Input(4) transform, 但 ScalarFnSignature.params 无第二个 WeightPtr (RmsNorm 无 bias)"
+  - "loop_analyzer 对 transform-only loop 误报 reductions → coalesce 失败 → 误入 3-loop 路径"
+triggerCondition: "scalar fn 数学上是 2-loop NormLike (RmsNorm/ValueNorm/L2Normalize), 但编译器向量化后 CFG 检测到 3 物理循环 + loop1 误报 reduction"
+sameClassCriterion: "任何 scalar fn 经 structured CFG 分析后, 生成的 pattern 引用了该 fn signature 不具备的参数 slot (Input(n) where n >= sig.n_ptr)"
+rootCause: "scalar_rms_norm 向量化后 4 物理循环, CFG 检测 3 循环 (loop1 误报 reduction), combine_three_loops Sum→Sum 命中 combine_layer_norm, 生成 LayerNorm pattern (Input(0..4)) 注入 RmsNorm trace_cache 覆盖 manual。emit_normlike 传 3 输入 [temp,scale,w] 但 transform 引用 Input(3) → 越界"
+fixTemplate: |
+  方案 A 防御性校验 (architect 推荐):
+  1. register_with_symexec_fallback Level 1 成功后, 校验 max_input_arity(pattern) <= n_ptr_params(sig), 否则降级 manual
+  2. combine_layer_norm 加 sig 校验: params 含 ≥2 WeightPtr 才生成 LayerNorm
+  3. combine_three_loops 传入 sig
+residualEvidence:
+  - "max_input_arity 校验: Level 1 pattern Input arity 超 sig ptr 数则降级 (edfa73aa)"
+  - "combine_layer_norm: 加 ScalarFnSignature bias 校验"
+  - "回归测试: scalar_rms_norm pattern transform 不引用 Input(>=3)"
+  - "cargo test --lib: 7029 passed 0 failed"
+归因时间: 2026-07-04
+status: 根治 (edfa73aa) | residual: 0
+```
