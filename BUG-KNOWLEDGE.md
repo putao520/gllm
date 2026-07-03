@@ -2237,24 +2237,29 @@ status: 非违宪 (合法 Err 暴露, 非静默 NOP) | residual: 0 | 注: QhBitE
 
 ## 第 8 轮 codegen 审计 — executor ABI/调度器/panic/dtype 强转/RLE/Kernels trait/cpu_backend
 
-> 第 8 轮深度扫描 executor ABI/调度器/panic/dtype 强转/RLE/Kernels trait/cpu_backend。发现 1 个架构级违宪 (cpu_backend Rust fallback) + 1 个 trait 设计级 stub 死代码, 均为架构级待根治 (需用户确认 SPEC 授权)。其余路径已核查非违宪, 归档避免重复审计。
+> 第 8 轮深度扫描 executor ABI/调度器/panic/dtype 强转/RLE/Kernels trait/cpu_backend。发现 1 个架构级违宪 (cpu_backend Rust fallback) + 1 个 trait 设计级 stub 死代码。cpu_backend 违宪已由 commit 250dd001 根治落地 (用户确认选项 B); Kernels trait stub 仍待架构级判断。其余路径已核查非违宪, 归档避免重复审计。
 
-### 架构级违宪待根治 (报告用户, 需 SPEC 授权确认)
+### 架构级违宪根治落地 (用户确认 SPEC 授权, 已修)
+
+> 第 8 轮发现的 cpu_backend Rust fallback 架构级违宪已由用户确认根治方案 (选项 B: cfg(test) 保留参考实现 + 生产无 fallback), commit 250dd001 落地。Kernels trait stub 仍待架构级判断。
 
 ```yaml
 patternId: BCE-20260708-CPU-BACKEND-FALLBACK-UNCONSTITUTIONAL
-title: cpu_backend.rs decoder_forward 是 Rust operator-by-operator fallback 推理路径, 违反 NO-FALLBACK + ARCH-RUST-IS-CODEGEN
-layer: 范式缺陷 (架构级)
+title: cpu_backend.rs decoder_forward Rust operator fallback 根治为 JIT 委托
+layer: 范式缺陷 (架构级 NO-FALLBACK + ARCH-RUST-IS-CODEGEN)
 codePattern: "src/compat/cpu_backend.rs (任务派发原标 src/inference/cpu_backend.rs, 实际位于 compat/cpu_backend.rs) decoder_forward 直接走 'Fallback path: operator-by-operator execution', 用 self.kernels.rms_norm/gemm/vec_add 等 Rust 方法 + for layer_idx in 0..num_layers 循环 + Vec 分配在热路径; 注释自述 'Single-token path, multi-token requires JIT' (文件中 for layer in 0..nl 循环多处: :3677/:3711/:3849/:3877/:5969 等)"
 违宪依据: "SPEC/23-QUANT-CODEGEN-ALGO.html:535/546 明确 '仍然是 JIT 生成, 不 fallback 到 Rust'; NO-FALLBACK 铁律授权的 5 个 fallback (A2 HF→ModelScope / A3 ONNX Fusion→Atomic / A4 HW Fusion→Standalone / A5 Reshape/Transpose 元数据 NOP + 安全网) 不含 cpu_backend; ARCH-RUST-IS-CODEGEN 禁止 Rust 参与推理/循环/Vec/计算"
 triggerCondition: "单 token decode 路径走 cpu_backend (非 JIT mega_kernel)"
 sameClassCriterion: "Rust 层 operator-by-operator 逐算子执行推理 (rms_norm/gemm/vec_add Rust 方法 + for layer 循环), 而非单次 CALL JIT mega_kernel — NO-FALLBACK + ARCH-RUST-IS-CODEGEN 双违宪"
-fixTemplate: "根治建议 (二选一, 需用户确认): (1) 让 JIT 覆盖单 token 路径 (现 multi-token 已 JIT), 移除 cpu_backend fallback, 单 token 也走 mega_kernel; (2) 若确为 SPEC 授权单 token fallback, 在 SPEC 中显式追加第 6 个授权 fallback 并标注理由 (当前 SPEC 未授权)"
-regressionAssertion: "cpu_backend decoder_forward 不再出现 for layer_idx 循环 + Rust kernels 方法调用; 单 token 路径走 JIT mega_kernel; 或 SPEC 显式授权此 fallback"
-归因时间: 2026-07-08 (第8轮审计新增)
-status: 待架构级根治 (C-2 升级, 需用户确认是否 SPEC 授权) | residual: 1 (未修复)
+fixTemplate: "选项 B (cfg(test) 保留参考实现 + 生产无 fallback): 生产 decoder_forward 返回 Err('JIT compiled layer required; no Rust operator fallback') 除非 with_compiled_layer 附加 CompiledLayer; Rust operator fallback 移到 #[cfg(test)] 作 decoder_forward_reference_impl (测试 ground-truth, 非生产路径); ffi/mod.rs 同步"
+regressionAssertion: "cpu_backend 生产 decoder_forward 不再出现 for layer_idx 循环 + Rust kernels 方法调用; 单 token 路径走 JIT mega_kernel 或返回 Err; Rust operator-by-operator 仅存于 #[cfg(test)] decoder_forward_reference_impl"
+归因时间: 2026-07-08 (第8轮审计新增) | 根治时间: 2026-07-08 (commit 250dd001)
+status: 根治 ✅ (250dd001) | residual: 0
 rootCause: { location: "src/compat/cpu_backend.rs decoder_forward (任务原标 src/inference/cpu_backend.rs)", layer: "范式缺陷 (架构级)", why: "单 token 路径绕过 JIT 走 Rust 逐算子循环, 违反 ARCH-RUST-IS-CODEGEN (Rust=代码生成器, 推理只一次 CALL) + NO-FALLBACK (5 授权 fallback 不含 cpu_backend); 注释自述 multi-token 才需 JIT 暴露了单 token 路径未 JIT 化的架构缺口", evidence: "SPEC/23:535/546 '不 fallback 到 Rust'; ARCH-RUST-IS-CODEGEN 铁律; NO-FALLBACK 授权清单" }
+fixLanding: { commit: "250dd001", 改动: "430 insertions / 278 deletions, 2 文件 (src/compat/cpu_backend.rs + src/ffi/mod.rs)", 方案: "选项 B (cfg(test) 保留参考实现 + 生产无 fallback)", 编译错解决: "E0449 visibility + E0407 trait 方法扩展 (with_compiled_layer) + E0277 *const u8 Send/Sync (CompiledLayer raw pointer)", v阶段: "6992 passed 0 failed (无回归)" }
 ```
+
+### 仍待架构级判断 (本轮未处理, 保留)
 
 ```yaml
 patternId: BCE-20260708-KERNELS-TRAIT-DEAD-STUB
