@@ -2619,3 +2619,35 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (482c44f5) | residual: 0
 ```
+
+## BCE-20260704-X86-BF16-VNNI-GUARD — x86 AVX-512 BF16/VNNI 指令只查 use_avx512 不查 has_bf16/has_vnni 致无BF16/VNNI的AVX-512 CPU SIGILL
+
+> AVX-512 BF16 (VDPBF16PS/VCVTNEPS2BF16) 和 VNNI (VPDPBUSD) 是独立硬件特性。Ice Lake/Tiger Lake 客户端 CPU 有 AVX-512 但无 BF16/VNNI。planner+codegen 只查 use_avx512 不查 has_bf16/has_vnni → 无 BF16/VNNI 的 AVX-512 CPU emit 这些指令 → SIGILL。
+
+```yaml
+patternId: BCE-20260704-X86-BF16-VNNI-GUARD
+title: "x86 AVX-512 特性指令 (BF16/VNNI/FP16) 的 codegen+planner 只查 use_avx512 不查对应特性 flag (has_bf16/has_vnni/has_avx512fp16), 致无该特性的 AVX-512 CPU SIGILL"
+layer: 设计缺陷 (硬件特性守卫缺失 — NO-SILENT-FALLBACK + NO-HW-DEGRADATION)
+codePattern:
+  - "planner.rs: if kc.use_avx512 { candidates.push(Avx512NativeBf16) } — 不查 has_bf16"
+  - "lower_instr_dispatch.inc.rs: if self.use_avx512 { vcvtneps2bf16(...) } — 不查 has_bf16"
+  - "lower_instr_dispatch.inc.rs: if self.use_avx512 { vpdpbusd(...) } — 不查 has_vnni"
+  - "X86Lower struct 无 has_bf16/has_vnni 字段 — codegen 无法查"
+triggerCondition: "AVX-512 CPU 无 BF16 (Ice Lake/Tiger Lake) 或无 VNNI, 但 use_avx512=true, 走 BF16/VNNI codegen 路径"
+sameClassCriterion: "任何 AVX-512 特性指令 (BF16/VNNI/FP16/AMX) emit 前, 守卫用 use_avx512 而非对应 has_* flag"
+rootCause: "AVX-512 是基础特性, BF16/VNNI/FP16 是独立扩展特性。use_avx512=true 不蕴含 has_bf16/has_vnni=true。planner 决策 + codegen emit 两层都只查 use_avx512, 漏了特性级守卫。X86Lower struct 甚至无 has_bf16/has_vnni 字段"
+fixTemplate: |
+  1. X86Lower struct 加 has_bf16/has_vnni 字段 (仿 has_avx512fp16)
+  2. 构造函数从 Platform::X86_64 提取 has_bf16/has_vnni
+  3. planner: Avx512NativeBf16 strategy 加 has_bf16 gate (if use_avx512 && has_bf16)
+  4. codegen: vcvtneps2bf16 emit 前查 has_bf16 (无则 fallback AVX2 软件序列 emit_f32_to_bf16_ymm_to_xmm_avx2)
+  5. codegen: vpdpbusd emit 前查 has_vnni (无则 Err, NO-SILENT-FALLBACK — INT8 dot 无替代)
+residualEvidence:
+  - "重扫 vcvtneps2bf16/vpdpbusd 调用点: 全加 has_bf16/has_vnni 守卫 (4720fde8)"
+  - "planner Avx512NativeBf16 strategy: 加 has_bf16 gate"
+  - "X86Lower struct: 加 has_bf16/has_vnni 字段 + 构造函数提取"
+  - "cargo test --lib: 7024 passed 0 failed"
+  - "注: has_avx512fp16 已有守卫 (lower_dot_product_x86 line 1974: if use_avx512 && has_avx512fp16), 本轮补齐 has_bf16/has_vnni"
+归因时间: 2026-07-04
+status: 根治 (4720fde8) | residual: 0
+```
