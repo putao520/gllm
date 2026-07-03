@@ -2677,3 +2677,26 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (5384e7cf) | residual: 0
 ```
+
+## BCE-20260704-MEANPOOL-SYMDIM-FALLBACK — MeanPool Symbolic seq_len 无 sym_map entry 时用 1/max_alloc 近似 (ARCH-SYMDIM-NO-CONST-DEGRADE + NO-SILENT-FALLBACK)
+
+> compile.inc.rs MeanPool 的 1/N 缩放: Symbolic seq_len 无 sym_map entry 时用 1/max_alloc 编译时常量近似。max_alloc 是分配上界非真实 N, 会致 MeanPool 数值错 (用 max_alloc 而非真实 seq_len 除)。
+
+```yaml
+patternId: BCE-20260704-MEANPOOL-SYMDIM-FALLBACK
+title: "MeanPool Symbolic seq_len 无 sym_map entry 时用 1/max_alloc 编译时常量近似 1/N, 而非返回 Err 或走 Runtime"
+layer: 设计缺陷 (ARCH-SYMDIM-NO-CONST-DEGRADE + NO-SILENT-FALLBACK)
+codePattern:
+  - "BoundExpr::Symbolic(sb) => { let inv_n = 1.0 / sb.max_alloc as f32; Broadcast(Const(inv_n)) }"
+  - "sym_map.resolve('seq_len') 无 entry 时 unwrap_or_else(|| seq_bound.clone()) 保留 Symbolic → 走上面 fallback"
+triggerCondition: "MeanPool + seq_bound=Symbolic + sym_map 无 seq_len entry (异常 setup)"
+sameClassCriterion: "Symbolic 维度无 sym_map entry 时, 用 max_alloc 编译时常量近似而非 Err/Runtime"
+rootCause: "正常路径 sym_map 有 seq_len (走 Runtime, 正确)。fallback 用 max_alloc (分配上界) 近似真实 seq_len — 违反 SymDim 穿透禁止降级 + NO-SILENT-FALLBACK"
+fixTemplate: "Symbolic 无 sym_map entry 时返回 Err (CodegenViolation), 要求 caller 在 sym_map 注册 seq_len 走 Runtime 分支"
+residualEvidence:
+  - "grep 确认无测试依赖 1/max_alloc fallback"
+  - "Symbolic 分支改为 return Err (116079a5)"
+  - "cargo test --lib: 7024 passed 0 failed"
+归因时间: 2026-07-04
+status: 根治 (116079a5) | residual: 0
+```
