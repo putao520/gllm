@@ -2372,3 +2372,40 @@ fixTemplate: "无需修复 (编译时常量)"
 归因时间: 2026-07-08 (第8轮深度扫描确认)
 status: 非违宪 (编译时常量) | residual: 0
 ```
+
+---
+
+## BCE-20260703-GPU-SCRATCHPAD-UNDERSIZE — GPU scratchpad buffer 只分配 base，未含 logits/sampling 区域致越界写 NaN+SIGSEGV
+
+> 5070Ti SmolLM2-135M GPU E2E: logits 全 NaN (49152 个) + embed 路径探针 SIGSEGV (signal 11)。编译成功 (gpu_code 4.9MB)，运行时越界写。
+
+```yaml
+patternId: BCE-20260703-GPU-SCRATCHPAD-UNDERSIZE
+title: GPU scratchpad buffer 大小只含 scratchpad_base_bytes (intermediate+RoPE)，未含 logits/sampling/MTP/SG 区域，JIT 写 logits 到 scratchpad+logits_scratch_offset 越界
+layer: 设计缺陷 (内存安全越界写)
+codePattern:
+  - "MegaKernelExecutor::scratchpad_bytes() 返回 m.scratchpad_base_bytes (= logits_scratch_offset)，仅 intermediate tensors + RoPE cache 大小"
+  - "executor_compile.rs:624 把 sb=mega.scratchpad_bytes() 上传给 prepare_gpu_mega_kernel → get_cached_scratchpad_bytes → batch_forward_gpu_pure:127 alloc_scratchpad_gpu(scratch_bytes.max(1024))"
+  - "JIT mega-kernel (mega_kernel_emit.rs:1155) 把 logits 写到 scratchpad + logits_scratch_offset，sampling 写到 +vocab_bytes 偏移，SG/MTP 更后"
+  - "logits_scratch_offset == scratchpad_base_bytes → logits 写到 buffer 末尾之外 → GPU 越界写 → NaN + SIGSEGV"
+triggerCondition: "GPU mega-kernel forward (任何含 logits 输出的图: generate-loop / prefill_logits / encode)"
+sameClassCriterion: "GPU 上传的 scratchpad 大小 < runtime_scratchpad_bytes(1) (base + 1 row logits + sampling×4 + MTP + SG) → 越界写"
+rootCause: "scratchpad_bytes() 取 scratchpad_base_bytes 而非完整 runtime 大小；CPU 路径每调用用 runtime_scratchpad_bytes(max_total) 正确，GPU 路径用编译时缓存的 base 值 → 漏算 logits/sampling 区"
+fixTemplate: "MegaKernelExecutor::scratchpad_bytes() 改返回 runtime_scratchpad_bytes(1) — JIT mega-kernel 始终写 logits 到 row 0 (mega_kernel_emit.rs:1558 row_byte_offset=0)，1 行 logits + sampling×4 + MTP + SG 是 kernel 实际触及的完整区域；不用 max_seq_len 行 (避免 Gemma4 E2B 128GB oversize)；不用 0 行 (避免越界)"
+regressionAssertion: "GPU scratchpad_bytes() >= runtime_scratchpad_bytes(1)；GPU E2E SmolLM2 logits 非 NaN + 无 SIGSEGV"
+residualEvidence:
+  - "cargo check --features cuda: pass (gllm + gllm-kernels)"
+  - "cargo test --lib mega_kernel: 430/430 pass (CPU 路径不受影响，每调用仍用 runtime_scratchpad_bytes)"
+  - "scratchpad_bytes() 唯一调用方: executor_compile.rs:624 GPU 上传 (CPU 路径每调用独立计算，不受波及)"
+  - "5070Ti GPU E2E 验证: 待机器上线 (192.168.1.200 当前不可达)"
+归因时间: 2026-07-03
+status: 根治 (代码已改，待 5070Ti 上线 E2E 验证) | residual: 0 (静态确认越界源已切除)
+```
+
+### 关键判定证据
+
+1. **CPU 路径正确** (executor_ops.inc.rs:21,229 等): `vec![0u8; mega.runtime_scratchpad_bytes(prompt_len)]` — 含 logits/sampling/MTP/SG
+2. **GPU 路径越界**: `scratchpad_bytes()` → `scratchpad_base_bytes` → 漏算 logits 区 (executor_compile.rs:624 上传)
+3. **JIT 写入点** (mega_kernel_emit.rs:1155): `output_ptr = scratchpad + logits_scratch_offset` (= scratchpad_base_bytes) → 写到 buffer 边界外
+4. **logits 只需 1 行** (mega_kernel_emit.rs:1310 注释 + 1558 row_byte_offset=0): JIT 始终写 row 0，不需要 max_seq_len 行
+5. **KV cache buffer 正确** (gpu_compile.rs:58): `num_layers * 2 * num_heads * max_seq_len * head_dim * dtype_size` — 非 SIGSEGV 源

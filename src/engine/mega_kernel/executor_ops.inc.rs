@@ -729,16 +729,35 @@ impl MegaKernelExecutor {
         self.mega_compiled.as_ref().and_then(|m| m.gpu_code.as_deref())
     }
 
-    /// Returns total scratchpad bytes needed.
+    /// Returns total scratchpad bytes needed by the mega-kernel.
     ///
     /// INVARIANT: `mega_compiled` is always `Some` after successful construction.
     /// PSC-1 root cause: returning 0 here (via `unwrap_or(0)`) silently hides an
     /// invariant violation and leads to a zero-sized scratchpad allocation, causing
     /// a heap-buffer-overflow during JIT execution. Fail loudly instead.
+    ///
+    /// BCE-20260703-GPU-SCRATCHPAD-UNDERSIZE: Previously returned only
+    /// `scratchpad_base_bytes` (= logits_scratch_offset), which covers the
+    /// intermediate tensors + RoPE cache but NOT the logits / sampling / MTP / SG
+    /// region that the JIT mega-kernel writes to at
+    /// `scratchpad + logits_scratch_offset`. The GPU path uploads this value
+    /// (`executor_compile.rs` → `prepare_gpu_mega_kernel` →
+    /// `get_cached_scratchpad_bytes` → `alloc_scratchpad_gpu`) and therefore
+    /// allocated a GPU scratchpad buffer too small for the logits row the kernel
+    /// writes — causing an out-of-bounds GPU write → NaN + SIGSEGV on 5070Ti.
+    ///
+    /// The CPU path uses `runtime_scratchpad_bytes(max_total)` per-call (correct).
+    /// The GPU path uploads once at model-load time, so this returns the full
+    /// runtime size for `max_total = 1` logits row — the JIT mega-kernel always
+    /// writes logits to row 0 (mega_kernel_emit.rs:1558 `row_byte_offset = 0`),
+    /// reusing the single row across prefill positions and decode steps. One
+    /// vocab_bytes row + sampling (×4) + MTP + SG is the exact region the kernel
+    /// touches, so this is the minimal correct GPU scratchpad size: no overrun,
+    /// no Gemma-4 128 GB oversize (which max_seq_len rows would cause).
     pub fn scratchpad_bytes(&self) -> usize {
         self.mega_compiled
             .as_ref()
-            .map(|m| m.scratchpad_base_bytes)
+            .map(|m| m.runtime_scratchpad_bytes(1).unwrap_or(m.scratchpad_base_bytes))
             .expect("scratchpad_bytes: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
