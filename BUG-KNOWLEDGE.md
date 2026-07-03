@@ -2651,3 +2651,29 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (4720fde8) | residual: 0
 ```
+
+## BCE-20260704-STEP-DTYPE-MISMATCH — step 硬编码 F32 与 dtype 不匹配 (NormLike stepbytes 同类)
+
+> BCE-20260703-NORM-MIXED-PRECISION-STEPBYTES (e24a2e49) 同类横扫。step = width.f32_lanes()*4 硬编码 F32 步长, 但 VecLoad/VecStore 用 ctx.dtype (BF16 时步长应不同)。
+
+```yaml
+patternId: BCE-20260704-STEP-DTYPE-MISMATCH
+title: "emit_loop step_bytes 硬编码 width.f32_lanes()*4 (F32 步长), 但 VecLoad/VecStore 用 ctx.dtype — BF16 时步长与 dtype 不匹配, 跳过一半元素"
+layer: 设计缺陷 (ARCH-JIT-YIELDS + ARCH-DTYPE-MIXED-PRECISION 同类)
+codePattern:
+  - "let step = width.f32_lanes() * 4; // 硬编码 F32 (W256=32, W512=64)"
+  - "let total_bytes = dim * ctx.dtype.elem_bytes(); // 按 dtype 算总字节"
+  - "VecLoad { dtype: ctx.dtype } // VecLoad 按 dtype 读 (BF16 W256 读 16 bytes)"
+  - "step_bytes=step // 循环按 F32 步长跳, BF16 时跳 32 但只读 16 → 跳过一半"
+triggerCondition: "ctx.dtype != F32 (如 BF16) + emit_loop step 用 f32_lanes()*4"
+sameClassCriterion: "任何 step_bytes = width.f32_lanes()*4 硬编码, 但 VecLoad/VecStore dtype 非 F32 — 步长与 dtype elem_bytes 不匹配"
+rootCause: "与 NormLike stepbytes 同源: step 按寄存器 F32 宽度算, 未按实际 dtype elem_bytes。BF16 W256 VecLoad 读 16 bytes (8 BF16→8 F32), 但 step=32 跳 32 bytes = 16 BF16 元素, 跳过一半"
+fixTemplate: "step = width.f32_lanes() * ctx.dtype.elem_bytes() (lanes × dtype.elem_bytes, BF16=8*2=16, F32=8*4=32)。参考 structural_emit.rs:43 load_vec_step = lanes*weight_elem 先例"
+residualEvidence:
+  - "BCE 横扫 width.f32_lanes()*4: 2 处真阳性 (MmHiddenInject + auto_select Softmax), 全治 (5384e7cf)"
+  - "其他命中: assert/test/注释 (非 BUG)"
+  - "auto_select Softmax: 确认死路径 (生产走 emit_softmax_inline), 加注释 + default_dtype.elem_bytes()"
+  - "cargo test --lib: 7024 passed 0 failed"
+归因时间: 2026-07-04
+status: 根治 (5384e7cf) | residual: 0
+```
