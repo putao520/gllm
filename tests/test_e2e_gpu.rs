@@ -145,6 +145,36 @@ fn gpu_e2e_smollm2_135m_logits_alignment() {
         .expect("GPU prefill logits unavailable (GPU backend not active?)");
     assert_eq!(gpu_logits.len(), VOCAB_SIZE, "GPU logits vocab size mismatch");
 
+    // DIAG: logits 实际值画像 (BCE 深度归因 — 不靠 argmax=0 猜测)
+    {
+        let sum: f64 = gpu_logits.iter().map(|x| *x as f64).sum();
+        let max_v = gpu_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min_v = gpu_logits.iter().cloned().fold(f32::INFINITY, f32::min);
+        let nan_cnt = gpu_logits.iter().filter(|x| x.is_nan()).count();
+        let zero_cnt = gpu_logits.iter().filter(|x| **x == 0.0).count();
+        let inf_cnt = gpu_logits.iter().filter(|x| x.is_infinite()).count();
+        eprintln!(
+            "[DIAG-LOGITS] len={} sum={sum:.4} min={min_v:.4} max={max_v:.4} nan={nan_cnt} zero={zero_cnt} inf={inf_cnt}",
+            gpu_logits.len()
+        );
+        eprintln!("[DIAG-LOGITS] first5={:?}", &gpu_logits[..5.min(gpu_logits.len())]);
+        // argmax 排查：前 5 大值的 (idx, val)
+        let mut idx_val: Vec<(usize, f32)> = gpu_logits.iter().cloned().enumerate().collect();
+        idx_val.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        eprintln!(
+            "[DIAG-LOGITS] top5={:?}",
+            &idx_val[..5.min(idx_val.len())]
+        );
+        // golden 对比前 5
+        let mut g_idx_val: Vec<(usize, f32)> = golden_logits.iter().cloned().enumerate().collect();
+        g_idx_val.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        eprintln!(
+            "[DIAG-GOLDEN] top5={:?}",
+            &g_idx_val[..5.min(g_idx_val.len())]
+        );
+        std::io::stderr().flush().ok();
+    }
+
     // 1. argmax next-token ID must match PyTorch greedy decode.
     let gpu_next_id = argmax(&gpu_logits) as u32;
     assert_eq!(
@@ -167,6 +197,71 @@ fn gpu_e2e_smollm2_135m_logits_alignment() {
     eprintln!(
         "[GPU-ALIGN] SmolLM2-135M: next_id={gpu_next_id} (golden {golden_next_id}) cos={cos:.6} mad={mad:.6}"
     );
+}
+
+// ─── BCE-NaN-LOCATE: GPU forward NaN 源二分定位 ─────────────────────
+// logits 全 NaN (49152 个). 用 embed 路径 (transformer layers only, 无 lm_head/argmax)
+// 探测 hidden state 是否也 NaN. 若 hidden NaN → NaN 源在 transformer 层 (RMSNorm/GEMM/RoPE/Attn);
+// 若 hidden finite → NaN 源在 lm_head 或 argmax.
+
+fn diag_finite(label: &str, v: &[f32]) -> bool {
+    let nan = v.iter().filter(|x| x.is_nan()).count();
+    let inf = v.iter().filter(|x| x.is_infinite()).count();
+    let sum: f64 = v.iter().map(|x| *x as f64).sum();
+    let max_v = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_v = v.iter().cloned().fold(f32::INFINITY, f32::min);
+    eprintln!(
+        "[DIAG-{label}] len={} sum={sum:.4} min={min_v:.4} max={max_v:.4} nan={nan} inf={inf}"
+    );
+    std::io::stderr().flush().ok();
+    nan == 0 && inf == 0
+}
+
+#[test]
+#[ignore = "GPU E2E: requires 5070Ti + cuda feature; run with --ignored"]
+fn gpu_diag_smollm2_nan_locate() {
+    eprintln!("[OOMPROBE-TEST] gpu_diag_smollm2_nan_locate entered, stderr flushed");
+    std::io::stderr().flush().ok();
+    const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
+    const PROMPT: &str = "The meaning of life is";
+
+    // 1. embed 路径: transformer layers only (no lm_head). hidden state should be finite.
+    let emb_client = Client::builder()
+        .model(MODEL)
+        .kind(ModelKind::Embedding)
+        .backend(BackendType::Cuda)
+        .build()
+        .unwrap_or_else(|e| panic!("Failed to build GPU embed client: {e}"));
+
+    let emb_resp = emb_client
+        .embed([PROMPT])
+        .expect("GPU SmolLM2 embed (encode path) failed");
+    assert_eq!(emb_resp.embeddings.len(), 1, "expected 1 embedding");
+    let hidden = &emb_resp.embeddings[0].embedding;
+    eprintln!(
+        "[DIAG-EMBED] hidden dim={}, first5={:?}",
+        hidden.len(),
+        &hidden[..5.min(hidden.len())]
+    );
+    let hidden_ok = diag_finite("EMBED-HIDDEN", hidden);
+
+    // 2. logits 路径 (含 lm_head): 应该 NaN (复现 BUG)
+    let chat_client = gpu_chat_client(MODEL);
+    let tokens = chat_client.encode(PROMPT).expect("encode failed");
+    let gpu_logits = chat_client
+        .diagnostic_prefill_logits(&tokens)
+        .expect("GPU prefill logits unavailable");
+    let logits_ok = diag_finite("LOGITS", &gpu_logits);
+
+    eprintln!(
+        "[DIAG-SUMMARY] hidden_finite={hidden_ok} logits_finite={logits_ok}"
+    );
+    std::io::stderr().flush().ok();
+
+    // 不做强断言 (诊断探针), 只打印. 隐藏 NaN 源判定:
+    //   hidden_ok=false  → NaN 在 transformer 层
+    //   hidden_ok=true, logits_ok=false → NaN 在 lm_head
+    assert!(hidden.len() > 0, "hidden state empty");
 }
 
 // ─── TEST-GPU-GEN-002: Qwen3-0.6B generator (GGUF Q4_0) ──────────────
