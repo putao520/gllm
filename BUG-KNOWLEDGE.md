@@ -2443,3 +2443,51 @@ status: 根治 (代码已改，待 5070Ti 上线 E2E 验证) | residual: 0 (静�
 3. **JIT 写入点** (mega_kernel_emit.rs:1155): `output_ptr = scratchpad + logits_scratch_offset` (= scratchpad_base_bytes) → 写到 buffer 边界外
 4. **logits 只需 1 行** (mega_kernel_emit.rs:1310 注释 + 1558 row_byte_offset=0): JIT 始终写 row 0，不需要 max_seq_len 行
 5. **KV cache buffer 正确** (gpu_compile.rs:58): `num_layers * 2 * num_heads * max_seq_len * head_dim * dtype_size` — 非 SIGSEGV 源
+
+## BCE-20260703-NORM-MIXED-PRECISION-STEPBYTES — NormLike/LayerNorm weight VecLoad 复用 input byte_off 致 BF16 只读一半元素 → SmolLM2 NaN 真因
+
+> SmolLM2-135M GPU E2E: argmax=0 / logits 全 NaN (49152 个)。CPU JIT 同样错 (argmax=9212 vs 黄金 253, value 17.4 vs 24.3)；5070Ti AVX-512 codegen 把错误放大为 NaN。这是长期追踪的 SmolLM2 NaN 真因 (architect 5 证据验证)。
+
+```yaml
+patternId: BCE-20260703-NORM-MIXED-PRECISION-STEPBYTES
+title: "NormLike/LayerNorm weight (BF16) VecLoad 复用 input (F32) byte_off 推进，导致 weight 只读一半元素 → normed 错 → logits 全错"
+layer: 设计缺陷 (混合精度 dtype 传播断裂 — ARCH-DTYPE-MIXED-PRECISION 违宪)
+codePattern:
+  - "emit_loop(bound, step_bytes=input width.bytes()=32, |prog, _counter, byte_off| { VecLoad{offset: LoopOffset(byte_off), dtype: weight_dtype=BF16} })"
+  - "input F32 VecLoad (W256) 读 32 bytes (8×F32); weight BF16 VecLoad (W256) 同宽只读 16 bytes (8×BF16→8×F32)"
+  - "weight VecLoad 复用 input 的 byte_off (按 32 推进) → weight 每轮只读一半 (16/32) → 跳过一半 weight 元素"
+  - "tail 同类: weight VecLoad offset 用 input elem (4) 而非 weight_elem (2)"
+triggerCondition: "混合精度 NormLike (RmsNorm/ValueNorm/HeadRmsNorm) 或 LayerNorm: input dtype != weight dtype (典型: 激活 F32 + 权重 BF16)"
+sameClassCriterion: "任何 emit_loop 内 weight VecLoad 的 offset 复用 input 步长 VReg (byte_off) 而非 weight 独立步长 (counter × weight_step_bytes)，且 weight_dtype.elem_bytes() != input dtype.elem_bytes()"
+rootCause: "NormLike step_bytes = width.bytes() (input F32 步长); weight VecLoad 复用 LoopOffset(byte_off)。byte_off 已是 counter×step_bytes (input步长), BF16 weight 需 counter×weight_step_bytes (lanes×weight_elem)。GEMM gemm_emit.rs:345 早已用独立 b_elem stride 是正确先例，NormLike 漏抄"
+fixTemplate: |
+  weight VecLoad 用独立步长 (参照 GEMM gemm_emit.rs:345 b_elem):
+  - weight_step_bytes = lanes × weight_dtype.elem_bytes()
+  - Phase 3: w_off = OffsetExpr::Mul(LoopOffset(counter), weight_step_bytes)  # counter 是纯索引 VReg
+  - tail: w_off = weight_tail_off + t × weight_elem  (weight_tail_off = vec_count × weight_step_bytes)
+  - LayerNorm bias_offset 用 weight_elem (非 input elem); bias VecLoad offset = bias_offset + w_off
+  同精度场景 (dtype==weight_dtype): weight_step_bytes == step_bytes, 零回归
+detectionSignatures:
+  literal: "dtype: weight_dtype.*offset: OffsetExpr::LoopOffset(byte_off)"
+  structural: "emit_loop(_, step_bytes, |_, counter, byte_off| VecLoad{offset: LoopOffset(byte_off), dtype: weight_dtype}) where weight_dtype.elem_bytes() != dtype.elem_bytes()"
+  antipattern: "mixed-precision-weight-reuses-input-stride"
+residualEvidence:
+  - "重扫 dtype: weight_dtype VecLoad: norm_softmax_emit.rs 全部已用 w_off/weight_step_bytes (2d2e5dbd)"
+  - "vision_audio_emit.rs:149 误报 (标量 MemLoad, 独立 w_byte_off)"
+  - "vision_audio_emit.rs:305 误报 (kernel_off = Mul(ScalarVReg(kr_ctr), scale) + Const(kc×weight_elem), 独立 weight 步长)"
+  - "structural_emit.rs:128 误报 (load_vec_step = lanes×weight_elem, d_off 本就是 weight 步长, output 用 ctr×compute_elem 独立)"
+  - "quant_gemm.inc.rs:98 误报 (kk_off 按 lanes×bytes_per_elem=weight 步长, input 用独立 act_off)"
+  - "cargo check --lib: pass"
+  - "cargo test --lib: 6993 passed 0 failed"
+  - "5070Ti GPU E2E 验证: 待机器上线 (192.168.1.200 当前不可达) — 静态确认 stepbytes 真因已切除"
+归因时间: 2026-07-03
+status: 根治 (代码已改 2d2e5dbd, 6993 passed) | residual: 0 (5 命中全甄别, 1 真阳性已治, 4 误报排除)
+```
+
+### 关键判定证据
+
+1. **input vs weight 步长错配** (norm_softmax_emit.rs:73 原): `step_bytes = width.bytes() = 32` (W256 F32), 但 BF16 weight 同宽只读 16 bytes
+2. **weight VecLoad 复用 input byte_off** (norm_softmax_emit.rs:205 原): `offset: LoopOffset(byte_off)` — byte_off 按 input step_bytes=32 推进，weight 每轮跳 32 bytes 但只读 16 → 跳过一半
+3. **CPU 也错** (非 GPU 特有): argmax=9212 vs 黄金 253, value 17.4 vs 24.3 — 证明是 codegen 层 BUG 非 GPU 路径专属
+4. **AVX-512 放大为 NaN** (5070Ti AMD 9950X3D 有 AVX-512): 未初始化高 lanes / BF16 解码错误 → NaN; 本地 i9-10900KF 无 AVX-512 → 有限但错
+5. **GEMM 已有正确先例** (gemm_emit.rs:345-367): `b_elem = b_dtype.elem_bytes()`, `OffsetExpr::Mul(LoopOffset(k_ctr), b_row_stride×k_unroll)` — weight 独立 stride 模式，NormLike 漏抄
