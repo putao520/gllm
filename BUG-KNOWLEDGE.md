@@ -2753,3 +2753,28 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (edfa73aa) | residual: 0
 ```
+
+## BCE-20260704-KERNELS-TRAIT-ISLAND-STUBS — Kernels trait 孤岛 stub (unimplemented!) 删除 (NO-PRAGMATIC-HACKS + P-1 红线)
+
+> src/traits.rs Kernels trait 有 19 个默认 stub (unimplemented!), ~16 个是孤岛 (0 live caller)。违反 P-1 红线 (unimplemented!/stub commit 前清除) + NO-PRAGMATIC-HACKS。architect-residual-eval §3 评估。
+
+```yaml
+patternId: BCE-20260704-KERNELS-TRAIT-ISLAND-STUBS
+title: "Kernels trait 默认方法 unimplemented! stub, 其中 ~16 个无 live caller (孤岛), 违反 P-1 红线 + NO-PRAGMATIC-HACKS"
+layer: 设计缺陷 (遗留 scalar 内核抽象, 现已转向 JIT codegen)
+codePattern:
+  - "fn vec_dot(&self, ...) { unimplemented!(\"...\") }"
+  - "fn gemm_bt/gemm_bias/pack_b/... { unimplemented!(...) }"
+  - "0 live caller (search_code 验证)"
+triggerCondition: "Kernels trait 默认方法 unimplemented! + 无调用"
+sameClassCriterion: "trait 默认方法 unimplemented! stub 且 0 live caller (孤岛)"
+rootCause: "traits.rs 是早期 scalar 内核抽象, 现已转向 JIT codegen (NO-SCALAR 铁律)。预留的 trait 方法 stub 未清理, 成为孤岛"
+fixTemplate: "删除 0 caller 的孤岛 stub (trait 默认方法 + cpu_kernels impl 无 override 的)。保留 live caller (pack_b/gelu) 或 required (gemm) 的方法"
+residualEvidence:
+  - "search_code 验证 ~16 个 stub 0 live caller"
+  - "删除孤岛 stub (493e6092): vec_dot/vec_sub/vec_scale/vec_axpy/vec_max/vec_sum_squares/gemm_bt/gemm_bias/gemm_prepacked/gemm_bias_prepacked/relu/dequant_q*/gemv_q8/rms_norm/layer_norm/rope/rope_with_pos/tanh/exp"
+  - "保留: gemm(required)/gemm_bias_act/pack_b(live)/gelu(live)/swiglu/softmax/vec_sum/gemv"
+  - "cargo test --lib: 7029 passed 0 failed"
+归因时间: 2026-07-04
+status: 根治 (493e6092) | residual: 0
+```
