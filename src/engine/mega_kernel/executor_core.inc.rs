@@ -2,6 +2,35 @@
 ///
 /// 唯一推理路径: 编译 → 单次 CALL。
 /// 编译在模型加载时完成，推理时零 Rust 开销。
+
+// ARCH-UNIFIED-EXEC 阶段2: 单次编译产物元数据 — CPU/GPU 统一承载 MegaKernelCompiled 构造所需字段。
+//
+// CPU 路径: 所有字段从 MegaKernelCompileOutput 真实提取。
+// GPU 路径: 共享字段(rope_cache/logits_scratch_offset/vocab_size/hidden)从 GpuMegaKernelOutput 提取;
+//   CPU 专属字段(buffer_layout/tensor_sources/source_map)用零布局/empty/None 填充 —
+//   GPU launcher 返 Err(阶段3B 注入真闭包), runtime_scratchpad_bytes 永不到达,
+//   这些字段在 GPU 路径为类型占位(非功能性死字段)。零布局 BufferLayout 是 codebase 已有模式
+//   (gllm-kernels src/compiler/mod.rs:1350 test fixture)。
+struct CompileMeta {
+    /// 运行时缓冲布局(activation ping/pong, logits, sampling workspace) — CPU JIT 专属。
+    buffer_layout: gllm_kernels::compiler::BufferLayout,
+    /// Intermediate tensor 源(TensorId → TensorPtrSource) — CPU JIT 专属, GPU 路径为 empty。
+    tensor_sources: std::collections::HashMap<
+        gllm_kernels::compiler::graph::TensorId,
+        gllm_kernels::compiler::buffer_alloc::TensorPtrSource,
+    >,
+    /// JIT source map(VmInstr → 机器码偏移 → Op 标签) — 仅 debug_jit=true 时生成, GPU 路径为 None。
+    source_map: Option<gllm_kernels::compiler::codegen::vm::debug_map::JitSourceMap>,
+    /// RoPE cos/sin 表需求(caller 必须在每次调用前填充 scratchpad) — CPU/GPU 共享。
+    rope_cache: Option<gllm_kernels::compiler::codegen::RopeCacheRequirement>,
+    /// Logits 区域在 scratchpad 中的偏移 — CPU/GPU 共享。
+    logits_scratch_offset: usize,
+    /// vocab_size — logits 每行元素数 — CPU/GPU 共享。
+    vocab_size: usize,
+    /// hidden_dim — SG scratchpad 需要 — CPU/GPU 共享。
+    hidden: usize,
+}
+
 pub struct MegaKernelExecutor {
     /// Mega-kernel 编译产物 (唯一路径 — SPEC/39 统一架构)
     mega_compiled: Option<MegaKernelCompiled>,
@@ -59,11 +88,19 @@ impl MegaKernelExecutor {
         // SPEC/39: BusinessConfig no longer nested in CompileConfig.
         // debug_jit promoted to CompileConfig top level — the only business
         // parameter the compiler reads directly.
+        // ARCH-UNIFIED-EXEC 阶段2: target 推导 — 最强硬件优先。
+        // 单次编译: target = if gpu_sm_version.is_some() { Gpu } else { Cpu }
+        // 套娃双编译根源(硬编码 Cpu + 单独 GPU 编译块)已删除。
+        let target = if let Some(sm) = gpu_sm_version {
+            gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Gpu { sm_version: sm }
+        } else {
+            gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Cpu
+        };
         let config = gllm_kernels::compiler::mega_kernel_abi::CompileConfig {
             max_seq_len,
             debug_jit: business_config.debug_jit,
             hetero: hetero_config.clone(),
-            target: gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Cpu,
+            target,
         };
 
         let hetero_layout = hetero_config.as_ref().map(|hc| {
@@ -73,15 +110,11 @@ impl MegaKernelExecutor {
         });
 
         // Pre-resolve weight layout before moving graph into compiler.
-        // Clone graph for GPU compilation (CPU compiler takes ownership).
         // Also save layer_loop_config for weight packing (needed even without GPU).
         let layer_loop_cfg = graph.layer_loop_config.clone();
         let hetero_loop_cfg = graph.hetero_layer_loop_config.clone();
-        let graph_for_gpu = if gpu_sm_version.is_some() {
-            Some(graph.clone())
-        } else {
-            None
-        };
+        // ARCH-UNIFIED-EXEC 阶段2: graph_for_gpu 克隆已删除 — 单次编译,
+        // target 决定编译 CPU 还是 GPU, 不再克隆两份图编两次。
         let weight_layout = graph.weight_layout();
         // ARCH-BLOB-YIELDS-WEIGHT: preserve per-tensor dtype from graph tensors.
         // dtype is taken from the graph TensorMeta (the source of truth) so the blob
@@ -146,42 +179,126 @@ impl MegaKernelExecutor {
         let output = compiler
             .compile(graph, &config, hetero_layout)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
-        let output = output.expect_cpu();
 
-        let exec_code = output.layer_code;
-        let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
-
-        // ARCH-UNIFIED-EXEC 阶段1B: 统一 CompiledExecutable::Cpu — 删除分离的 exec_code/entry_fn/gpu_code 三字段。
-        // GPU 编译块阶段1B 移除（compile_from_auto_graph 只产 CPU）；阶段2 按 target 重做单次编译。
-        let executable = CompiledExecutable::Cpu {
-            code: exec_code,
-            entry_fn,
+        // ARCH-UNIFIED-EXEC 阶段2: 单次编译 — match CompileOutput 构造 CompiledExecutable + CompileMeta。
+        // CPU 路径: 提取 layer_code + entry_fn + 完整布局元数据(buffer_layout/tensor_sources/source_map)。
+        // GPU 路径: 提取 PTX 字节码 + placeholder launcher(返 Err) — 真闭包阶段3B 在
+        //   compile_and_upload_mega 注入(那里有 backend)。GPU 共享字段(rope_cache/logits_scratch_offset/
+        //   vocab_size/hidden)从 GpuMegaKernelOutput 提取; CPU 专属字段(buffer_layout/source_map/
+        //   tensor_sources)用零布局/None/empty 填充 — GPU launcher 返 Err, 这些字段在 GPU 路径永不读取。
+        let (executable, meta): (CompiledExecutable, CompileMeta) = match output {
+            gllm_kernels::compiler::CompileOutput::Cpu(c) => {
+                let gllm_kernels::compiler::MegaKernelCompileOutput {
+                    layer_code: exec_code,
+                    buffer_layout,
+                    tensor_sources,
+                    source_map,
+                    rope_cache,
+                    logits_scratch_offset,
+                    vocab_size,
+                    hidden,
+                    num_layers: _,
+                    weight_layout: _,
+                    total_scratchpad_bytes: _,
+                    hetero_layout: _,
+                } = c;
+                // entry_point_as_mega_kernel 借用 &exec_code 返回 fn 指针(已 transmute 拷贝),
+                // 不持借用 → 可先取 entry_fn 再 move exec_code 进 CompiledExecutable::Cpu。
+                let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
+                let executable = CompiledExecutable::Cpu {
+                    code: exec_code,
+                    entry_fn,
+                };
+                let meta = CompileMeta {
+                    buffer_layout,
+                    tensor_sources,
+                    source_map,
+                    rope_cache,
+                    logits_scratch_offset,
+                    vocab_size,
+                    hidden,
+                };
+                (executable, meta)
+            }
+            gllm_kernels::compiler::CompileOutput::Gpu(g) => {
+                // 阶段2: GPU launcher placeholder — 真实 launcher(捕获 backend/cuModule/cuStream)
+                // 阶段3B 在 compile_and_upload_mega 注入, 因为那里持 backend: &B。
+                let launcher: std::sync::Arc<
+                    dyn Fn(&MegaKernelArgs) -> Result<(), MegaKernelError> + Send + Sync,
+                > = std::sync::Arc::new(|_args| {
+                    Err(MegaKernelError::Execution(
+                        "GPU launcher not yet wired (阶段3B)".to_string(),
+                    ))
+                });
+                let gllm_kernels::compiler::GpuMegaKernelOutput {
+                    gpu_code,
+                    rope_cache,
+                    logits_scratch_offset,
+                    vocab_size,
+                    hidden,
+                    total_scratchpad_bytes: _,
+                    num_layers: _,
+                } = g;
+                let executable = CompiledExecutable::Gpu {
+                    ptx: gpu_code,
+                    kernel_name: "mega_kernel".into(),
+                    launcher,
+                };
+                // GPU 路径: GpuMegaKernelOutput 不携带 buffer_layout/tensor_sources/source_map
+                // (CPU JIT 专属字段)。用零布局 + None + empty 填充 — GPU launcher 返 Err,
+                // runtime_scratchpad_bytes 永不到达, 这些字段在 GPU 路径为类型占位(非功能性死字段)。
+                // 零布局 BufferLayout 是 codebase 已有模式(gllm-kernels mod.rs:1350 test fixture)。
+                // 阶段3B 接真 launcher 时若需 GPU scratchpad 管理, 再扩 GpuMegaKernelOutput。
+                let buffer_layout = gllm_kernels::compiler::mega_kernel_abi::BufferLayout {
+                    activation_a_offset: 0,
+                    activation_b_offset: 0,
+                    activation_bytes: 0,
+                    logits_offset: 0,
+                    logits_bytes: 0,
+                    sampling_workspace_offset: 0,
+                    sampling_workspace_bytes: 0,
+                    sg_detect_offset: 0,
+                    sg_knowledge_offset: 0,
+                    sg_data_bytes: 0,
+                    total_scratchpad_bytes: 0,
+                };
+                let meta = CompileMeta {
+                    buffer_layout,
+                    tensor_sources: std::collections::HashMap::new(),
+                    source_map: None,
+                    rope_cache,
+                    logits_scratch_offset,
+                    vocab_size,
+                    hidden,
+                };
+                (executable, meta)
+            }
         };
-        let target = gllm_kernels::compiler::CompileTarget::Cpu;
 
         // BCE-20260629-006: 追加 intermediate tensor offsets（供 DIAG harness 动态查询）
-        // 从 name_map（已包含 tensor_names 中的 intermediate）构建 named_offsets
+        // CPU 专属: GpuMegaKernelOutput 无 tensor_sources, GPU 路径 tensor_sources 为 empty,
+        // 循环不迭代 → 自动跳过增强。无需额外条件分支。
         // 对于 tensor_sources 中的 ActivationPing/Pong，直接用 buffer_layout 的 offset
         // 因为 VAM 把 embedding 映射为 ActivationPing 但 Resolver 已强制覆盖为 Intermediate
-        // 所以从 output.tensor_sources 提取即可。对于 ActivationPing（被 VAM 覆盖的），
-        // 用 buffer_layout.activation_a_offset 而不是 0。
+        // 所以从 meta.tensor_sources 提取即可。对于 ActivationPing（被 VAM 覆盖的），
+        // 用 meta.buffer_layout.activation_a_offset 而不是 0。
         // 先收集 tensor_sources 中的所有 Intermediate 映射
         let mut inter_map: std::collections::HashMap<gllm_kernels::compiler::graph::TensorId, usize> = std::collections::HashMap::new();
-        for (&tid, src) in &output.tensor_sources {
+        for (&tid, src) in &meta.tensor_sources {
             if let gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Intermediate { offset } = src {
                 inter_map.insert(tid, *offset);
             }
         }
         // 构建 named_offsets：先用 weight_layout 的，再补上 intermediate（有 Intermediate 映射的）
-        for (&tid, src) in &output.tensor_sources {
+        for (&tid, src) in &meta.tensor_sources {
             if let Some((name, dt)) = tensor_names.get(&tid) {
                 if !named_offsets.iter().any(|(n, _, _)| n == name) {
                     // 优先用 inter_map 中的 offset（Resolver 覆盖后的值）
                     let offset = inter_map.get(&tid).copied().unwrap_or_else(|| {
                         match src {
                             gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Intermediate { offset } => *offset,
-                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::ActivationPing => output.buffer_layout.activation_a_offset,
-                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::ActivationPong => output.buffer_layout.activation_b_offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::ActivationPing => meta.buffer_layout.activation_a_offset,
+                            gllm_kernels::compiler::buffer_alloc::TensorPtrSource::ActivationPong => meta.buffer_layout.activation_b_offset,
                             gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Output { offset } => *offset,
                             gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Weight { offset } => *offset,
                             gllm_kernels::compiler::buffer_alloc::TensorPtrSource::Activation => 0,
@@ -191,11 +308,14 @@ impl MegaKernelExecutor {
                 }
             }
         }
+
         // §19 KV-OPT-009: Compile KIVI4 variant for compressed KV attention.
+        // CPU 专属: KIVI4 variant 走 CPU JIT 编译(compile + expect_cpu),
+        // GPU 路径(meta.tensor_sources 为 empty)不产 KIVI4 variant — 阶段3B 后再考虑 GPU KIVI4。
         // TEMP: disable KIVI4 compilation for GGUF models (no raw_floats) —
         // RegAllocator on 28-layer N-layer takes 15min per compilation.
         // Will re-enable after RegAllocator optimization.
-        let kivi4_exec = if !raw_floats.is_empty() {
+        let kivi4_exec = if !meta.tensor_sources.is_empty() && !raw_floats.is_empty() {
             compiler
                 .compile(graph_kivi4, &config, hetero_layout_for_kivi4)
                 .ok()
@@ -218,27 +338,25 @@ impl MegaKernelExecutor {
             has_gemma_norm_residual,
         );
 
-        // ARCH-UNIFIED-EXEC 阶段1B: GPU 编译块删除。
-        // 旧路径在此处根据 (graph_for_gpu, gpu_sm_version) 单独编译 PTX 并存到 gpu_code 字段。
-        // 阶段2 将按 target 选 CPU/GPU 单次编译并构造 CompiledExecutable::Gpu。
-        // 阶段1B compile_from_auto_graph 只产 CPU executable — GPU 编译完全移除（不是死代码，是阶段性删除）。
-        let _ = (graph_for_gpu, gpu_sm_version);
+        // ARCH-UNIFIED-EXEC 阶段2: 套娃双编译块已删除 — 不再克隆 graph_for_gpu 单独编 GPU。
+        // 单次编译按 target 选 CPU/GPU; gpu_sm_version 已在 target 推导处消费。
+        let _ = gpu_sm_version;
 
         let mtp_depth_extracted = mtp_depth;
         let mega_compiled = MegaKernelCompiled {
             named_offsets,
-            buffer_layout: output.buffer_layout,
-            logits_scratch_offset: output.logits_scratch_offset,
+            buffer_layout: meta.buffer_layout,
+            logits_scratch_offset: meta.logits_scratch_offset,
             weight_blob,
             executable,
             target,
-            rope_cache: output.rope_cache,
-            scratchpad_base_bytes: output.logits_scratch_offset,
-            vocab_size: output.vocab_size,
-            hidden: output.hidden,
+            rope_cache: meta.rope_cache,
+            scratchpad_base_bytes: meta.logits_scratch_offset,
+            vocab_size: meta.vocab_size,
+            hidden: meta.hidden,
             compute_dtype: geometry.compute_dtype,
 
-            source_map: output.source_map,
+            source_map: meta.source_map,
             num_kv_heads: geometry.num_kv_heads,
             head_dim: geometry.head_dim,
             max_seq_len,
