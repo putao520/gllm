@@ -74,6 +74,16 @@ impl MegaKernelExecutor {
         business_config: gllm_kernels::compiler::BusinessConfig,
         hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
         gpu_sm_version: Option<u32>,
+        // ARCH-UNIFIED-EXEC 阶段3B-1: GPU launcher factory.
+        // When `target = Gpu`, this factory is invoked with (ptx, kernel_name)
+        // to build the real launcher closure (captures backend, calls
+        // `gpu_launch_mega_kernel`). None = CPU target or backend without GPU.
+        // Architect sessionId 5d98f4f4: closure must be built inside backend
+        // module (`pub(super)` visibility), so we accept a factory not backend.
+        gpu_launcher_builder: Option<&dyn Fn(Vec<u8>, String) -> Result<
+            std::sync::Arc<dyn Fn(&MegaKernelArgs) -> Result<(), MegaKernelError> + Send + Sync>,
+            MegaKernelError,
+        >>,
     ) -> Result<Self, MegaKernelError> {
         // Derive all geometry from graph — CompilerGraph is the SSOT.
         let geometry =
@@ -221,15 +231,11 @@ impl MegaKernelExecutor {
                 (executable, meta)
             }
             gllm_kernels::compiler::CompileOutput::Gpu(g) => {
-                // 阶段2: GPU launcher placeholder — 真实 launcher(捕获 backend/cuModule/cuStream)
-                // 阶段3B 在 compile_and_upload_mega 注入, 因为那里持 backend: &B。
-                let launcher: std::sync::Arc<
-                    dyn Fn(&MegaKernelArgs) -> Result<(), MegaKernelError> + Send + Sync,
-                > = std::sync::Arc::new(|_args| {
-                    Err(MegaKernelError::Execution(
-                        "GPU launcher not yet wired (阶段3B)".to_string(),
-                    ))
-                });
+                // ARCH-UNIFIED-EXEC 阶段3B-1: 真 launcher 注入.
+                // 工厂 (gpu_launcher_builder) 由 compile_and_upload_mega 构造,
+                // 闭包内调 backend.build_mega_launcher(ptx, kernel_name) → 真 cuLaunchKernel.
+                // Architect sessionId 5d98f4f4: 闭包必须在 backend 模块内构造 (pub(super)),
+                // 故 compile_from_auto_graph 收工厂而非 backend.
                 let gllm_kernels::compiler::GpuMegaKernelOutput {
                     gpu_code,
                     rope_cache,
@@ -239,9 +245,17 @@ impl MegaKernelExecutor {
                     total_scratchpad_bytes: _,
                     num_layers: _,
                 } = g;
+                let kernel_name = "mega_kernel".to_string();
+                let launcher = if let Some(builder) = gpu_launcher_builder {
+                    builder(gpu_code.clone(), kernel_name.clone())?
+                } else {
+                    return Err(MegaKernelError::Execution(
+                        "GPU target compiled but no launcher builder provided (backend has no GPU capability?)".to_string(),
+                    ));
+                };
                 let executable = CompiledExecutable::Gpu {
                     ptx: gpu_code,
-                    kernel_name: "mega_kernel".into(),
+                    kernel_name,
                     launcher,
                 };
                 // GPU 路径: GpuMegaKernelOutput 不携带 buffer_layout/tensor_sources/source_map

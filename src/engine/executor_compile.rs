@@ -611,11 +611,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
         gpu_sm_version: Option<u32>,
     ) -> ExecutorResult<super::mega_kernel::MegaKernelExecutor> {
+        // ARCH-UNIFIED-EXEC 阶段3B-1: GPU launcher factory.
+        // Architect sessionId 5d98f4f4: closure must be built inside backend
+        // module (`pub(super)` visibility of `gpu_launch_mega_kernel`), so we
+        // pass a factory closure that calls `backend.build_mega_launcher(ptx, kernel_name)`.
+        // The factory captures `backend` by reference (lives through this fn).
+        // None when target is CPU or backend lacks GPU capability (default trait
+        // impl returns Err → factory only invoked when target=Gpu).
+        let gpu_launcher_builder: Option<&dyn Fn(Vec<u8>, String) -> Result<
+            std::sync::Arc<dyn Fn(&super::mega_kernel::MegaKernelArgs) -> Result<(), super::mega_kernel::MegaKernelError> + Send + Sync>,
+            super::mega_kernel::MegaKernelError,
+        >> = if gpu_sm_version.is_some() {
+            Some(&|ptx, kernel_name| backend.build_mega_launcher(ptx, kernel_name))
+        } else {
+            None
+        };
         let mega = super::mega_kernel::MegaKernelExecutor::compile_from_auto_graph(
             graph, weight_ptrs, weight_sizes,
             weights.raw_floats(), name_map,
             geometry.max_seq_len, eos_id,
             business_config, hetero_config, gpu_sm_version,
+            gpu_launcher_builder,
         )
         .map_err(|e| ExecutorError::Backend(BackendError::Other(format!("mega-kernel compilation failed: {}", e))))?;
 

@@ -549,6 +549,75 @@ macro_rules! impl_gpu_backend {
                 }
             }
 
+            /// ARCH-UNIFIED-EXEC 阶段3B-1: GPU launcher factory.
+            /// Construct the launcher closure INSIDE the backend module (Rust
+            /// `pub(super)` visibility: `gpu_launch_mega_kernel` is only visible
+            /// within each backend's module). Architect sessionId 5d98f4f4: this
+            /// is the only correct design — `&self` captured by clone, default
+            /// trait impl returns Err, GPU backends override here. Mirrors
+            /// `prepare_gpu_mega_kernel`/`device_memory_capacity`/`gpu_sm_version`
+            /// GPU capability method体系 (default + override pattern).
+            fn build_mega_launcher(
+                &self,
+                ptx: Vec<u8>,
+                kernel_name: String,
+            ) -> Result<
+                std::sync::Arc<
+                    dyn Fn(&crate::engine::mega_kernel::MegaKernelArgs)
+                        -> Result<(), crate::engine::mega_kernel::MegaKernelError>
+                        + Send
+                        + Sync,
+                >,
+                crate::engine::mega_kernel::MegaKernelError,
+            > {
+                #[cfg( $($cfg_pred)+ )]
+                {
+                    // Clone backend into the closure (CudaBackend/HipBackend/MetalBackend
+                    // all impl Clone — Arc-share the underlying GPU device/driver handle).
+                    let backend = self.clone();
+                    Ok(std::sync::Arc::new(move |args: &crate::engine::mega_kernel::MegaKernelArgs| {
+                        // MegaKernelArgs → [usize; 22] conversion. Field order MUST match
+                        // the 22-param cuLaunchKernel argv order in gpu_generate_single_sequence
+                        // (cuda_backend.rs:340-369) and the CPU MegaKernelFn 22-param SSOT
+                        // (gllm-kernels mega_kernel_abi.rs:159-210). Do NOT reorder.
+                        let raw: [usize; 22] = [
+                            args.input_ids_ptr as usize,      // 0
+                            args.weight_blob_ptr as usize,    // 1
+                            args.kv_cache_ptr as usize,       // 2
+                            args.positions_ptr as usize,      // 3
+                            args.aux_ptr as usize,            // 4
+                            args.batch_size,                  // 5
+                            args.prompt_len,                  // 6
+                            args.scratchpad_ptr as usize,     // 7
+                            args.output_tokens_ptr as usize,  // 8
+                            args.temperature_u32,             // 9
+                            args.top_k,                       // 10
+                            args.top_p_u32,                   // 11
+                            args.max_new_tokens,              // 12
+                            args.eos_token_id,                // 13
+                            args.hook_ctx_ptr as usize,       // 14
+                            args.telemetry_ptr as usize,      // 15
+                            args.session_position,            // 16
+                            args.fused_hidden_ptr as usize,   // 17
+                            args.num_mm_tokens,               // 18
+                            args.callback_table_ptr as usize, // 19
+                            args.page_table_ptr as usize,     // 20
+                            args.batch_ctx_ptr as usize,      // 21
+                        ];
+                        backend
+                            .gpu_launch_mega_kernel(&ptx, &kernel_name, &raw)
+                            .map_err(crate::engine::mega_kernel::MegaKernelError::Execution)
+                    }))
+                }
+                #[cfg(not( $($cfg_pred)+ ))]
+                {
+                    let _ = (ptx, kernel_name);
+                    Err(crate::engine::mega_kernel::MegaKernelError::Execution(
+                        concat!($feature_label, " feature not enabled — cannot build GPU mega-kernel launcher").into(),
+                    ))
+                }
+            }
+
             fn device_memory_capacity(&self) -> usize {
                 #[cfg( $($cfg_pred)+ )]
                 { use gllm_kernels::gpu::GpuDevice; self.device.total_memory() }

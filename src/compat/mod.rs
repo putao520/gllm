@@ -312,6 +312,40 @@ pub mod backend_trait {
             let _ = (weight_blob, gpu_code, scratchpad_bytes);
             Ok(())
         }
+
+        /// Build a GPU mega-kernel launcher closure that captures the backend
+        /// and PTX/kernel name, ready for `cuLaunchKernel` invocation.
+        ///
+        /// ARCH-UNIFIED-EXEC 阶段3B-1: trait factory method — the closure MUST be
+        /// constructed inside the backend module (Rust `pub(super)` visibility:
+        /// `gpu_launch_mega_kernel` is only visible within `cuda_backend.rs`).
+        /// Returning a closure from outside the module would violate visibility.
+        /// This is the only correct design (architect sessionId 5d98f4f4), not an
+        /// LSP violation — `&self` is captured by clone, not by trait override of
+        /// an internal method.
+        ///
+        /// Default impl returns Err for backends without GPU launch capability
+        /// (mirrors `gpu_sm_version`/`prepare_gpu_mega_kernel`/`device_memory_capacity`
+        /// GPU capability method体系). GPU backend overrides to construct the
+        /// real launcher.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        fn build_mega_launcher(
+            &self,
+            _ptx: Vec<u8>,
+            _kernel_name: String,
+        ) -> Result<
+            std::sync::Arc<
+                dyn Fn(&crate::engine::mega_kernel::MegaKernelArgs)
+                    -> Result<(), crate::engine::mega_kernel::MegaKernelError>
+                    + Send
+                    + Sync,
+            >,
+            crate::engine::mega_kernel::MegaKernelError,
+        > {
+            Err(crate::engine::mega_kernel::MegaKernelError::Execution(
+                "this backend does not support GPU mega-kernel launch".into(),
+            ))
+        }
     }
 
     /// Trait for looking up named tensors in a weight store.
