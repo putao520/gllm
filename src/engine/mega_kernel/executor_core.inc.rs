@@ -765,10 +765,34 @@ impl MegaKernelExecutor {
                         ctx.batch_ctx_ptr,
                     )
                 },
-                CompiledExecutable::Gpu { .. } => {
-                    return Err(MegaKernelError::Execution(
-                        "GPU launcher not yet wired (阶段3B)".to_string(),
-                    ));
+                CompiledExecutable::Gpu { launcher, .. } => {
+                    let args = MegaKernelArgs {
+                        input_ids_ptr: input_ids.as_ptr(),
+                        weight_blob_ptr: ctx.weight_blob_ptr,
+                        kv_cache_ptr: ctx.kv_cache_ptr,
+                        positions_ptr: positions.as_ptr(),
+                        aux_ptr: std::ptr::null(),
+                        batch_size: 1,
+                        prompt_len,
+                        scratchpad_ptr: ctx.scratch_buffer_ptr,
+                        output_tokens_ptr: output_tokens.as_mut_ptr(),
+                        temperature_u32: temperature.to_bits() as usize,
+                        top_k,
+                        top_p_u32: top_p.to_bits() as usize,
+                        max_new_tokens,
+                        eos_token_id: self.eos_token_id as usize,
+                        hook_ctx_ptr: ctx.hook_ctx_ptr as *const u8,
+                        telemetry_ptr: ctx.telemetry_ptr,
+                        session_position,
+                        fused_hidden_ptr: fused_hidden.map_or(std::ptr::null(), |fh| fh.as_ptr() as *const u8),
+                        num_mm_tokens,
+                        callback_table_ptr: ctx.callback_table_ptr as *const u8,
+                        page_table_ptr,
+                        batch_ctx_ptr: ctx.batch_ctx_ptr,
+                    };
+                    launcher(&args)?;
+                    // GPU arm: generated_count 占位 = max_new_tokens (D2H copy 后由 3C 校准)
+                    max_new_tokens
                 }
             };
             // Read MXCSR after JIT call — check if JIT modified FP exception state
@@ -970,10 +994,34 @@ impl MegaKernelExecutor {
                         ctx.batch_ctx_ptr,              // batch_ctx_ptr — triggers JIT batch path
                     )
                 },
-                CompiledExecutable::Gpu { .. } => {
-                    return Err(MegaKernelError::Execution(
-                        "GPU launcher not yet wired (阶段3B)".to_string(),
-                    ));
+                CompiledExecutable::Gpu { launcher, .. } => {
+                    let args = MegaKernelArgs {
+                        input_ids_ptr: input_ids_flat.as_ptr(),
+                        weight_blob_ptr: ctx.weight_blob_ptr,
+                        kv_cache_ptr: ctx.kv_cache_ptr,
+                        positions_ptr: positions_flat.as_ptr(),
+                        aux_ptr: std::ptr::null(),
+                        batch_size: 1,
+                        prompt_len: total_prefill_tokens,
+                        scratchpad_ptr: ctx.scratch_buffer_ptr,
+                        output_tokens_ptr: output_tokens.as_mut_ptr(),
+                        temperature_u32: 0,
+                        top_k: 0,
+                        top_p_u32: 0,
+                        max_new_tokens: max_decode_steps,
+                        eos_token_id: 0,
+                        hook_ctx_ptr: std::ptr::null(),
+                        telemetry_ptr: std::ptr::null_mut(),
+                        session_position: 0,
+                        fused_hidden_ptr: std::ptr::null(),
+                        num_mm_tokens: 0,
+                        callback_table_ptr: std::ptr::null(),
+                        page_table_ptr: std::ptr::null(),
+                        batch_ctx_ptr: ctx.batch_ctx_ptr,
+                    };
+                    launcher(&args)?;
+                    // GPU arm: generated_count 占位 = max_decode_steps (D2H copy 后由 3C 校准)
+                    max_decode_steps
                 }
             };
             result

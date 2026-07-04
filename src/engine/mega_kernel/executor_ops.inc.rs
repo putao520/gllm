@@ -86,10 +86,33 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: mega.weight_blob.as_ptr(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len,
+                    scratchpad_ptr: scratchpad.as_mut_ptr(),
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 1,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: 0,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
@@ -197,10 +220,33 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: mega.weight_blob.as_ptr(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len,
+                    scratchpad_ptr: scratchpad.as_mut_ptr(),
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 1,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: 0,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
@@ -296,10 +342,33 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: mega.weight_blob.as_ptr(),
+                    kv_cache_ptr: std::ptr::null_mut(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len,
+                    scratchpad_ptr: scratchpad.as_mut_ptr(),
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 0,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: 0,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
@@ -397,10 +466,33 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: mega.weight_blob.as_ptr(),
+                    kv_cache_ptr: std::ptr::null_mut(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len,
+                    scratchpad_ptr: scratchpad.as_mut_ptr(),
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 0,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: 0,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
@@ -501,10 +593,33 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: mega.weight_blob.as_ptr(),
+                    kv_cache_ptr: std::ptr::null_mut(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len: seq_len,
+                    scratchpad_ptr: scratchpad.as_mut_ptr(),
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 0,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: 0,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
@@ -602,10 +717,33 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: mega.weight_blob.as_ptr(),
+                    kv_cache_ptr: std::ptr::null_mut(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len: seq_len,
+                    scratchpad_ptr: scratchpad.as_mut_ptr(),
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 0,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: anchor_layer,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
@@ -1044,10 +1182,36 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
                 )
             },
-            CompiledExecutable::Gpu { .. } => {
-                return Err(MegaKernelError::Execution(
-                    "GPU launcher not yet wired (阶段3B)".to_string(),
-                ));
+            CompiledExecutable::Gpu { launcher, .. } => {
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+                let args = MegaKernelArgs {
+                    input_ids_ptr: input_ids.as_ptr(),
+                    weight_blob_ptr: ctx.weight_blob_ptr,
+                    kv_cache_ptr: std::ptr::null_mut(),
+                    positions_ptr: positions.as_ptr(),
+                    aux_ptr: std::ptr::null(),
+                    batch_size: 1,
+                    prompt_len,
+                    scratchpad_ptr: ctx.scratch_buffer_ptr,
+                    output_tokens_ptr: output_tokens.as_mut_ptr(),
+                    temperature_u32: 0,
+                    top_k: 1,
+                    top_p_u32: 0,
+                    max_new_tokens: 1,
+                    eos_token_id: self.eos_token_id as usize,
+                    hook_ctx_ptr: std::ptr::null(),
+                    telemetry_ptr: std::ptr::null_mut(),
+                    session_position: 0,
+                    fused_hidden_ptr: std::ptr::null(),
+                    num_mm_tokens: 0,
+                    callback_table_ptr: std::ptr::null(),
+                    page_table_ptr: std::ptr::null(),
+                    batch_ctx_ptr: std::ptr::null(),
+                };
+                launcher(&args)?;
+                0usize
             }
         };
 
