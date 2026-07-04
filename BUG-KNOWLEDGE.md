@@ -2778,3 +2778,31 @@ residualEvidence:
 归因时间: 2026-07-04
 status: 根治 (493e6092) | residual: 0
 ```
+
+## BCE-20260704-GPU-EXECUTOR-NEVER-LAUNCHES-GPU — GPU backend 推理 100% 走 CPU x86 entry_fn, GPU PTX 从不 launch (P0 架构级死代码)
+
+- **patternId**: BCE-20260704-GPU-EXECUTOR-NEVER-LAUNCHES-GPU
+- **title**: Executor.execute_* 永远调 mega.entry_fn (CPU x86 JIT 函数指针), gpu_code (PTX) 编译后从不 launch — GPU 代码全是死代码
+- **layer**: 范式缺陷 (NO-ISLAND-MODULE + ARCH-RUST-IS-CODEGEN, GPU 推理基础设施未接入)
+- **归因时间**: 2026-07-04
+- **现象** (5070Ti 真机实测):
+  - CPU E2E `test_e2e_alignment_smollm2::alignment_smollm2_greedy_next_token` PASSED (argmax==253 golden)
+  - GPU E2E `test_e2e_gpu::gpu_e2e_smollm2_135m_logits_alignment` FAILED (argmax=38734, logits sum=273279)
+  - 同模型/同 prompt/同代码, 两测试结果完全不同
+- **根因** (确凿证据):
+  - `src/engine/mega_kernel/executor_core.inc.rs:147-152`: `compile(graph, &config, ...)` 用 **CPU config** (`output.expect_cpu()`), `entry_fn = exec_code.entry_point_as_mega_kernel()` = **CPU x86 JIT 函数指针**。
+  - `src/engine/mega_kernel/executor_core.inc.rs:221-244`: GPU PTX **单独编译**存到 `gpu_code: Option<Vec<u8>>` (只是字节, 不变成可执行 CUmodule/CUfunction)。
+  - `src/engine/mega_kernel/executor_ops.inc.rs`: **所有 execute_*** (diagnostic_prefill_logits / execute_encode / execute_rerank / execute_score_tokens / execute_encode_at_layer) 全调 `(mega.entry_fn)()` (line 63/167/259/353/452/546/958), **从不检查 backend 类型, 从不调用 gpu_launch_mega_kernel**。
+  - `src/compat/cuda_backend.rs:423` `gpu_launch_mega_kernel` 函数已实现 (调 `cuLaunchKernel`), 但 **executor 不调用它** — GPU launch 基础设施建了一半, 没接入 execute 路径。
+  - `gpu_code` 字段仅在 `gpu_code()` getter (executor_ops.inc.rs:728) 和 `set_decoder_gpu_code` (:898) 出现, execute_* 不消费。
+- **影响**:
+  - NO-ISLAND-MODULE 违规: GPU codegen (gpu_lower/*, PTX 编译) 全是死代码 (编译了 4.9MB PTX 但从不执行)。
+  - ARCH-RUST-IS-CODEGEN 违规: GPU 推理实际走 CPU x86 JIT (entry_fn), 不是 GPU。
+  - 数值错: GPU E2E fail 因为... (待确认 — entry_fn 是 CPU x86, 该和 CPU E2E 结果一致; 疑似 Cuda backend 的 mega_compiled 用了 GPU DeviceProfile 影响 entry_fn 编译, 或 Client::new_chat 自动检测在 5070Ti 选 Cpu 而 gpu_chat_client 强制 Cuda 导致 config 差异)
+- **根治方向** (需 architect 设计):
+  1. Executor 区分 CPU/GPU backend, GPU 时持有 `CUmodule` + `CUfunction` (从 gpu_code PTX 经 cuModuleLoadData 编译)。
+  2. execute_* 在 GPU backend 时调 `gpu_launch_mega_kernel` (传 21-param ABI), CPU backend 时保持 `entry_fn`。
+  3. MegaKernelCompiled 持有 GPU 句柄 (Option<CudaModule>), entry_fn 在 GPU 路径不使用。
+  4. executor_core.inc.rs compile 阶段: GPU backend 时调 `GpuCompiledLayer::from_ptx` 产出 CUmodule, 存到 mega_compiled.gpu_module。
+- **优先级**: P0 (GPU 推理完全不走 GPU 是最严重的 NO-ISLAND-MODULE 违规; 但修复规模大, 涉及 Executor ABI 重构 + 所有 execute_* 分流, 需 architect(consult) 设计)
+- **归因证据**: `git log --oneline -1` = 1d7eee3f; CPU E2E passed / GPU E2E failed 实测于 5070Ti (192.168.1.200, RTX 5070 Ti SM12.0); entry_fn vs gpu_code 路径分离代码确认。
