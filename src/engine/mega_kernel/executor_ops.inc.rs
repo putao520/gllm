@@ -54,36 +54,43 @@ impl MegaKernelExecutor {
         }
 
         // Run with max_new_tokens=1 to get prefill logits
-        let _generated = unsafe {
-            // R1: Build KernelContext
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _generated = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                // R1: Build KernelContext
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                prompt_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0, // temperature=0 (greedy)
-                1, // top_k=1
-                0, // top_p=0
-                1, // max_new_tokens=1
-                self.eos_token_id as usize,
-                std::ptr::null(),     // hook_ctx_ptr
-                std::ptr::null_mut(), // telemetry
-                0,                    // session_position
-                std::ptr::null(),     // fused_hidden_ptr
-                0,                    // num_mm_tokens
-                std::ptr::null(),     // callback_table_ptr
-                std::ptr::null(),     // page_table_ptr
-                std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    prompt_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0, // temperature=0 (greedy)
+                    1, // top_k=1
+                    0, // top_p=0
+                    1, // max_new_tokens=1
+                    self.eos_token_id as usize,
+                    std::ptr::null(),     // hook_ctx_ptr
+                    std::ptr::null_mut(), // telemetry
+                    0,                    // session_position
+                    std::ptr::null(),     // fused_hidden_ptr
+                    0,                    // num_mm_tokens
+                    std::ptr::null(),     // callback_table_ptr
+                    std::ptr::null(),     // page_table_ptr
+                    std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         // Read logits for last prompt token from scratchpad.
@@ -158,36 +165,43 @@ impl MegaKernelExecutor {
             }
         }
 
-        let _generated = unsafe {
-            // R1: Build KernelContext
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _generated = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                // R1: Build KernelContext
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL for FromCache
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                prompt_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0,
-                1,
-                0,
-                1,
-                self.eos_token_id as usize,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL for FromCache
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    prompt_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0,
+                    1,
+                    0,
+                    1,
+                    self.eos_token_id as usize,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         Ok(DiagnosticScratchpad {
@@ -250,36 +264,43 @@ impl MegaKernelExecutor {
             }
         }
 
-        let _generated_count = unsafe {
-            // R1: Build KernelContext
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _generated_count = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                // R1: Build KernelContext
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — encode graph has no persistent KV
-                positions.as_ptr(),
-                std::ptr::null(), // seq_lens: null
-                1,                // batch_size
-                prompt_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0, // temperature (unused in encode mode)
-                0, // top_k (unused)
-                0, // top_p bits (unused)
-                1, // max_new_tokens = 1 (minimal)
-                self.eos_token_id as usize,
-                std::ptr::null(),     // hook_ctx_ptr: null
-                std::ptr::null_mut(), // telemetry: null
-                0,                    // session_position: new
-                std::ptr::null(),     // fused_hidden_ptr: no MM
-                0,                    // num_mm_tokens: 0
-                std::ptr::null(),     // callback_table_ptr: null
-                std::ptr::null(),     // page_table_ptr: null (contiguous KV)
-                std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    std::ptr::null_mut(), // kv_cache_ptr: null — encode graph has no persistent KV
+                    positions.as_ptr(),
+                    std::ptr::null(), // seq_lens: null
+                    1,                // batch_size
+                    prompt_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0, // temperature (unused in encode mode)
+                    0, // top_k (unused)
+                    0, // top_p bits (unused)
+                    1, // max_new_tokens = 1 (minimal)
+                    self.eos_token_id as usize,
+                    std::ptr::null(),     // hook_ctx_ptr: null
+                    std::ptr::null_mut(), // telemetry: null
+                    0,                    // session_position: new
+                    std::ptr::null(),     // fused_hidden_ptr: no MM
+                    0,                    // num_mm_tokens: 0
+                    std::ptr::null(),     // callback_table_ptr: null
+                    std::ptr::null(),     // page_table_ptr: null (contiguous KV)
+                    std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         // The graph output tensor (MeanPool/classifier result) is redirected to the Output region
@@ -344,36 +365,43 @@ impl MegaKernelExecutor {
             }
         }
 
-        let _generated_count = unsafe {
-            // R1: Build KernelContext
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _generated_count = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                // R1: Build KernelContext
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — rerank graph has no generate loop
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                prompt_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0,
-                0,
-                0,
-                1, // max_new_tokens = 1 (one iteration for forward pass)
-                self.eos_token_id as usize,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    std::ptr::null_mut(), // kv_cache_ptr: null — rerank graph has no generate loop
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    prompt_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0,
+                    0,
+                    0,
+                    1, // max_new_tokens = 1 (one iteration for forward pass)
+                    self.eos_token_id as usize,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         // Extract logits for yes/no tokens from row 0 of the logits region.
@@ -444,33 +472,40 @@ impl MegaKernelExecutor {
             }
         }
 
-        let _generated_count = unsafe {
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _generated_count = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                seq_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0, 0, 0,
-                1,
-                self.eos_token_id as usize,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    seq_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0, 0, 0,
+                    1,
+                    self.eos_token_id as usize,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         let logits_off = mega.logits_scratch_offset;
@@ -538,33 +573,40 @@ impl MegaKernelExecutor {
             }
         }
 
-        let _generated_count = unsafe {
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _generated_count = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                seq_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0, 0, 0,
-                1,
-                self.eos_token_id as usize,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                anchor_layer, // session_position repurposed as anchor_layer for EncodeToLayer
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    seq_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0, 0, 0,
+                    1,
+                    self.eos_token_id as usize,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    anchor_layer, // session_position repurposed as anchor_layer for EncodeToLayer
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         let output_elems = seq_len * hidden_size;
@@ -725,8 +767,14 @@ impl MegaKernelExecutor {
     }
 
     /// Returns the GPU PTX/HIP code if available.
+    ///
+    /// ARCH-UNIFIED-EXEC 阶段1B: gpu_code 字段删除，PTX 现归 `CompiledExecutable::Gpu { ptx }`。
+    /// 阶段1B 只构造 Cpu 变体 → 恒返回 None。阶段3B 注入 Gpu 变体后从此处提取 ptx。
     pub fn gpu_code(&self) -> Option<&[u8]> {
-        self.mega_compiled.as_ref().and_then(|m| m.gpu_code.as_deref())
+        self.mega_compiled.as_ref().and_then(|m| match &m.executable {
+            CompiledExecutable::Gpu { ptx, .. } => Some(ptx.as_slice()),
+            CompiledExecutable::Cpu { .. } => None,
+        })
     }
 
     /// Returns total scratchpad bytes needed by the mega-kernel.
@@ -801,13 +849,20 @@ impl MegaKernelExecutor {
         }
 
         // Save original bytes before NOP-out
-        let saved = mega
-            .exec_code
+        let code = match &mega.executable {
+            CompiledExecutable::Cpu { code, .. } => code,
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "NOP expert code: GPU executable not supported (阶段3B)".to_string(),
+                ));
+            }
+        };
+        let saved = code
             .save_code_region(code_offset, code_len)
             .map_err(|e| MegaKernelError::Execution(format!("save_code_region failed: {e}")))?;
 
         // NOP out the region
-        mega.exec_code
+        code
             .nop_code_region(code_offset, code_len)
             .map_err(|e| MegaKernelError::Execution(format!("nop_code_region failed: {e}")))?;
 
@@ -839,7 +894,15 @@ impl MegaKernelExecutor {
             return Ok(());
         }
 
-        mega.exec_code
+        let code = match &mega.executable {
+            CompiledExecutable::Cpu { code, .. } => code,
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "restore expert code: GPU executable not supported (阶段3B)".to_string(),
+                ));
+            }
+        };
+        code
             .write_code_region(code_offset, saved_bytes)
             .map_err(|e| MegaKernelError::Execution(format!("write_code_region failed: {e}")))?;
 
@@ -863,7 +926,10 @@ impl MegaKernelExecutor {
     pub fn mega_code_size(&self) -> usize {
         self.mega_compiled
             .as_ref()
-            .map(|m| m.exec_code.code_size())
+            .map(|m| match &m.executable {
+                CompiledExecutable::Cpu { code, .. } => code.code_size(),
+                CompiledExecutable::Gpu { ptx, .. } => ptx.len(),
+            })
             .expect("mega_code_size: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
@@ -894,12 +960,9 @@ impl MegaKernelExecutor {
         &self.variant_registry
     }
 
-    /// Store GPU mega-kernel PTX/HIP code for mega-kernel path.
-    pub fn set_decoder_gpu_code(&mut self, code: Vec<u8>) {
-        if let Some(ref mut mega) = self.mega_compiled {
-            mega.gpu_code = Some(code);
-        }
-    }
+    /// ARCH-UNIFIED-EXEC 阶段1B: set_decoder_gpu_code 删除。
+    /// 旧路径写入 mega.gpu_code 字段（已删除）。阶段3B 将通过构造 CompiledExecutable::Gpu
+    /// 替代此方法 — 当前 GPU 可执行体在 compile_from_auto_graph 阶段构造，不在运行时设置。
 
     /// Diagnostic: run forward-only compilation of the same graph, execute once.
     /// Bypasses mega-kernel generate loop to isolate forward pass correctness.
@@ -949,36 +1012,43 @@ impl MegaKernelExecutor {
         }
 
         // Run forward pass only, no generate loop logic
-        let _result = unsafe {
-            // R1: Build KernelContext
-            let mut ctx = KernelContext::zeroed();
-            ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
-            ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+        let _result = match &mega.executable {
+            CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
+                // R1: Build KernelContext
+                let mut ctx = KernelContext::zeroed();
+                ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
+                ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
 
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                std::ptr::null_mut(), // kv_cache_ptr: null — forward-only graph has no persistent KV
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                prompt_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                0,
-                1,
-                0,
-                1, // max_new_tokens=1
-                self.eos_token_id as usize,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
-            )
+                (entry_fn)(
+                    input_ids.as_ptr(),
+                    ctx.weight_blob_ptr,
+                    std::ptr::null_mut(), // kv_cache_ptr: null — forward-only graph has no persistent KV
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    prompt_len,
+                    ctx.scratch_buffer_ptr,
+                    output_tokens.as_mut_ptr(),
+                    0,
+                    1,
+                    0,
+                    1, // max_new_tokens=1
+                    self.eos_token_id as usize,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                )
+            },
+            CompiledExecutable::Gpu { .. } => {
+                return Err(MegaKernelError::Execution(
+                    "GPU launcher not yet wired (阶段3B)".to_string(),
+                ));
+            }
         };
 
         // Read logits from scratchpad (same offset as generate mode)

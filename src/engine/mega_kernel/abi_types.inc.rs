@@ -274,6 +274,38 @@ unsafe impl Sync for KernelContext {}
 pub type MegaKernelFn = unsafe extern "C" fn(ctx: *const u8) -> u32;
 
 // ============================================================================
+// CompiledExecutable — CPU/GPU 统一可执行体 (ARCH-UNIFIED-EXEC 阶段1B)
+// ============================================================================
+
+/// 编译产物的统一可执行体 — CPU/GPU 二选一，编译时按 target bake。
+///
+/// ARCH-UNIFIED-EXEC: 消灭 GPU 不 launch 死代码 — launcher 闭包捕获 backend，
+/// execute_* 统一 `match executable` 分流。CPU 路径直接 CALL entry_fn；
+/// GPU 路径通过 launcher 闭包 cuLaunchKernel。
+///
+/// 阶段1B: 只构造 `Cpu` 变体（compile_from_auto_graph 当前只产 CPU）。
+/// GPU 变体留空待阶段3B launcher 注入 — execute_* 对 `Gpu` 返回
+/// `Err(MegaKernelError::Execution("GPU launcher not yet wired"))`。
+pub enum CompiledExecutable {
+    /// CPU x86/aarch64 JIT 机器码 + 函数指针（22-param flat ABI via KernelContext）。
+    Cpu {
+        /// mmap'd JIT 机器码（generate loop + embedded forward code）。
+        code: gllm_kernels::compiler::CompiledLayer,
+        /// 22-param 函数指针 — 单次 CALL 完成推理。
+        entry_fn: gllm_kernels::compiler::MegaKernelFn,
+    },
+    /// GPU PTX/HIP/MSL 字节码 + launcher 闭包。
+    ///
+    /// launcher 闭包捕获 backend（cuModule/cuStream），运行时 cuLaunchKernel。
+    /// 阶段1B 不构造此变体 — 阶段3B 注入真实 launcher。
+    Gpu {
+        ptx: Vec<u8>,
+        kernel_name: String,
+        launcher: std::sync::Arc<dyn Fn(&MegaKernelArgs) -> Result<(), MegaKernelError> + Send + Sync>,
+    },
+}
+
+// ============================================================================
 // MegaKernelExecutor
 // ============================================================================
 
@@ -300,17 +332,17 @@ struct MegaKernelCompiled {
     logits_scratch_offset: usize,
     /// 预打包的连续权重 blob
     weight_blob: Vec<u8>,
-    /// mmap'd 完整 mega-kernel 机器码（generate loop + embedded forward code，单一连续函数）
-    exec_code: gllm_kernels::compiler::CompiledLayer,
-    /// Legacy ABI function pointer (23-param) emitted by JIT.
-    /// R1: KernelContext → unpack to legacy ABI → CALL.
-    entry_fn: gllm_kernels::compiler::MegaKernelFn,
+    /// 统一可执行体 — CPU/GPU 二选一。
+    /// ARCH-UNIFIED-EXEC: 替代旧 exec_code + entry_fn + gpu_code 三字段分离。
+    /// 阶段1B 只构造 Cpu 变体；Gpu 变体待阶段3B。
+    executable: CompiledExecutable,
+    /// 编译目标 — CPU 或 GPU(sm_version)。
+    /// 阶段1B 恒为 CompileTarget::Cpu（GPU 编译块阶段1B 删除，阶段2 重建）。
+    target: gllm_kernels::compiler::CompileTarget,
     /// RoPE cos/sin 表需求（caller 必须在每次调用前填充 scratchpad）
     rope_cache: Option<gllm_kernels::compiler::codegen::RopeCacheRequirement>,
     /// scratchpad 固定部分大小（intermediate tensors + RoPE cache），不含运行时 logits
     scratchpad_base_bytes: usize,
-    /// GPU mega-kernel PTX/HIP 代码（可选，仅 GPU 路径使用）
-    gpu_code: Option<Vec<u8>>,
     /// vocab_size — logits 每行元素数
     vocab_size: usize,
     /// hidden_dim — SG scratchpad 需要

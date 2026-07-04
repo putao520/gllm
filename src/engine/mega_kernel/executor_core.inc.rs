@@ -151,6 +151,14 @@ impl MegaKernelExecutor {
         let exec_code = output.layer_code;
         let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
 
+        // ARCH-UNIFIED-EXEC 阶段1B: 统一 CompiledExecutable::Cpu — 删除分离的 exec_code/entry_fn/gpu_code 三字段。
+        // GPU 编译块阶段1B 移除（compile_from_auto_graph 只产 CPU）；阶段2 按 target 重做单次编译。
+        let executable = CompiledExecutable::Cpu {
+            code: exec_code,
+            entry_fn,
+        };
+        let target = gllm_kernels::compiler::CompileTarget::Cpu;
+
         // BCE-20260629-006: 追加 intermediate tensor offsets（供 DIAG harness 动态查询）
         // 从 name_map（已包含 tensor_names 中的 intermediate）构建 named_offsets
         // 对于 tensor_sources 中的 ActivationPing/Pong，直接用 buffer_layout 的 offset
@@ -210,43 +218,11 @@ impl MegaKernelExecutor {
             has_gemma_norm_residual,
         );
 
-        // Compile GPU PTX/HIP code if sm_version provided and GPU JIT backend available.
-        #[cfg(any(feature = "cuda", feature = "hip"))]
-        let gpu_code = match (graph_for_gpu, gpu_sm_version) {
-            (Some(g), Some(sm)) => {
-                let gpu_config = gllm_kernels::compiler::mega_kernel_abi::CompileConfig {
-                    max_seq_len: config.max_seq_len,
-                    debug_jit: config.debug_jit,
-                    hetero: config.hetero.clone(),
-                    target: gllm_kernels::compiler::mega_kernel_abi::CompileTarget::Gpu { sm_version: sm },
-                };
-                match compiler.compile(g, &gpu_config, None) {
-                    Ok(compile_output) => {
-                        let gpu_output = compile_output.expect_gpu();
-                        log::info!(
-                            "[mega] GPU PTX compiled: {} bytes, {} layers",
-                            gpu_output.gpu_code.len(),
-                            gpu_output.num_layers,
-                        );
-                        Some(gpu_output.gpu_code)
-                    }
-                    Err(e) => {
-                        // BCE-20260702-GPU-SILENT-FALLBACK: user explicitly requested GPU (Cuda/Hip),
-                        // so GPU compilation failure MUST propagate as Err — NO silent fallback to
-                        // CPU x86 codegen. This is the NO-SILENT-FALLBACK constitutional requirement.
-                        return Err(MegaKernelError::Compilation(
-                            format!("GPU mega-kernel compilation failed (target=sm{}): {}", sm, e),
-                        ));
-                    }
-                }
-            },
-            _ => None,
-        };
-        #[cfg(not(any(feature = "cuda", feature = "hip")))]
-        let gpu_code = {
-            let _ = (graph_for_gpu, gpu_sm_version);
-            None
-        };
+        // ARCH-UNIFIED-EXEC 阶段1B: GPU 编译块删除。
+        // 旧路径在此处根据 (graph_for_gpu, gpu_sm_version) 单独编译 PTX 并存到 gpu_code 字段。
+        // 阶段2 将按 target 选 CPU/GPU 单次编译并构造 CompiledExecutable::Gpu。
+        // 阶段1B compile_from_auto_graph 只产 CPU executable — GPU 编译完全移除（不是死代码，是阶段性删除）。
+        let _ = (graph_for_gpu, gpu_sm_version);
 
         let mtp_depth_extracted = mtp_depth;
         let mega_compiled = MegaKernelCompiled {
@@ -254,15 +230,14 @@ impl MegaKernelExecutor {
             buffer_layout: output.buffer_layout,
             logits_scratch_offset: output.logits_scratch_offset,
             weight_blob,
-            exec_code,
-            entry_fn,
+            executable,
+            target,
             rope_cache: output.rope_cache,
             scratchpad_base_bytes: output.logits_scratch_offset,
             vocab_size: output.vocab_size,
             hidden: output.hidden,
             compute_dtype: geometry.compute_dtype,
 
-            gpu_code,
             source_map: output.source_map,
             num_kv_heads: geometry.num_kv_heads,
             head_dim: geometry.head_dim,
@@ -631,30 +606,39 @@ impl MegaKernelExecutor {
                 0x1F80 // Default: all exceptions masked
             };
             std::arch::asm!("ldmxcsr [{}]", in(reg) &mxcsr_nan_trap, options(nostack));
-            let result = (mega.entry_fn)(
-                input_ids.as_ptr(),
-                ctx.weight_blob_ptr,
-                ctx.kv_cache_ptr,
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                prompt_len,
-                ctx.scratch_buffer_ptr,
-                output_tokens.as_mut_ptr(),
-                temperature.to_bits() as usize,
-                top_k,
-                top_p.to_bits() as usize,
-                max_new_tokens,
-                self.eos_token_id as usize,
-                ctx.hook_ctx_ptr as *const u8,
-                ctx.telemetry_ptr,
-                session_position, // session_position (0=new, >0=resume)
-                fused_hidden.map_or(std::ptr::null(), |fh| fh.as_ptr() as *const u8), // fused_hidden_ptr
-                num_mm_tokens,      // num_mm_tokens
-                ctx.callback_table_ptr as *const u8,
-                page_table_ptr,     // page_table_ptr: NULL = contiguous KV, u32[] = paged KV
-                ctx.batch_ctx_ptr,
-            );
+            let result = match &mega.executable {
+                CompiledExecutable::Cpu { entry_fn, .. } => {
+                    (entry_fn)(
+                        input_ids.as_ptr(),
+                        ctx.weight_blob_ptr,
+                        ctx.kv_cache_ptr,
+                        positions.as_ptr(),
+                        std::ptr::null(),
+                        1,
+                        prompt_len,
+                        ctx.scratch_buffer_ptr,
+                        output_tokens.as_mut_ptr(),
+                        temperature.to_bits() as usize,
+                        top_k,
+                        top_p.to_bits() as usize,
+                        max_new_tokens,
+                        self.eos_token_id as usize,
+                        ctx.hook_ctx_ptr as *const u8,
+                        ctx.telemetry_ptr,
+                        session_position, // session_position (0=new, >0=resume)
+                        fused_hidden.map_or(std::ptr::null(), |fh| fh.as_ptr() as *const u8), // fused_hidden_ptr
+                        num_mm_tokens,      // num_mm_tokens
+                        ctx.callback_table_ptr as *const u8,
+                        page_table_ptr,     // page_table_ptr: NULL = contiguous KV, u32[] = paged KV
+                        ctx.batch_ctx_ptr,
+                    )
+                },
+                CompiledExecutable::Gpu { .. } => {
+                    return Err(MegaKernelError::Execution(
+                        "GPU launcher not yet wired (阶段3B)".to_string(),
+                    ));
+                }
+            };
             // Read MXCSR after JIT call — check if JIT modified FP exception state
             let mut mxcsr_after: u32 = 0;
             std::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr_after, options(nostack));
@@ -827,30 +811,40 @@ impl MegaKernelExecutor {
             ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
             ctx.batch_ctx_ptr = batch_ctx.as_ptr();
 
-            (mega.entry_fn)(
-                input_ids_flat.as_ptr(),
-                ctx.weight_blob_ptr,
-                ctx.kv_cache_ptr,
-                positions_flat.as_ptr(),
-                std::ptr::null(),               // aux
-                1,                              // batch_size (forward pass dimension)
-                total_prefill_tokens,           // prompt_len (forward dimension)
-                ctx.scratch_buffer_ptr,         // scratchpad
-                output_tokens.as_mut_ptr(),     // output
-                0,                              // temperature (batch mode: read from sampling_params_ptr per-seq)
-                0,                              // top_k (batch mode: read from sampling_params_ptr per-seq)
-                0,                              // top_p (batch mode: read from sampling_params_ptr per-seq)
-                max_decode_steps,               // max_new_tokens — non-zero triggers decode step loop
-                0,                              // eos_token_id (batch mode: read from sampling_params_ptr per-seq)
-                std::ptr::null(),               // hook_ctx (from batch_ctx)
-                std::ptr::null_mut(),           // telemetry
-                0,                              // session_position (from batch_ctx)
-                std::ptr::null(),               // fused_hidden (from batch_ctx)
-                0,                              // num_mm_tokens
-                std::ptr::null(),               // callback_table (from batch_ctx)
-                std::ptr::null(),               // page_table (from batch_ctx)
-                ctx.batch_ctx_ptr,              // batch_ctx_ptr — triggers JIT batch path
-            )
+            let result = match &mega.executable {
+                CompiledExecutable::Cpu { entry_fn, .. } => {
+                    (entry_fn)(
+                        input_ids_flat.as_ptr(),
+                        ctx.weight_blob_ptr,
+                        ctx.kv_cache_ptr,
+                        positions_flat.as_ptr(),
+                        std::ptr::null(),               // aux
+                        1,                              // batch_size (forward pass dimension)
+                        total_prefill_tokens,           // prompt_len (forward dimension)
+                        ctx.scratch_buffer_ptr,         // scratchpad
+                        output_tokens.as_mut_ptr(),     // output
+                        0,                              // temperature (batch mode: read from sampling_params_ptr per-seq)
+                        0,                              // top_k (batch mode: read from sampling_params_ptr per-seq)
+                        0,                              // top_p (batch mode: read from sampling_params_ptr per-seq)
+                        max_decode_steps,               // max_new_tokens — non-zero triggers decode step loop
+                        0,                              // eos_token_id (batch mode: read from sampling_params_ptr per-seq)
+                        std::ptr::null(),               // hook_ctx (from batch_ctx)
+                        std::ptr::null_mut(),           // telemetry
+                        0,                              // session_position (from batch_ctx)
+                        std::ptr::null(),               // fused_hidden (from batch_ctx)
+                        0,                              // num_mm_tokens
+                        std::ptr::null(),               // callback_table (from batch_ctx)
+                        std::ptr::null(),               // page_table (from batch_ctx)
+                        ctx.batch_ctx_ptr,              // batch_ctx_ptr — triggers JIT batch path
+                    )
+                },
+                CompiledExecutable::Gpu { .. } => {
+                    return Err(MegaKernelError::Execution(
+                        "GPU launcher not yet wired (阶段3B)".to_string(),
+                    ));
+                }
+            };
+            result
         };
 
         log::debug!(
