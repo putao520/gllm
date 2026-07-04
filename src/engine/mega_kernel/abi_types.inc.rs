@@ -522,4 +522,8 @@ pub struct MegaKernelArgs {
     pub callback_table_ptr: *const u8,
     pub page_table_ptr: *const u32,  // SSOT arg 20: *const u32 (u32[] paged KV table, NULL=contiguous)
     pub batch_ctx_ptr: *const u8,    // SSOT arg 21: *const u8 (NULL=single-seq legacy)
+    // ARCH-UNIFIED-EXEC 阶段3C: host-side size metadata (NOT part of 22-param GPU ABI).
+    // GPU launcher uses these to size H2D/D2H copies. CPU arm ignores (fills 0).
+    pub scratchpad_bytes: usize,
+    pub output_tokens_bytes: usize,
 }

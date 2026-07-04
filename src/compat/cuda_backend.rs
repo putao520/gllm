@@ -61,8 +61,30 @@ pub struct CudaBackend<E: Element = f32> {
     /// Uploaded weight blob on GPU: (device_ptr, bytes). Uploaded once, reused.
     #[cfg(feature = "cuda")]
     weight_blob_gpu: std::sync::Mutex<Option<(u64, usize)>>,
+    /// ARCH-UNIFIED-EXEC 阶段3C: GPU mega-kernel device buffers (scratchpad/output/input).
+    /// Arc<Mutex> (NOT plain Mutex) so launcher closure's cloned backend sees the
+    /// SAME physical GPU memory prepared on the original backend — time-independent.
+    /// Plain Mutex would reset on clone (like weight_blob_gpu does), losing the
+    /// prepared buffers. Architect sessionId 5d98f4f4: Arc-share is load-bearing.
+    #[cfg(feature = "cuda")]
+    pub(super) gpu_mega_buffers: std::sync::Arc<std::sync::Mutex<Option<GpuMegaBuffers>>>,
 
     _marker: std::marker::PhantomData<E>,
+}
+
+/// ARCH-UNIFIED-EXEC 阶段3C: cached GPU device buffers for mega-kernel H2D/launch/D2H.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+pub(super) struct GpuMegaBuffers {
+    /// Device scratchpad ptr (covers kv_cache + activations + logits region).
+    pub scratchpad: u64,
+    pub scratchpad_bytes: usize,
+    /// Device output_tokens ptr (u32 tokens written by GPU kernel).
+    pub output: u64,
+    pub output_bytes: usize,
+    /// Device input_ids ptr (u32 tokens read by GPU kernel, H2D per call).
+    pub input: u64,
+    pub input_bytes: usize,
 }
 
 // Manual Debug since Mutex<HashMap> and Arc<CudaDevice> don't derive Debug cleanly
@@ -106,6 +128,8 @@ impl<E: Element> Clone for CudaBackend<E> {
             kv_meta: self.kv_meta.clone(),
             #[cfg(feature = "cuda")]
             weight_blob_gpu: std::sync::Mutex::new(None),
+            #[cfg(feature = "cuda")]
+            gpu_mega_buffers: std::sync::Arc::clone(&self.gpu_mega_buffers),
 
             _marker: std::marker::PhantomData,
         }
@@ -198,6 +222,8 @@ impl<E: Element> CudaBackend<E> {
             swap_store: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             weight_blob_gpu: std::sync::Mutex::new(None),
+            #[cfg(feature = "cuda")]
+            gpu_mega_buffers: std::sync::Arc::new(std::sync::Mutex::new(None)),
 
             _marker: std::marker::PhantomData,
         })
@@ -444,6 +470,135 @@ impl<E: Element> CudaBackend<E> {
         let stream = self.device.default_stream();
         self.device.launch_kernel(func, grid, block, &kernel_args, stream)
             .map_err(|e| format!("launch_kernel failed: {e}"))?;
+        Ok(())
+    }
+
+    /// ARCH-UNIFIED-EXEC 阶段3C: alloc 3 device buffers (scratchpad/output/input).
+    /// Called from prepare_gpu_mega_kernel. Reused across calls — zero hot-loop alloc.
+    #[cfg(feature = "cuda")]
+    pub(super) fn alloc_gpu_mega_buffers(&self, scratchpad_bytes: usize) -> Result<(), String> {
+        let sp_bytes = scratchpad_bytes.max(1024);
+        let scratchpad_dev = self.alloc_scratchpad_gpu(sp_bytes)?;
+        let output_dev = self.alloc_scratchpad_gpu(sp_bytes)?;
+        let input_dev = self.alloc_scratchpad_gpu(sp_bytes)?;
+        let buffers = GpuMegaBuffers {
+            scratchpad: scratchpad_dev,
+            scratchpad_bytes: sp_bytes,
+            output: output_dev,
+            output_bytes: sp_bytes,
+            input: input_dev,
+            input_bytes: sp_bytes,
+        };
+        let mut gpu_bufs = self.gpu_mega_buffers.lock()
+            .map_err(|e| format!("gpu_mega_buffers lock poisoned: {e}"))?;
+        *gpu_bufs = Some(buffers);
+        Ok(())
+    }
+
+    /// ARCH-UNIFIED-EXEC 阶段3C: H2D → launch → D2H 三步内聚.
+    /// architect sessionId 5d98f4f4: host pointers in args are D2H targets (not GPU ptrs).
+    /// 1. H2D: input_ids + positions (host) → device (upload_to_gpu, gate allows per-call alloc)
+    /// 2. build device argv: weight_blob_gpu + scratchpad_gpu + output_gpu + input_dev + positions_dev
+    /// 3. cuLaunchKernel via gpu_launch_mega_kernel
+    /// 4. D2H: device scratchpad → host (args.scratchpad_bytes),
+    ///         device output → host (args.output_tokens_bytes)
+    #[cfg(feature = "cuda")]
+    pub(super) fn launch_mega_kernel_with_bridging(
+        &self,
+        ptx: &[u8],
+        kernel_name: &str,
+        args: &crate::engine::mega_kernel::MegaKernelArgs,
+    ) -> Result<(), String> {
+        // Lock buffers (Arc-shared with prepare'd backend)
+        let (scratchpad_dev, output_dev) = {
+            let bufs_opt = self.gpu_mega_buffers.lock()
+                .map_err(|e| format!("gpu_mega_buffers lock poisoned: {e}"))?;
+            let buf = bufs_opt.as_ref()
+                .ok_or_else(|| "gpu_mega_buffers not prepared (prepare_gpu_mega_kernel not called?)".to_string())?;
+            (buf.scratchpad, buf.output)
+        };
+
+        // Weight device ptr (from weight_blob_gpu cache)
+        let weight_dev = self.weight_blob_gpu.lock()
+            .map_err(|e| format!("weight_blob_gpu lock poisoned: {e}"))?
+            .map(|(ptr, _)| ptr)
+            .ok_or_else(|| "weight_blob_gpu not uploaded".to_string())?;
+
+        // Step 1: H2D input_ids + positions (host → device, per-call alloc — gate allows leak, BCE later)
+        let input_bytes = args.prompt_len.checked_mul(4)
+            .ok_or_else(|| "prompt_len overflow for input_bytes".to_string())?;
+        let input_host = unsafe {
+            std::slice::from_raw_parts(args.input_ids_ptr as *const u8, input_bytes)
+        };
+        let input_dev = self.upload_to_gpu(input_host)?;
+
+        let positions_bytes = args.prompt_len.checked_mul(4)
+            .ok_or_else(|| "prompt_len overflow for positions_bytes".to_string())?;
+        let positions_host = unsafe {
+            std::slice::from_raw_parts(args.positions_ptr as *const u8, positions_bytes)
+        };
+        let positions_dev = if positions_bytes > 0 {
+            self.upload_to_gpu(positions_host)?
+        } else {
+            0
+        };
+
+        // Step 2: build device argv (replace host ptrs with device ptrs)
+        let raw: [usize; 22] = [
+            input_dev as usize,                           // 0: input_ids (device)
+            weight_dev as usize,                          // 1: weight_blob (device)
+            scratchpad_dev as usize,                      // 2: kv_cache (device scratchpad)
+            positions_dev as usize,                       // 3: positions (device)
+            args.aux_ptr as usize,                        // 4: aux (host — kernel rarely reads)
+            args.batch_size,                              // 5
+            args.prompt_len,                              // 6
+            scratchpad_dev as usize,                      // 7: scratchpad (device)
+            output_dev as usize,                          // 8: output_tokens (device)
+            args.temperature_u32,                         // 9
+            args.top_k,                                   // 10
+            args.top_p_u32,                               // 11
+            args.max_new_tokens,                          // 12
+            args.eos_token_id,                            // 13
+            args.hook_ctx_ptr as usize,                   // 14: hook_ctx (host)
+            args.telemetry_ptr as usize,                  // 15: telemetry (host)
+            args.session_position,                        // 16
+            args.fused_hidden_ptr as usize,               // 17: fused_hidden (host)
+            args.num_mm_tokens,                           // 18
+            args.callback_table_ptr as usize,             // 19: callback_table (host)
+            args.page_table_ptr as usize,                 // 20: page_table (host)
+            args.batch_ctx_ptr as usize,                  // 21: batch_ctx (host)
+        ];
+
+        // Step 3: launch
+        self.gpu_launch_mega_kernel(ptx, kernel_name, &raw)?;
+
+        // Step 4: D2H scratchpad (整块, args.scratchpad_bytes) + output_tokens
+        let sp_bytes_copy = args.scratchpad_bytes;
+        if sp_bytes_copy > 0 {
+            let sp_dev_data = self.download_from_gpu(scratchpad_dev, sp_bytes_copy)
+                .map_err(|e| format!("dtoh scratchpad failed: {e}"))?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    sp_dev_data.as_ptr(),
+                    args.scratchpad_ptr,
+                    sp_bytes_copy,
+                );
+            }
+        }
+
+        let out_bytes_copy = args.output_tokens_bytes;
+        if out_bytes_copy > 0 {
+            let out_dev_data = self.download_from_gpu(output_dev, out_bytes_copy)
+                .map_err(|e| format!("dtoh output failed: {e}"))?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    out_dev_data.as_ptr(),
+                    args.output_tokens_ptr as *mut u8,
+                    out_bytes_copy,
+                );
+            }
+        }
+
         Ok(())
     }
 }

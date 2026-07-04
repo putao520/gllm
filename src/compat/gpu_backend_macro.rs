@@ -78,6 +78,12 @@ macro_rules! impl_gpu_backend {
                         cache.insert("__scratchpad_bytes__".to_string(), scratchpad_bytes.to_le_bytes().to_vec());
                     }
 
+                    // ARCH-UNIFIED-EXEC 阶段3C: alloc 3 device buffers (scratchpad/output/input)
+                    // via backend-specific method. Reuse across calls — zero hot-loop alloc,
+                    // avoids forget-leak in generate loop.
+                    backend_f32.alloc_gpu_mega_buffers(scratchpad_bytes)
+                        .map_err(|e| BE::$upload_err_variant(e))?;
+
                     Ok(())
                 }
                 #[cfg(not( $($cfg_pred)+ ))]
@@ -576,36 +582,16 @@ macro_rules! impl_gpu_backend {
                     // all impl Clone — Arc-share the underlying GPU device/driver handle).
                     let backend = self.clone();
                     Ok(std::sync::Arc::new(move |args: &crate::engine::mega_kernel::MegaKernelArgs| {
-                        // MegaKernelArgs → [usize; 22] conversion. Field order MUST match
-                        // the 22-param cuLaunchKernel argv order in gpu_generate_single_sequence
-                        // (cuda_backend.rs:340-369) and the CPU MegaKernelFn 22-param SSOT
-                        // (gllm-kernels mega_kernel_abi.rs:159-210). Do NOT reorder.
-                        let raw: [usize; 22] = [
-                            args.input_ids_ptr as usize,      // 0
-                            args.weight_blob_ptr as usize,    // 1
-                            args.kv_cache_ptr as usize,       // 2
-                            args.positions_ptr as usize,      // 3
-                            args.aux_ptr as usize,            // 4
-                            args.batch_size,                  // 5
-                            args.prompt_len,                  // 6
-                            args.scratchpad_ptr as usize,     // 7
-                            args.output_tokens_ptr as usize,  // 8
-                            args.temperature_u32,             // 9
-                            args.top_k,                       // 10
-                            args.top_p_u32,                   // 11
-                            args.max_new_tokens,              // 12
-                            args.eos_token_id,                // 13
-                            args.hook_ctx_ptr as usize,       // 14
-                            args.telemetry_ptr as usize,      // 15
-                            args.session_position,            // 16
-                            args.fused_hidden_ptr as usize,   // 17
-                            args.num_mm_tokens,               // 18
-                            args.callback_table_ptr as usize, // 19
-                            args.page_table_ptr as usize,     // 20
-                            args.batch_ctx_ptr as usize,      // 21
-                        ];
+                        // ARCH-UNIFIED-EXEC 阶段3C: H2D → launch → D2H 三步内聚.
+                        // host pointers in args are D2H TARGETS (not passed to GPU).
+                        // CudaBackend::launch_mega_kernel_with_bridging does:
+                        //   1. H2D input_ids (host→device input buffer)
+                        //   2. build device argv (weight_blob_gpu + scratchpad_gpu + output_gpu + input_gpu)
+                        //   3. cuLaunchKernel
+                        //   4. D2H device scratchpad→host (args.scratchpad_bytes),
+                        //      device output→host (args.output_tokens_bytes)
                         backend
-                            .gpu_launch_mega_kernel(&ptx, &kernel_name, &raw)
+                            .launch_mega_kernel_with_bridging(&ptx, &kernel_name, args)
                             .map_err(crate::engine::mega_kernel::MegaKernelError::Execution)
                     }))
                 }

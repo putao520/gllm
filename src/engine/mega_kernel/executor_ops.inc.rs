@@ -110,6 +110,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize
@@ -244,6 +246,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize
@@ -366,6 +370,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize
@@ -490,6 +496,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize
@@ -617,6 +625,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize
@@ -741,6 +751,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize
@@ -1209,6 +1221,8 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    scratchpad_bytes: scratchpad.len(),
+                    output_tokens_bytes: output_tokens.len() * 4,
                 };
                 launcher(&args)?;
                 0usize

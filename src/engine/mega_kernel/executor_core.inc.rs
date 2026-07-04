@@ -789,6 +789,8 @@ impl MegaKernelExecutor {
                         callback_table_ptr: ctx.callback_table_ptr as *const u8,
                         page_table_ptr,
                         batch_ctx_ptr: ctx.batch_ctx_ptr,
+                        scratchpad_bytes: scratchpad.len(),
+                        output_tokens_bytes: output_tokens.len() * 4,
                     };
                     launcher(&args)?;
                     // GPU arm: generated_count 占位 = max_new_tokens (D2H copy 后由 3C 校准)
@@ -1018,6 +1020,8 @@ impl MegaKernelExecutor {
                         callback_table_ptr: std::ptr::null(),
                         page_table_ptr: std::ptr::null(),
                         batch_ctx_ptr: ctx.batch_ctx_ptr,
+                        scratchpad_bytes: scratchpad.len(),
+                        output_tokens_bytes: output_tokens.len() * 4,
                     };
                     launcher(&args)?;
                     // GPU arm: generated_count 占位 = max_decode_steps (D2H copy 后由 3C 校准)
