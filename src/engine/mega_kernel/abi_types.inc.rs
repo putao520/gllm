@@ -456,3 +456,38 @@ impl MegaKernelCompiled {
             .unwrap_or(usize::MAX)
     }
 }
+
+// ============================================================================
+// MegaKernelArgs — 22-param 统一参数包 (ARCH-UNIFIED-EXEC)
+// ============================================================================
+
+/// Mega-Kernel 22-param 统一参数包 (SSOT: 对齐 gllm-kernels MegaKernelFn 22-param ABI)。
+/// CPU entry_fn 和 GPU cuLaunchKernel 各自从此结构展开参数，类型系统保证字段不遗漏。
+/// 参考: gllm-kernels/src/compiler/mega_kernel_abi.rs:159 + gpu_generate_single_sequence cuda_backend.rs:306。
+///
+/// ARCH-UNIFIED-EXEC: 扁平化执行架构 — 消灭 GPU 不 launch 死代码 + 套娃双路径。
+#[derive(Clone, Copy)]
+pub struct MegaKernelArgs {
+    pub input_ids_ptr: *const u32,
+    pub weight_blob_ptr: *const u8,
+    pub kv_cache_ptr: *mut u8,
+    pub positions_ptr: *const u32,
+    pub aux_ptr: *const u8,
+    pub batch_size: usize,
+    pub prompt_len: usize,
+    pub scratchpad_ptr: *mut u8,
+    pub output_tokens_ptr: *mut u32,
+    pub temperature_u32: usize,   // f32::to_bits() as usize
+    pub top_k: usize,
+    pub top_p_u32: usize,          // f32::to_bits() as usize
+    pub max_new_tokens: usize,
+    pub eos_token_id: usize,
+    pub hook_ctx_ptr: *const u8,
+    pub telemetry_ptr: *mut u8,  // SSOT arg 15: *mut u8 (对齐 gllm-kernels mega_kernel_abi.rs:168)
+    pub session_position: usize,
+    pub fused_hidden_ptr: *const u8,
+    pub num_mm_tokens: usize,
+    pub callback_table_ptr: *const u8,
+    pub page_table_ptr: *const u32,  // SSOT arg 20: *const u32 (u32[] paged KV table, NULL=contiguous)
+    pub batch_ctx_ptr: *const u8,    // SSOT arg 21: *const u8 (NULL=single-seq legacy)
+}
