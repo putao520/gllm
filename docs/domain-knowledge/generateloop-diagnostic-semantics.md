@@ -328,6 +328,28 @@ SmolLM2: q_proj/k_proj/v_proj/o_proj/gate_proj/up_proj/down_proj 全受影响 (t
 
 **BCE 横扫**: 此 bug 影响所有混合精度 trans_b GEMM, 需全项目横扫确认 + 回归测试.
 
+## ★ 根因2 定位: ActivationSwap 后 layer1 读 embedding (非 layer0 输出) (2026-07-06)
+
+GEMM stride bug 修复后, layer0 cos=1.0 但 layer1+ norm 逐层放大 (47→91→165→229).
+
+**决定性发现** (diag_step13 + Python 对比):
+- gllm layer1 v_proj norm=6.692, ref layer1 v_proj norm=4.013, cos=0.078
+- **gllm layer1 v_proj(emb rmsnorm) cos=1.0000** — gllm layer1 v_proj 输入 = rmsnorm(embedding), 不是 rmsnorm(layer0 out)!
+
+**根因**: layer1 读 embedding (layer0 输入), 不是 layer0 输出.
+- layer0: input=embedding (ping), output=layer0_out (pong). ActivationSwap 交换 ping↔pong.
+- 交换后: ping=layer0_out, pong=embedding.
+- layer1 应读 ping (=layer0_out), 但实际读 pong (=embedding).
+- 说明 layer1 的输入 tensor 映射到 pong (而非 ping), 或 ActivationSwap 交换方向错.
+
+**嫌疑**:
+1. ActivationSwap xchg 交换后, layer1 input materialize 用了旧 VReg 值 (未重新 load)
+2. layer 模板输入 tensor (hidden input) 在层循环前预加载一次, 循环内不 reload — ActivationSwap 改了寄存器值但预加载的值未更新
+3. ActivationSwap 交换方向反了 (应 ping→pong 但实际 pong→ping)
+
+**待验证**: layer 循环内 hidden input tensor 是否每迭代重新 materialize, 还是循环前加载一次.
+文件: gllm-kernels/src/compiler/codegen/vm/plan_lower/context.inc.rs (TensorPtrResolver materialize) + pipeline.inc.rs (ActivationSwap emit 顺序).
+
 ## 权重字节验证全 GEMM（路C 扩展，2026-07-06）
 
 gllm weight_blob (325653120 bytes) 中搜索 golden 权重:

@@ -744,15 +744,13 @@ fn diag_step10_weight_byte_verify() {
 fn diag_step12_single_layer_intermediates() {
     eprintln!("\n=== Step 12: GLLM_SINGLE_LAYER=1 读 layer0 所有中间张量 ===");
     std::io::stderr().flush().ok();
-    // GLLM_SINGLE_LAYER=1 让层循环只跑 1 次 (layer 0), 中间张量不被后续层覆盖
     std::env::set_var("GLLM_SINGLE_LAYER", "1");
     let client = build_cpu_client();
     let all_tokens = client.encode(PROMPT).expect("encode");
-    let single = vec![all_tokens[0]];  // 单 token prefill
+    let single = vec![all_tokens[0]];
     let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
     std::env::remove_var("GLLM_SINGLE_LAYER");
-
-    let elem = 4usize; // F32
+    let elem = 4usize;
     let read_tensor = |name: &str| -> Vec<f32> {
         let off = client.diagnostic_tensor_offset(name).unwrap_or(usize::MAX);
         if off == usize::MAX { return Vec::new(); }
@@ -761,25 +759,61 @@ fn diag_step12_single_layer_intermediates() {
             f32::from_le_bytes([b[0],b[1],b[2],b[3]])
         }).collect()
     };
-
-    // dump 各中间张量到单独文件
     let tensors = ["embedding", "layer.normed", "layer.q", "layer.k", "layer.v",
                    "layer.q_rope", "layer.k_rope", "layer.attn", "layer.o",
                    "layer.attn_resid", "layer.post_normed", "layer.gate", "layer.up",
                    "layer.ffn_act", "layer.down", "layer.ffn_resid"];
     for name in &tensors {
         let data = read_tensor(name);
-        if data.is_empty() {
-            eprintln!("{:20} NOT FOUND", name);
-            continue;
-        }
+        if data.is_empty() { eprintln!("{:20} NOT FOUND", name); continue; }
         let norm: f64 = data.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
         let safe_name = name.replace('.', "_");
         let path = format!("/tmp/gllm_{}.bin", safe_name);
         let mut buf = Vec::with_capacity(HIDDEN_SIZE * 4);
         for v in &data { buf.extend_from_slice(&v.to_le_bytes()); }
         let _ = std::fs::write(&path, &buf);
-        eprintln!("{:20} off=? norm={:8.3} first5={:?} → {}", name, norm, &data[0..5], path);
+        eprintln!("{:20} norm={:8.3} first5={:?} → {}", name, norm, &data[0..5], path);
     }
+}
+
+#[test]
+fn diag_step13_two_layer_intermediates() {
+    eprintln!("\n=== Step 13: GLLM_DEBUG_LAYERS=2 读 layer1 中间张量 ===");
+    std::io::stderr().flush().ok();
+    std::env::set_var("GLLM_DEBUG_LAYERS", "2");
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    let single = vec![all_tokens[0]];
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    std::env::remove_var("GLLM_DEBUG_LAYERS");
+    let elem = 4usize;
+    // layer1 中间张量 (注意 slot 复用, layer1 最后写入的是 layer1 的值, 因 layer0 已被覆盖)
+    // 读 v_proj (唯一 offset), 比 ref layer1 v_proj
+    let v_off = client.diagnostic_tensor_offset("layer.v").unwrap();
+    let mut v = vec![0.0f32; 192];  // v_proj output is 192
+    for h in 0..192 {
+        let b = &sp.data[v_off + h*elem..v_off + (h+1)*elem];
+        v[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    let v_norm: f64 = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    eprintln!("layer.v (last layer=layer1) norm={:.3} first5={:?}", v_norm, &v[0..5]);
+    // dump
+    let mut buf = Vec::new();
+    for x in &v { buf.extend_from_slice(&x.to_le_bytes()); }
+    let _ = std::fs::write("/tmp/gllm_l1_v.bin", &buf);
+    // layer1 output (ffn_resid 唯一 offset)
+    let ffn_off = client.diagnostic_tensor_offset("layer.ffn_resid").unwrap();
+    let mut ffn = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[ffn_off + h*elem..ffn_off + (h+1)*elem];
+        ffn[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    let ffn_norm: f64 = ffn.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    eprintln!("layer.ffn_resid (layer1 out) norm={:.3} first5={:?}", ffn_norm, &ffn[0..5]);
+    let _ = std::fs::write("/tmp/gllm_l1_ffn_resid.bin", {
+        let mut b = Vec::new();
+        for x in &ffn { b.extend_from_slice(&x.to_le_bytes()); }
+        b
+    });
 }
 
