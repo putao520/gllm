@@ -588,7 +588,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
-        self.compute.mega_kernel.as_ref()?.diagnostic_prefill_logits(prompt_tokens).ok()
+        match self.compute.mega_kernel.as_ref()?.diagnostic_prefill_logits(prompt_tokens) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("[DIAG-PREFILL-LOGITS-ERR] {:?}", e);
+                None
+            }
+        }
     }
 
     pub fn diagnostic_forward_only(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
