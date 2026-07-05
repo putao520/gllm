@@ -106,6 +106,29 @@ session_position: anchor_layer,  // anchor layer N
 - KV cache 全 F32 自洽（运行时插桩 kv_row_stride=768=buffer=MemCopy，非越界）
 - derive_compute_dtype 硬编码是宪法 -1 违宪（层2），但当前对 SmolLM2 数值自洽（层1），非发散根因
 
+## Ring-Buffer 实现 + capture 全零卡点（2026-07-06）
+
+Ring-Buffer 基础设施 + 暴露层全落地（gllm-kernels commit 0a710e86/59ad1e6a, gllm commit 37d9b312）：
+- BufferAllocation/BufferLayout 加 layer_capture_offset/stride/bytes 字段
+- pipeline.inc.rs close_layer_loop + handle_standard_layer_loop 在 ActivationSwap 前 emit capture copy
+- named_offsets 注册 "layer_capture" + diagnostic_layer_capture_stride() getter
+- diagnostic-layer-capture Cargo feature 门控（默认关，生产零开销）
+
+**实测（diag_step10 启用 feature）**：
+```
+[RING-BUF] layer_capture registered: offset=245366784 stride=18874368 bytes=566231040
+[RING-BUF] capture_off=245366784 stride=18874368 (feature 启用)
+layer 0-29 row_last cosine = 0.0000 (nonzero=0)  ← capture 区全零!
+```
+
+**capture 区全零** = emit capture copy 没执行或写错位置。可能原因：
+1. close_layer_loop 的 emit 条件 `locals.layer_capture` + `state.abi.layer_loop_counter` + `activation_swap_vregs` 某个为 None
+2. SmolLM2 走的层循环路径没进 close_layer_loop（走 handle_standard_layer_loop 的 `!group.is_layer_group` 分支，但 is_layer_group=true 不进）
+3. pong 指针在 emit 时指向错误（ActivationSwap 前 pong 不是当前层输出）
+4. layer_loop_counter 在 emit 时值不对
+
+**待调试**：加 eprintln 在 emit capture copy 处确认是否执行 + 各变量值。Ring-Buffer 基础设施正确，诊断测试待调试 capture 写入。
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
