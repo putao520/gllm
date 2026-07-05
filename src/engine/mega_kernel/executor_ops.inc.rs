@@ -955,6 +955,11 @@ impl MegaKernelExecutor {
         self.mega_compiled.as_ref().and_then(|m| m.named_tensor_dtype(name))
     }
 
+    /// Ring-Buffer 逐层捕获: per-layer stride (bytes). feature 关时返回 0.
+    pub fn diagnostic_layer_capture_stride(&self) -> usize {
+        self.mega_compiled.as_ref().map(|m| m.layer_capture_stride()).unwrap_or(0)
+    }
+
     /// Returns the GPU PTX/HIP code if available.
     ///
     /// ARCH-UNIFIED-EXEC 阶段1B: gpu_code 字段删除，PTX 现归 `CompiledExecutable::Gpu { ptx }`。

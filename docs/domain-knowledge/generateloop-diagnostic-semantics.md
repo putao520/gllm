@@ -168,32 +168,43 @@ grep "is_layer_group" 全代码库：所有构造点（group_dep.rs:153/334/495/
 
 **待确认**：SmolLM2 30 层循环实际 emit 位置（mega_kernel_emit.rs GenerateLoop 内？单模板只 emit 一层 + 运行时 LoopBegin/End 循环 30 次？）+ Ring-Buffer capture 正确位置。
 
-## is_layer_group 全 false 根因：op label 不匹配 "layer." 前缀（2026-07-06）
+## Ring-Buffer capture 已工作（2026-07-06 重大进展，推翻旧结论）
 
-assign_homogeneous_markers（fusion/pass.rs:713-775）逻辑：
-- line 742 `anchor_label = graph.op(group.ops[0]).label`
-- line 745 `if anchor_label.starts_with("layer.")` → 标 is_layer_group=true
-- line 758 layer_group_indices 空 → return（不标）
+**旧结论（错误）**：capture 区全零，is_layer_group 全 false 导致 capture 不 emit。
 
-**根因**：SmolLM2 op label 不是 "layer." 前缀！
-- build_graph 主路径用 cn_layer（line 3: `format!("L{}.{suffix}")`）→ label "L0.q_proj"
-- ptname（line 438）只在 hetero 4-template 块内，prefix="layer_sliding_small" 等
-- SmolLM2 homogeneous 不走 hetero 块 → op label 是 "L0.xxx" 或别的，非 "layer.xxx"
-- assign_homogeneous_markers starts_with("layer.") 不匹配 → is_layer_group 全 false
+**新事实（2026-07-06 eprintln trace 确证）**：
+1. **is_layer_group 是 true**（不是全 false）。assign_homogeneous_markers (fusion/pass.rs:767-768) 正确设置 is_layer_group=true。之前 grep "全 false" 看的是构造点默认值，不是赋值后的值。
+2. **op labels 是 "layer." 前缀**（不是 "L0."）。build_graph 的 cn_layer 实际生成 "layer.input_norm" 等（不是 "L0.xxx"）。assign_homogeneous_markers starts_with("layer.") 正确命中。
+3. **capture emit 正确调用**：emit_layer_capture_copy 在 close_layer_loop + handle_standard_layer_loop 退出分支 emit，在 LoopEnd 之前（body 内，每层迭代执行）。
+4. **capture 区有数据**：30 层各 576 元素全非零，量级正确（norm ~30-60，与 golden h1 row4 norm=34.6 一致）。
+5. **counter×stride 生效**：layer0 ≠ layer29 (cos=-0.042)，每层写不同位置。
 
-**矛盾**：line 364 注释说 emit ONE template with "layer." prefix，但实际 cn_layer 生成 "L0." 前缀。注释与代码不符。
+## 逐层 bisection 结果（2026-07-06 diag_step8）
 
-**影响**：is_layer_group 全 false → pipeline.inc.rs:812 永不进 → in_layer_loop 恒 false → close_layer_loop 不调 → Ring-Buffer capture 不 emit + 层循环不走 emit_fusion_groups 路径。
+单 token prefill（隔离 GenerateLoop 覆盖）+ capture 逐层读：
 
-**待确认**：
-1. SmolLM2 实际 op label（加 eprintln 在 assign_homogeneous_markers 确认）
-2. 若 label 是 "L0."，assign_homogeneous_markers 应改 starts_with("L0.") 或 cn_layer 改 "layer." 前缀
-3. 30 层循环实际 emit 位置（若 emit_fusion_groups 不处理，在哪？）
+| 验证 | 结果 | 结论 |
+|------|------|------|
+| embedding (diagnostic_tensor_offset "embedding") vs golden h0 row0 | cos=1.0000 | ✅ embedding 完全正确 |
+| capture layer0 vs golden h1 row0 | cos=0.1325 | ❌ layer 0 计算发散 |
+| capture layer0 vs golden h0 row0 (embedding) | cos=-0.0059 | capture 不是 embedding |
+| capture layer0 norm | 60.72 | 量级对（golden h1 row4 norm=34.6） |
+| 5-token capture layer0 vs golden h1 row4 | cos=0.0002 | ❌ layer 0 发散 |
 
-**候选修复**：
-- A: assign_homogeneous_markers 改 starts_with("L0.") 或同时支持 "layer."/"L0."
-- B: cn_layer 改生成 "layer.N.xxx" 前缀
-- C: 找到实际层循环 emit 位置，Ring-Buffer capture 放那
+**结论**：logits 发散根因在 **layer 0 计算路径**（embedding 输入正确，layer 0 输出发散）。
+
+capture layer0 数据量级正确但内容错（cos≈0）= 计算正确但数值发散，非 capture buffer 问题。
+
+## layer 0 计算发散的嫌疑（待逐算子诊断）
+
+layer 0 算子序列：input_norm(RMSNorm) → q/k/v_proj(GEMM) → rope → mha → o_proj → attn_resid → post_norm → gate/up/down_proj → swiglu → ffn_resid
+
+**最大嫌疑（architect 已确认 Constitution -1 违宪）**：
+- derive_compute_dtype (dtype_chain.rs:198): `BF16|F16 => F32` 硬编码精度假设
+- GEMM 权重 dtype 传播是否正确从 TensorMeta 推断（而非统一 F32）
+- 混合精度：SmolLM2 BF16 权重 + F32 激活，GEMM 应 BF16 解码权重 + F32 累加
+
+**下一步**：layer 0 内部逐算子 bisection（需细粒度 capture 或算子级 dump），定位首个发散算子。
 
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0

@@ -331,6 +331,12 @@ impl Client {
         self.state.load().as_ref()?.backend.executor().diagnostic_tensor_offset(name)
     }
 
+    /// Ring-Buffer 逐层捕获: per-layer stride (bytes). feature 关时返回 0.
+    /// 诊断 harness 读 layer_capture 区第 N 层输出 = offset + N * stride.
+    pub fn diagnostic_layer_capture_stride(&self) -> usize {
+        self.state.load().as_ref().map(|s| s.backend.executor().diagnostic_layer_capture_stride()).unwrap_or(0)
+    }
+
     /// Diagnostic: run prefill on prompt tokens and return logits for the last token.
     pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
         self.state.load().as_ref()?.backend.executor().diagnostic_prefill_logits(prompt_tokens)

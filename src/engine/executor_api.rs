@@ -587,6 +587,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.compute.mega_kernel.as_ref()?.diagnostic_tensor_offset(name)
     }
 
+    /// Ring-Buffer 逐层捕获: per-layer stride (bytes). feature 关时返回 0.
+    pub fn diagnostic_layer_capture_stride(&self) -> usize {
+        self.compute.mega_kernel.as_ref().map(|m| m.diagnostic_layer_capture_stride()).unwrap_or(0)
+    }
+
     pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
         self.compute.mega_kernel.as_ref()?.diagnostic_prefill_logits(prompt_tokens).ok()
     }

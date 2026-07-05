@@ -530,6 +530,16 @@ impl<E: Element> BackendExecutor<E> {
         }
     }
 
+    /// Ring-Buffer 逐层捕获: per-layer stride (bytes). feature 关时返回 0.
+    pub fn diagnostic_layer_capture_stride(&self) -> usize {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_layer_capture_stride(),
+            BackendExecutor::Cuda(e) => e.diagnostic_layer_capture_stride(),
+            BackendExecutor::Rocm(e) => e.diagnostic_layer_capture_stride(),
+            BackendExecutor::Metal(e) => e.diagnostic_layer_capture_stride(),
+        }
+    }
+
     pub fn diagnostic_prefill_scratchpad(&self, prompt_tokens: &[u32]) -> Option<crate::engine::mega_kernel::DiagnosticScratchpad> {
         // BCE-20260703-NaN-LOCATE: GPU/Rocm/Metal previously routed to `diagnostic_prefill_logits`
         // (logits-only, no intermediate tensors) — making layer-level NaN localization impossible.

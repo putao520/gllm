@@ -498,3 +498,177 @@ fn diag_step7_single_token_prefill_rebuild() {
         eprintln!(">>> embedding 真错 (语义对齐后仍不对), 根因在 embedding/gather 数据路径");
     }
 }
+
+#[test]
+fn diag_step8b_single_token_capture() {
+    eprintln!("\n=== Step 8b: 单 token prefill capture (隔离 GenerateLoop 覆盖) ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    // 单 token: 只用 token 0
+    let single = vec![all_tokens[0]];
+    let cap_off = client.diagnostic_tensor_offset("layer_capture").expect("cap off");
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    assert!(cap_stride > 0);
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    let elem = 4usize;
+    let mut l0 = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[cap_off + h*elem..cap_off + (h+1)*elem];
+        l0[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    eprintln!("single-token capture layer0 first 5 = {:?}", &l0[0..5]);
+    // 单 token prefill: golden hidden_layer_1 row0 (token 0 的 layer 0 输出)
+    let golden_h1 = load_golden_hidden_layer(&path, 1);
+    let golden_row0 = &golden_h1[0..HIDDEN_SIZE];
+    eprintln!("golden h1 row0 first 5 = {:?}", &golden_row0[0..5]);
+    eprintln!("cosine(capture layer0, golden h1 row0) = {:.4}", cosine(&l0, golden_row0));
+    // 也试 golden h0 row0 (embedding token 0)
+    let golden_h0 = load_golden_hidden_layer(&path, 0);
+    let golden_emb_row0 = &golden_h0[0..HIDDEN_SIZE];
+    eprintln!("cosine(capture layer0, golden h0 row0) = {:.4}", cosine(&l0, golden_emb_row0));
+
+    // 关键: 单 token prefill 的 embedding 是否对? (验证输入正确性)
+    let emb_off = client.diagnostic_tensor_offset("embedding").expect("emb off");
+    let mut emb = vec![0.0f32; HIDDEN_SIZE];
+    let esp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    let eelem = esp.elem_bytes();
+    for h in 0..HIDDEN_SIZE {
+        let b = &esp.data[emb_off + h*eelem..emb_off + (h+1)*eelem];
+        emb[h] = match eelem {
+            4 => f32::from_le_bytes([b[0],b[1],b[2],b[3]]),
+            2 => { let bits = (b[1] as u32)<<8 | b[0] as u32; f32::from_bits(bits<<16) }
+            _ => 0.0,
+        };
+    }
+    eprintln!("single-token embedding row0 vs golden h0 row0 = {:.4}", cosine(&emb, golden_emb_row0));
+}
+
+#[test]
+fn diag_step8c_capture_inter_layer() {
+    eprintln!("\n=== Step 8c: capture 层间相似度 (检测残流/恒等问题) ===");
+    std::io::stderr().flush().ok();
+    let client = build_cpu_client();
+    let tokens = client.encode(PROMPT).expect("encode");
+    let cap_off = client.diagnostic_tensor_offset("layer_capture").expect("cap off");
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    let sp = client.diagnostic_prefill_scratchpad(&tokens).expect("sp");
+    let elem = 4usize;
+    let read_layer = |n: usize| -> Vec<f32> {
+        let o = cap_off + n * cap_stride;
+        (0..HIDDEN_SIZE).map(|h| {
+            let b = &sp.data[o + h*elem..o + (h+1)*elem];
+            f32::from_le_bytes([b[0],b[1],b[2],b[3]])
+        }).collect()
+    };
+    let l0 = read_layer(0);
+    // layer0 vs embedding (golden h0 row4)
+    let golden_h0 = load_golden_hidden_layer(&golden_path(), 0);
+    let emb = &golden_h0[(SEQ_LEN-1)*HIDDEN_SIZE..SEQ_LEN*HIDDEN_SIZE];
+    eprintln!("capture layer0 vs golden embedding row4 = {:.4}", cosine(&l0, emb));
+    for n in 1..5 {
+        let ln = read_layer(n);
+        let lprev = read_layer(n-1);
+        eprintln!("capture layer{n} vs layer{} = {:.4}", n-1, cosine(&ln, &lprev));
+    }
+    // 也看 layer0 的 norm (是否 RMSNorm 后的值)
+    eprintln!("capture layer0 norm = {:.4}", l0.iter().map(|x| x*x).sum::<f32>().sqrt());
+    eprintln!("golden embedding row4 norm = {:.4}", emb.iter().map(|x| x*x).sum::<f32>().sqrt());
+}
+
+//
+// 前置: gllm-kernels diagnostic-layer-capture feature 启用.
+//   cargo test --features gllm-kernels/diagnostic-layer-capture --test test_diag_cpu_bisect diag_step8 -- --nocapture
+//
+// capture 区在 scratchpad, offset = diagnostic_tensor_offset("layer_capture"),
+// per-layer stride = diagnostic_layer_capture_stride(). 第 N 层输出 (M=1 row0)
+// 在 offset + N * stride, hidden=576 F32.
+//
+// 注意 GenerateLoop M=1: 单次 prefill 只处理最后 token, capture 每层是最后 token
+// 的 hidden (seq_len=1 row0). golden hidden_layer_N shape (5, 576) — 比最后行 (row4).
+
+#[test]
+fn diag_step8_layer_capture_bisect() {
+    eprintln!("\n=== Step 8: Ring-Buffer 逐层捕获 — 30 层 bisection ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let client = build_cpu_client();
+    let tokens = client.encode(PROMPT).expect("encode");
+    eprintln!("tokens = {:?}", tokens);
+
+    let cap_off = client.diagnostic_tensor_offset("layer_capture")
+        .expect("layer_capture offset not found (feature not enabled?)");
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    assert!(cap_stride > 0, "layer_capture_stride=0 (feature not enabled?)");
+    eprintln!("cap_off={} stride={}", cap_off, cap_stride);
+
+    let sp = client.diagnostic_prefill_scratchpad(&tokens).expect("scratchpad");
+    eprintln!("scratchpad len={} bytes", sp.data.len());
+    let elem = 4usize; // capture 区 F32 (side_channel_copy dtype=F32)
+
+    // Sanity: layer 0 vs layer 29 是否相同 (若 counter×stride 没生效, 都写同位置会相同)
+    {
+        let l0 = &sp.data[cap_off..cap_off + HIDDEN_SIZE * elem];
+        let l29 = &sp.data[cap_off + 29 * cap_stride..cap_off + 29 * cap_stride + HIDDEN_SIZE * elem];
+        let same = l0 == l29;
+        let l0_f: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+            let b = &l0[h*elem..(h+1)*elem]; f32::from_le_bytes([b[0],b[1],b[2],b[3]])
+        }).collect();
+        let l29_f: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+            let b = &l29[h*elem..(h+1)*elem]; f32::from_le_bytes([b[0],b[1],b[2],b[3]])
+        }).collect();
+        eprintln!("[SANITY] layer0 == layer29? {} (cos={:.4})", same, cosine(&l0_f, &l29_f));
+        eprintln!("[SANITY] layer0 first 5 = {:?}", &l0_f[0..5]);
+    }
+
+    // 也试 layer 0 vs golden hidden_layer_0 (embedding) — 看是否 capture 实际是 embedding
+    {
+        let golden_h0 = load_golden_hidden_layer(&path, 0);
+        let golden_last0 = &golden_h0[(SEQ_LEN-1)*HIDDEN_SIZE..SEQ_LEN*HIDDEN_SIZE];
+        let mut l0 = vec![0.0f32; HIDDEN_SIZE];
+        for h in 0..HIDDEN_SIZE {
+            let b = &sp.data[cap_off + h*elem..cap_off + (h+1)*elem];
+            l0[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+        }
+        eprintln!("[SANITY] capture layer0 vs golden hidden_layer_0 row4 = {:.4}", cosine(&l0, golden_last0));
+        // 试 golden hidden_layer_1 所有 row, 找匹配
+        let golden_h1 = load_golden_hidden_layer(&path, 1);
+        for r in 0..SEQ_LEN {
+            let gr = &golden_h1[r*HIDDEN_SIZE..(r+1)*HIDDEN_SIZE];
+            eprintln!("[SANITY] capture layer0 vs golden h1 row{r} = {:.4}", cosine(&l0, gr));
+        }
+    }
+
+    // 每层 N: 读 hidden_layer_N 最后行 (row seq_len-1) vs golden hidden_layer_{N+1} row4
+    // 注意: golden hidden_layer_0 = embedding 输出; hidden_layer_N (N>=1) = layer N-1 输出.
+    // gllm capture 第 N 层 (counter N) = layer N 的输出 = golden hidden_layer_{N+1}.
+    eprintln!("\nlayer | cosine vs golden hidden_layer_(N+1) row4 | nonzero");
+    let mut first_bad: Option<usize> = None;
+    for n in 0..NUM_LAYERS {
+        let layer_off = cap_off + n * cap_stride;
+        if layer_off + HIDDEN_SIZE * elem > sp.data.len() {
+            eprintln!("layer {n}: OUT OF BOUNDS (off={}, len={})", layer_off, sp.data.len());
+            break;
+        }
+        let mut row = vec![0.0f32; HIDDEN_SIZE];
+        for h in 0..HIDDEN_SIZE {
+            let b = &sp.data[layer_off + h * elem..layer_off + (h + 1) * elem];
+            row[h] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        }
+        let nonzero = row.iter().filter(|x| x.abs() > 1e-12).count();
+        // golden: capture layer N = layer N output = hidden_layer_{N+1}
+        let golden_idx = n + 1;
+        let golden_h = load_golden_hidden_layer(&path, golden_idx);
+        let golden_last = &golden_h[(SEQ_LEN - 1) * HIDDEN_SIZE..SEQ_LEN * HIDDEN_SIZE];
+        let cos = cosine(&row, golden_last);
+        eprintln!("  {n:2}  | cos={cos:.4}  | nonzero={nonzero}/{}", HIDDEN_SIZE);
+        if first_bad.is_none() && cos < 0.99 {
+            first_bad = Some(n);
+        }
+    }
+    match first_bad {
+        Some(n) => eprintln!("\n>>> 首个发散层: layer {n} (capture layer {n} vs golden hidden_layer_{})", n + 1),
+        None => eprintln!("\n>>> 全 30 层 cosine > 0.99, 层路径无发散 — 根因在层后 (final_norm/lm_head)"),
+    }
+}

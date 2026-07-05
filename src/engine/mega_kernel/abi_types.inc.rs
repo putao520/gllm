@@ -413,6 +413,13 @@ impl MegaKernelCompiled {
             .map(|(_, _, dt)| *dt)
     }
 
+    /// Ring-Buffer 逐层捕获: 返回 per-layer stride (bytes).
+    /// 第 N 层输出 = layer_capture_offset + N * stride.
+    /// feature 关时返回 0 (capture 区未分配).
+    pub fn layer_capture_stride(&self) -> usize {
+        self.buffer_layout.layer_capture_stride
+    }
+
     /// 计算运行时 scratchpad 大小：固定部分 + logits(max_total 行) + sampling + MTP + SG
     ///
     /// Returns `Err(String)` on overflow instead of silently saturating to `usize::MAX`,
