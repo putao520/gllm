@@ -2909,3 +2909,72 @@ architectConfidence: "3C-2 修后置信度提升 — gate 阻塞的两点 (kv_ca
 2. **死代码断链静态检查**: CI grep 门控, gpu_generate_single_sequence/rerank_forward_gpu_pure 等孤儿若无调用点则报警
 3. **argmax=253 硬门控**: 必须等 5070Ti 真机, 本地无法替代
 
+## BCE-20260705-KVCACHE-DTYPE-DUAL-LAYER-SPLIT (architect 裁决: 唯一致命根因)
+
+> SmolLM2-135M CPU E2E (本地 i9-10900KF AVX2): argmax=967 (golden=253), cosine=-0.465, MAD=33.7。
+> 8 轮诊断收敛 (embedding 对/dtype 对/残差流对/logits 信号可信) + architect(retrospect/consult) 归因确认。
+> architect sessionId: edb98acd-f28a-466b-ad97-863e9056c3b7。6 Agent 交叉验证。
+
+```yaml
+patternId: BCE-20260705-KVCACHE-DTYPE-DUAL-LAYER-SPLIT
+title: "JIT 层 ctx.dtype=graph_dtype()=F32 (硬编码) vs buffer 层 compute_dtype=BF16 (config 推断) 双地层裂开 → KV cache buffer 按 384(BF16) 分配, 但 MemCopy 写/读按 768(F32) → 30 层逐层 2× stride 越界踩踏"
+layer: 范式缺陷 (KV cache dtype SSOT 缺失, JIT 层与 buffer 层 dtype 解耦不一致)
+codePattern:
+  - "context.inc.rs:179 ctx.dtype = graph_dtype() = F32 硬编码 (JIT 层, 决定 GEMM c_dtype + 激活 dtype)"
+  - "abi_types.inc.rs:395 elem_bytes() = compute_dtype.size_bytes() = 2 (buffer 层, 决定 KV cache stride)"
+  - "types.inc.rs:167 compute_dtype = config.compute_dtype.unwrap_or(config.dtype) = BF16 (SmolLM2)"
+  - "build_graph.inc.rs:693 AttentionSpec.dtype = DType::F32 硬编码 (写读层)"
+  - "lower_op.inc.rs:1521 kv_row_stride = 3*64*4 = 768 (F32 stride, MemCopy 写读用)"
+  - "abi_types.inc.rs:469 kv_row_stride() = 3*64*2 = 384 (BF16 stride, buffer 分配用)"
+  - "→ 768 > 384: MemCopy 写 768 字节进 384 字节行, 越界覆盖下一行 V / 下一 layer K"
+sameClassCriterion: "任何 JIT 层 dtype (graph_dtype/ctx.dtype 硬编码 F32) 与 buffer 层 dtype (compute_dtype 从 config 推断) 解耦, 导致 buffer 分配按一者 stride, 读写按另一者 stride → 越界或浪费"
+rootCause: |
+  JIT 层与 buffer 层 dtype 完全解耦 (两个独立来源):
+    JIT 层 ctx.dtype = graph_dtype() 硬编码 F32 → GEMM c_dtype=F32, 激活 F32, AttentionSpec.dtype=F32, MemCopy dtype=F32 stride=768
+    buffer 层 compute_dtype = config 推断 BF16 → KV cache elem_bytes=2, buffer stride=384
+  写读 (768) vs 分配 (384) 不一致 → 每行 KV 写入溢出覆盖下一行 → 30 层逐层 2× stride 越界踩踏 → attention Q·K 全错 → logits 发散 (cosine=-0.465, argmax=967)
+detectionSignatures:
+  structural: "graph_dtype() 返回硬编码 F32 + compute_dtype 从 config 推断 + KV cache buffer 按 compute_dtype 分配 + MemCopy 按 graph_dtype 拷"
+  literal: "fn graph_dtype() -> DType { DType::F32 }"
+  antipattern: "kv-cache-dtype-dual-layer-split"
+fixTemplate: |
+  方案 A (根治, architect 推荐): 双层统一到 compute_dtype
+    - graph_dtype() 从硬编码 F32 改为返回 compute_dtype (SmolLM2 上变 BF16)
+    - 全链 BF16: buffer 384, 写读 384, SSOT 统一
+    - 影响面: 所有模型 (graph_dtype 变了影响所有 GEMM c_dtype + 激活), 需全量回归
+  方案 B (止血): buffer 层退回 F32
+    - elem_bytes 硬编码 4 (不读 compute_dtype)
+    - 全链 F32: buffer 768, 写读 768, 自洽
+    - 违反 compute_dtype 语义, KV cache 内存翻倍, 非 SSOT
+  推荐 A (ARCH-JIT-DATA-YIELDS: 代码顺从数据实际 dtype; C-3 根治优先)
+candidateB_refuted: |
+  候选根因 B (VecNarrow lane-loss, emit_f32_to_bf16_ymm_to_xmm_avx2 8 lanes 只窄化低 4) 已排除:
+    - needs_narrowing_from(F32)=false (trace.rs:1130) → 前向路径零 VecNarrow(BF16) 调用
+    - SmolLM2 forward 不触发 F32→BF16 narrow (激活/中间结果都 F32, 不存 BF16)
+    - emit_f32_to_bf16_ymm_to_xmm_avx2 是死代码 (search_code profile: 0 consumers)
+    - 修复 lane-loss 对本 case 无效
+residualEvidence: |
+  - architect 归因确认 (sessionId edb98acd): 6 Agent 交叉验证, 候选 A 唯一致命根因
+  - 反证解释: BCE-20260703 "本地 argmax=253 正确" 记录证据不足 (未跑 gllm-vs-golden 端到端数值断言, 同 BCE-20260704-X86-BF16-VNNI-GUARD 重开原因)
+  - 待修复后验证: argmax=253, cosine>0.9999, MAD<1
+归因时间: 2026-07-05
+status: 已归因 (architect 裁决) | residual: 待修复 + 验证 (方案 A/B 待用户确认)
+```
+
+### 修复方案选择 (需用户确认)
+
+architect 给出两方案, 影响面差异大, 需用户拍板:
+
+| 方案 | 内容 | 影响面 | 架构 |
+|------|------|--------|------|
+| A (推荐) | graph_dtype() 返回 compute_dtype (非硬编码 F32) | 所有模型 (GEMM c_dtype + 激活全变) | 根治 SSOT |
+| B (止血) | buffer 层 elem_bytes 硬编码 4 (不读 compute_dtype) | 仅 KV cache buffer | 局部 patch, 违反 compute_dtype 语义 |
+
+按 C-3 (根治优先) + ARCH-JIT-DATA-YIELDS (代码顺从数据) 应选 A, 但 A 影响所有模型需全量回归。待用户确认后派发 Executor。
+
+### 与其他 BCE 关系
+
+- BCE-20260704-X86-BF16-VNNI-GUARD (重开): 重开归因 "fallback BF16 GEMM" 误判, 真因是本条 KV cache dtype 双地层裂开。候选 B (VecNarrow lane-loss) 已排除。本条根治后 BCE-20260704 应合并关闭
+- BCE-20260703-AVX512-HALF-LANES: AVX-512 半lanes (argmax=6) 已根治, 独立 bug。本条是 AVX2 路径 (argmax=967), 不同路径不同根因
+- ARCH-JIT-DATA-YIELDS 违宪: JIT 层硬编码 F32 不顺从 buffer 层实际 dtype (BF16)
+
