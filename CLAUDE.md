@@ -1,5 +1,21 @@
 # gllm
 
+> 🚨🚨🚨 **宪法 -1（最高优先级，凌驾所有）: 禁止预设任何精度立场（ARCH-NO-PRECISION-ASSUMPTION）**
+>
+> **JIT 代码生成禁止预设任何精度立场，必须严格按照权重文件实际 dtype + 配置文件要求生成 JIT 代码。**
+>
+> - ❌ 禁止假设权重是某固定 dtype（BF16/F32/NVFP4/INT8/混合精度）— 必须从权重文件 TensorMeta 逐张量读取
+> - ❌ 禁止代码里有 `match storage_dtype { BF16 => F32, ... }` 式的精度降级/升级硬编码 — 这是代码预设精度立场
+> - ❌ 禁止 "BF16 always widen to F32" / "NVFP4 always dequant to F32" 这类全局精度策略 — 每个算子的每个输入按其实际 dtype 独立 JIT 特化
+> - ❌ 禁止用 "累加器精度" / "计算精度" 概念掩盖精度预设 — 累加器 dtype 也必须从数据推导（如 BF16 权重 + BF16 激活 → BF16 累加或 F32 累加由配置/硬件决定，不由代码硬编码）
+> - ❌ 禁止 "blob 保留 BF16" 这类表述 — 这预设了 BF16 立场；正确表述 "blob 保留权重文件原始 dtype 字节"
+> - ✅ 权重文件是 NVFP4 → blob 保留 NVFP4 字节，JIT 生成 NVFP4 解码+计算代码
+> - ✅ 权重文件是混合精度（部分 BF16 + 部分 NVFP4）→ blob 各张量按各自原始 dtype，JIT 逐张量特化
+> - ✅ 配置文件指定 compute_dtype → 以配置为准（用户主权），但不预设默认值掩盖权重实际 dtype
+> - ✅ JIT 看到什么 dtype 就生成什么 dtype 的代码 — 代码顺从数据，数据不顺从代码
+>
+> **铁律来源**：NVFP4 权重 / 混合精度模型场景。任何 "X always → F32" 的硬编码都是违宪，因为 X 可能是任意精度。derive_compute_dtype 的 `BF16 => F32` 硬编码是典型违宪（即使当前对 BF16 "看起来正确"，对 NVFP4/混合精度必然错）。
+
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## 🚨 宪法
