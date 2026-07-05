@@ -76,7 +76,9 @@ pub struct CudaBackend<E: Element = f32> {
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 pub(super) struct GpuMegaBuffers {
-    /// Device scratchpad ptr (covers kv_cache + activations + logits region).
+    /// Device scratchpad ptr (activations + logits + sampling workspace).
+    /// NOTE: kv_cache MUST be a separate buffer (kernel writes K/V to kv_cache,
+    /// reads logits from scratchpad — aliasing corrupts logits. BCE-20260705-GPUPTR-002).
     pub scratchpad: u64,
     pub scratchpad_bytes: usize,
     /// Device output_tokens ptr (u32 tokens written by GPU kernel).
@@ -85,6 +87,11 @@ pub(super) struct GpuMegaBuffers {
     /// Device input_ids ptr (u32 tokens read by GPU kernel, H2D per call).
     pub input: u64,
     pub input_bytes: usize,
+    /// Device kv_cache ptr (K/V projections written by GPU kernel). SEPARATE from
+    /// scratchpad — kernel writes KV here, reads logits from scratchpad. Aliasing
+    /// (slot 2 = slot 7 = scratchpad) corrupts logits → argmax wrong.
+    pub kv_cache: u64,
+    pub kv_cache_bytes: usize,
 }
 
 // Manual Debug since Mutex<HashMap> and Arc<CudaDevice> don't derive Debug cleanly
@@ -475,12 +482,22 @@ impl<E: Element> CudaBackend<E> {
 
     /// ARCH-UNIFIED-EXEC 阶段3C: alloc 3 device buffers (scratchpad/output/input).
     /// Called from prepare_gpu_mega_kernel. Reused across calls — zero hot-loop alloc.
+    /// ARCH-UNIFIED-EXEC 阶段3C-2: kv_cache is a SEPARATE buffer from scratchpad
+    /// (kernel writes K/V to kv_cache, reads logits from scratchpad — aliasing corrupts).
     #[cfg(feature = "cuda")]
-    pub(super) fn alloc_gpu_mega_buffers(&self, scratchpad_bytes: usize) -> Result<(), String> {
+    pub(super) fn alloc_gpu_mega_buffers(
+        &self,
+        scratchpad_bytes: usize,
+        kv_cache_bytes: usize,
+    ) -> Result<(), String> {
         let sp_bytes = scratchpad_bytes.max(1024);
         let scratchpad_dev = self.alloc_scratchpad_gpu(sp_bytes)?;
         let output_dev = self.alloc_scratchpad_gpu(sp_bytes)?;
         let input_dev = self.alloc_scratchpad_gpu(sp_bytes)?;
+        // kv_cache: independent device buffer (NOT aliased to scratchpad).
+        // Size 0 → alloc minimal 1 byte (CUDA rejects 0-byte alloc), kernel won't touch.
+        let kv_bytes = kv_cache_bytes.max(1);
+        let kv_cache_dev = self.alloc_scratchpad_gpu(kv_bytes)?;
         let buffers = GpuMegaBuffers {
             scratchpad: scratchpad_dev,
             scratchpad_bytes: sp_bytes,
@@ -488,6 +505,8 @@ impl<E: Element> CudaBackend<E> {
             output_bytes: sp_bytes,
             input: input_dev,
             input_bytes: sp_bytes,
+            kv_cache: kv_cache_dev,
+            kv_cache_bytes: kv_bytes,
         };
         let mut gpu_bufs = self.gpu_mega_buffers.lock()
             .map_err(|e| format!("gpu_mega_buffers lock poisoned: {e}"))?;
@@ -510,12 +529,13 @@ impl<E: Element> CudaBackend<E> {
         args: &crate::engine::mega_kernel::MegaKernelArgs,
     ) -> Result<(), String> {
         // Lock buffers (Arc-shared with prepare'd backend)
-        let (scratchpad_dev, output_dev) = {
+        // BCE-20260705-GPUPTR-002: kv_cache_dev SEPARATE from scratchpad_dev (slot 2 ≠ slot 7).
+        let (scratchpad_dev, output_dev, kv_cache_dev, scratchpad_alloc_bytes, output_alloc_bytes) = {
             let bufs_opt = self.gpu_mega_buffers.lock()
                 .map_err(|e| format!("gpu_mega_buffers lock poisoned: {e}"))?;
             let buf = bufs_opt.as_ref()
                 .ok_or_else(|| "gpu_mega_buffers not prepared (prepare_gpu_mega_kernel not called?)".to_string())?;
-            (buf.scratchpad, buf.output)
+            (buf.scratchpad, buf.output, buf.kv_cache, buf.scratchpad_bytes, buf.output_bytes)
         };
 
         // Weight device ptr (from weight_blob_gpu cache)
@@ -547,7 +567,7 @@ impl<E: Element> CudaBackend<E> {
         let raw: [usize; 22] = [
             input_dev as usize,                           // 0: input_ids (device)
             weight_dev as usize,                          // 1: weight_blob (device)
-            scratchpad_dev as usize,                      // 2: kv_cache (device scratchpad)
+            kv_cache_dev as usize,                        // 2: kv_cache (device, SEPARATE from scratchpad — BCE-20260705-GPUPTR-002)
             positions_dev as usize,                       // 3: positions (device)
             args.aux_ptr as usize,                        // 4: aux (host — kernel rarely reads)
             args.batch_size,                              // 5
@@ -572,8 +592,16 @@ impl<E: Element> CudaBackend<E> {
         // Step 3: launch
         self.gpu_launch_mega_kernel(ptx, kernel_name, &raw)?;
 
-        // Step 4: D2H scratchpad (整块, args.scratchpad_bytes) + output_tokens
-        let sp_bytes_copy = args.scratchpad_bytes;
+        // Step 4: D2H scratchpad + output_tokens.
+        // BCE-20260705-GPUPTR-002: D2H size mismatch — prepare allocs runtime_scratchpad_bytes(1)
+        // but runtime copies runtime_scratchpad_bytes(max_total). Use min + debug_assert to avoid
+        // device OOB read while exposing the size inconsistency (don't silently mask with min alone).
+        let sp_bytes_copy = args.scratchpad_bytes.min(scratchpad_alloc_bytes);
+        debug_assert!(
+            args.scratchpad_bytes <= scratchpad_alloc_bytes,
+            "D2H scratchpad size mismatch: host wants {} but device allocated {} (prepare vs runtime inconsistency)",
+            args.scratchpad_bytes, scratchpad_alloc_bytes
+        );
         if sp_bytes_copy > 0 {
             let sp_dev_data = self.download_from_gpu(scratchpad_dev, sp_bytes_copy)
                 .map_err(|e| format!("dtoh scratchpad failed: {e}"))?;
@@ -586,7 +614,12 @@ impl<E: Element> CudaBackend<E> {
             }
         }
 
-        let out_bytes_copy = args.output_tokens_bytes;
+        let out_bytes_copy = args.output_tokens_bytes.min(output_alloc_bytes);
+        debug_assert!(
+            args.output_tokens_bytes <= output_alloc_bytes,
+            "D2H output size mismatch: host wants {} but device allocated {}",
+            args.output_tokens_bytes, output_alloc_bytes
+        );
         if out_bytes_copy > 0 {
             let out_dev_data = self.download_from_gpu(output_dev, out_bytes_copy)
                 .map_err(|e| format!("dtoh output failed: {e}"))?;

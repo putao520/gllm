@@ -56,6 +56,7 @@ macro_rules! impl_gpu_backend {
                 weight_blob: &[u8],
                 gpu_code: Option<&[u8]>,
                 scratchpad_bytes: usize,
+                kv_cache_bytes: usize,
             ) -> Result<(), BE> {
                 #[cfg( $($cfg_pred)+ )]
                 {
@@ -78,17 +79,18 @@ macro_rules! impl_gpu_backend {
                         cache.insert("__scratchpad_bytes__".to_string(), scratchpad_bytes.to_le_bytes().to_vec());
                     }
 
-                    // ARCH-UNIFIED-EXEC 阶段3C: alloc 3 device buffers (scratchpad/output/input)
-                    // via backend-specific method. Reuse across calls — zero hot-loop alloc,
-                    // avoids forget-leak in generate loop.
-                    backend_f32.alloc_gpu_mega_buffers(scratchpad_bytes)
+                    // ARCH-UNIFIED-EXEC 阶段3C-2: alloc 4 device buffers (scratchpad/output/input/kv_cache).
+                    // kv_cache SEPARATE from scratchpad (kernel writes K/V to kv_cache, reads logits
+                    // from scratchpad — aliasing corrupts logits, BCE-20260705-GPUPTR-002).
+                    // Reuse across calls — zero hot-loop alloc, avoids forget-leak in generate loop.
+                    backend_f32.alloc_gpu_mega_buffers(scratchpad_bytes, kv_cache_bytes)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
                     Ok(())
                 }
                 #[cfg(not( $($cfg_pred)+ ))]
                 {
-                    let _ = (weight_blob, gpu_code, scratchpad_bytes);
+                    let _ = (weight_blob, gpu_code, scratchpad_bytes, kv_cache_bytes);
                     Ok(())
                 }
             }

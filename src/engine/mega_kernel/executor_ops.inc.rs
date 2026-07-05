@@ -959,6 +959,15 @@ impl MegaKernelExecutor {
             .expect("scratchpad_bytes: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
     }
 
+    /// ARCH-UNIFIED-EXEC 阶段3C-2: kv_cache size accessor for GPU device buffer alloc.
+    /// Forward to MegaKernelCompiled::kv_cache_bytes(num_layers).
+    pub fn kv_cache_bytes(&self, num_layers: usize) -> usize {
+        self.mega_compiled
+            .as_ref()
+            .map(|m| m.kv_cache_bytes(num_layers))
+            .expect("kv_cache_bytes: mega_compiled must be Some — executor constructed without compiling mega-kernel (invariant violation)")
+    }
+
     /// Layer 6: 将 JIT source map 写入文本文件（供 DAP 调试器使用）。
     /// 仅当 debug_jit=true 时有内容。
     pub fn dump_source_map(&self, path: &std::path::Path) -> std::io::Result<()> {

@@ -308,8 +308,9 @@ pub mod backend_trait {
             weight_blob: &[u8],
             gpu_code: Option<&[u8]>,
             scratchpad_bytes: usize,
+            kv_cache_bytes: usize,
         ) -> Result<(), BackendError> {
-            let _ = (weight_blob, gpu_code, scratchpad_bytes);
+            let _ = (weight_blob, gpu_code, scratchpad_bytes, kv_cache_bytes);
             Ok(())
         }
 
