@@ -227,6 +227,7 @@ fn diag_step2_layer_bisect() {
             Err(e) => { eprintln!("layer {n}: encode_to_layer err {e}"); continue; }
         };
 
+        let next = n + 1;
         let cos = cosine(&gllm_hn, &golden_mean);
         eprintln!("layer {n:2}: cosine = {cos:.4}");
         if cos < 0.99 && first_diverge.is_none() {
@@ -239,5 +240,134 @@ fn diag_step2_layer_bisect() {
         Some(0) => eprintln!(">>> 发散在 layer 0: embedding/norm/QKV proj 错 (查 golden_layer0_ops)"),
         Some(n) => eprintln!(">>> 发散在 layer {n}: 该层 GEMM/norm 符号错 (BF16 fallback GEMM?)"),
         None => eprintln!(">>> 所有层都 OK 但 final logits 错: lm_head/final norm 问题"),
+    }
+}
+
+// ─── 架构师 sessionId 5d98f4f4 第6轮纠错: diag_step1/2 比对错位一层 ───
+// encode_to_layer(N) 返回 layer N **输出**, 应比 golden hidden_layer_{N+1}
+// (不是 hidden_layer_N). 之前全错位, cosine≈0 可能是正常错位噪声.
+
+#[test]
+fn diag_step3_buffer_layout_dump() {
+    eprintln!("\n=== Step 3: buffer_layout 段基址 (确认 offset 37748736 落哪个段) ===");
+    std::io::stderr().flush().ok();
+    let client = build_cpu_client();
+    let tokens = client.encode(PROMPT).expect("encode");
+    let sp = client.diagnostic_prefill_scratchpad(&tokens).expect("scratchpad");
+
+    eprintln!("scratchpad data len = {} bytes ({:.1} MB)", sp.data.len(), sp.data.len() as f64 / 1_048_576.0);
+    eprintln!("logits_offset = {} ({:.1} MB)", sp.logits_offset, sp.logits_offset as f64 / 1_048_576.0);
+    eprintln!("vocab={}, prompt_len={}, hidden={}, dtype={:?}, elem_bytes={}",
+        sp.vocab_size, sp.prompt_len, sp.hidden_size, sp.compute_dtype, sp.elem_bytes());
+    eprintln!("\nnamed_offsets ({} 个):", sp.named_offsets.len());
+    for (name, off, dt) in &sp.named_offsets {
+        eprintln!("  {name:30} off={off:>12} ({:.1} MB) dtype={:?}", off / 1_048_576, dt);
+    }
+
+    // 查 embedding offset
+    if let Some(off) = client.diagnostic_tensor_offset("embedding") {
+        eprintln!("\n>>> embedding offset (diagnostic_tensor_offset) = {} ({:.1} MB)", off, off as f64 / 1_048_576.0);
+    }
+    if let Some(off) = client.diagnostic_tensor_offset("embed") {
+        eprintln!(">>> embed (weight) offset = {} ({:.1} MB)", off, off as f64 / 1_048_576.0);
+    }
+}
+
+#[test]
+fn diag_step4_embedding_direct_read() {
+    eprintln!("\n=== Step 4: 直读 embedding (绕开 layer 0) vs golden hidden_layer_0 ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let golden_h0 = load_golden_hidden_layer(&path, 0); // (5, 576) = embedding 输出
+    eprintln!("golden hidden_layer_0 (embedding): len={}, expected {}", golden_h0.len(), SEQ_LEN * HIDDEN_SIZE);
+
+    let client = build_cpu_client();
+    let tokens = client.encode(PROMPT).expect("encode");
+    let sp = client.diagnostic_prefill_scratchpad(&tokens).expect("scratchpad");
+
+    // 用 diagnostic_tensor_offset 查 embedding (动态 offset, 不硬编码)
+    let emb_off = client.diagnostic_tensor_offset("embedding")
+        .expect("embedding tensor offset not found in named_offsets");
+    let emb_dtype = sp.compute_dtype; // 全图统一 compute dtype (BF16 权重 + F32 激活, embedding 输出 = 激活 dtype)
+    eprintln!("embedding offset = {} dtype = {:?}", emb_off, emb_dtype);
+    eprintln!("scratchpad data len = {}, emb_off + seq*hidden*elem_bytes = {}",
+        sp.data.len(), emb_off + SEQ_LEN * HIDDEN_SIZE * emb_dtype.size_bytes());
+
+    // 从 scratchpad 的 emb_off 读 [5, 576] embedding (按 dtype)
+    let elem = emb_dtype.size_bytes();
+    let mut gllm_embed = vec![0.0f32; SEQ_LEN * HIDDEN_SIZE];
+    for i in 0..SEQ_LEN * HIDDEN_SIZE {
+        let b = &sp.data[emb_off + i * elem..emb_off + (i + 1) * elem];
+        gllm_embed[i] = match elem {
+            4 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            2 => {
+                // BF16: 高16位拼 F32
+                let bits = (b[1] as u32) << 8 | b[0] as u32;
+                f32::from_bits(bits << 16)
+            }
+            _ => 0.0,
+        };
+    }
+    eprintln!("gllm embedding read: len={}, first 5 = {:?}", gllm_embed.len(), &gllm_embed[0..5]);
+    eprintln!("golden h0 first 5 = {:?}", &golden_h0[0..5]);
+
+    // row 0 cosine
+    let cos_row0 = cosine(&gllm_embed[0..HIDDEN_SIZE], &golden_h0[0..HIDDEN_SIZE]);
+    // mean over seq cosine
+    let gllm_mean: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+        let mut s = 0.0f32;
+        for r in 0..SEQ_LEN { s += gllm_embed[r * HIDDEN_SIZE + h]; }
+        s / SEQ_LEN as f32
+    }).collect();
+    let golden_mean: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+        let mut s = 0.0f32;
+        for r in 0..SEQ_LEN { s += golden_h0[r * HIDDEN_SIZE + h]; }
+        s / SEQ_LEN as f32
+    }).collect();
+    let cos_mean = cosine(&gllm_mean, &golden_mean);
+
+    eprintln!("cosine(gllm embedding row0, golden h0 row0) = {cos_row0:.4}");
+    eprintln!("cosine(gllm embedding mean, golden h0 mean) = {cos_mean:.4}");
+    if cos_mean > 0.99 {
+        eprintln!(">>> embedding 对齐! 之前 embedding 正交 = diag_step1/2 错位比对伪信号. 根因在 layer 之后");
+    } else {
+        eprintln!(">>> embedding 真的不对齐 (语义已确认). 根因在 embedding/gather 数据路径");
+    }
+}
+
+#[test]
+fn diag_step5_layer_bisect_fixed() {
+    eprintln!("\n=== Step 5: 逐层 bisection (修正错位: encode_to_layer(N) vs golden hidden_layer_(N+1)) ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let client = build_cpu_client();
+    let _tokens = client.encode(PROMPT).expect("encode");
+
+    // SmolLM2 30 层, golden hidden_layer_0..30 (31 个). encode_to_layer(N) 返回 layer N 输出
+    // = golden hidden_layer_{N+1}. N=0..29 对应 golden hidden_layer_1..30.
+    let mut first_diverge: Option<usize> = None;
+    for n in 0..NUM_LAYERS {
+        let golden_hn_out = load_golden_hidden_layer(&path, n + 1); // layer N 输出 = golden hidden_layer_{N+1}
+        let golden_mean: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+            let mut s = 0.0f32;
+            for r in 0..SEQ_LEN { s += golden_hn_out[r * HIDDEN_SIZE + h]; }
+            s / SEQ_LEN as f32
+        }).collect();
+
+        let gllm_hn = match client.encode_to_layer(PROMPT, LayerAnchor::Absolute(n), PoolMode::MeanPool) {
+            Ok(v) => v,
+            Err(e) => { eprintln!("layer {n}: encode_to_layer err {e}"); continue; }
+        };
+        let next = n + 1;
+        let cos = cosine(&gllm_hn, &golden_mean);
+        eprintln!("layer {n:2} output: cosine(vs golden hidden_layer_{}) = {cos:.4}", n + 1);
+        if cos < 0.99 && first_diverge.is_none() {
+            first_diverge = Some(n);
+        }
+    }
+    eprintln!("\n>>> 首个发散层 (修正错位后) = {:?}", first_diverge);
+    match first_diverge {
+        Some(n) => eprintln!(">>> 发散在 layer {n} 输出: 该层处理错 (attention/FFN/norm)"),
+        None => eprintln!(">>> 所有层都对, 根因在 final norm / lm_head"),
     }
 }
