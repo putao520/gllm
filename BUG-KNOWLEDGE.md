@@ -2806,3 +2806,95 @@ status: 根治 (493e6092) | residual: 0
   4. executor_core.inc.rs compile 阶段: GPU backend 时调 `GpuCompiledLayer::from_ptx` 产出 CUmodule, 存到 mega_compiled.gpu_module。
 - **优先级**: P0 (GPU 推理完全不走 GPU 是最严重的 NO-ISLAND-MODULE 违规; 但修复规模大, 涉及 Executor ABI 重构 + 所有 execute_* 分流, 需 architect(consult) 设计)
 - **归因证据**: `git log --oneline -1` = 1d7eee3f; CPU E2E passed / GPU E2E failed 实测于 5070Ti (192.168.1.200, RTX 5070 Ti SM12.0); entry_fn vs gpu_code 路径分离代码确认。
+
+---
+
+## BCE-20260705-GPUDEAD-001 — GPU 编译产物存储但无 launch 消费者（编译了从不执行）
+
+> **归因时间**: 2026-07-05
+> **architect sessionId**: 5d98f4f4-3959-4749-9a18-e12b33eebb00
+> **根治重构**: ARCH-UNIFIED-EXEC（7 commits: 9062e87/fd0fbe5/12580ef/686a70c/571f0c6/744d1151）
+> **领域资料库**: docs/domain-knowledge/cuda-driver-api.md（C-9）
+
+```yaml
+patternId: BCE-20260705-GPUDEAD-001
+title: GPU 编译产物存储但无 launch 调用点（编译了从不执行）
+layer: 范式
+codePattern:
+  - "编译产出 PTX/HSACO/字节码存入字段/缓存，但 grep 不到对应 launch 调用点"
+  - "compile 与 launch 分离，中间无数据流连接（断链）"
+detectionSignatures:
+  structural:
+    - "字段/变量接收 CompileOutput::Gpu / gpu_code / ptx，但同 struct 无 launch_* 调用"
+    - "launch 函数定义存在但全工作区 0 非测试调用点"
+  literal:
+    - "grep 'fn.*launch' 定义 → 反查调用点 = 0"
+sameClassCriterion:
+  - "任何 GPU 可执行产物（PTX/HSACO/MSL）从生成到 cuLaunchKernel/dispatch 的数据流断裂"
+triggerCondition:
+  - "GPU 后端推理结果错误（argmax=38734 等）但 CPU 同代码正确"
+  - "GPU PTX 编译产出 4.9MB 但 nvidia-smi 无 kernel 活动"
+fixTemplate:
+  - "统一编译入口 compile() 产 CompiledExecutable（CPU→entry_fn / GPU→launcher 闭包）"
+  - "execute_* 按 executable 分流，GPU arm 调 launcher(&args)"
+  - "NO-ISLAND-MODULE 铁律的 GPU 特化：编译产物必须有可达 launch 消费者"
+regressionAssertion:
+  - "grep 'fn.*launch.*kernel' 定义 → 每个都必须有 ≥1 非测试调用点"
+  - "GPU E2E argmax 与 CPU 一致（SmolLM2-135M: 253）"
+residualInstances:
+  - "gpu_generate_single_sequence (cuda_backend.rs:335) — 0 非测试调用点, 死代码孤儿"
+  - "rerank_forward_gpu_pure / classify_forward_gpu_pure — 0 调用点, 已被 mega.execute_* 取代, 待删"
+  - "GpuCompiledLayer::execute (gllm-kernels executable.rs:573) — 0 调用点, 独立 per-layer launch 死路径"
+status: "主路径已根治 (mega_kernel), 孤儿死代码待 4a/4b 阶段清理"
+```
+
+## BCE-20260705-GPUPTR-002 — host 指针混入 device kernel argv
+
+> **归因时间**: 2026-07-05
+> **architect sessionId**: 5d98f4f4-3959-4749-9a18-e12b33eebb00
+> **3C 修复**: commit 744d1151（launcher 三步内聚 H2D→launch→D2H，6/22 指针槽已修）
+
+```yaml
+patternId: BCE-20260705-GPUPTR-002
+title: host 地址空间指针 as usize 直接塞入 device kernel launch 参数数组
+layer: 范式
+codePattern:
+  - "host Vec/slice.as_ptr() as usize → 写入 cuLaunchKernel/dispatch 的 argv[i]"
+  - "同一指针字段 CPU 路径直接用（对），GPU 路径未 H2D 就传（错）"
+detectionSignatures:
+  structural:
+    - "kernelParams/[usize;N]/argv 数组元素来自未经 upload_to_gpu 的 host ptr"
+  literal:
+    - "'as usize' 出现在 launch 参数构造上下文，且源头是 *.as_ptr()/as_mut_ptr()"
+sameClassCriterion:
+  - "任何 device kernel 启动参数的指针槽，其值未经过 H2D 上传即来自 host 地址"
+triggerCondition:
+  - "GPU kernel 读 host 地址数字 → device 地址空间读随机显存 → 结果纯噪声（argmax=38734）"
+fixTemplate:
+  - "GPU arm argv 指针槽全用 device ptr (H2D 上传后或缓存 device buffer)"
+  - "host 指针字段语义转换: CPU arm 直接用, GPU arm = D2H 目标地址"
+  - "launcher 三步内聚: H2D(input host→device) → launch(device argv) → D2H(device output→host)"
+regressionAssertion:
+  - "argv slot 0/1/2/3/7/8 必须是 device ptr (slot 2/7 待 kv_cache 独立 buffer 确认)"
+  - "MegaKernelArgs 加 scratchpad_bytes/output_tokens_bytes 让 launcher 算 D2H 拷贝量"
+residualInstances:
+  - "kv_cache 别名到 scratchpad (slot 2 = scratchpad_dev) — 头号 gate 风险, 待 Explore 确认 kernel 读写语义"
+  - "slot 4/14/15/17/19/20/21 = host ptr 透传 (aux/hook_ctx/telemetry/fused_hidden/callback_table/page_table/batch_ctx) — 诊断路径全 NULL 无害, generate 全循环变活 host ptr"
+  - "Metal device.rs:338 — 22 参数全走 setBuffer, 标量当 buffer 地址绑定, 独立 ABI bug"
+  - "gpu_generate_single_sequence:376/379 — 死代码里的 host ptr argv, latent"
+  - "D2H scratchpad size 一致性 — prepare 分配 (cached.max(1024)) vs runtime 拷贝 (runtime_scratchpad_bytes) 可能不一致致越界"
+status: "6/22 槽已修, 残留 4 类实例待 BCE 完整闭环"
+architectConfidence: "3C 实现置信度 50% — kv_cache 别名 + D2H size 是头号风险, 需 Explore 确认后再上真机"
+```
+
+## SPEC 沉淀点（C-3 根治, 待 spec_write）
+
+- **SPEC 40 (端到端数据流) 加 CRITERION-GPU-ARGV-DEVICE**: 进入 cuLaunchKernel/dispatch 的 kernelParams 数组，每个指针槽的值必须来自 device 地址空间（H2D 上传后的 device ptr 或缓存 device buffer），禁止 host `as_ptr()/as_mut_ptr() as usize` 直接进 argv。NULL 指针允许（未用槽）。编译期 + 运行期双门控。
+- **SPEC 39 (统一编译器) 加 CRITERION-GPU-COMPILE-LAUNCH-LINK**: 任何 `CompileOutput::Gpu` 产物必须有可达的 launch 调用点消费。NO-ISLAND-MODULE 铁律的 GPU 特化。
+
+## 替代验证（5070Ti 离线时本地可做）
+
+1. **argv device-ptr 断言 unit test**: 构造 MegaKernelArgs → 走 launch_mega_kernel_with_bridging argv 构造逻辑（抽成纯函数）→ 断言 slot 0/1/2/3/7/8 是 device ptr、其余 host 透传槽为 NULL
+2. **死代码断链静态检查**: CI grep 门控, gpu_generate_single_sequence/rerank_forward_gpu_pure 等孤儿若无调用点则报警
+3. **argmax=253 硬门控**: 必须等 5070Ti 真机, 本地无法替代
+

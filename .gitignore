@@ -32,6 +32,10 @@ TASKLIST.md
 PLAN.md
 audit_report.md
 docs/
+# C-9 exception: domain-knowledge archive IS tracked (堵 AI 幻觉的外部技术资料库)
+!docs/domain-knowledge/
+!docs/domain-knowledge/**
+
 
 # Development artifacts (root level only)
 /debug_*.rs

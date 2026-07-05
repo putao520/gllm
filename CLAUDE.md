@@ -67,6 +67,14 @@
 - `../gllm-kernels/SPEC/` (JIT codegen + VmInstr SSOT)
 - `../gllm-nccl/SPEC/` (Distributed communication, 10 documents)
 
+## 领域资料库索引（C-9，堵 AI 幻觉）
+
+> 涉及外部技术（训练数据过时/缺失）时，必须先读资料库再动手。详见 `~/.claude/rules/domain-knowledge.md`。
+
+| 技术 | 文件 | 用途 |
+|------|------|------|
+| CUDA Driver API（H2D/D2H/cuLaunchKernel） | `docs/domain-knowledge/cuda-driver-api.md` | host/device 地址空间 + 22-param ABI + GpuDevice API；GPU launch 代码必读 |
+
 ## SPEC Index
 
 | Document | Content | 状态 |
