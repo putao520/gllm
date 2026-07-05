@@ -168,6 +168,33 @@ grep "is_layer_group" 全代码库：所有构造点（group_dep.rs:153/334/495/
 
 **待确认**：SmolLM2 30 层循环实际 emit 位置（mega_kernel_emit.rs GenerateLoop 内？单模板只 emit 一层 + 运行时 LoopBegin/End 循环 30 次？）+ Ring-Buffer capture 正确位置。
 
+## is_layer_group 全 false 根因：op label 不匹配 "layer." 前缀（2026-07-06）
+
+assign_homogeneous_markers（fusion/pass.rs:713-775）逻辑：
+- line 742 `anchor_label = graph.op(group.ops[0]).label`
+- line 745 `if anchor_label.starts_with("layer.")` → 标 is_layer_group=true
+- line 758 layer_group_indices 空 → return（不标）
+
+**根因**：SmolLM2 op label 不是 "layer." 前缀！
+- build_graph 主路径用 cn_layer（line 3: `format!("L{}.{suffix}")`）→ label "L0.q_proj"
+- ptname（line 438）只在 hetero 4-template 块内，prefix="layer_sliding_small" 等
+- SmolLM2 homogeneous 不走 hetero 块 → op label 是 "L0.xxx" 或别的，非 "layer.xxx"
+- assign_homogeneous_markers starts_with("layer.") 不匹配 → is_layer_group 全 false
+
+**矛盾**：line 364 注释说 emit ONE template with "layer." prefix，但实际 cn_layer 生成 "L0." 前缀。注释与代码不符。
+
+**影响**：is_layer_group 全 false → pipeline.inc.rs:812 永不进 → in_layer_loop 恒 false → close_layer_loop 不调 → Ring-Buffer capture 不 emit + 层循环不走 emit_fusion_groups 路径。
+
+**待确认**：
+1. SmolLM2 实际 op label（加 eprintln 在 assign_homogeneous_markers 确认）
+2. 若 label 是 "L0."，assign_homogeneous_markers 应改 starts_with("L0.") 或 cn_layer 改 "layer." 前缀
+3. 30 层循环实际 emit 位置（若 emit_fusion_groups 不处理，在哪？）
+
+**候选修复**：
+- A: assign_homogeneous_markers 改 starts_with("L0.") 或同时支持 "layer."/"L0."
+- B: cn_layer 改生成 "layer.N.xxx" 前缀
+- C: 找到实际层循环 emit 位置，Ring-Buffer capture 放那
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
