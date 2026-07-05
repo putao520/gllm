@@ -81,16 +81,30 @@ session_position: anchor_layer,  // anchor layer N
 - ❌ **encode_to_layer(LastToken) 返回全零**（Step8 实测，30 层全 cosine=0.0000）— API 不可用，需新诊断路径
 - ❌ **encode_to_layer(MeanPool) cosine≈0**（Step5，错位伪信号：gllm mean=row0/5 vs golden mean=5token真实平均）
 
-## 逐层 bisection 的困境（Step8 实测，2026-07-06）
+## 逐层 bisection 的困境（Step8 实测 + architect sessionId b2aff8e2 确认）
 
 诊断 logits 发散需逐层定位首个发散算子，但现有诊断 API 均不可用：
 - `encode_to_layer(LastToken)`: 返回全零（Step8 30 屄全 cosine=0.0000）
 - `encode_to_layer(MeanPool)`: 错位伪信号（Step5 cosine≈-0.01，gllm mean=row0/5 vs golden mean=5token真实平均）
 - `diagnostic_prefill_scratchpad`: 能读 embedding offset（Step7 证对），但 layer hidden 输出在 ActivationPing/Pong 区，不在 named_offsets，无法直读
 
-**结论**：逐层 bisection 需要新诊断 API——暴露 activation 区 layer hidden offset，或 execute_encode_at_layer 把 layer N 输出写到可读的 scratchpad 区。
+**物理根因（architect 确认）**：层循环是**单模板×30次迭代**（NO-LAYER-EXPAND 铁律）。所有 30 层写同一对 ping/pong buffer，`ActivationSwap`（pipeline.inc.rs:384）只换指针。循环跑完，**只有 layer 29 的输出存活**，中间层物理上读不到。
 
-**临时方向**：用 diagnostic_prefill_logits 的 scratchpad，找 activation 区 offset（VAM analyze 的 activation_alias），手动读 layer 输出 row0。需 executor 层支持。
+**EarlyExit 双重未完成**：
+1. EarlyExit op 未插入图（grep 全代码库无插入点，只定义未使用）
+2. GprBranchAction::Exit x86 lowering 未实现（lower_instr_dispatch.inc.rs:2901-2903 CmpEq+Exit 返 Err）
+3. ConditionalExit 已实现（:2995）但 EarlyExit op 用错了 GprCondAction::Exit
+
+**结论**：逐层 bisection 需新机制。architect 推荐 Ring-Buffer 单遍捕获：
+- 层循环末尾（ActivationSwap 前）插无条件 side-channel 拷贝
+- 按 layer_loop_counter 缩放偏移到 capture 区
+- 单次 forward 捕获全部 30 层
+- 避开 CmpEq+Exit 未实现（用无条件拷贝 + counter 缩放，复用 AddPtr + emit_side_channel_copy）
+- 诊断开关门控（ComputeProfile 字段，禁环境变量），生产零开销
+
+**dtype 假说已排除**（architect 重提但已被运行时证伪）：
+- KV cache 全 F32 自洽（运行时插桩 kv_row_stride=768=buffer=MemCopy，非越界）
+- derive_compute_dtype 硬编码是宪法 -1 违宪（层2），但当前对 SmolLM2 数值自洽（层1），非发散根因
 
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
