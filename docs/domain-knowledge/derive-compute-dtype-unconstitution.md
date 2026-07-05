@@ -58,17 +58,62 @@ pub fn derive_compute_dtype(storage_dtype: DType, device: &DeviceProfile) -> DTy
 | 5 项联动改 BF16 能修 logits 发散 | 不能。当前发散根因不在 dtype 链（architect 裁决 + 运行时证伪） |
 | derive_compute_dtype 改了会引入 768/384 越界 | 只有"只改 derive 不改 spec.dtype"才越界。宪法 -1 合规的修复须整体设计 |
 
-## 根治方向（宪法 -1 合规，非之前的 5 项联动）
+## 根治方案（宪法 -1 合规，architect sessionId 401396fe 完整重构方案）
 
-**问题**：derive_compute_dtype 返回单一 compute_dtype 无法表达混合精度，且硬编码降级。
+**核心裁决**：违宪的根不是 match arm 写错，是 `compute_dtype` 一个字段扛了三个正交语义（过载）。
 
-**宪法 -1 合规方案**（待 architect 详细设计）：
-- 移除 `derive_compute_dtype` 的精度预设 match arm
-- compute_dtype 概念应**逐张量**而非整模型（每张量按其 storage_dtype JIT 特化）
-- 累加器 dtype 由算子 + 硬件 + 配置决定，不由全局 compute_dtype 硬编码
-- KV cache dtype 跟随 K/V projection 输出张量实际 dtype（而非全局 compute_dtype）
+| 语义 | 是什么 | 当前载体 | 宪法 -1 顺从数据源 | 现状 |
+|------|--------|---------|------------------|------|
+| A 累加器精度 | FMA acc 寄存器 dtype | compute_dtype | 硬件能力 + 配置，兜底 F32 | ❌ 硬编码 F32，device 忽略 |
+| B KV cache 存储精度 | runtime 产生的 K/V | compute_dtype(buffer) + spec.dtype 硬编码 F32(stride/load) | K/V projection 输出张量 dtype | ❌ 主权分裂（split-brain 隐患）|
+| C 权重存储精度 | 权重文件字节 | ~~compute_dtype~~ | weight_dtypes/tdt/b_dtype | ✅ 已 per-tensor 化，合规 |
 
-**注意**：这是范式级重构，不能简单改 match arm（会引入 stride 不一致）。需 architect 整体设计。
+**关键**：语义 C（权重布局）已从 compute_dtype 剥离（build_graph.inc.rs:86 tdt、lower_op.inc.rs:1357-1362 三路 b_dtype、build_graph.inc.rs:357 weight_physical_bytes）。NVFP4 原生寄存器解码已存在（emit_nvfp4_sub_block_dequant，无 F32 buffer 落地）。**本重构不碰权重侧，只拆 A+B**。
+
+### 3 阶段重构（每阶段当前硬件行为不变，可独立回归）
+
+**阶段 1：derive_compute_dtype → 累加器精度，顺从硬件+配置（行为不变，逻辑合规）**
+- dtype_chain.rs:195-210：`match device.dot_product_cap() { NativeBf16 if BF16 => BF16, _ => F32(兜底) }`
+- F32 是兜底分支（无原生累加支持时数值安全），非"BF16 always => F32"恒等预设
+- 当前硬件（i9 无 AMX-BF16）→ 仍 F32，行为零变化
+- 改动 1.2：统一双 compute_dtype 主权（ModelGeometry 用户 Option vs GraphDerived 硬编码）→ derive_compute_dtype 加 config_override 参数，P0 优先用户配置
+
+**阶段 2：KV cache dtype 主权归位到 K/V projection 输出张量（消除 split-brain）**
+- 改动 2.1：build_graph.inc.rs:693/1316/1523 AttentionSpec.dtype 不再硬编码 F32，从 k_out 张量 dtype 推导
+- 改动 2.2：abi_types.inc.rs:469-489 KV cache 尺寸用新增 kv_dtype 字段（非全局 compute_dtype）
+- 改动 2.3：types.inc.rs:211-217 kv_bytes_per_token 用 kv_dtype
+- 当前全 F32 → 行为不变，但消除 split-brain，让"未来 K/V 输出 BF16 → KV cache 自动 BF16"成正确路径
+
+**阶段 3（收尾）：解耦 TurboQuant + 清理死标签 + NVFP4 W512**
+- 3.1（前置，须与阶段 1 同批）：executor_builder.rs:219 TurboQuant 开关从 `compute_dtype != F32` 改成 `storage 是否量化`
+- 3.2：trace.rs:1025-1036 DequantMethod 死标签（低优先级）
+- 3.3：lower_instr.rs NVFP4 W512(ZMM) 补齐（当前已是 Err，符合 NO-SILENT-FALLBACK）
+
+### 3 个隐藏耦合点（重构必须同步处理，否则回归）
+
+1. **TurboQuant 误触发**（executor_builder.rs:219 `!= F32` 开关）→ 累加器变 BF16 会误开，必须改看 storage 是否量化，且须与阶段 1 同批
+2. **双 compute_dtype 主权分裂**（ModelGeometry 用户 Option vs GraphDerived 硬编码）→ 用户 `with_compute_dtype` 被忽略
+3. **kv_bytes_per_token 用 storage dtype**（types.inc.rs:211）vs buffer 用 compute_dtype → 混合精度估算/实际不一致
+
+### DAG 执行顺序
+
+阶段 3.1（TurboQuant 解耦，前置）→ 阶段 1（累加器精度）→ 全量回归 → 阶段 2（KV cache 主权）→ 全量回归 → 阶段 3.2/3.3（收尾，可选）
+
+### 与 logits 发散解耦（重要）
+
+- **本重构对 SmolLM2 发散零帮助**（上轮已证 dtype 链自洽）
+- 发散诊断必须并行另开线（Gather/decode M=1/RoPE partial）
+- 重构与发散诊断分开 commit/分支（重构有回归风险，混在一起会污染发散定位）
+
+### 宪法合规验证
+
+| 宪法 | 重构后合规 | 证据 |
+|------|-----------|------|
+| -1 ARCH-NO-PRECISION-ASSUMPTION | ✅ | derive_compute_dtype 去恒等预设，device.dot_product_cap() 前置查询，F32 是兜底分支非映射 |
+| 1 ARCH-BLOB-YIELDS-WEIGHT | ✅（已合规，不动）| 权重侧 per-tensor，blob 保原始 dtype |
+| 2 ARCH-MEMORY-FIRST | ✅ | KV cache dtype 跟数据产生点（k_out 张量）|
+
+完整方案详见 `docs/dtype-compute-refactor-plan.md`（architect 写入，已并入本资料库）。
 
 ## 与 logits 发散的关系（解耦）
 
