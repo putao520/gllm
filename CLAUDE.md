@@ -80,6 +80,8 @@
 | Mega-Kernel Topology（prefill vs decode, M维） | `docs/domain-knowledge/mega-kernel-topology.md` | GenerateLoop（decoder 模型含 SmolLM2）每迭代 M=1 覆盖 row0，row1-4 全零是设计行为；ARCH-DECODE-LOGITS-ROW0；推理诊断必读 |
 | GenerateLoop 诊断语义（M=1 错位陷阱） | `docs/domain-knowledge/generateloop-diagnostic-semantics.md` | 诊断 harness 读多行错位伪信号；方法 A 单 token prefill 重建；encode_at_layer session_position 复用 anchor；写诊断测试必读 |
 | KV cache dtype 双地层陷阱 | `docs/domain-knowledge/kv-cache-dtype-dual-layer.md` | JIT 层 ctx.dtype=F32 硬编码 vs buffer 层 compute_dtype=BF16 解耦 → stride 768 vs 384 越界踩踏（SmolLM2 logits 发散根因）；KV cache 代码必读 |
+| RMSNorm / final norm 实现链路 | `docs/domain-knowledge/rmsnorm-final-norm.md` | scalar 参考 + NormLike 三阶段 + eps 从 spec 覆盖 + BF16 weight 独立步长；排除 RMSNorm 嫌疑（实现正确） |
+| lm_head Tied Embedding 权重解析 | `docs/domain-knowledge/lm-head-tied-embedding.md` | tie data-driven 检测 + 独立 TensorId 共享指针 + blob 双倍拷贝 + trans_b=true 正确；排除 lm_head 嫌疑 |
 
 ## SPEC Index
 
