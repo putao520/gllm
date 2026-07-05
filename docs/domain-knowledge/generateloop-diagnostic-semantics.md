@@ -129,6 +129,29 @@ layer 0-29 row_last cosine = 0.0000 (nonzero=0)  ← capture 区全零!
 
 **待调试**：加 eprintln 在 emit capture copy 处确认是否执行 + 各变量值。Ring-Buffer 基础设施正确，诊断测试待调试 capture 写入。
 
+## Ring-Buffer capture emit 位置错（2026-07-06 调试确认）
+
+加 eprintln 调试发现：
+```
+[CAPTURE-DBG] construct: alloc.layer_capture_bytes=566231040 stride=18874368 (构造成功)
+[CAPTURE-DBG] NOT in_layer_loop (state.in_layer_loop=false) — close_layer_loop skipped
+```
+
+**根因**：capture emit 在 close_layer_loop（pipeline.inc.rs:440），但 SmolLM2 编译时 `state.in_layer_loop=false`——**没进层循环路径**，close_layer_loop 从不被调，capture copy 从不 emit。
+
+handle_standard_layer_loop 的 emit 点（line 878）也要求 `state.in_layer_loop`，同样不进。
+
+**问题**：SmolLM2 层循环 codegen 不走 emit_fusion_groups 的 in_layer_loop 路径。可能走 GroupMarker 或别的机制（SPEC 39 统一编译器，层循环由 GroupMarker 驱动）。
+
+**需 architect 确认**：SmolLM2 层循环实际走哪条 codegen 路径？capture emit 应放在哪？
+
+候选：
+- GroupMarker 驱动的层循环（mega_kernel_emit.rs 或别处）
+- handle_standard_layer_loop 但 in_layer_loop 状态没正确设置
+- 层循环根本不在 emit_fusion_groups，而在 mega_kernel_emit 的统一 emit
+
+Ring-Buffer 基础设施（字段/暴露/getter）全对，只差 emit 位置匹配 SmolLM2 实际层循环路径。
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
