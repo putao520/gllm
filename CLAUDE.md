@@ -74,6 +74,7 @@
 | 技术 | 文件 | 用途 |
 |------|------|------|
 | CUDA Driver API（H2D/D2H/cuLaunchKernel） | `docs/domain-knowledge/cuda-driver-api.md` | host/device 地址空间 + 22-param ABI + GpuDevice API；GPU launch 代码必读 |
+| SmolLM2-135M-Instruct 架构 | `docs/domain-knowledge/smollm2-135m-architecture.md` | config.json ground truth（kv_heads=3, head_dim=64, tied embed, BF16）；CPU/GPU 推理诊断必读 |
 
 ## SPEC Index
 
