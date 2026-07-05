@@ -76,6 +76,7 @@
 | CUDA Driver API（H2D/D2H/cuLaunchKernel） | `docs/domain-knowledge/cuda-driver-api.md` | host/device 地址空间 + 22-param ABI + GpuDevice API；GPU launch 代码必读 |
 | SmolLM2-135M-Instruct 架构 | `docs/domain-knowledge/smollm2-135m-architecture.md` | config.json ground truth（kv_heads=3, head_dim=64, tied embed, BF16）；CPU/GPU 推理诊断必读 |
 | VAM ActivationPing/Pong + activation_alias | `docs/domain-knowledge/vam-activation-pingpong.md` | 层间残差流语义（BCE-20260629-005 排除 Gather 输出走 Intermediate，H4 映射对）；CPU/GPU 推理诊断必读 |
+| dtype 传播链（BF16↔F32 widen/narrow） | `docs/domain-knowledge/dtype-propagation.md` | X86ElemStrategy WidenCompute + 多路 dtype 独立推断；JIT codegen 诊断必读 |
 
 ## SPEC Index
 
