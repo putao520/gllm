@@ -1,0 +1,243 @@
+//! CPU BUG 逐层 bisection 诊断 (ARCH-UNIFIED-EXEC 块1 后续).
+//!
+//! 块1 实测 (commit 2364ff48): CPU argmax=967 (golden=253), cosine=-0.465.
+//! 本测试按架构师 sessionId 5d98f4f4 诊断路径定位根因:
+//!   Step 0: 行选排除 (5 行 logits 逐行 cosine)
+//!   Step 1: 嵌入对比 (gllm encode_to_layer layer0 vs golden hidden_layer_0)
+//!   Step 2: 逐层 bisection (encode_to_layer layer N vs golden hidden_layer_N)
+//!
+//! 不带 cuda feature 跑: cargo +nightly test --test test_diag_cpu_bisect -- --nocapture
+
+#![cfg(target_os = "linux")]
+
+use gllm::{Client, ModelKind};
+use gllm::head_routing::{LayerAnchor, PoolMode};
+use std::io::Write as _;
+
+// ─── Golden helpers (mirror test_e2e_cpu.rs) ─────────────────────────
+
+fn load_golden_f32_tensor(path: &std::path::Path, name: &str) -> Vec<f32> {
+    let data = std::fs::read(path).unwrap_or_else(|e| panic!("read golden {e}"));
+    let tensors = safetensors::SafeTensors::deserialize(&data).unwrap_or_else(|e| panic!("parse {e}"));
+    let view = tensors.tensor(name).unwrap_or_else(|_| panic!("missing tensor {name}"));
+    view.data()
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn load_golden_next_token_id(path: &std::path::Path) -> u32 {
+    let v = load_golden_f32_tensor(path, "next_token_id");
+    v[0] as u32
+}
+
+/// golden logits [seq_len, vocab_size] → 返回完整 (不切片), 供逐行 cosine.
+fn load_golden_all_logits(path: &std::path::Path) -> Vec<f32> {
+    load_golden_f32_tensor(path, "logits")
+}
+
+/// golden hidden_layer_N [seq_len=5, hidden=576].
+fn load_golden_hidden_layer(path: &std::path::Path, layer_idx: usize) -> Vec<f32> {
+    load_golden_f32_tensor(path, &format!("hidden_layer_{layer_idx}"))
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum();
+    let na: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    let nb: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    if na == 0.0 || nb == 0.0 { 0.0 } else { (dot / (na * nb)) as f32 }
+}
+
+fn argmax(v: &[f32]) -> usize {
+    v.iter().enumerate().fold(0usize, |mi, (i, &x)| if x > v[mi] { i } else { mi })
+}
+
+const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
+const PROMPT: &str = "The meaning of life is";
+const SEQ_LEN: usize = 5;
+const VOCAB_SIZE: usize = 49152;
+const HIDDEN_SIZE: usize = 576;
+const NUM_LAYERS: usize = 30;
+
+fn golden_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("tests/e2e_alignment/data/golden_smollm2_135m.safetensors")
+}
+
+fn build_cpu_client() -> Client {
+    Client::builder()
+        .model(MODEL)
+        .kind(ModelKind::Chat)
+        .build()
+        .unwrap_or_else(|e| panic!("build CPU client: {e}"))
+}
+
+// ─── Step 0: 行选排除 ────────────────────────────────────────────────
+//
+// diagnostic_prefill_logits 读 row 0 (ARCH-DECODE-LOGITS-ROW0). golden logits
+// shape (5, 49152) 是 5 行. 抽 CPU 每一行 vs golden 每一行 cosine, 看是否有 >0.99.
+
+#[test]
+fn diag_step0_row_selection() {
+    eprintln!("=== Step 0: 行选排除 ===");
+    std::io::stderr().flush().ok();
+
+    let path = golden_path();
+    assert!(path.exists(), "golden missing");
+    let golden_all = load_golden_all_logits(&path);
+    let golden_next = load_golden_next_token_id(&path);
+    eprintln!("golden next_token_id = {golden_next}");
+
+    let client = build_cpu_client();
+    let tokens = client.encode(PROMPT).expect("encode");
+    eprintln!("tokens = {:?}", tokens);
+
+    // diagnostic_prefill_logits 返回 (seq_len, vocab) 完整? 还是只 row 0?
+    // 块1 验证 len=49152 (=1*vocab), 只 row 0. 需 scratchpad 抽多行.
+    let sp = client.diagnostic_prefill_scratchpad(&tokens).expect("scratchpad");
+    eprintln!("scratchpad: data len={}, logits_offset={}, vocab={}, prompt_len={}, dtype={:?}, elem_bytes={}",
+        sp.data.len(), sp.logits_offset, sp.vocab_size, sp.prompt_len, sp.compute_dtype, sp.elem_bytes());
+
+    // logits region: [seq_len, vocab] in scratchpad starting at logits_offset
+    let elem = sp.elem_bytes();
+    let vocab = sp.vocab_size;
+    let row_bytes = vocab * elem;
+    eprintln!("logits region: row_bytes={}, seq_len={}", row_bytes, sp.prompt_len);
+
+    // CPU logits: 5 rows (seq_len=5), each vocab=49152
+    let cpu_rows: Vec<Vec<f32>> = (0..sp.prompt_len).map(|r| {
+        let off = sp.logits_offset + r * row_bytes;
+        // dtype-aware: 用 DiagnosticScratchpad 的 read 方法或直接按 compute_dtype 解
+        // 简化: 假设 F32 (elem=4). 若非 F32, read_dtype_aware 更准.
+        let mut row = Vec::with_capacity(vocab);
+        for i in 0..vocab {
+            let b = &sp.data[off + i * elem..off + (i + 1) * elem];
+            let v = match elem {
+                4 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                2 => {
+                    // BF16: 高16位, 拼成 F32
+                    let bits = (b[1] as u32) << 8 | b[0] as u32;
+                    let f32_bits = bits << 16;
+                    f32::from_bits(f32_bits)
+                }
+                _ => 0.0,
+            };
+            row.push(v);
+        }
+        row
+    }).collect();
+
+    eprintln!("CPU logits rows extracted: {}", cpu_rows.len());
+
+    // golden 也是 5 行 [seq_len, vocab]
+    let golden_rows: Vec<Vec<f32>> = (0..SEQ_LEN).map(|r| {
+        let off = r * VOCAB_SIZE;
+        golden_all[off..off + VOCAB_SIZE].to_vec()
+    }).collect();
+
+    // 逐行 cosine 矩阵
+    eprintln!("\n--- cosine(cpu_row, golden_row) 矩阵 ---");
+    for cr in 0..cpu_rows.len().min(SEQ_LEN) {
+        for gr in 0..SEQ_LEN {
+            let cos = cosine(&cpu_rows[cr], &golden_rows[gr]);
+            eprintln!("  cpu[{cr}] vs golden[{gr}] = {cos:.4}");
+        }
+    }
+
+    // 诊断: 是否有任一 >0.99
+    let mut max_cos = -1.0f32;
+    let mut max_pair = (0usize, 0usize);
+    for cr in 0..cpu_rows.len().min(SEQ_LEN) {
+        for gr in 0..SEQ_LEN {
+            let c = cosine(&cpu_rows[cr], &golden_rows[gr]);
+            if c > max_cos { max_cos = c; max_pair = (cr, gr); }
+        }
+    }
+    eprintln!("\n>>> max cosine = {max_cos:.4} at cpu[{0}] vs golden[{1}]", max_pair.0, max_pair.1);
+    if max_cos > 0.99 {
+        eprintln!(">>> 行选可能 OK 或行错位: cpu row {} ≈ golden row {}", max_pair.0, max_pair.1);
+    } else {
+        eprintln!(">>> 行选无匹配 (>0.99), 排除纯行选 bug — 问题在计算路径");
+    }
+}
+
+// ─── Step 1 + 2: 逐层 bisection (encode_to_layer) ────────────────────
+//
+// encode_to_layer 返回 pooled hidden. 用 ClsToken pool (取 row 0) 后 cosine vs
+// golden hidden_layer_N row 0. 简化: LastToken pool vs golden row (seq_len-1).
+// 注意: encode_to_layer 内部 pool, 我们对比 pooled 后的值.
+// 更准: 用 MeanPool vs golden mean. 但 first diverge layer 仍能定位.
+
+#[test]
+fn diag_step1_embedding_compare() {
+    eprintln!("\n=== Step 1: 嵌入对比 (layer 0 hidden) ===");
+    std::io::stderr().flush().ok();
+
+    let path = golden_path();
+    let golden_h0 = load_golden_hidden_layer(&path, 0); // (5, 576)
+    eprintln!("golden hidden_layer_0: len={}, expected {}", golden_h0.len(), SEQ_LEN * HIDDEN_SIZE);
+
+    let client = build_cpu_client();
+    let _tokens = client.encode(PROMPT).expect("encode");
+
+    // encode_to_layer layer 0, MeanPool → (576,)
+    let anchor = LayerAnchor::Absolute(0);
+    let gllm_h0_pooled = client
+        .encode_to_layer(PROMPT, anchor, PoolMode::MeanPool)
+        .expect("encode_to_layer layer0");
+    eprintln!("gllm layer0 pooled: len={}", gllm_h0_pooled.len());
+
+    // golden h0 mean over seq → (576,)
+    let golden_h0_mean: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+        let mut s = 0.0f32;
+        for r in 0..SEQ_LEN { s += golden_h0[r * HIDDEN_SIZE + h]; }
+        s / SEQ_LEN as f32
+    }).collect();
+    eprintln!("golden layer0 mean: len={}", golden_h0_mean.len());
+
+    let cos = cosine(&gllm_h0_pooled, &golden_h0_mean);
+    eprintln!("cosine(gllm layer0 MeanPool, golden h0 mean) = {cos:.4}");
+    if cos > 0.99 {
+        eprintln!(">>> 嵌入对齐 (layer0 OK) — BF16 解码 + gather + 权重名 OK, 问题在层内 (norm/GEMM)");
+    } else {
+        eprintln!(">>> 嵌入不对齐 — BF16 解码/权重名/gather 可能有 bug");
+    }
+}
+
+#[test]
+fn diag_step2_layer_bisect() {
+    eprintln!("\n=== Step 2: 逐层 bisection ===");
+    std::io::stderr().flush().ok();
+
+    let path = golden_path();
+    let client = build_cpu_client();
+    let _tokens = client.encode(PROMPT).expect("encode");
+
+    let mut first_diverge: Option<usize> = None;
+    for n in 0..=NUM_LAYERS {
+        let golden_hn = load_golden_hidden_layer(&path, n); // (5,576)
+        let golden_mean: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
+            let mut s = 0.0f32;
+            for r in 0..SEQ_LEN { s += golden_hn[r * HIDDEN_SIZE + h]; }
+            s / SEQ_LEN as f32
+        }).collect();
+
+        let gllm_hn = match client.encode_to_layer(PROMPT, LayerAnchor::Absolute(n), PoolMode::MeanPool) {
+            Ok(v) => v,
+            Err(e) => { eprintln!("layer {n}: encode_to_layer err {e}"); continue; }
+        };
+
+        let cos = cosine(&gllm_hn, &golden_mean);
+        eprintln!("layer {n:2}: cosine = {cos:.4}");
+        if cos < 0.99 && first_diverge.is_none() {
+            first_diverge = Some(n);
+        }
+    }
+
+    eprintln!("\n>>> 首个发散层 (cosine<0.99) = {:?}", first_diverge);
+    match first_diverge {
+        Some(0) => eprintln!(">>> 发散在 layer 0: embedding/norm/QKV proj 错 (查 golden_layer0_ops)"),
+        Some(n) => eprintln!(">>> 发散在 layer {n}: 该层 GEMM/norm 符号错 (BF16 fallback GEMM?)"),
+        None => eprintln!(">>> 所有层都 OK 但 final logits 错: lm_head/final norm 问题"),
+    }
+}
