@@ -36,6 +36,71 @@ config.json torch_dtype=bfloat16
 
 **结果**：每行 KV 写 768 字节进 384 字节 buffer → 溢出覆盖下一行 V / 下一 layer K → 30 层逐层 2× stride 越界踩踏 → attention Q·K 全错 → logits 发散（cosine=-0.465, argmax=967）。
 
+## MemCopy 纯字节搬，忽略 dtype（源码确认）
+
+**lower_instr_dispatch.inc.rs:1220-1242 `lower_mem_copy_x86`**：
+```rust
+VmInstr::MemCopy { dst, src, bytes, dtype: _, guard, effect } => {  // dtype 被忽略!
+    for off in (0..b).step_by(8) {
+        mov rax, [src+off]; mov [dst+off], rax;  // 纯 8 字节搬，不转换
+    }
+}
+```
+- `dtype: _` —— MemCopy lower **完全忽略 dtype**
+- 逐 8 字节 mov，纯 memcpy，不做任何 dtype 转换
+- dtype 字段只影响 emit 端的 stride 计算（lower_op.inc.rs:1521 `kv_row_stride = ... * dtype.elem_bytes()`）
+
+**修正原描述**：
+- ❌ "MemCopy dtype=F32 不 narrow → BF16 buffer 存 F32 字节" —— 错，MemCopy 不看 dtype
+- ✅ MemCopy 按 `bytes=768`（F32 stride 算的）逐字节搬，但 KV cache buffer 每行只有 384 字节 → 768 字节搬进 384 字节行 = 越界覆盖下一行
+
+bug 本质是 **stride 不一致（768 vs 384）导致越界**，不是 dtype 转换问题。
+
+## attention 读 KV cache 用 F32（读写 stride 一致，但都 > buffer 分配）
+
+**attention_emit.rs:122** `VecLoad { dst, base: k_row, offset: d_off, width, dtype }` —— dtype=F32，按 F32 读 KV cache。
+
+**读写一致分析**：
+- **写**：MemCopy 按 `bytes=768`（F32 stride）纯字节搬
+- **读**：VecLoad 按 `dtype=F32` 读，每行 768 字节（F32 stride）
+- 写读 stride 一致（都 768），**如果 buffer 够大**，数据格式自洽（F32 字节存 F32 读）
+- 但 buffer 按 384 分配 → 写 768 溢出覆盖下一行，读 768 读到下一行数据
+
+**结论**：bug 不是"读 F32 写 BF16 格式不匹配"，而是"buffer 分配 384 vs 写读 stride 768 越界"。若 buffer 按 768 分配（compute_dtype=F32），则全链自洽（虽然 KV cache 内存翻倍，但正确）。这就是方案 B（止血）的原理。
+
+## 方案 A 的复杂性（不只是改 graph_dtype）
+
+统一到 compute_dtype=BF16 后，需要：
+- buffer 按 BF16（384）分配 ✅ 已是
+- MemCopy 按 BF16 stride（384）搬 + **需要 narrow F32→BF16**（因为 k_out 是 F32）—— 但 MemCopy 当前 `dtype: _` 忽略 dtype，不会 narrow
+- VecLoad 按 BF16 读 + widen BF16→F32 计算
+
+**方案 A 不能只改 graph_dtype()**，还要：
+1. MemCopy 改成支持 dtype 转换（看 dtype 字段，F32→BF16 时 narrow）
+2. 或改用专门的 narrow op 替代 MemCopy
+3. attention VecLoad dtype 改 compute_dtype
+
+## 方案 A 会激活 VecNarrow lane-loss bug（次生风险，源码确认）
+
+**gemm_emit.rs:317** `needs_narrow = c_dtype.needs_narrowing_from(acc_dtype)`，:393-396 如果 needs_narrow，emit `VecNarrow`。
+
+| 配置 | c_dtype | acc_dtype | needs_narrow | VecNarrow |
+|------|---------|-----------|-------------|-----------|
+| 当前 | F32 | F32 | false | 不触发（lane-loss 是死代码） |
+| 方案 A 后 | BF16 | F32 | **true** | **每个 GEMM store 都触发** |
+
+方案 A 后每个 GEMM（q/k/v/o_proj + lm_head + FFN）的 store 都走 `VecNarrow { dst_dtype: BF16, src_dtype: F32 }` → AVX2 路径调 `emit_f32_to_bf16_ymm_to_xmm_avx2`（lane-loss bug：8 lanes F32 只窄化低 4 lanes，高 4 丢失）。
+
+**lane-loss 修复方案**（与方案 A 同时做）：`emit_f32_to_bf16_ymm_to_xmm_avx2` 用 `vextracti128` 取 ymm 高半，正确 pack 8 lanes 成 BF16。当前只 pack 低 4 lanes（`ymm_to_xmm` 丢高半）。
+
+**结论**：方案 A 必须同时做 4 项，否则激活 lane-loss：
+1. graph_dtype() 返回 compute_dtype
+2. MemCopy 支持 dtype 转换（或改用 narrow op）
+3. attention VecLoad dtype 改 compute_dtype + widen
+4. 修 emit_f32_to_bf16_ymm_to_xmm_avx2 lane-loss（vextracti128 取高半）
+
+需 architect 给完整改动清单 + 评估全链影响。
+
 ## AI 易误判点
 
 | ❌ 误判 | ✅ 正解（源码 + architect 证明） |
