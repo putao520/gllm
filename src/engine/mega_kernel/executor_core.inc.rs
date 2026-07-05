@@ -274,6 +274,9 @@ impl MegaKernelExecutor {
                     sg_detect_offset: 0,
                     sg_knowledge_offset: 0,
                     sg_data_bytes: 0,
+                    layer_capture_offset: 0,
+                    layer_capture_stride: 0,
+                    layer_capture_bytes: 0,
                     total_scratchpad_bytes: 0,
                 };
                 let meta = CompileMeta {
@@ -321,6 +324,22 @@ impl MegaKernelExecutor {
                     named_offsets.push((name.clone(), offset, *dt));
                 }
             }
+        }
+
+        // Ring-Buffer 逐层捕获: 注册 layer_capture 基址到 named_offsets (诊断 harness 可查).
+        // diagnostic_tensor_offset("layer_capture") 返回 capture 区起点;
+        // 第 N 层输出 = layer_capture_offset + N * layer_capture_stride.
+        // feature 关时 layer_capture_bytes=0, 不注册 (生产零开销).
+        if meta.buffer_layout.layer_capture_bytes > 0 {
+            named_offsets.push((
+                "layer_capture".to_string(),
+                meta.buffer_layout.layer_capture_offset,
+                gllm_kernels::types::DType::F32,
+            ));
+            eprintln!("[RING-BUF] layer_capture registered: offset={} stride={} bytes={}",
+                meta.buffer_layout.layer_capture_offset,
+                meta.buffer_layout.layer_capture_stride,
+                meta.buffer_layout.layer_capture_bytes);
         }
 
         // §19 KV-OPT-009: Compile KIVI4 variant for compressed KV attention.
