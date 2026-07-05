@@ -607,39 +607,6 @@ fn diag_step8_layer_capture_bisect() {
     eprintln!("scratchpad len={} bytes", sp.data.len());
     let elem = 4usize; // capture 区 F32 (side_channel_copy dtype=F32)
 
-    // Sanity: layer 0 vs layer 29 是否相同 (若 counter×stride 没生效, 都写同位置会相同)
-    {
-        let l0 = &sp.data[cap_off..cap_off + HIDDEN_SIZE * elem];
-        let l29 = &sp.data[cap_off + 29 * cap_stride..cap_off + 29 * cap_stride + HIDDEN_SIZE * elem];
-        let same = l0 == l29;
-        let l0_f: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
-            let b = &l0[h*elem..(h+1)*elem]; f32::from_le_bytes([b[0],b[1],b[2],b[3]])
-        }).collect();
-        let l29_f: Vec<f32> = (0..HIDDEN_SIZE).map(|h| {
-            let b = &l29[h*elem..(h+1)*elem]; f32::from_le_bytes([b[0],b[1],b[2],b[3]])
-        }).collect();
-        eprintln!("[SANITY] layer0 == layer29? {} (cos={:.4})", same, cosine(&l0_f, &l29_f));
-        eprintln!("[SANITY] layer0 first 5 = {:?}", &l0_f[0..5]);
-    }
-
-    // 也试 layer 0 vs golden hidden_layer_0 (embedding) — 看是否 capture 实际是 embedding
-    {
-        let golden_h0 = load_golden_hidden_layer(&path, 0);
-        let golden_last0 = &golden_h0[(SEQ_LEN-1)*HIDDEN_SIZE..SEQ_LEN*HIDDEN_SIZE];
-        let mut l0 = vec![0.0f32; HIDDEN_SIZE];
-        for h in 0..HIDDEN_SIZE {
-            let b = &sp.data[cap_off + h*elem..cap_off + (h+1)*elem];
-            l0[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
-        }
-        eprintln!("[SANITY] capture layer0 vs golden hidden_layer_0 row4 = {:.4}", cosine(&l0, golden_last0));
-        // 试 golden hidden_layer_1 所有 row, 找匹配
-        let golden_h1 = load_golden_hidden_layer(&path, 1);
-        for r in 0..SEQ_LEN {
-            let gr = &golden_h1[r*HIDDEN_SIZE..(r+1)*HIDDEN_SIZE];
-            eprintln!("[SANITY] capture layer0 vs golden h1 row{r} = {:.4}", cosine(&l0, gr));
-        }
-    }
-
     // 每层 N: 读 hidden_layer_N 最后行 (row seq_len-1) vs golden hidden_layer_{N+1} row4
     // 注意: golden hidden_layer_0 = embedding 输出; hidden_layer_N (N>=1) = layer N-1 输出.
     // gllm capture 第 N 层 (counter N) = layer N 的输出 = golden hidden_layer_{N+1}.
@@ -657,7 +624,6 @@ fn diag_step8_layer_capture_bisect() {
             row[h] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         }
         let nonzero = row.iter().filter(|x| x.abs() > 1e-12).count();
-        // golden: capture layer N = layer N output = hidden_layer_{N+1}
         let golden_idx = n + 1;
         let golden_h = load_golden_hidden_layer(&path, golden_idx);
         let golden_last = &golden_h[(SEQ_LEN - 1) * HIDDEN_SIZE..SEQ_LEN * HIDDEN_SIZE];
@@ -668,7 +634,83 @@ fn diag_step8_layer_capture_bisect() {
         }
     }
     match first_bad {
-        Some(n) => eprintln!("\n>>> 首个发散层: layer {n} (capture layer {n} vs golden hidden_layer_{})", n + 1),
+        Some(n) => eprintln!("\n>>> 首个发散层: layer {} (capture layer {} vs golden hidden_layer_{})", n, n, n + 1),
         None => eprintln!("\n>>> 全 30 层 cosine > 0.99, 层路径无发散 — 根因在层后 (final_norm/lm_head)"),
+    }
+}
+
+#[test]
+fn diag_step9_encode_at_layer_row0() {
+    eprintln!("\n=== Step 9: encode_at_layer(0) row0 vs capture layer0 vs golden h1 ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+
+    let single = vec![all_tokens[0]];
+    let out = client.encode_to_layer(PROMPT, LayerAnchor::Absolute(0), PoolMode::LastToken)
+        .expect("encode_to_layer");
+    eprintln!("encode_to_layer(Layer0, LastToken) output len={} (expected hidden={})", out.len(), HIDDEN_SIZE);
+    let row0 = &out[0..HIDDEN_SIZE];
+    eprintln!("encode_to_layer row0 first 5 = {:?}", &row0[0..5]);
+
+    let cap_off = client.diagnostic_tensor_offset("layer_capture").expect("cap off");
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    let elem = 4usize;
+    let mut cap_l0 = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[cap_off + h*elem..cap_off + (h+1)*elem];
+        cap_l0[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    eprintln!("capture layer0 first 5 = {:?}", &cap_l0[0..5]);
+    eprintln!("cosine(encode_at_layer(0) row0, capture layer0) = {:.4}", cosine(row0, &cap_l0));
+
+    let golden_h1 = load_golden_hidden_layer(&path, 1);
+    let golden_row0 = &golden_h1[0..HIDDEN_SIZE];
+    eprintln!("cosine(encode_at_layer(0) row0, golden h1 row0) = {:.4}", cosine(row0, golden_row0));
+    eprintln!("cosine(capture layer0, golden h1 row0) = {:.4}", cosine(&cap_l0, golden_row0));
+}
+
+#[test]
+fn diag_step10_weight_byte_verify() {
+    eprintln!("\n=== Step 10: 权重字节验证 (路C, 独立必做) — layer0 input_norm weight ===");
+    std::io::stderr().flush().ok();
+    let client = build_cpu_client();
+    let blob = client.diagnostic_weight_blob_bytes().expect("weight blob");
+    eprintln!("gllm weight_blob len={} bytes ({:.1} MB)", blob.len(), blob.len() as f64 / 1_048_576.0);
+
+    // 读 golden model layer0 input_layernorm weight (BF16, 576 elem)
+    let golden_path = std::path::PathBuf::from(
+        "/home/putao/.gllm/models/huggingface/models--HuggingFaceTB--SmolLM2-135M-Instruct/snapshots/12fd25f77366fa6b3b4b768ec3050bf629380bac/model.safetensors"
+    );
+    let data = std::fs::read(&golden_path).expect("read golden model");
+    use std::convert::TryInto;
+    let n = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
+    let header: serde_json::Value = serde_json::from_slice(&data[8..8+n]).expect("header");
+    let info = header["model.layers.0.input_layernorm.weight"].as_object().expect("tensor");
+    let off = info["data_offsets"][0].as_u64().unwrap() as usize + 8 + n;
+    let golden_bf16: Vec<u8> = data[off..off + 576 * 2].to_vec();
+    // golden first 5 as f32 (bf16->f32)
+    let golden_f32: Vec<f32> = (0..576).map(|i| {
+        let b = &golden_bf16[i*2..i*2+2];
+        let bits = (b[1] as u32) << 8 | b[0] as u32;
+        f32::from_bits(bits << 16)
+    }).collect();
+    eprintln!("golden input_norm first 5 = {:?}", &golden_f32[0..5]);
+
+    // 在 gllm blob 里搜 golden_bf16 的 576*2=1152 字节模式
+    let pattern = &golden_bf16;
+    let mut found_offsets = Vec::new();
+    for i in 0..blob.len().saturating_sub(pattern.len()) {
+        if &blob[i..i+pattern.len()] == pattern {
+            found_offsets.push(i);
+        }
+    }
+    eprintln!("golden input_norm pattern 在 gllm blob 找到 {} 处: {:?}", found_offsets.len(), found_offsets);
+    if found_offsets.is_empty() {
+        eprintln!(">>> 未找到! 权重字节不一致 (loader 转换/转置/偏移错)");
+    } else {
+        eprintln!(">>> 找到! 权重字节一致 (input_norm weight 正确)");
     }
 }

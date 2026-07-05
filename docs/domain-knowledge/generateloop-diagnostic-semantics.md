@@ -206,6 +206,33 @@ layer 0 算子序列：input_norm(RMSNorm) → q/k/v_proj(GEMM) → rope → mha
 
 **下一步**：layer 0 内部逐算子 bisection（需细粒度 capture 或算子级 dump），定位首个发散算子。
 
+## 路径 C 权重字节验证（2026-07-06 已完成）
+
+architect (sessionId 088a2b41) 推荐三路互补诊断：A 单 token attention 恒等式 / B PyTorch hook 补 golden / C 权重字节验证。
+
+**路 C 结果（diag_step10_weight_byte_verify）**：
+- golden model layer0 input_layernorm weight (BF16, 576 elem) 在 gllm weight_blob 找到 **1 处**, offset=113247360
+- **权重字节完全一致** — layer0 input_norm weight 正确
+
+**结论**：loader 没有转置/错位/偏移 bug。RMSNorm 权重字节对。
+排除：权重字节 bug（loader 转置/行列错位/tied embedding 双拷贝偏移错/BF16 blob pack stride 错）。
+保留嫌疑：RMSNorm 计算逻辑 / GEMM 计算 / RoPE / attention scale / softmax / 残差连接。
+
+## 路径 A 单 token attention 恒等式（2026-07-06 待做）
+
+单 token prefill (seq_len=1):
+- attention: Q·K^T = [9,3,1] (GQA, 9 query heads, 3 kv heads), softmax over 1 key = [1.0]
+- attention 输出 = 1.0 × V = V (broadcast via GQA: 3 kv heads → 9 query heads by repeat)
+- 所以 layer 0 attention 部分 = o_proj(v_proj(rmsnorm1(embedding)))
+- layer 0 完整 = embedding + o_proj(v_proj(rmsnorm1(embedding))) + down_proj(swiglu(gate,up) of rmsnorm2(...))
+
+验证方法（不依赖 layer 内部 golden）:
+1. RMSNorm 后 norm 应 ≈ ‖input_norm weight‖ = 0.958 (golden layer0 input_layernorm weight norm)
+2. 若 RMSNorm 输出 norm ≠ 0.958 → RMSNorm bug
+3. 若 RMSNorm 对但 attention 后发散 → attention/GEMM bug
+
+需要: layer 0 内部算子级 capture (在 input_norm 后插 capture 点). 现有 capture 只在层边界.
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
