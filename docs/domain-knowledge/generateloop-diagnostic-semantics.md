@@ -267,6 +267,38 @@ architect (sessionId 088a2b41) 推荐三路互补诊断：A 单 token attention 
 
 下一步: 用 Python 参考导出每个算子中间结果, 与 gllm (需安全算子级 capture) 逐算子对比定位首个发散点.
 
+## 当前 BUG 状态总结（2026-07-06）
+
+**已确定性排除的技术点**:
+1. ✅ Ring-Buffer capture 基础设施工作正常 (30 层全非零, stride 对齐 JIT=18874368=harness)
+2. ✅ is_layer_group=true (assign_homogeneous_markers 正确赋值, op label="layer." 前缀)
+3. ✅ embedding 完全正确 (单 token cos=1.0000)
+4. ✅ layer 0 输出发散 (单 token cos=0.13, 5-token cos=0.0097)
+5. ✅ 权重字节正确 (input_norm weight 在 blob 找到, 字节一致)
+6. ✅ dtype 传播链正确 (GEMM a=F32/b=BF16 WidenCompute, Norm weight_dtype 独立, 符合 Constitution -1)
+7. ✅ attention scale 正确 (1/√head_dim = 1/8)
+8. ✅ derive_compute_dtype BF16→F32 违宪但数值自洽 (非发散根因)
+9. ✅ encode_to_layer API 返回全零 (不可用)
+10. ✅ Python 参考模型完美匹配 golden (cos=0.99999), 可作诊断 ground truth
+11. ✅ gllm layer0 输出不匹配任何 ref 中间值 (q_proj/o_proj/resid1/full l0) — 计算逻辑错误
+
+**保留嫌疑 (layer 0 内部某算子计算逻辑错)**:
+- GEMM 转置/布局 (trans_b/stride 错)
+- RoPE theta/partial (SmolLM2 theta=100000 partial=1.0)
+- attention GQA repeat (9 query / 3 kv, repeat 3x)
+- softmax 实现
+- 残差连接顺序/位置
+
+**下一步 (待做)**:
+1. 实现安全算子级 capture (读 layer.normed/layer.q/layer.attn 等 named_offsets, 非 activation pong)
+2. 逐算子对比 gllm 中间值 vs Python ref
+3. 定位首个发散算子 → BCE 根治
+
+**诊断工具**:
+- `tests/test_diag_cpu_bisect.rs` diag_step8/8b/8c/9/10 (Rust capture + 权重验证)
+- `tests/e2e_alignment/diag_layer0_divergence.py` (Python 参考 + 假设测试)
+- gllm-kernels diagnostic-layer-capture feature (capture emit + trace eprintln)
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
