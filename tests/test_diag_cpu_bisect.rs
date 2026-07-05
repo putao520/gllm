@@ -674,13 +674,12 @@ fn diag_step9_encode_at_layer_row0() {
 
 #[test]
 fn diag_step10_weight_byte_verify() {
-    eprintln!("\n=== Step 10: 权重字节验证 (路C, 独立必做) — layer0 input_norm weight ===");
+    eprintln!("\n=== Step 10: 权重字节验证 (路C) — layer0 input_norm weight ===");
     std::io::stderr().flush().ok();
     let client = build_cpu_client();
     let blob = client.diagnostic_weight_blob_bytes().expect("weight blob");
     eprintln!("gllm weight_blob len={} bytes ({:.1} MB)", blob.len(), blob.len() as f64 / 1_048_576.0);
 
-    // 读 golden model layer0 input_layernorm weight (BF16, 576 elem)
     let golden_path = std::path::PathBuf::from(
         "/home/putao/.gllm/models/huggingface/models--HuggingFaceTB--SmolLM2-135M-Instruct/snapshots/12fd25f77366fa6b3b4b768ec3050bf629380bac/model.safetensors"
     );
@@ -691,7 +690,6 @@ fn diag_step10_weight_byte_verify() {
     let info = header["model.layers.0.input_layernorm.weight"].as_object().expect("tensor");
     let off = info["data_offsets"][0].as_u64().unwrap() as usize + 8 + n;
     let golden_bf16: Vec<u8> = data[off..off + 576 * 2].to_vec();
-    // golden first 5 as f32 (bf16->f32)
     let golden_f32: Vec<f32> = (0..576).map(|i| {
         let b = &golden_bf16[i*2..i*2+2];
         let bits = (b[1] as u32) << 8 | b[0] as u32;
@@ -699,7 +697,6 @@ fn diag_step10_weight_byte_verify() {
     }).collect();
     eprintln!("golden input_norm first 5 = {:?}", &golden_f32[0..5]);
 
-    // 在 gllm blob 里搜 golden_bf16 的 576*2=1152 字节模式
     let pattern = &golden_bf16;
     let mut found_offsets = Vec::new();
     for i in 0..blob.len().saturating_sub(pattern.len()) {
@@ -713,4 +710,13 @@ fn diag_step10_weight_byte_verify() {
     } else {
         eprintln!(">>> 找到! 权重字节一致 (input_norm weight 正确)");
     }
+}
+
+#[test]
+#[ignore = "路A 需安全的算子级 capture (pong buffer 不是 input_norm 输出, SIGSEGV). 待实现正确的中间张量 capture"]
+fn diag_step11_input_norm_capture() {
+    // 路A: 验证 RMSNorm — input_norm 输出 norm 应 ≈ ‖input_norm weight‖ ≈ 0.958.
+    // 当前 operator-level capture 读 pong buffer 但 input_norm 输出在 layer.normed 暂存区 (非 pong),
+    // 导致 SIGSEGV. 需改为读 layer.normed tensor offset 或 materialize 输出 ptr.
+    eprintln!("路A input_norm capture: 待实现安全的中间张量 capture");
 }
