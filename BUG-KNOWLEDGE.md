@@ -3049,3 +3049,52 @@ architect 给出两方案, 影响面差异大, 需用户拍板:
 - BCE-20260703-AVX512-HALF-LANES: AVX-512 半lanes (argmax=6) 已根治, 独立 bug。本条是 AVX2 路径 (argmax=967), 不同路径不同根因
 - ARCH-JIT-DATA-YIELDS 违宪: JIT 层硬编码 F32 不顺从 buffer 层实际 dtype (BF16)
 
+
+## BCE-20260706-EARLYEXIT-CMPEQ-EXIT-UNIMPL (EarlyExit x86 lowering 未实现, encode_to_layer 损坏)
+
+> 诊断 SmolLM2 logits 发散时发现: encode_to_layer(LastToken) 返回全零 (30 层 cosine=0.0000)。
+> 根因: GprBranchAction::Exit 在 x86 lowering 完全未实现, EarlyExit op 无法 early-exit。
+
+```yaml
+patternId: BCE-20260706-EARLYEXIT-CMPEQ-EXIT-UNIMPL
+title: "GprBranchAction::Exit 在 x86 lowering 所有条件分支都返 Err 'not yet supported', EarlyExit CmpEq+Exit 无法工作 → encode_to_layer 返回全零"
+layer: 设计缺陷 (功能未实现, NO-ISLAND-MODULE — EarlyExit op 存在但 lowering 未接线)
+codePattern:
+  - "lower_instr_dispatch.inc.rs:2901-2903 GprBranchAction::Exit(_) => return Err('GprCondAction: CmpEq + Exit not yet supported')"
+  - "所有条件 (IsNull/BitClear/BitSet/IsNonNull/CmpEq/CmpLtU/CmpGeU) + Exit 都返 Err"
+  - "lower_op.inc.rs:894 Op::EarlyExit{anchor_layer} emit CmpEq(layer_ctr, anchor) + Exit(input_ptr) → x86 lowering 报错"
+  - "SmolLM2 能编译 → EarlyExit op 没被插入图 (否则编译失败) → encode_to_layer 走完整 generate loop 不 early-exit"
+sameClassCriterion: "任何 GprBranchAction::Exit 在 x86 lowering 返 Err 的分支 (未实现 early-exit 语义)"
+rootCause: |
+  GprBranchAction::Exit 的 x86 lowering 未实现 (所有条件分支返 Err)。
+  EarlyExit op (用 CmpEq+Exit) 无法 early-exit layer 循环。
+  encode_to_layer 依赖 EarlyExit 捕获 layer N 输出, 但 EarlyExit 不工作 →
+  走完整 generate loop, layer N 输出从未写到 activation buffer → 读 activation 全零。
+  SmolLM2 能编译说明 EarlyExit op 没被插入图 (否则 lowering Err 致编译失败)。
+detectionSignatures:
+  literal: "GprCondAction: CmpEq + Exit not yet supported"
+  structural: "GprBranchAction::Exit(_) => return Err"
+  antipattern: "earlyexit-cmpeq-exit-unimplemented"
+fixTemplate: |
+  实现 CmpEq + Exit 的 x86 lowering:
+    - CmpEq: cmp gpr, imm; jz exit_label
+    - Exit(input_ptr): 把 input_ptr 写到输出位置 (或跳转到函数尾, 返回 input_ptr)
+  需明确 Exit 语义: 是"写 input_ptr 内容到 output buffer"还是"返回 input_ptr 作结果"
+  参考 GprBranchAction::JumpToLabel 的实现 (jz label)
+residualEvidence: |
+  - 源码铁证: lower_instr_dispatch.inc.rs:2901-2903 CmpEq+Exit 返 Err
+  - 实测: diag_step8 encode_to_layer(LastToken) 30 屄全 cosine=0.0000 (全零)
+  - ping_off=0, pong_off=9437184 两 activation buffer 都零 (layer 未写)
+归因时间: 2026-07-06
+status: 已归因 (源码铁证) | residual: 待实现 CmpEq+Exit lowering
+```
+
+### 与 logits 发散的关系
+
+**非 logits 发散根因**: diagnostic_prefill_logits 不依赖 EarlyExit, 走完整 generate loop 写 logits row0 (cosine=-0.465 真信号)。
+但 EarlyExit 未实现阻断逐层 bisection 诊断 (encode_to_layer 损坏)。
+
+### 修复优先级
+
+- 高 (诊断工具修复): 实现 CmpEq+Exit 让 encode_to_layer 工作, 才能逐层 bisection 定位发散层
+- BCE 横扫: 检查其他 GprBranchAction::Exit 用法是否也受影响

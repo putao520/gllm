@@ -107,21 +107,38 @@ match source {
 
 **更深发现**：layer output 根本不写到 activation buffer。EarlyExit（lower_op.inc.rs:894）`Exit(input_ptr)` 的 input_ptr 是 layer input tensor 指针（如 embedding 在 Intermediate 区 offset=37748736），不是 activation buffer。EarlyExit 语义是"跳转/返回 input_ptr"，不是"写 output 到 activation"。
 
+**根因铁证（2026-07-06 源码确认）**：`GprBranchAction::Exit` 在 x86 lowering **完全未实现**！
+
+lower_instr_dispatch.inc.rs:2901-2903:
+```rust
+GprCondition::CmpEq(vreg, imm) => {
+    ...
+    match action {
+        GprBranchAction::Exit(_) => {
+            return Err("GprCondAction: CmpEq + Exit not yet supported".into());
+        }
+        ...
+    }
+}
+```
+
+**所有条件 + Exit 都返 Err**（IsNull/BitClear/BitSet/IsNonNull/CmpEq/CmpLtU/CmpGeU 全 "not yet supported"）。
+
+EarlyExit op（lower_op.inc.rs:894）用 `CmpEq(layer_ctr, anchor_layer)` + `Exit(input_ptr)`——这个组合 x86 lowering **报错未实现**。
+
+**推断**：SmolLM2 能编译说明 EarlyExit op 没被插入图（否则编译失败），encode_to_layer 走完整 generate loop（max_new_tokens=1），不 early-exit。layer N 输出从未被捕获到 activation buffer → encode_to_layer 返回全零（读 activation 区零内存）。
+
+**这是真 bug**：EarlyExit CmpEq+Exit 未实现，encode_to_layer 功能损坏。但**非 logits 发散根因**（diagnostic_prefill_logits 不依赖 EarlyExit，走完整 generate loop 写 logits row0）。
+
 **实测数据**（diag_step8 修复后）:
 ```
 [ENCODE-AT-LAYER-DIAG] anchor=0 seq_len=5 hidden=576 ping_off=0 pong_off=9437184 scratchpad.len=249233408 compute_dtype=F32 target=Cpu
 ping_off=0, pong_off=9437184 两 buffer 都零 (nonzero=0)
 ```
 
-**结论**：架构师"layer hidden 在 ActivationPong"假设不成立。需重新设计诊断路径：
-- EarlyExit 的 input_ptr 指向什么 tensor？layer input 还是 output？
-- GprBranchAction::Exit 语义是什么（跳转/返回/写 buffer）？
-- 需查 Exit action 的 x86 lowering 确认输出落点
-
-**AI 易误判**：
-- ❌ "encode_to_layer 返回全零 = layer 处理错" → 错，是读错 offset
-- ❌ "layer hidden 在 ActivationPong" → 错（架构师假设），EarlyExit 返回 input_ptr 不写 activation
-- ❌ "读 offset 0 拿 layer 输出" → 错，offset 0 是 ActivationPing
-- ✅ 需查 GprBranchAction::Exit lowering 确定输出落点
+**结论**：encode_to_layer 不可用于逐层 bisection（EarlyExit 未实现）。需新诊断路径：
+- 实现 CmpEq+Exit 的 x86 lowering（让 EarlyExit 真正 early-exit + 写 output）
+- 或用别的方式捕获 layer N 输出（如 hook callback）
+- 或用 diagnostic_prefill_scratchpad 在 generate loop 中插桩
 
 **与 logits 发散的关系**：此 bug 是诊断工具 bug（execute_encode_at_layer 读错），**非 logits 发散根因**（diagnostic_prefill_logits 读 logits_scratch_offset 正确，cosine=-0.465 真信号）。但阻断逐层 bisection。
