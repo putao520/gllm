@@ -74,7 +74,7 @@ kv_cache_bytes = num_layers × 2 (K+V) × max_seq_len × num_kv_heads × head_di
 - theta = 100000（不是 Llama 默认 10000）
 - interleaved = false（GPT-NeoX 风格，非 GPT-J interleaved）
 - scaling = null（无 long-context scaling）
-- partial = ?（SmolLM2 用部分 RoPE，但 config 未标——需从 gllm model_config 推导或实测）
+- **partial = 1.0（全维度旋转，标准 RoPE）** — config.json 无 rope_partial_ratio 字段，gllm 默认 unwrap_or(1.0)（types.inc.rs:151）。SmolLM2 是 Llama 架构，用标准全维度 RoPE，非 Gemma 4 的 p-RoPE 0.25。
 
 ### 推理模式（prefill vs decode）
 - prefill: prompt_len 个 token 一次过（M=seq_len），Gather 应写 [seq_len, 576]
