@@ -2878,13 +2878,13 @@ regressionAssertion:
   - "argv slot 0/1/2/3/7/8 必须是 device ptr (slot 2/7 待 kv_cache 独立 buffer 确认)"
   - "MegaKernelArgs 加 scratchpad_bytes/output_tokens_bytes 让 launcher 算 D2H 拷贝量"
 residualInstances:
-  - "kv_cache 别名到 scratchpad (slot 2 = scratchpad_dev) — 头号 gate 风险, 待 Explore 确认 kernel 读写语义"
-  - "slot 4/14/15/17/19/20/21 = host ptr 透传 (aux/hook_ctx/telemetry/fused_hidden/callback_table/page_table/batch_ctx) — 诊断路径全 NULL 无害, generate 全循环变活 host ptr"
-  - "Metal device.rs:338 — 22 参数全走 setBuffer, 标量当 buffer 地址绑定, 独立 ABI bug"
-  - "gpu_generate_single_sequence:376/379 — 死代码里的 host ptr argv, latent"
-  - "D2H scratchpad size 一致性 — prepare 分配 (cached.max(1024)) vs runtime 拷贝 (runtime_scratchpad_bytes) 可能不一致致越界"
-status: "6/22 槽已修, 残留 4 类实例待 BCE 完整闭环"
-architectConfidence: "3C 实现置信度 50% — kv_cache 别名 + D2H size 是头号风险, 需 Explore 确认后再上真机"
+  - "kv_cache 别名到 scratchpad (slot 2 = scratchpad_dev) — ✅ RESOLVED (commit 306353a1, 阶段3C-2 加第4块 kv_cache device buffer)"
+  - "D2H scratchpad size 一致性 — ✅ RESOLVED (commit 306353a1, D2H 用 min + debug_assert)"
+  - "slot 4/14/15/17/19/20/21 = host ptr 透传 (aux/hook_ctx/telemetry/fused_hidden/callback_table/page_table/batch_ctx) — 诊断路径全 NULL 无害, generate 全循环变活 host ptr (待 generate GPU 验证)"
+  - "Metal device.rs:338 — 22 参数全走 setBuffer, 标量当 buffer 地址绑定, 独立 ABI bug (待 Metal backend 验证)"
+  - "gpu_generate_single_sequence:376/379 — 死代码里的 host ptr argv, latent (待 4b 删死代码)"
+status: "kv_cache 别名 + D2H size 已根治 (commit 306353a1), 残留 3 类非 gate 阻塞实例待后续闭环"
+architectConfidence: "3C-2 修后置信度提升 — gate 阻塞的两点 (kv_cache 别名 + D2H size) 已解决, 待 5070Ti 真机验 argmax=253"
 ```
 
 ## SPEC 沉淀点（C-3 根治, 待 spec_write）
