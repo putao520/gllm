@@ -371,3 +371,77 @@ fn diag_step5_layer_bisect_fixed() {
         None => eprintln!(">>> 所有层都对, 根因在 final norm / lm_head"),
     }
 }
+
+// ─── 架构师第8轮: per-row cosine + 交叉比对 (token 序列已确认一致) ───
+// gllm tokens [504,2455,282,1029,314] == golden input_ids (逐位相同)
+// 排除 token 序列错位. 进 per-row 分析 embedding 部分对齐根因.
+
+#[test]
+fn diag_step6_per_row_and_cross() {
+    eprintln!("\n=== Step 6: per-row cosine + 交叉比对 ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let golden_h0 = load_golden_hidden_layer(&path, 0); // (5, 576)
+    eprintln!("确认: gllm tokens = golden input_ids = [504, 2455, 282, 1029, 314] (逐位相同)");
+
+    let client = build_cpu_client();
+    let tokens = client.encode(PROMPT).expect("encode");
+    eprintln!("gllm tokens = {:?}", tokens);
+    let sp = client.diagnostic_prefill_scratchpad(&tokens).expect("scratchpad");
+    let emb_off = client.diagnostic_tensor_offset("embedding").expect("embedding offset");
+    let elem = sp.elem_bytes();
+
+    // 读 gllm embedding [5, 576]
+    let mut gllm_rows: Vec<Vec<f32>> = Vec::with_capacity(SEQ_LEN);
+    for r in 0..SEQ_LEN {
+        let row_off = emb_off + r * HIDDEN_SIZE * elem;
+        let row: Vec<f32> = (0..HIDDEN_SIZE).map(|i| {
+            let b = &sp.data[row_off + i * elem..row_off + (i + 1) * elem];
+            match elem {
+                4 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                2 => { let bits = (b[1] as u32) << 8 | b[0] as u32; f32::from_bits(bits << 16) }
+                _ => 0.0,
+            }
+        }).collect();
+        gllm_rows.push(row);
+    }
+    let golden_rows: Vec<Vec<f32>> = (0..SEQ_LEN).map(|r| {
+        golden_h0[r * HIDDEN_SIZE..(r + 1) * HIDDEN_SIZE].to_vec()
+    }).collect();
+
+    eprintln!("\n--- per-row cosine (gllm[i] vs golden[i]) ---");
+    for i in 0..SEQ_LEN {
+        let c = cosine(&gllm_rows[i], &golden_rows[i]);
+        eprintln!("  row {i}: cosine = {c:.4}");
+    }
+
+    eprintln!("\n--- 交叉比对 (gllm[i] vs golden[i+1]) — 测 token 错位+1 ---");
+    for i in 0..SEQ_LEN.saturating_sub(1) {
+        let c = cosine(&gllm_rows[i], &golden_rows[i + 1]);
+        eprintln!("  gllm[{i}] vs golden[{}] = {c:.4}", i + 1);
+    }
+
+    eprintln!("\n--- 交叉比对 (gllm[i+1] vs golden[i]) — 测 token 错位-1 ---");
+    for i in 0..SEQ_LEN.saturating_sub(1) {
+        let c = cosine(&gllm_rows[i + 1], &golden_rows[i]);
+        eprintln!("  gllm[{}] vs golden[{i}] = {c:.4}", i + 1);
+    }
+
+    // 模式判定
+    let diag: Vec<f32> = (0..SEQ_LEN).map(|i| cosine(&gllm_rows[i], &golden_rows[i])).collect();
+    let cross_plus: Vec<f32> = (0..SEQ_LEN-1).map(|i| cosine(&gllm_rows[i], &golden_rows[i+1])).collect();
+    let cross_minus: Vec<f32> = (0..SEQ_LEN-1).map(|i| cosine(&gllm_rows[i+1], &golden_rows[i])).collect();
+    let diag_max = diag.iter().cloned().fold(-1.0f32, f32::max);
+    let cross_plus_max = cross_plus.iter().cloned().fold(-1.0f32, f32::max);
+    let cross_minus_max = cross_minus.iter().cloned().fold(-1.0f32, f32::max);
+    eprintln!("\n>>> max: diag={diag_max:.4} cross+1={cross_plus_max:.4} cross-1={cross_minus_max:.4}");
+    if cross_plus_max > 0.9 {
+        eprintln!(">>> gllm token 序列比 golden 错位 +1 (gllm[i]≈golden[i+1])");
+    } else if cross_minus_max > 0.9 {
+        eprintln!(">>> gllm token 序列比 golden 错位 -1 (gllm[i+1]≈golden[i])");
+    } else if diag_max > 0.9 {
+        eprintln!(">>> per-row 对齐 (某行高), 非错位");
+    } else {
+        eprintln!(">>> 所有模式都低, 非简单错位 — gather 每行读取有系统偏移 (代码 bug)");
+    }
+}
