@@ -105,3 +105,34 @@ o_norope = layer0.self_attn.o_proj(attn_norope.transpose(1,2).reshape(1,5,576))
 print("[HYPO] no-rope o_proj row0 first5:", o_norope[0,0,:5].float().detach().numpy(), "norm:", float(torch.norm(o_norope[0,0].float())))
 
 print("\ngllm layer0 (full) row0 first5: [1.9386488, 2.383808, -0.6042177, 0.9909464, -1.4935191] norm: 60.7")
+
+# ★ 关键验证: gllm l0 norm (60.7) ≈ ref q_proj norm (61.22) — gllm 是否捕获了 q_proj 而非 layer0?
+print("\n=== gllm l0 vs ref q_proj (norm 匹配检查) ===")
+# ref q row0 first5 (需要导出)
+# 重新算 q_proj row0
+normed1_f = normed1[0].float().detach().numpy()
+q_row0 = layer0.self_attn.q_proj(normed1[0,0]).float().detach().numpy()
+print("ref q_proj row0 first5:", q_row0[:5], "norm:", np.linalg.norm(q_row0))
+print("gllm l0 row0 first5: [1.9386488, 2.383808, -0.6042177, 0.9909464, -1.4935191]")
+gllm_l0 = np.fromfile('/tmp/gllm_capture_layer0_5token.bin', dtype=np.float32)  # (576,)
+# cosine ref q_proj row0 vs gllm l0 row0
+cos = float(np.dot(q_row0, gllm_l0) / (np.linalg.norm(q_row0) * np.linalg.norm(gllm_l0)))
+print(f"cosine(ref q_proj row0, gllm l0 row0) = {cos:.4f}")
+# also k_proj, v_proj
+k_row0 = layer0.self_attn.k_proj(normed1[0,0]).float().detach().numpy()
+v_row0 = layer0.self_attn.v_proj(normed1[0,0]).float().detach().numpy()
+# k_proj/v_proj are 192 elem (3*64), not 576 — skip
+
+# o_proj, resid1, full l0
+print(f"cosine(ref o_proj row0, gllm l0 row0) = {float(np.dot(o[0,0].float().detach().numpy(), gllm_l0)/(np.linalg.norm(o[0,0].float().detach().numpy())*np.linalg.norm(gllm_l0))):.4f}")
+print(f"cosine(ref resid1 row0, gllm l0 row0) = {float(np.dot(resid1[0,0].float().detach().numpy(), gllm_l0)/(np.linalg.norm(resid1[0,0].float().detach().numpy())*np.linalg.norm(gllm_l0))):.4f}")
+print(f"cosine(ref l0 row0, gllm l0 row0) = {float(np.dot(l0_ref[0], gllm_l0)/(np.linalg.norm(l0_ref[0])*np.linalg.norm(gllm_l0))):.4f}")
+
+# gllm capture (5-token) = 最后 token = row4. 比 ref row4.
+print("\n=== gllm l0 (5-token last) vs ref row4 ===")
+print(f"cosine(ref l0 row4, gllm l0) = {float(np.dot(l0_ref[4], gllm_l0)/(np.linalg.norm(l0_ref[4])*np.linalg.norm(gllm_l0))):.4f}")
+print(f"cosine(ref resid1 row4, gllm l0) = {float(np.dot(resid1[0,4].float().detach().numpy(), gllm_l0)/(np.linalg.norm(resid1[0,4].float().detach().numpy())*np.linalg.norm(gllm_l0))):.4f}")
+print(f"ref l0 row4 first5: {l0_ref[4,:5]}")
+print(f"gllm l0 first5: {gllm_l0[:5]}")
+# 也试: gllm l0 是否 = ref l0 row0 的某种变换? 检查 norm
+print(f"ref l0 row0 norm: {np.linalg.norm(l0_ref[0])}, row4 norm: {np.linalg.norm(l0_ref[4])}, gllm norm: {np.linalg.norm(gllm_l0)}")

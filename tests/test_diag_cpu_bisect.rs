@@ -575,6 +575,13 @@ fn diag_step8c_capture_inter_layer() {
     // 也看 layer0 的 norm (是否 RMSNorm 后的值)
     eprintln!("capture layer0 norm = {:.4}", l0.iter().map(|x| x*x).sum::<f32>().sqrt());
     eprintln!("golden embedding row4 norm = {:.4}", emb.iter().map(|x| x*x).sum::<f32>().sqrt());
+    // dump gllm capture layer0 (5-token, last token=row4 semantics) to file for Python comparison
+    {
+        let mut buf = Vec::with_capacity(HIDDEN_SIZE * 4);
+        for v in &l0 { buf.extend_from_slice(&v.to_le_bytes()); }
+        let _ = std::fs::write("/tmp/gllm_capture_layer0_5token.bin", &buf);
+        eprintln!("[DUMP] gllm capture layer0 → /tmp/gllm_capture_layer0_5token.bin");
+    }
 }
 
 //
