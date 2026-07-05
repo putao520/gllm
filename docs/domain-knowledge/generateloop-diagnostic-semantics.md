@@ -233,6 +233,40 @@ architect (sessionId 088a2b41) 推荐三路互补诊断：A 单 token attention 
 
 需要: layer 0 内部算子级 capture (在 input_norm 后插 capture 点). 现有 capture 只在层边界.
 
+## Python 参考模型验证（2026-07-06 路B, 已建立）
+
+`tests/e2e_alignment/diag_layer0_divergence.py` — 用 transformers 加载 SmolLM2, 手动跑 layer0 各算子,
+导出中间结果 (rmsnorm1/q/k/v/rope/attention/o_proj/resid1) + 测试假设 (no-softmax/no-scale/no-rope).
+
+**参考正确性验证**:
+- ref embedding vs golden h0 row0 = cos 0.99999 ✅
+- ref layer0 out vs golden h1 row0 = cos 0.99999 ✅ (Python 参考完美匹配 golden)
+- ref l0 row0 norm = 47.36, ref l0 row4 norm = 34.64 (= golden h1 row4 norm)
+- gllm capture l0 row0 norm = 60.7 (1.28x ref row0; row4 60.7 vs 34.6 = 1.75x)
+
+**layer0 中间结果 (Python 参考, row0)**:
+- rmsnorm1 norm = 2.30 (注意: 不是 0.958, RMSNorm 输出 norm ≠ ‖weight‖)
+- q_proj norm = 61.22 ← **接近 gllm l0 norm 60.7!**
+- k_proj norm = 38.77
+- v_proj norm = 1.17
+- o_proj out norm = 0.69 (attention 正确时 o_proj 输出小)
+- resid1 (after attn) norm = 2.14
+
+**假设测试 (o_proj out row0 norm)**:
+- 正确 = 0.69
+- no-softmax = 8.01 (放大 11.6x, 但 gllm 放大 1.28x row0, 不匹配)
+- no-scale = 0.78 (相近, 不像根因)
+- no-rope = 1.21 (放大 1.75x, 接近 gllm row4 放大 1.75x!)
+
+**关键嫌疑**: no-rope 假设 o_proj norm 1.21 vs 正确 0.69 (放大 1.75x) ≈ gllm l0 row4 放大 1.75x.
+但 gllm 数值模式与 no-rope 不完全匹配. 需更细的算子级对比.
+
+**gllm l0 row0 first5**: [1.94, 2.38, -0.60, 0.99, -1.49]
+**ref l0 row0 first5**: [2.44, 0.34, -0.36, 0.79, 1.25]
+数值完全不同 (非简单缩放), 说明 bug 不是单一算子缺失, 而是计算逻辑错误.
+
+下一步: 用 Python 参考导出每个算子中间结果, 与 gllm (需安全算子级 capture) 逐算子对比定位首个发散点.
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
