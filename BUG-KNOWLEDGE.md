@@ -2909,7 +2909,79 @@ architectConfidence: "3C-2 修后置信度提升 — gate 阻塞的两点 (kv_ca
 2. **死代码断链静态检查**: CI grep 门控, gpu_generate_single_sequence/rerank_forward_gpu_pure 等孤儿若无调用点则报警
 3. **argmax=253 硬门控**: 必须等 5070Ti 真机, 本地无法替代
 
-## BCE-20260705-KVCACHE-DTYPE-DUAL-LAYER-SPLIT (architect 裁决: 唯一致命根因)
+## BCE-20260705-DERIVE-COMPUTE-DTYPE-UNCONSTITUTION (运行时钉死违宪, 待根治)
+
+> SmolLM2-135M CPU E2E logits 发散诊断中, 运行时插桩发现 compute_dtype=F32 (config 是 BF16)。
+> 追出 derive_compute_dtype 硬编码 BF16→F32 降级, 宪法1 (ARCH-BLOB-YIELDS-WEIGHT) 违宪。
+> 用户明确指示: "运行时定死了就是最明显的违宪, 我们的要求是代码顺从数据/配置"。
+
+```yaml
+patternId: BCE-20260705-DERIVE-COMPUTE-DTYPE-UNCONSTITUTION
+title: "derive_compute_dtype (dtype_chain.rs:198) 硬编码 BF16→F32 降级, 无视 device 参数, 导致 loader 把 BF16 权重 dequantize 成 F32 进 blob (宪法1违宪: blob 须保留原始 dtype)"
+layer: 范式缺陷 (代码假设 BF16 必须降级 F32, 数据迁就代码, 违反 ARCH-JIT-DATA-YIELDS / 宪法1 / 宪法3)
+codePattern:
+  - "dtype_chain.rs:198 DType::BF16 | DType::F16 => DType::F32 — 硬编码降级, 无视 device 参数"
+  - "dtype_chain.rs:209 注释 'device parameter is reserved for future hardware' — 当前违宪被记为待办"
+  - "graph_geometry.rs:127 compute_dtype = derive_compute_dtype(storage_dtype, device) → F32"
+  - "executor_core.inc.rs:371 MegaKernelCompiled.compute_dtype = geometry.compute_dtype (GraphDerivedGeometry, 非 ModelGeometry) = F32"
+  - "executor_compile.rs:185 needs_dtype_conversion = (compute_dtype=F32 != dtype=BF16) = true"
+  - "executor_compile.rs:193 dequantize_weight_to_dtype(BF16 → F32) — BF16 权重转 F32 字节进 blob (宪法1违宪)"
+sameClassCriterion: "任何函数硬编码把窄 dtype (BF16/F16) 降级成 F32 compute, 导致 loader 把权重字节转换进 blob。代码假设数据须迁就代码, 非 JIT 层 WidenCompute"
+rootCause: |
+  derive_compute_dtype (dtype_chain.rs:195-210) match arm 硬编码:
+    BF16 | F16 => F32  (line 198, 无视 device 参数)
+  导致 compute_dtype=F32, needs_dtype_conversion=true, loader dequantize BF16→F32 进 blob。
+  违宪: blob 应保留原始 BF16 字节 (宪法1), 代码应顺从数据 BF16 (ARCH-JIT-DATA-YIELDS)。
+  JIT 层 WidenCompute 才是正确路径 (SIMD 指令层 widen BF16→F32 累加, 非 loader 层转字节)。
+detectionSignatures:
+  structural: "fn derive_compute_dtype(storage_dtype, device) match arm BF16|F16 => F32 (不用 device)"
+  literal: "DType::BF16 | DType::F16 => DType::F32"
+  antipattern: "derive-compute-dtype-hardcode-f32-downgrade"
+fixTemplate: |
+  derive_compute_dtype 顺从 storage_dtype (不降级):
+    match storage_dtype {
+        DType::BF16 | DType::F16 => storage_dtype,  // 顺从, JIT 层 WidenCompute
+        DType::F32 => DType::F32,
+        DType::U8 | DType::F8E4M3 | ... => DType::F32,  // 量化类型仍 dequant (合法)
+    }
+  配套 (derive_compute_dtype 修复后 compute_dtype=BF16 触发):
+    1. executor_compile.rs:185 needs_dtype_conversion 变 false → 不再 dequantize BF16→F32 → blob 保留 BF16 (宪法1恢复)
+    2. KV cache 按 BF16(384/行) 分配 → MemCopy 需 narrow F32→BF16 (k_out 是 F32)
+    3. attention VecLoad 按 BF16 读 + widen
+    4. GEMM c_dtype=BF16 → needs_narrow=true → 触发 VecNarrow → 必须先修 lane-loss bug
+       (emit_f32_to_bf16_ymm_to_xmm_avx2: vextracti128 取高半, 当前只 pack 低 4 lanes)
+candidateA_refuted_runtime: |
+  候选根因 A (KV cache dtype 双地层裂开) 运行时证伪:
+    [DIAG-KV-BUF] compute_dtype=F32 elem_bytes=4 kv_row_stride=768 kv_cache_bytes=377487360
+    KV cache 实际全 F32 (buffer 768/行 = MemCopy 768/行 = attention 读 768/行), 无越界。
+  但证伪揭示更深违宪: compute_dtype=F32 本身就是 derive_compute_dtype 硬编码降级的结果。
+  用户洞察: "运行时定死了就是最明显的违宪" — 表面自洽的 F32 是违宪传染的产物, 非正确状态。
+residualEvidence: |
+  - 运行时插桩 (commit 本条前): compute_dtype=F32, kv_row_stride=768 (全 F32 自洽)
+  - 源码铁证: dtype_chain.rs:198 BF16=>F32 硬编码, 注释承认 "device reserved for future"
+  - 权重实测: safetensors BF16 (model.embed_tokens.weight dtype=torch.bfloat16)
+  - config.json: torch_dtype=bfloat16 (无 compute_dtype 字段)
+  - 待修复后验证: blob 保留 BF16 + KV cache BF16 + argmax=253 + cosine>0.9999
+归因时间: 2026-07-05
+status: 已归因 (运行时+源码双铁证) | residual: 待根治 (derive_compute_dtype + 4 项配套)
+```
+
+### 违宪根治路线 (用户要求: 代码顺从数据/配置, 永远根治)
+
+1. **derive_compute_dtype** (dtype_chain.rs:198): BF16|F16 => storage_dtype (不降级)
+2. **lane-loss bug** (emit_helpers.inc.rs emit_f32_to_bf16_ymm_to_xmm_avx2): vextracti128 取高半 (GEMM VecNarrow 触发前提)
+3. **MemCopy dtype 转换** (lower_mem_copy_x86): 支持 F32→BF16 narrow (KV cache 写入)
+4. **attention VecLoad** (attention_emit.rs:122): dtype 改 BF16 + widen
+5. **graph_dtype()** (context.inc.rs:167): 确认是否也硬编码 F32 (JIT 层 ctx.dtype)
+
+### 与候选根因 A 的关系
+
+候选根因 A (KV cache dtype 双地层裂开) 运行时证伪 — KV cache 全 F32 自洽无越界。
+但证伪过程追出 derive_compute_dtype 违宪 (更深层根因方向)。
+方案 A 4 项联动 (见 kv-cache-dtype-dual-layer.md) 仍需做, 但前提是先修 derive_compute_dtype。
+derive_compute_dtype 修复后, compute_dtype=BF16, KV cache 变 BF16, 才会暴露方案 A 的 MemCopy/VecNarrow/VecLoad 联动需求。
+
+## BCE-20260705-KVCACHE-DTYPE-DUAL-LAYER-SPLIT (候选根因 A, 运行时证伪, 保留为方案 A 联动参考)
 
 > SmolLM2-135M CPU E2E (本地 i9-10900KF AVX2): argmax=967 (golden=253), cosine=-0.465, MAD=33.7。
 > 8 轮诊断收敛 (embedding 对/dtype 对/残差流对/logits 信号可信) + architect(retrospect/consult) 归因确认。

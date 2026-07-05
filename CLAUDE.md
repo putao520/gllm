@@ -82,6 +82,7 @@
 | KV cache dtype 双地层陷阱 | `docs/domain-knowledge/kv-cache-dtype-dual-layer.md` | JIT 层 ctx.dtype=F32 硬编码 vs buffer 层 compute_dtype=BF16 解耦 → stride 768 vs 384 越界踩踏（SmolLM2 logits 发散根因）；KV cache 代码必读 |
 | RMSNorm / final norm 实现链路 | `docs/domain-knowledge/rmsnorm-final-norm.md` | scalar 参考 + NormLike 三阶段 + eps 从 spec 覆盖 + BF16 weight 独立步长；排除 RMSNorm 嫌疑（实现正确） |
 | lm_head Tied Embedding 权重解析 | `docs/domain-knowledge/lm-head-tied-embedding.md` | tie data-driven 检测 + 独立 TensorId 共享指针 + blob 双倍拷贝 + trans_b=true 正确；排除 lm_head 嫌疑 |
+| derive_compute_dtype 违宪铁证 | `docs/domain-knowledge/derive-compute-dtype-unconstitution.md` | dtype_chain.rs:198 硬编码 BF16→F32 降级（无视 device）→ loader dequantize BF16→F32 进 blob（宪法1违宪）；运行时钉死 SmolLM2 compute_dtype=F32；根治必读 |
 
 ## SPEC Index
 
