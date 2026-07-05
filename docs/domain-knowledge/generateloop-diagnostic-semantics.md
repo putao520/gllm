@@ -67,14 +67,30 @@ session_position: anchor_layer,  // anchor layer N
 | embedding cosine 低 = embedding bug | Step7 证 embedding 100% 对，是 harness 错位 |
 | logits 在 row[prompt_len-1] | ARCH-DECODE-LOGITS-ROW0：写 row0 |
 | 单 token prefill 不能重建（缺 KV） | layer 0 ops 无 KV 依赖，可重建 |
+| **encode_to_layer(LastToken) 返回 layer N 输出 row0** | **实测返回全零（Step8）— API 不可用于逐层 bisection** |
+| **encode_to_layer(MeanPool) cosine 低 = 层错** | **错位伪信号：gllm mean=row0/5 vs golden mean=真实5token平均** |
 
 ## 与 BUG 诊断的关系
 - ✅ embedding 对（Step7 方法 A）
 - ✅ dtype 对（D0）
 - ✅ 残差流映射对（H4）
 - ✅ row1-4 零是设计（topology 库）
+- ✅ dtype 链自洽（architect sessionId 401396fe 裁决，非发散根因）
 - 🔄 **logits cosine=-0.465 是真信号**（diagnostic_prefill_logits 读 row0 正确）
 - 根因在 logits 计算路径（final norm / lm_head / 某 layer GEMM），需用语义对齐方法诊断
+- ❌ **encode_to_layer(LastToken) 返回全零**（Step8 实测，30 层全 cosine=0.0000）— API 不可用，需新诊断路径
+- ❌ **encode_to_layer(MeanPool) cosine≈0**（Step5，错位伪信号：gllm mean=row0/5 vs golden mean=5token真实平均）
+
+## 逐层 bisection 的困境（Step8 实测，2026-07-06）
+
+诊断 logits 发散需逐层定位首个发散算子，但现有诊断 API 均不可用：
+- `encode_to_layer(LastToken)`: 返回全零（Step8 30 屄全 cosine=0.0000）
+- `encode_to_layer(MeanPool)`: 错位伪信号（Step5 cosine≈-0.01，gllm mean=row0/5 vs golden mean=5token真实平均）
+- `diagnostic_prefill_scratchpad`: 能读 embedding offset（Step7 证对），但 layer hidden 输出在 ActivationPing/Pong 区，不在 named_offsets，无法直读
+
+**结论**：逐层 bisection 需要新诊断 API——暴露 activation 区 layer hidden offset，或 execute_encode_at_layer 把 layer N 输出写到可读的 scratchpad 区。
+
+**临时方向**：用 diagnostic_prefill_logits 的 scratchpad，找 activation 区 offset（VAM analyze 的 activation_alias），手动读 layer 输出 row0。需 executor 层支持。
 
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
