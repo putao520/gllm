@@ -445,3 +445,56 @@ fn diag_step6_per_row_and_cross() {
         eprintln!(">>> 所有模式都低, 非简单错位 — gather 每行读取有系统偏移 (代码 bug)");
     }
 }
+
+// ─── 架构师第9轮 + topology 资料库: 单 token prefill 重建 embedding (方法A) ───
+// GenerateLoop M=1 覆盖 row0, 单次调用只 row0 有数据.
+// 方法A: 每位置 i 用前缀 tokens[0..i+1] 调 scratchpad, 读 row0 = token i embedding,
+// 拼接 [seq, hidden] vs golden hidden_layer_0. layer0 ops 不依赖 KV cache可重建.
+
+#[test]
+fn diag_step7_single_token_prefill_rebuild() {
+    eprintln!("\n=== Step 7: 单 token prefill 重建 embedding (方法A, topology 资料库) ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let golden_h0 = load_golden_hidden_layer(&path, 0); // (5, 576) golden embedding
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    eprintln!("all_tokens = {:?}", all_tokens);
+
+    let emb_off_resolver = client.diagnostic_tensor_offset("embedding")
+        .expect("embedding offset");
+
+    // 对每个位置 i, 用前缀 tokens[0..i+1] prefill, 读 row0 = token i embedding
+    let mut rebuilt: Vec<f32> = Vec::with_capacity(SEQ_LEN * HIDDEN_SIZE);
+    let mut per_row_cos = Vec::with_capacity(SEQ_LEN);
+    for i in 0..SEQ_LEN {
+        let prefix: Vec<u32> = all_tokens[0..=i].to_vec();
+        let sp = client.diagnostic_prefill_scratchpad(&prefix).expect("scratchpad");
+        let elem = sp.elem_bytes();
+        // row0 = 最后 token (token i) 的 embedding, 在 emb_off 处 [576] (M=1 只 row0)
+        let mut row = vec![0.0f32; HIDDEN_SIZE];
+        for h in 0..HIDDEN_SIZE {
+            let b = &sp.data[emb_off_resolver + h * elem..emb_off_resolver + (h + 1) * elem];
+            row[h] = match elem {
+                4 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                2 => { let bits = (b[1] as u32) << 8 | b[0] as u32; f32::from_bits(bits << 16) }
+                _ => 0.0,
+            };
+        }
+        let golden_row = &golden_h0[i * HIDDEN_SIZE..(i + 1) * HIDDEN_SIZE];
+        let cos = cosine(&row, golden_row);
+        eprintln!("token {i} (id={}): row0 cosine vs golden h0 row{i} = {cos:.4}", all_tokens[i]);
+        per_row_cos.push(cos);
+        rebuilt.extend_from_slice(&row);
+    }
+
+    // 整体 cosine (拼接 [5, 576])
+    let cos_full = cosine(&rebuilt, &golden_h0);
+    eprintln!("\n>>> 重建 [seq, hidden] cosine vs golden h0 = {cos_full:.4}");
+    eprintln!(">>> per-row min/max = {:.4} / {:.4}", per_row_cos.iter().cloned().fold(1.0f32, f32::min), per_row_cos.iter().cloned().fold(-1.0f32, f32::max));
+    if cos_full > 0.99 {
+        eprintln!(">>> embedding 完全正确 (单 token 重建证明)! 之前 'embedding bug' 是诊断 harness 读多行错位");
+    } else {
+        eprintln!(">>> embedding 真错 (语义对齐后仍不对), 根因在 embedding/gather 数据路径");
+    }
+}
