@@ -152,6 +152,22 @@ handle_standard_layer_loop 的 emit 点（line 878）也要求 `state.in_layer_l
 
 Ring-Buffer 基础设施（字段/暴露/getter）全对，只差 emit 位置匹配 SmolLM2 实际层循环路径。
 
+## is_layer_group 全 false 铁证（2026-07-06）
+
+grep "is_layer_group" 全代码库：所有构造点（group_dep.rs:153/334/495/796/1088/...共 15+ 处）都是 `is_layer_group: false`。**没有任何地方设 is_layer_group: true**。
+
+所以 pipeline.inc.rs:812 `if group.is_layer_group && !state.in_layer_loop` 永远不进 → in_layer_loop 恒 false → close_layer_loop 不调 → Ring-Buffer capture 不 emit。
+
+**矛盾**：is_layer_group 全 false，但 SmolLM2 30 层能跑。说明层循环不在 emit_fusion_groups 的 in_layer_loop 路径。
+
+**architect 分析中（sessionId ff2b4f63）**：
+- SmolLM2 层 op label 是 "layer." 前缀（build_graph 用 ptname("layer.xxx")）
+- assign_group_markers 的 fallback（label starts_with "layer."）理论上该标 is_layer_group=true
+- 但实际全 false → fallback 没命中（group.ops[0] label 不是 "layer." 或没跑到这 plan）
+- 正在查 fusion/pass.rs assign_group_markers + group.ops[0] 语义
+
+**待确认**：SmolLM2 30 层循环实际 emit 位置（mega_kernel_emit.rs GenerateLoop 内？单模板只 emit 一层 + 运行时 LoopBegin/End 循环 30 次？）+ Ring-Buffer capture 正确位置。
+
 ## 正确的逐层 bisection（用方法 A 累积）
 1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
 2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
