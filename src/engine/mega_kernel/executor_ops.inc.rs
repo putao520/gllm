@@ -292,6 +292,15 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
+        // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 {
+            vec![0u8; kv_cache_bytes]
+        } else {
+            Vec::new()
+        };
+
         // Pre-fill RoPE cache
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = prompt_len * rc.head_dim;
@@ -324,7 +333,7 @@ impl MegaKernelExecutor {
                 (entry_fn)(
                     input_ids.as_ptr(),
                     ctx.weight_blob_ptr,
-                    std::ptr::null_mut(), // kv_cache_ptr: null — encode graph has no persistent KV
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions.as_ptr(),
                     std::ptr::null(), // seq_lens: null
                     1,                // batch_size
@@ -350,7 +359,7 @@ impl MegaKernelExecutor {
                 let args = MegaKernelArgs {
                     input_ids_ptr: input_ids.as_ptr(),
                     weight_blob_ptr: mega.weight_blob.as_ptr(),
-                    kv_cache_ptr: std::ptr::null_mut(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions_ptr: positions.as_ptr(),
                     aux_ptr: std::ptr::null(),
                     batch_size: 1,
@@ -418,6 +427,15 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
+        // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 {
+            vec![0u8; kv_cache_bytes]
+        } else {
+            Vec::new()
+        };
+
         // Pre-fill RoPE cache
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = prompt_len * rc.head_dim;
@@ -450,7 +468,7 @@ impl MegaKernelExecutor {
                 (entry_fn)(
                     input_ids.as_ptr(),
                     ctx.weight_blob_ptr,
-                    std::ptr::null_mut(), // kv_cache_ptr: null — rerank graph has no generate loop
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions.as_ptr(),
                     std::ptr::null(),
                     1,
@@ -476,7 +494,7 @@ impl MegaKernelExecutor {
                 let args = MegaKernelArgs {
                     input_ids_ptr: input_ids.as_ptr(),
                     weight_blob_ptr: mega.weight_blob.as_ptr(),
-                    kv_cache_ptr: std::ptr::null_mut(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions_ptr: positions.as_ptr(),
                     aux_ptr: std::ptr::null(),
                     batch_size: 1,
@@ -556,6 +574,15 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
+        // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 {
+            vec![0u8; kv_cache_bytes]
+        } else {
+            Vec::new()
+        };
+
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = seq_len * rc.head_dim;
             if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
@@ -581,7 +608,7 @@ impl MegaKernelExecutor {
                 (entry_fn)(
                     input_ids.as_ptr(),
                     ctx.weight_blob_ptr,
-                    std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions.as_ptr(),
                     std::ptr::null(),
                     1,
@@ -605,7 +632,7 @@ impl MegaKernelExecutor {
                 let args = MegaKernelArgs {
                     input_ids_ptr: input_ids.as_ptr(),
                     weight_blob_ptr: mega.weight_blob.as_ptr(),
-                    kv_cache_ptr: std::ptr::null_mut(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions_ptr: positions.as_ptr(),
                     aux_ptr: std::ptr::null(),
                     batch_size: 1,
@@ -682,6 +709,18 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
+        // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
+        // encode_at_layer (逐层 bisection 诊断入口) 必须传非 NULL kv_cache, 否则 layer-0
+        // attention 解引用 NULL → SIGSEGV (client.encode_to_layer → encode_at_layer_for_prompt
+        // → execute_encode_at_layer(0) 在 N=0 就崩, 阻断 cosine 诊断).
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 {
+            vec![0u8; kv_cache_bytes]
+        } else {
+            Vec::new()
+        };
+
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = seq_len * rc.head_dim;
             if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
@@ -707,7 +746,7 @@ impl MegaKernelExecutor {
                 (entry_fn)(
                     input_ids.as_ptr(),
                     ctx.weight_blob_ptr,
-                    std::ptr::null_mut(), // kv_cache_ptr: null — graph has no generate loop
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions.as_ptr(),
                     std::ptr::null(),
                     1,
@@ -731,7 +770,7 @@ impl MegaKernelExecutor {
                 let args = MegaKernelArgs {
                     input_ids_ptr: input_ids.as_ptr(),
                     weight_blob_ptr: mega.weight_blob.as_ptr(),
-                    kv_cache_ptr: std::ptr::null_mut(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions_ptr: positions.as_ptr(),
                     aux_ptr: std::ptr::null(),
                     batch_size: 1,
@@ -1148,6 +1187,15 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; 1];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
 
+        // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
+        // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
+        let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
+        let mut kv_cache = if kv_cache_bytes > 0 {
+            vec![0u8; kv_cache_bytes]
+        } else {
+            Vec::new()
+        };
+
         // Pre-fill RoPE cache
         if let Some(ref rc) = mega.rope_cache {
             let rope_elems = prompt_len * rc.head_dim;
@@ -1181,7 +1229,7 @@ impl MegaKernelExecutor {
                 (entry_fn)(
                     input_ids.as_ptr(),
                     ctx.weight_blob_ptr,
-                    std::ptr::null_mut(), // kv_cache_ptr: null — forward-only graph has no persistent KV
+                    kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions.as_ptr(),
                     std::ptr::null(),
                     1,
@@ -1210,7 +1258,7 @@ impl MegaKernelExecutor {
                 let args = MegaKernelArgs {
                     input_ids_ptr: input_ids.as_ptr(),
                     weight_blob_ptr: ctx.weight_blob_ptr,
-                    kv_cache_ptr: std::ptr::null_mut(),
+                    kv_cache_ptr: kv_cache.as_mut_ptr(), // BCE-KV-DIAG: non-NULL when kv_source=FromCache
                     positions_ptr: positions.as_ptr(),
                     aux_ptr: std::ptr::null(),
                     batch_size: 1,
