@@ -2649,7 +2649,18 @@ residualEvidence:
   - "cargo test --lib: 7024 passed 0 failed"
   - "注: has_avx512fp16 已有守卫 (lower_dot_product_x86 line 1974: if use_avx512 && has_avx512fp16), 本轮补齐 has_bf16/has_vnni"
 归因时间: 2026-07-04
-status: 根治 (4720fde8) | residual: 0
+status: ⚠️ 重开 (原闭环证据不足) | residual: ≥1
+reopenReason: |
+  原闭环 (4720fde8) 仅做静态 guard 重扫 + cargo test --lib 单元测试,
+  未跑 gllm-vs-golden 端到端数值断言 (argmax==253 / cosine>0.9999).
+  2026-07-05 块1 实测 (commit 2364ff48, tests/test_e2e_cpu.rs):
+    - CPU argmax=967 (golden=253), cosine=-0.465 (阈值>0.9999), MAD=33.7
+    - 本地 i9-10900KF 无 AVX-512/VNNI (仅 avx2) → bug 在 fallback BF16 GEMM 路径
+      (emit_f32_to_bf16_ymm_to_xmm_avx2), 即原 fixTemplate 第4条 fallback 从未做数值对齐
+  按 C-7 铁律3 (残留=0 才放行), 原 residual=0 判定证据不足, 重开补全:
+    1. gllm-vs-golden 端到端数值断言 (块1 已建 tests/test_e2e_cpu.rs)
+    2. fallback BF16 GEMM 路径数值等价性验证
+    3. commit_gate / verify(alignment) / arch_insight(quality) 三项门控
 ```
 
 ## BCE-20260704-STEP-DTYPE-MISMATCH — step 硬编码 F32 与 dtype 不匹配 (NormLike stepbytes 同类)
