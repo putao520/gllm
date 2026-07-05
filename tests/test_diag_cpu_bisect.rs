@@ -717,13 +717,51 @@ fn diag_step10_weight_byte_verify() {
     } else {
         eprintln!(">>> 找到! 权重字节一致 (input_norm weight 正确)");
     }
+    // dump full weight blob for Python analysis
+    let _ = std::fs::write("/tmp/gllm_weight_blob.bin", &blob);
+    eprintln!("[DUMP] weight_blob → /tmp/gllm_weight_blob.bin ({} bytes)", blob.len());
 }
 
 #[test]
-#[ignore = "路A 需安全的算子级 capture (pong buffer 不是 input_norm 输出, SIGSEGV). 待实现正确的中间张量 capture"]
-fn diag_step11_input_norm_capture() {
-    // 路A: 验证 RMSNorm — input_norm 输出 norm 应 ≈ ‖input_norm weight‖ ≈ 0.958.
-    // 当前 operator-level capture 读 pong buffer 但 input_norm 输出在 layer.normed 暂存区 (非 pong),
-    // 导致 SIGSEGV. 需改为读 layer.normed tensor offset 或 materialize 输出 ptr.
-    eprintln!("路A input_norm capture: 待实现安全的中间张量 capture");
+fn diag_step12_single_layer_intermediates() {
+    eprintln!("\n=== Step 12: GLLM_SINGLE_LAYER=1 读 layer0 所有中间张量 ===");
+    std::io::stderr().flush().ok();
+    // GLLM_SINGLE_LAYER=1 让层循环只跑 1 次 (layer 0), 中间张量不被后续层覆盖
+    std::env::set_var("GLLM_SINGLE_LAYER", "1");
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    let single = vec![all_tokens[0]];  // 单 token prefill
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    std::env::remove_var("GLLM_SINGLE_LAYER");
+
+    let elem = 4usize; // F32
+    let read_tensor = |name: &str| -> Vec<f32> {
+        let off = client.diagnostic_tensor_offset(name).unwrap_or(usize::MAX);
+        if off == usize::MAX { return Vec::new(); }
+        (0..HIDDEN_SIZE).map(|h| {
+            let b = &sp.data[off + h*elem..off + (h+1)*elem];
+            f32::from_le_bytes([b[0],b[1],b[2],b[3]])
+        }).collect()
+    };
+
+    // dump 各中间张量到单独文件
+    let tensors = ["embedding", "layer.normed", "layer.q", "layer.k", "layer.v",
+                   "layer.q_rope", "layer.k_rope", "layer.attn", "layer.o",
+                   "layer.attn_resid", "layer.post_normed", "layer.gate", "layer.up",
+                   "layer.ffn_act", "layer.down", "layer.ffn_resid"];
+    for name in &tensors {
+        let data = read_tensor(name);
+        if data.is_empty() {
+            eprintln!("{:20} NOT FOUND", name);
+            continue;
+        }
+        let norm: f64 = data.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let safe_name = name.replace('.', "_");
+        let path = format!("/tmp/gllm_{}.bin", safe_name);
+        let mut buf = Vec::with_capacity(HIDDEN_SIZE * 4);
+        for v in &data { buf.extend_from_slice(&v.to_le_bytes()); }
+        let _ = std::fs::write(&path, &buf);
+        eprintln!("{:20} off=? norm={:8.3} first5={:?} → {}", name, norm, &data[0..5], path);
+    }
 }
+

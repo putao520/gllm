@@ -267,7 +267,46 @@ architect (sessionId 088a2b41) 推荐三路互补诊断：A 单 token attention 
 
 下一步: 用 Python 参考导出每个算子中间结果, 与 gllm (需安全算子级 capture) 逐算子对比定位首个发散点.
 
-## 当前 BUG 状态总结（2026-07-06）
+## v_proj GEMM 计算逻辑 bug 定位（2026-07-06 重大突破）
+
+**方法**：GLLM_SINGLE_LAYER=1 让层循环只跑 1 次（layer 0），所有中间张量不被后续层覆盖。
+diag_step12_single_layer_intermediates 读 named_offsets 各中间张量 offset，dump 到文件。
+Python 参考逐算子对比 (tests/e2e_alignment/diag_layer0_divergence.py + /tmp/compare_intermediates.py)。
+
+**唯一 offset 中间张量对比**（共享 offset 的被覆盖，只读唯一 offset）:
+
+| 张量 | gllm norm | Python ref norm | cosine | 判定 |
+|------|-----------|-----------------|--------|------|
+| embedding | 2.001 | 2.001 | 1.0 | ✅ 对 |
+| v_proj (off=100663296) | 0.766 | 0.537 | **0.0333** | ❌ 发散 |
+| attn (off=81788928) | 1.327 | 0.930 | - | attn=V (单token恒等, 逻辑对, 继承v错误) |
+| up_proj (off=144703488) | 16.584 | 14.503 | - | 偏大 |
+| ffn_act (off=195035136) | 6.774 | 7.778 | - | 接近 |
+| ffn_resid (off=9437184) | 0.0 | 54.110 | - | ❌ 全零(残差丢失) |
+
+**首个发散算子 = v_proj GEMM** (cos=0.0333, 几乎正交).
+- attention 输出 first5 = v_proj first5 (单 token attention=V 恒等, 证明 attention 逻辑正确, 继承 v 的错误)
+- v_proj 权重字节正确 (路C: golden v_proj weight 在 blob 找到 1 处 offset=114133248, 字节一致)
+- v_proj 输入 rmsnorm1: 排除假设 (v_proj(embedding)/v_proj(rmsnorm1)/v_proj(layernorm)/各 eps 变体 cos 全 0.03-0.09)
+- Python 手动 GEMM normed1@w_v^T = ref v_proj (norm=0.536), gllm v_proj norm=0.766
+
+**结论**: v_proj GEMM 计算逻辑 bug. 权重对 + 输入对 + dtype 对, 但 JIT 生成的 GEMM 机器码算出错结果.
+**根因方向**: GEMM K维 stride / M/N/K 维度映射 / BF16 WidenCompute 解码 / 累加逻辑.
+
+**下一步**: 看 v_proj GemmSpec (trans_b/m/n/k) + GEMM emit 逻辑, 对比 q_proj/k_proj (同 GEMM 但被 slot 覆盖无法直接验证).
+
+## 权重字节验证全 GEMM（路C 扩展，2026-07-06）
+
+gllm weight_blob (325653120 bytes) 中搜索 golden 权重:
+
+| 权重 | shape | blob offset | 字节 |
+|------|-------|-------------|------|
+| input_norm | [576] | 113247360 | ✅ 一致 |
+| q_proj | [576,576] | 113248512 | ✅ 一致 |
+| k_proj | [192,576] | 113912064 | ✅ 一致 |
+| v_proj | [192,576] | 114133248 | ✅ 一致 |
+
+所有 GEMM 权重字节正确. 排除 loader 转置/偏移/错层. bug 在 GEMM JIT 计算逻辑.
 
 **已确定性排除的技术点**:
 1. ✅ Ring-Buffer capture 基础设施工作正常 (30 层全非零, stride 对齐 JIT=18874368=harness)
