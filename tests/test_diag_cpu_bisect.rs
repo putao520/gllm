@@ -543,6 +543,24 @@ fn diag_step8b_single_token_capture() {
         };
     }
     eprintln!("single-token embedding row0 vs golden h0 row0 = {:.4}", cosine(&emb, golden_emb_row0));
+
+    // 逐层 capture (单 token) vs golden hidden_layer_{N+1} row0
+    eprintln!("\n=== 单 token 逐层 capture vs golden ===");
+    for n in 0..NUM_LAYERS.min(5) {
+        let mut ln = vec![0.0f32; HIDDEN_SIZE];
+        for h in 0..HIDDEN_SIZE {
+            let o = cap_off + n * cap_stride + h*elem;
+            if o + elem <= sp.data.len() {
+                let b = &sp.data[o..o+elem];
+                ln[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+            }
+        }
+        let golden_h = load_golden_hidden_layer(&path, n + 1);
+        let golden_row = &golden_h[0..HIDDEN_SIZE]; // row0 = token 0
+        let cos = cosine(&ln, golden_row);
+        let norm: f64 = ln.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        eprintln!("  layer{n} vs golden h{} row0: cos={:.4} norm={:.3}", n+1, cos, norm);
+    }
 }
 
 #[test]

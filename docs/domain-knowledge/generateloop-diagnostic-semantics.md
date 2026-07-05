@@ -295,6 +295,39 @@ Python 参考逐算子对比 (tests/e2e_alignment/diag_layer0_divergence.py + /t
 
 **下一步**: 看 v_proj GemmSpec (trans_b/m/n/k) + GEMM emit 逻辑, 对比 q_proj/k_proj (同 GEMM 但被 slot 覆盖无法直接验证).
 
+## ★ 根因定位: emit_gemm_trans_b_inline 混合精度 K维 stride bug (2026-07-06)
+
+**文件**: `gllm-kernels/src/compiler/codegen/vm/gemm_emit.rs:1305-1422` (`emit_gemm_trans_b_inline`)
+
+**Bug**: 混合精度 GEMM (a=F32 激活, b=BF16 权重) trans_b 路径, A 和 B 共享同一个 K维循环 offset (p_off), 但 p_off 步长 = `k_step = lanes * b_elem` (line 1345).
+
+```rust
+let k_step = lanes * b_elem;  // line 1345: 8 * 2 = 16 bytes (BF16)
+// ...
+prog.emit_loop(BoundExpr::Const(k_vecs), k_step, |prog, _p_ctr, p_off| {
+    // A load: offset = m_off*a_row_stride + p_off  ← p_off 步进 16 bytes
+    // B load: offset = j_off*j_b_stride_ratio + p_off  ← p_off 步进 16 bytes
+});
+```
+
+**问题**: A 是 F32 (a_elem=4), 需要 stride = lanes*a_elem = 8*4 = 32 bytes (8 个 F32 元素).
+但 p_off 步进 k_step = lanes*b_elem = 16 bytes (BF16). A 每次 load 只前进 16 bytes = 4 个 F32 元素,
+**漏读一半 K 维元素 + 读取错位** → 输出 cos≈0 (正交).
+
+**数值验证**:
+- SmolLM2 v_proj: k=576, lanes=8 (W256), a_elem=4 (F32), b_elem=2 (BF16)
+- k_step = 8*2 = 16 bytes; A 应步进 8*4 = 32 bytes
+- A 读 byte 0,16,32,... 应读 byte 0,32,64,... → 漏一半 + 错位
+- gllm v_proj cos=0.0333 (正交), norm 0.766 vs ref 0.537 (偏大因 FMA 累加错位数据)
+
+**影响范围**: 所有 trans_b=true + a_elem≠b_elem 的混合精度 GEMM (BF16 权重 + F32 激活).
+SmolLM2: q_proj/k_proj/v_proj/o_proj/gate_proj/up_proj/down_proj 全受影响 (trans_b=true, BF16 权重).
+解释: layer 0 全 30 层发散, 所有 GEMM 算子都错.
+
+**根治方案**: A 和 B 用独立 K维 offset (a_p_off 步进 lanes*a_elem, b_p_off 步进 lanes*b_elem), 或 p_off 用元素索引 (非字节) 各自乘 elem_bytes.
+
+**BCE 横扫**: 此 bug 影响所有混合精度 trans_b GEMM, 需全项目横扫确认 + 回归测试.
+
 ## 权重字节验证全 GEMM（路C 扩展，2026-07-06）
 
 gllm weight_blob (325653120 bytes) 中搜索 golden 权重:
