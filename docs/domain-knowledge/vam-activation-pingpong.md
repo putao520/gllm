@@ -96,3 +96,22 @@ match source {
 - `smollm2-135m-architecture.md`: SmolLM2 架构事实
 - `cuda-driver-api.md`: GPU launch（host/device ptr）
 - 本文件: VAM 层间 activation 语义（CPU/GPU 共用）
+
+## 重大陷阱：execute_encode_at_layer 读 offset 0 = ActivationPing 全零（architect sessionId aa9aee8e）
+
+**根因**：execute_encode_at_layer（executor_ops.inc.rs:801-812）读 scratchpad offset 0（ActivationPing），但 layer hidden 写在 ActivationPong（activation_b_offset）。读从未写入的 ping buffer → 全零。
+
+**实测**：diag_step8 encode_to_layer(LastToken) 30 层全 cosine=0.0000（全零返回值）。
+
+**修复**：读 `mega.buffer_layout.activation_b_offset` 而非 0。但需先验证 ping/pong 奇偶交替：
+- 情况甲：early-exit 固定输出在 activation_b → 固定读 activation_b_offset
+- 情况乙：ping/pong 每层 swap（i 写 buf[(i+1)%2]）→ 第 N 层输出 buffer 取决于 N 奇偶
+
+**判别**：读 mega_kernel_emit.rs 层循环 + early-exit 分支确认。
+
+**AI 易误判**：
+- ❌ "encode_to_layer 返回全零 = layer 处理错" → 错，是读错 offset（ping 而非 pong）
+- ❌ "读 offset 0 拿 layer 输出" → 错，offset 0 是 ActivationPing（input），output 在 Pong
+- ✅ layer output 在 ActivationPong（activation_b_offset），按奇偶可能交替
+
+**与 logits 发散的关系**：此 bug 是诊断工具 bug（execute_encode_at_layer 读错），**非 logits 发散根因**（diagnostic_prefill_logits 读 logits_scratch_offset 是对的，cosine=-0.465 真信号）。但此 bug 阻断了逐层 bisection 诊断。
