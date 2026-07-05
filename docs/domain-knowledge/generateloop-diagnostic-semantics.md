@@ -1,0 +1,94 @@
+# GenerateLoop 诊断语义资料库（C-9，堵 AI 幻觉）
+
+> 来源：gllm mega_kernel_emit + executor_ops + topology.rs 源码 + Step7 实测（确定性）
+> 建库触发：8 轮 CPU BUG 诊断反复被诊断工具语义错位误导（第6轮架构师纠错 + Step7 证实）
+> 最后验证：2026-07-05
+
+## 核心陷阱：GenerateLoop M=1 让诊断测试读多行错位
+
+### GenerateLoop 每迭代只处理 1 个 token
+- decoder 模型（SmolLM2/Llama/Qwen）→ `is_generate=true` → `LoopTopology::GenerateLoop`
+- `seq_len_source = LoopCounterPlusOne`：每迭代 seq_len = gen_counter+1
+- Gather/GEMM/lm_head 每迭代 M=1（只 1 token）
+- **输出写 row 0（覆盖），不按 [seq_len, ...] 累加写**
+
+### 诊断 harness 读多行 = 错位（第6轮架构师纠错）
+| 错位类型 | harness 错法 | 伪信号 |
+|---------|------------|--------|
+| embedding 读多行 | `sp.read_dtype_aware(emb_off, seq*hidden)` 读 row0-4 | row1-4=0，cosine 低 |
+| logits 读多行 | `read_dtype_aware(logits_off, seq*vocab)` | row1-4=0，cosine 低 |
+| encode_at_layer 读多行 | `read_dtype_aware(0, seq*hidden)` | 同上 |
+| 逐层 hidden 读多行 | encode_to_layer(N) 返回层输出，读多行 | 全错位 |
+
+### 实测确证（Step7，commit 829ae2f6）
+单 token prefill（方法 A）重建 embedding：
+```
+token 0-4 各自 cosine vs golden hidden_layer_0 row i = 1.0000
+```
+**embedding 完全正确**，之前 0.13/0.67 是 harness 读多行错位伪信号。
+
+## 正确诊断方法（语义对齐）
+
+### 方法 A: 单 token prefill 重建（embedding/中间层）
+对每位置 i：
+1. 用前缀 `&tokens[0..=i]` 调 `diagnostic_prefill_scratchpad`
+2. 读 row 0（最后 token = token i 的输出）
+3. 拼 [seq, hidden] vs golden hidden_layer_i
+- **适用**：layer 0 ops（embedding/gather/q_proj）不依赖 KV cache，单 token 可重建
+- **限制**：attention 跨 token 依赖 KV cache，深层需逐 token 累积
+
+### 方法 B: 单次调用只比 row0 vs golden 最后 token
+- 读 gllm row0（最后 prompt token 的输出）
+- 比 golden hidden_layer_{N} 的最后行（row seq_len-1）
+- 单 token 验证（弱，但语义对齐）
+
+### logits 读取（ARCH-DECODE-LOGITS-ROW0，BCE-20260629-002）
+- decode 内核把 last-token logits 写 **row 0**（非 row[prompt_len-1]）
+- `diagnostic_prefill_logits` 读 row 0 → **正确**（这个信号可信）
+- 读 row[prompt_len-1] = 读未写零内存 → 错
+
+## encode_at_layer 的 session_position 复用（executor_ops.inc.rs:762）
+```rust
+// session_position 参数复用为 anchor_layer
+session_position: anchor_layer,  // anchor layer N
+```
+- anchor_layer 通过 session_position 传给 mega-kernel
+- 内核在第 N 层 early-exit，写该层 hidden 到 scratchpad
+- **但仍是 GenerateLoop M=1**，只 row0 有效
+- `read_dtype_aware(0, seq*hidden)` 读多行 → 错位
+
+## AI 易误判点
+
+| ❌ 误判 | ✅ 正解（源码 + 实测证明） |
+|--------|---------|
+| prefill 一次写 [seq, hidden] | GenerateLoop 每迭代 M=1 覆盖 row0 |
+| 诊断读 row0-4 比对 golden 多行 | 错位，row1-4=0 是设计 |
+| encode_at_layer 返回完整 [seq, hidden] | 返回 M=1 输出，只 row0 有效 |
+| embedding cosine 低 = embedding bug | Step7 证 embedding 100% 对，是 harness 错位 |
+| logits 在 row[prompt_len-1] | ARCH-DECODE-LOGITS-ROW0：写 row0 |
+| 单 token prefill 不能重建（缺 KV） | layer 0 ops 无 KV 依赖，可重建 |
+
+## 与 BUG 诊断的关系
+- ✅ embedding 对（Step7 方法 A）
+- ✅ dtype 对（D0）
+- ✅ 残差流映射对（H4）
+- ✅ row1-4 零是设计（topology 库）
+- 🔄 **logits cosine=-0.465 是真信号**（diagnostic_prefill_logits 读 row0 正确）
+- 根因在 logits 计算路径（final norm / lm_head / 某 layer GEMM），需用语义对齐方法诊断
+
+## 正确的逐层 bisection（用方法 A 累积）
+1. layer 0：单 token prefill（prefix=[tok0]）读 row0 vs golden hidden_layer_1 row0
+2. layer N：prefix=tokens[0..N+1]，读 row0 vs golden hidden_layer_{N+1} row(seq_len-1)
+3. 注意：attention 有 KV cache 累积，单 token prefill 的 prefix 含历史 token
+4. 找首个 cosine<0.99 的层
+
+## 关键代码位置
+- `executor_ops.inc.rs:805-810`: encode_at_layer 读 `read_dtype_aware(0, seq*hidden)`（多行陷阱）
+- `executor_ops.inc.rs:121-134`: ARCH-DECODE-LOGITS-ROW0 注释
+- `executor_ops.inc.rs:762`: session_position 复用 anchor_layer
+- `tests/test_diag_cpu_bisect.rs diag_step7`: 方法 A 实现（实测 cosine 1.0000）
+
+## 与其他资料库关系
+- `mega-kernel-topology.md`: GenerateLoop M=1 根因（本库是其诊断应用）
+- `vam-activation-pingpong.md`: layer loop ActivationPing/Pong
+- 本文件: 诊断 harness 怎么避开 M=1 错位陷阱
