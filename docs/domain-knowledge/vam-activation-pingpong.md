@@ -103,15 +103,25 @@ match source {
 
 **实测**：diag_step8 encode_to_layer(LastToken) 30 层全 cosine=0.0000（全零返回值）。
 
-**修复**：读 `mega.buffer_layout.activation_b_offset` 而非 0。但需先验证 ping/pong 奇偶交替：
-- 情况甲：early-exit 固定输出在 activation_b → 固定读 activation_b_offset
-- 情况乙：ping/pong 每层 swap（i 写 buf[(i+1)%2]）→ 第 N 层输出 buffer 取决于 N 奇偶
+**修复尝试失败**（2026-07-06 实测）：读 activation_a_offset(=0)/activation_b_offset(=9437184) 两 buffer 都零。
 
-**判别**：读 mega_kernel_emit.rs 层循环 + early-exit 分支确认。
+**更深发现**：layer output 根本不写到 activation buffer。EarlyExit（lower_op.inc.rs:894）`Exit(input_ptr)` 的 input_ptr 是 layer input tensor 指针（如 embedding 在 Intermediate 区 offset=37748736），不是 activation buffer。EarlyExit 语义是"跳转/返回 input_ptr"，不是"写 output 到 activation"。
+
+**实测数据**（diag_step8 修复后）:
+```
+[ENCODE-AT-LAYER-DIAG] anchor=0 seq_len=5 hidden=576 ping_off=0 pong_off=9437184 scratchpad.len=249233408 compute_dtype=F32 target=Cpu
+ping_off=0, pong_off=9437184 两 buffer 都零 (nonzero=0)
+```
+
+**结论**：架构师"layer hidden 在 ActivationPong"假设不成立。需重新设计诊断路径：
+- EarlyExit 的 input_ptr 指向什么 tensor？layer input 还是 output？
+- GprBranchAction::Exit 语义是什么（跳转/返回/写 buffer）？
+- 需查 Exit action 的 x86 lowering 确认输出落点
 
 **AI 易误判**：
-- ❌ "encode_to_layer 返回全零 = layer 处理错" → 错，是读错 offset（ping 而非 pong）
-- ❌ "读 offset 0 拿 layer 输出" → 错，offset 0 是 ActivationPing（input），output 在 Pong
-- ✅ layer output 在 ActivationPong（activation_b_offset），按奇偶可能交替
+- ❌ "encode_to_layer 返回全零 = layer 处理错" → 错，是读错 offset
+- ❌ "layer hidden 在 ActivationPong" → 错（架构师假设），EarlyExit 返回 input_ptr 不写 activation
+- ❌ "读 offset 0 拿 layer 输出" → 错，offset 0 是 ActivationPing
+- ✅ 需查 GprBranchAction::Exit lowering 确定输出落点
 
-**与 logits 发散的关系**：此 bug 是诊断工具 bug（execute_encode_at_layer 读错），**非 logits 发散根因**（diagnostic_prefill_logits 读 logits_scratch_offset 是对的，cosine=-0.465 真信号）。但此 bug 阻断了逐层 bisection 诊断。
+**与 logits 发散的关系**：此 bug 是诊断工具 bug（execute_encode_at_layer 读错），**非 logits 发散根因**（diagnostic_prefill_logits 读 logits_scratch_offset 正确，cosine=-0.465 真信号）。但阻断逐层 bisection。
