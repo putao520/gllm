@@ -3153,6 +3153,48 @@ residualEvidence: |
 status: 根治 | residual: 0
 ```
 
+## BCE-20260706-SPEC-DTYPE-F32-HARDCODE (Spec struct dtype 字段硬编码 F32, 宪法 -1 违宪嫌疑, 待 architect 评审)
+
+> 用户洞察："RmsNorm 用 DType::F32 这又是一个违宪的点，我们几乎所有的 BUG 点都来自代码违宪,写死量化类型"。
+> 横扫发现：graph_impl.inc.rs 在手边有 `dt = ir.dtype`（顺从权重 storage dtype）的情况下，对 NormSpec/AttentionSpec 的 dtype 字段写死 `DType::F32`，而 GemmSpec.dtype 用 `dt`（顺从）。看似不一致，但深入分析发现语义分层。
+
+### 横扫范围（生产路径，排除 test fixture）
+
+| 文件 | 行 | Op | dtype | 判定 |
+|------|----|----|------|------|
+| gllm-kernels graph_impl.inc.rs:380/476 | RmsNorm | F32 | 当前正确（输入激活 F32） |
+| gllm-kernels graph_impl.inc.rs:577/635 | LayerNorm | F32 | 当前正确（输入激活 F32） |
+| gllm-kernels graph_impl.inc.rs:609 | MultiHeadAttention | F32 | **违宪嫌疑**（输入 Q/K/V = dt=BF16，但 Spec 写 F32）|
+| gllm build_graph.inc.rs:693/1316/1523 | MultiHeadAttention | F32 | **违宪嫌疑**（同上）|
+| gllm-kernels graph_impl.inc.rs:388/396/404/... | Gemm | dt | ✅ 顺从 |
+
+test fixture（topology.rs:302+, fusion_group_emit.rs:1454+, graph_geometry.rs, semantics.rs, dtype_chain.rs 测试等）的 F32 硬编码不计违宪（测试可控）。
+
+### 语义分层（关键区分，非纯不一致）
+
+- **GemmSpec.dtype = dt(BF16)**：表达"Gemm 算 BF16 权重"（权重是 BF16）。lowering 的 elem_bytes 用 spec.dtype 算权重步长。✅
+- **NormSpec.dtype = F32**：表达"Norm 算 F32 激活"（激活是 F32，混合精度 A=F32+B=BF16）。lowering 的 elem_bytes 用 spec.dtype 算激活步长。**当前正确**（激活 F32），但对 NVFP4/纯 BF16 激活会错。
+- **AttentionSpec.dtype = F32**：Attention 输入 Q/K/V = GemmSpec 输出 = dt(BF16)，但 Spec 写 F32。lowering `elem_bytes = F32.size_bytes()=4`（lower_op.inc.rs:1395），而 Q/K/V 实际 BF16(2 字节) → **步长错乱嫌疑**。
+
+### 待 architect 评审的 3 点
+
+1. **NormSpec.dtype=F32 是否违宪**：当前对 SmolLM2 正确（激活 F32），但宪法 -1 要求"不预设精度立场"。根治方向：NormSpec.dtype 应从其输入张量 dtype 推导（lowering 时 op.inputs[0].dtype），而非 graph 构造时写死。这是范式级改动（Spec struct dtype 字段语义重定义）。
+2. **AttentionSpec.dtype=F32 是否真 bug**：SmolLM2 CPU E2E 已 pass（argmax=253），说明要么 Attention lowering 没真用 spec.dtype 算步长（用了别的源），要么 Q/K/V 实际是 F32（graph tensor dtype 与 GemmSpec.dtype=dt 不一致？）。需运行时插桩确认 AttentionSpec.dtype 在 lower_op.inc.rs:1395/1488/1630 的真实消费。
+3. **根治方案**：Spec.dtype 字段在 lowering 时从 op.inputs[i].dtype 推导（lower_op 已有 graph 访问权），graph 构造时不写死。比改 graph_impl 的 F32→dt 更彻底（dt 也假设所有权重同 dtype，对混合精度会错）。
+
+### 与 BCE-20260705-DERIVE-COMPUTE-DTYPE 关系
+
+同类扩散：derive_compute_dtype 精度预设违宪（函数级 match arm）已根治（阶段1+3.1），本类是 Spec struct 字段级精度预设。两者都是"代码写死精度立场"，宪法 -1 同源。阶段 2（KV cache dtype 主权）的 AttentionSpec.dtype 修正是本类的子集。
+
+### KB 位置
+
+- `docs/domain-knowledge/dtype-propagation.md`：BF16 传播链（WidenCompute），NormSpec.dtype 语义参考
+- `docs/domain-knowledge/derive-compute-dtype-unconstitution.md`：阶段 2 原方案（AttentionSpec.dtype 从 k_out 推导），本类扩展到所有 Spec.dtype
+
+归因时间: 2026-07-06
+status: 违宪嫌疑待 architect 评审 + 运行时验证 | residual: 8 处生产违宪（5 graph_impl + 3 build_graph）待根治方案确认后批量 codemod
+```
+
 ### 根治状态
 
 `gemm_emit.rs:1345-1401` emit_gemm_trans_b_inline:
