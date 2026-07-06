@@ -3176,10 +3176,26 @@ test fixture（topology.rs:302+, fusion_group_emit.rs:1454+, graph_geometry.rs, 
 - **NormSpec.dtype = F32**：表达"Norm 算 F32 激活"（激活是 F32，混合精度 A=F32+B=BF16）。lowering 的 elem_bytes 用 spec.dtype 算激活步长。**当前正确**（激活 F32），但对 NVFP4/纯 BF16 激活会错。
 - **AttentionSpec.dtype = F32**：Attention 输入 Q/K/V = GemmSpec 输出 = dt(BF16)，但 Spec 写 F32。lowering `elem_bytes = F32.size_bytes()=4`（lower_op.inc.rs:1395），而 Q/K/V 实际 BF16(2 字节) → **步长错乱嫌疑**。
 
+### 运行时消费确认（2026-07-06 源码追踪）
+
+`lower_op.inc.rs lower_attention_v2:1488`：
+```rust
+let dtype = spec.dtype.to_quant_precision();  // F32
+// :1517
+let kv_row_stride = spec.geometry.num_kv_heads * spec.geometry.head_dim * dtype.elem_bytes();
+// SmolLM2: 3 * 64 * 4(F32) = 768
+```
+
+**AttentionSpec.dtype=F32 真实用于 kv_row_stride 步长计算**。Q/K/V 张量是 BF16（dt，elem_bytes=2），但 stride 用 F32(4)。
+
+**当前自洽原因**：KV cache buffer 用 compute_dtype=F32 分配（executor_builder.rs:97 `let kv_dtype = geometry.compute_dtype`），所以 KV cache 行宽 = 768(F32)，stride 768 匹配——当前自洽但**主权错位**（KV cache dtype 应顺从 K/V 输出张量，非 compute_dtype）。
+
+**阶段 2 联动铁证**：若阶段 2 把 KV cache dtype 改成 BF16（顺从 K/V 输出），buffer 行宽变 384，但 AttentionSpec.dtype 仍 F32 → kv_row_stride=768 → **stride 不一致（768 vs 384）越界**。KB 阶段 2 警告"单独改 KV cache dtype 引入 stride 不一致"的精确机制确认：AttentionSpec.dtype 必须与 KV cache dtype 同步。
+
 ### 待 architect 评审的 3 点
 
 1. **NormSpec.dtype=F32 是否违宪**：当前对 SmolLM2 正确（激活 F32），但宪法 -1 要求"不预设精度立场"。根治方向：NormSpec.dtype 应从其输入张量 dtype 推导（lowering 时 op.inputs[0].dtype），而非 graph 构造时写死。这是范式级改动（Spec struct dtype 字段语义重定义）。
-2. **AttentionSpec.dtype=F32 是否真 bug**：SmolLM2 CPU E2E 已 pass（argmax=253），说明要么 Attention lowering 没真用 spec.dtype 算步长（用了别的源），要么 Q/K/V 实际是 F32（graph tensor dtype 与 GemmSpec.dtype=dt 不一致？）。需运行时插桩确认 AttentionSpec.dtype 在 lower_op.inc.rs:1395/1488/1630 的真实消费。
+2. **AttentionSpec.dtype=F32 真实消费确认**：已确认用于 kv_row_stride（lower_op.inc.rs:1517）。当前自洽（KV cache F32），但主权错位。根治须与 KV cache dtype 同步（阶段 2 联动）。
 3. **根治方案**：Spec.dtype 字段在 lowering 时从 op.inputs[i].dtype 推导（lower_op 已有 graph 访问权），graph 构造时不写死。比改 graph_impl 的 F32→dt 更彻底（dt 也假设所有权重同 dtype，对混合精度会错）。
 
 ### 与 BCE-20260705-DERIVE-COMPUTE-DTYPE 关系
@@ -3191,8 +3207,8 @@ test fixture（topology.rs:302+, fusion_group_emit.rs:1454+, graph_geometry.rs, 
 - `docs/domain-knowledge/dtype-propagation.md`：BF16 传播链（WidenCompute），NormSpec.dtype 语义参考
 - `docs/domain-knowledge/derive-compute-dtype-unconstitution.md`：阶段 2 原方案（AttentionSpec.dtype 从 k_out 推导），本类扩展到所有 Spec.dtype
 
-归因时间: 2026-07-06
-status: 违宪嫌疑待 architect 评审 + 运行时验证 | residual: 8 处生产违宪（5 graph_impl + 3 build_graph）待根治方案确认后批量 codemod
+归因时间: 2026-07-06 (横扫) / 2026-07-06 (运行时消费确认)
+status: 违宪嫌疑待 architect 评审 (2 点: NormSpec 范式根治 + Spec.dtype 从 inputs 推导) | residual: 8 处生产违宪(5 graph_impl + 3 build_graph) + 阶段2 联动(AttentionSpec.dtype 须与 KV cache dtype 同步, lower_op.inc.rs:1517 kv_row_stride 确认)
 ```
 
 ### 根治状态
