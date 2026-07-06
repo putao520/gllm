@@ -3098,3 +3098,110 @@ status: 已归因 (源码铁证) | residual: 待实现 CmpEq+Exit lowering
 
 - 高 (诊断工具修复): 实现 CmpEq+Exit 让 encode_to_layer 工作, 才能逐层 bisection 定位发散层
 - BCE 横扫: 检查其他 GprBranchAction::Exit 用法是否也受影响
+
+---
+
+## BCE-20260706-MIXED-GEMM-STRIDE — 混合精度 trans_b GEMM K维 stride bug (A/B 共享 offset)
+
+```yaml
+patternId: BCE-20260706-MIXED-GEMM-STRIDE
+title: 混合精度 trans_b GEMM A/B 共享 K维 offset 致 A 漏读错位
+layer: 设计
+codePattern:
+  - "emit_gemm_trans_b_inline: A 和 B 共享 K维循环 p_off, p_off 步长=lanes*b_elem"
+  - "a=F32 (a_elem=4) 需 stride=lanes*a_elem=32, 但 p_off 步进 16 (BF16) → A 漏读一半"
+triggerCondition:
+  - "trans_b=true + a_elem≠b_elem 混合精度 GEMM (BF16 权重 + F32 激活)"
+  - "SmolLM2 q/k/v/o/gate/up/down_proj 全受影响"
+detectionSignatures:
+  literal:
+    - "let k_step = lanes \\* b_elem;.*prog.emit_loop.*k_step.*VecLoad.*LoopOffset\\(p_off\\)"
+sameClassCriterion:
+  - "trans_b GEMM 中 A 和 B 用同一 byte offset 但 a_elem≠b_elem"
+fixTemplate:
+  - "A 的 K维 offset 用 p_off * a_b_ratio (a_elem/b_elem), tail 独立起始 tail_base_a"
+regressionAssertion:
+  - "混合精度 trans_b GEMM v_proj 输出 cos=1.0 vs Python 参考 (normed1@w_v^T)"
+rootCause: gllm-kernels/src/compiler/codegen/vm/gemm_emit.rs:1305 emit_gemm_trans_b_inline
+fixCommit: 04a8b559
+residualEvidence: |
+  - v_proj cos: 0.0333 → 1.0000
+  - layer0 capture vs golden h1: 0.0002 → 1.0000
+  - CPU E2E cosine: -0.465 → 0.823 (此 bug 修复后, 根因2 修复后达 1.0)
+  - 7040 kernels tests passed 0 failed
+归因时间: 2026-07-06
+status: 根治 | residual: 0
+```
+
+### 根治状态
+
+`gemm_emit.rs:1345-1401` emit_gemm_trans_b_inline:
+- `a_b_ratio = a_elem/b_elem` (需 b_elem|a_elem, 不整除回退 1)
+- A vec load offset: `Mul(LoopOffset(p_off), a_b_ratio)` (补回 F32 比 BF16 宽 2x)
+- A tail: `tail_base_a = k_vecs*lanes*a_elem`, `p_byte_a = tail_base_a + t*a_elem`
+- B 不变 (p_off 对 B 正确)
+
+BCE 横扫: 所有 trans_b GEMM 路径 (emit_gemm_trans_b_inline) 已修. 非 trans_b 路径 (emit_gemm_blis_inline) 不受影响 (trans_b=false 时 A/B 同 dtype).
+
+---
+
+## BCE-20260706-ACTSWAP-INPUT-ALIAS — ActivationSwap input_tid 走 Intermediate 致 layer1+ 读 embedding
+
+```yaml
+patternId: BCE-20260706-ACTSWAP-INPUT-ALIAS
+title: activation_alias.input_tid (gather 输出) 被强制 Intermediate 致 ActivationSwap 失效
+layer: 设计
+codePattern:
+  - "context.inc.rs build(): gather 输出强制 Intermediate{offset}, input_tid=embedding 走 Intermediate"
+  - "layer hidden input 读 Intermediate{固定offset}, 不随 ActivationSwap 切换"
+triggerCondition:
+  - "decoder 模型 GenerateLoop + activation_alias (input_tid = gather 输出)"
+  - "SmolLM2/Llama/Qwen 等 decoder"
+detectionSignatures:
+  literal:
+    - "m.insert\\(out_tid, TensorPtrSource::Intermediate.*// Gather output"
+  structural:
+    - "activation_alias.input_tid 映射非 ActivationPing"
+sameClassCriterion:
+  - "层循环 input tensor 读固定 offset (非 ping/pong), ActivationSwap 无法切换"
+fixTemplate:
+  - "if let Some((in_tid, _)) = &topology.layer_activation_alias { m.insert(*in_tid, ActivationPing); }"
+regressionAssertion:
+  - "逐层 capture layer0-29 vs golden 全 cos=1.0"
+  - "CPU E2E cosine=1.000000, argmax=253 (golden)"
+rootCause: gllm-kernels/src/compiler/codegen/vm/plan_lower/context.inc.rs build()
+fixCommit: b7e49f15
+residualEvidence: |
+  - 逐层 capture: layer1 cos 0.27 → 1.0000, layer2-4 全 1.0
+  - CPU E2E: cosine 0.823 → 1.000000, argmax 14423 → 253, test PASS
+  - 44377 gllm lib tests + 7040 kernels tests passed 0 failed
+归因时间: 2026-07-06
+status: 根治 | residual: 0
+```
+
+### 根治状态
+
+`context.inc.rs build()` (alloc.tensor_sources 分支):
+```rust
+if let Some((in_tid, _out_tid)) = &topology.layer_activation_alias {
+    m.insert(*in_tid, TensorPtrSource::ActivationPing);  // 覆盖 gather 的 Intermediate
+}
+```
+
+效果: gather 写 embedding → ping, layer0 读 ping=embedding, ActivationSwap 后 layer1 读 ping=layer0_out.
+
+**副作用**: `diagnostic_tensor_offset("embedding")` 返回的 offset 不再是 embedding 实际位置 (embedding 写 ping buffer). 诊断测试需改读 ping offset. 生产推理正确.
+
+**BCE-20260629-005 修订**: 旧 BCE-005 排除 gather 输出 (强制 Intermediate) 是为防 NaN, 但导致 input_tid 不走 ping. 现修复让 input_tid 走 ActivationPing (gather 写 ping), BCE-005 的 NaN 问题未复现 (gather 在循环前写 ping, layer0 读到正确 embedding).
+
+---
+
+## 总结: SmolLM2 CPU logits 发散 BUG 完整根治 (2026-07-06)
+
+两个根因, 顺序修复:
+1. **BCE-20260706-MIXED-GEMM-STRIDE** (04a8b559): 混合精度 trans_b GEMM A/B 共享 K维 offset → A 漏读错位. 修复: A 用 p_off*a_b_ratio. layer0 cos 0→1.0, E2E cosine -0.465→0.823.
+2. **BCE-20260706-ACTSWAP-INPUT-ALIAS** (b7e49f15): activation_alias.input_tid 走 Intermediate → ActivationSwap 失效, layer1+ 读 embedding. 修复: input_tid 强制 ActivationPing. 逐层 cos 全 1.0, E2E cosine→1.000000, argmax=253.
+
+**最终验证**: CPU E2E `cpu_e2e_smollm2_135m_logits_alignment` PASS (cosine=1.000000, mad=0.008957). 44377+7040 tests 无回归.
+
+诊断方法论沉淀: GLLM_SINGLE_LAYER/GLOBAL_DEBUG_LAYERS + named_offsets 中间张量读 + Python 参考逐算子对比, 定位首个发散算子 (v_proj GEMM), 再用 GLLM_DEBUG_LAYERS=2 定位层间传递 bug (ActivationSwap).

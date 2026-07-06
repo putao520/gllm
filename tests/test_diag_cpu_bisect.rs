@@ -857,3 +857,64 @@ fn diag_step14_ping_pong_buffers() {
     eprintln!("capture layer0 (单token) first5={:?} norm={:.3}", &l0_cap[0..5],
         l0_cap.iter().map(|x| x*x).sum::<f32>().sqrt());
 }
+
+// ─── 回归测试 (BCE-20260706) ─────────────────────────────────────────
+// 两个根因的回归断言: GEMM stride + ActivationSwap alias.
+// 不用 env var (避免 test 间 state 泄露), 用 capture 读 layer0/layer1.
+
+#[test]
+fn regression_bce_20260706_mixed_gemm_stride() {
+    // BCE-20260706-MIXED-GEMM-STRIDE: 混合精度 trans_b GEMM A/B K维 offset 独立.
+    // 回归: layer0 capture (含 v_proj GEMM 输出) vs golden h1 cos > 0.99.
+    // bug 复发时 layer0 cos ≈ 0 (v_proj 正交).
+    eprintln!("\n=== REGRESSION: BCE-20260706-MIXED-GEMM-STRIDE ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    let single = vec![all_tokens[0]];
+    let cap_off = client.diagnostic_tensor_offset("layer_capture").expect("cap");
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    let elem = 4usize;
+    // layer0 capture (cap_off + 0)
+    let mut l0 = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[cap_off + h*elem..cap_off + (h+1)*elem];
+        l0[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    let golden_h1 = load_golden_hidden_layer(&path, 1);
+    let golden_row0 = &golden_h1[0..HIDDEN_SIZE];
+    let cos = cosine(&l0, golden_row0);
+    eprintln!("layer0 vs golden h1 row0 cos = {:.4}", cos);
+    assert!(cos > 0.99, "layer0 cos {} < 0.99 — GEMM stride bug 回归 (BCE-20260706-MIXED-GEMM-STRIDE)", cos);
+}
+
+#[test]
+fn regression_bce_20260706_actswap_input_alias() {
+    // BCE-20260706-ACTSWAP-INPUT-ALIAS: layer1+ 读上一层输出 (非 embedding).
+    // 回归: 逐层 capture layer1 vs golden h2 cos > 0.99.
+    // bug 复发时 layer1 读 embedding, cos ≈ 0.27.
+    eprintln!("\n=== REGRESSION: BCE-20260706-ACTSWAP-INPUT-ALIAS ===");
+    std::io::stderr().flush().ok();
+    let path = golden_path();
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    let single = vec![all_tokens[0]];
+    let cap_off = client.diagnostic_tensor_offset("layer_capture").expect("cap");
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    let elem = 4usize;
+    // layer1 (capture index 1) vs golden h2 row0
+    let mut l1 = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let o = cap_off + 1 * cap_stride + h*elem;
+        let b = &sp.data[o..o+elem];
+        l1[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    let golden_h2 = load_golden_hidden_layer(&path, 2);
+    let golden_row0 = &golden_h2[0..HIDDEN_SIZE];
+    let cos = cosine(&l1, golden_row0);
+    eprintln!("layer1 vs golden h2 row0 cos = {:.4}", cos);
+    assert!(cos > 0.99, "layer1 cos {} < 0.99 — ActivationSwap alias bug 回归 (BCE-20260706-ACTSWAP-INPUT-ALIAS)", cos);
+}
