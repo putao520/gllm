@@ -222,3 +222,30 @@ derive_compute_dtype 改 BF16 后，attention spec.dtype（build_graph.inc.rs:69
 - `dtype-propagation.md`：WidenCompute 是 JIT 层正确 widen，本库指出 loader 层 dequantize 是违宪（非 WidenCompute）
 - `smollm2-135m-architecture.md`：SmolLM2 BF16 权重事实（本库是违宪检测的输入）
 - 本文件：derive_compute_dtype 硬编码 BF16→F32 降级违宪铁证
+
+## 阶段 3.1 方案修正（2026-07-06，C-9 自我修正）
+
+**原方案问题**：KB §阶段 3.1 说"TurboQuant 开关从 `compute_dtype != F32` 改成 `storage 是否量化`"。但实测发现 `derive_storage_dtype`（graph_geometry.rs:192-215）只返回浮点 {F32, BF16, F16}，量化类型（U8/F8/F6/F4）被 `_ => {}` 忽略（测试 `storage_dtype_ignores_quantized_weight_dtypes` line 964-978 确认是设计行为）。所以"storage 是否量化"无法从 storage_dtype 判断——storage_dtype 值域不含 INT 量化。
+
+**SPEC 契约确认**（00-PHILOSOPHY.html:157,181-188）：
+- "原生混合精度路径处理模型原始 dtype，TurboQuant 处理额外量化"
+- TurboQuant 量化 = "模型使用 TurboQuant 量化格式（INT4/FP4/FP6）"
+- 即：BF16 权重（原生浮点）不触发 TurboQuant；INT4/FP4/FP6 权重才触发
+
+**当前 `compute_dtype != F32` 触发逻辑错**：
+- BF16 权重 + NativeBf16 硬件 → compute=BF16 → 误触发（BF16 是原生浮点不是 TurboQuant 量化）
+- 当前 i9 SimdAssisted → compute=F32 → 巧合不触发（隐藏 bug）
+
+**修正方案 B（architect infra 不可用，KB+SPEC 双源决策）**：
+- `GraphDerivedGeometry`（graph_geometry.rs）新增 `is_weight_quantized: bool` 字段
+- `from_graph` 扫权重 tensor，统计是否有量化 dtype（U8/F8E4M3/F8E5M2/F6E3M2/F6E2M3/F4E2M1）→ 填字段
+- `default_for_simple` 填 `false`
+- TurboQuant 触发（executor_builder.rs:219）改成 `g.is_weight_quantized`（非 `compute_dtype != F32`）
+- **不碰 derive_storage_dtype**（隔离，下游 KV cache dtype 不受影响）
+
+**为何选 B 不选 A/C**：
+- 方案 A（修 derive_storage_dtype 识别量化）：影响下游 KV cache dtype，回归面大
+- 方案 C（从 ctx/weight_dtypes 判断）：executor_builder 无法直接拿 weight_dtypes，需额外暴露，不隔离
+- 方案 B：geometry 加字段隔离 + SPEC 合规 + graph tensors 可探测
+
+**阶段 3.1 修正后 task**：跨仓（gllm-kernels geometry 加字段 + gllm executor_builder 改触发）。

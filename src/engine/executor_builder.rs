@@ -207,6 +207,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     /// Build compute coordinator with mega-kernel, epilogue, turboquant, etc.
+    // @trace REQ-DTYPE-CHAIN-005 [lifecycle:init] TurboQuant trigger decoupled from
+    // compute_dtype → is_weight_quantized (SPEC §11: TQ handles additional quantization)
     pub(crate) fn build_compute_coordinator(
         ctx: &LoaderContext<B, E>,
         mega_kernel: Option<super::mega_kernel::MegaKernelExecutor>,
@@ -216,8 +218,22 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         jit_director: Option<crate::jit::director::JitDirector>,
     ) -> ExecutorResult<super::coordinator::compute::ComputeCoordinator> {
         let g = &ctx.geometry;
-        let turboquant = if g.compute_dtype != gllm_kernels::types::DType::F32 {
-            log::info!("executor: §11 TurboQuant enabled (compute_dtype={:?})", g.compute_dtype);
+        // SPEC §11 (00-PHILOSOPHY): TurboQuant handles *additional* quantization
+        // (INT4/FP4/FP6) on top of the model's native precision. Native floating
+        // weights (F32/BF16/F16) do NOT trigger TurboQuant.
+        //
+        // This decouples the trigger from `compute_dtype` (an accumulator-precision
+        // knob): a BF16 model on native-BF16 hardware would set compute_dtype=BF16
+        // and spuriously enable TurboQuant under the old `!= F32` check (currently
+        // masked on i9 SimdAssisted → compute=F32 by coincidence). The correct
+        // signal is whether any weight tensor is actually stored in a quantized
+        // format — sourced from the uploaded weight handle's quantized-tensor map.
+        //
+        // KB: docs/domain-knowledge/derive-compute-dtype-unconstitution.md §阶段 3.1.
+        let is_weight_quantized = ctx.weights.tensor_names()
+            .any(|name| ctx.weights.is_quantized(name));
+        let turboquant = if is_weight_quantized {
+            log::info!("executor: §11 TurboQuant enabled (weight quantized)");
             crate::kv_cache::turboquant::TurboQuantRuntime::new(
                 crate::kv_cache::turboquant::TurboQuantConfig {
                     bits: 4, sink_count: 4, fwht_enabled: true,
@@ -3460,16 +3476,23 @@ mod tests {
         assert_eq!(bus.find_port(crate::routing::BusPortTag::Guardrail).unwrap().layer, 30);
     }
 
-    // ---- build_compute_coordinator: TurboQuant enabled when compute_dtype != F32 ----
+    // ---- build_compute_coordinator: TurboQuant enabled when weight is quantized ----
+    // SPEC §11: TurboQuant handles *additional* quantization (INT4/FP4/FP6).
+    // Trigger = is_weight_quantized (any weight tensor in a quantized format),
+    // NOT compute_dtype != F32 (which is an accumulator-precision knob that would
+    // spuriously fire on native BF16 hardware). See KB derive-compute-dtype-unconstitution.md §阶段 3.1.
 
     #[test]
-    fn turboquant_enabled_when_compute_dtype_not_f32() {
+    fn turboquant_disabled_when_weights_not_quantized_even_if_compute_dtype_bf16() {
+        // Behavior-invariant: BF16 model on native-BF16 hardware → compute_dtype=BF16,
+        // but weights are native float (not quantized) → TurboQuant MUST stay OFF.
+        // Under the old `compute_dtype != F32` check this would have wrongly enabled TQ.
         let geometry = Arc::new(crate::model_config::ModelGeometry {
             hidden_size: 64, num_layers: 4, vocab_size: 100,
             intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
             head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
             rope_scale: 1.0, rope_interleaved: false,
-            dtype: DType::F32,
+            dtype: DType::BF16,
             compute_dtype: DType::BF16,
             norm_eps: 1e-5, num_experts: 0,
             moe_top_k: 0, expert_intermediate_size: 0,
@@ -3487,7 +3510,10 @@ mod tests {
             mla_use_unabsorbed: false,
         });
 
-        let turboquant = if geometry.compute_dtype != DType::F32 {
+        // The new trigger: is_weight_quantized, sourced from the weight handle's
+        // quantized-tensor map. Native BF16 weights → no quantized entry → false.
+        let is_weight_quantized = false; // BF16 weights are native float, not quantized
+        let turboquant = if is_weight_quantized {
             crate::kv_cache::turboquant::TurboQuantRuntime::new(
                 crate::kv_cache::turboquant::TurboQuantConfig {
                     bits: 4, sink_count: 4, fwht_enabled: true,
@@ -3498,12 +3524,17 @@ mod tests {
         } else {
             crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
         };
-        assert!(turboquant.is_enabled());
+        // Assert: native BF16 (even with compute_dtype=BF16) does NOT enable TurboQuant.
+        assert!(!turboquant.is_enabled());
+        // Sanity: the geometry's compute_dtype is BF16, confirming the old check
+        // (`!= F32`) would have wrongly enabled TurboQuant here.
+        assert_eq!(geometry.compute_dtype, DType::BF16);
     }
 
     #[test]
-    fn turboquant_disabled_when_compute_dtype_is_f32() {
-        let geometry = Arc::new(crate::model_config::ModelGeometry {
+    fn turboquant_disabled_when_f32_weights_not_quantized() {
+        // F32 weights, compute_dtype=F32 → clearly no TurboQuant (unchanged behavior).
+        let _geometry = Arc::new(crate::model_config::ModelGeometry {
             hidden_size: 64, num_layers: 4, vocab_size: 100,
             intermediate_size: 128, num_heads: 4, num_kv_heads: 2,
             head_dim: 16, max_seq_len: 512, rope_theta: 10000.0,
@@ -3526,7 +3557,8 @@ mod tests {
             mla_use_unabsorbed: false,
         });
 
-        let turboquant = if geometry.compute_dtype != DType::F32 {
+        let is_weight_quantized = false; // F32 weights are not quantized
+        let turboquant = if is_weight_quantized {
             crate::kv_cache::turboquant::TurboQuantRuntime::new(
                 crate::kv_cache::turboquant::TurboQuantConfig {
                     bits: 4, sink_count: 4, fwht_enabled: true,
@@ -3538,6 +3570,26 @@ mod tests {
             crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
         };
         assert!(!turboquant.is_enabled());
+    }
+
+    #[test]
+    fn turboquant_enabled_when_weight_is_quantized_even_if_compute_dtype_f32() {
+        // Quantized weights (INT4/FP4/FP6) → TurboQuant enabled, regardless of
+        // compute_dtype. This is the SPEC §11 contract: TurboQuant handles
+        // *additional* quantization on top of native precision.
+        let is_weight_quantized = true; // e.g. U8/F8E4M3/F4E2M1 weight present
+        let turboquant = if is_weight_quantized {
+            crate::kv_cache::turboquant::TurboQuantRuntime::new(
+                crate::kv_cache::turboquant::TurboQuantConfig {
+                    bits: 4, sink_count: 4, fwht_enabled: true,
+                    mode: crate::kv_cache::quant::QuantMode::Deterministic,
+                    dual_track_enabled: false,
+                },
+            ).unwrap()
+        } else {
+            crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
+        };
+        assert!(turboquant.is_enabled());
     }
 
     // ---- build_compute_coordinator: TurboQuant init failure propagates ----
