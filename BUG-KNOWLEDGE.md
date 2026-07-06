@@ -2956,9 +2956,17 @@ residualEvidence: |
   - 层1 数值自洽: architect 裁决 + 运行时插桩 (compute_dtype=F32, kv_row_stride=768 自洽)
   - 层2 精度预设违宪: dtype_chain.rs:198 硬编码 BF16=>F32 (宪法 -1)
   - 发散根因换方向: M=1 单 token prefill 逐算子 cosine 对齐 golden
-归因时间: 2026-07-05 (初版) / 2026-07-06 (architect 裁决 + 宪法 -1 修正)
-status: 精度预设违宪待根治 (独立于发散) | residual: 待 architect 整体设计
+归因时间: 2026-07-05 (初版) / 2026-07-06 (architect 裁决 + 宪法 -1 修正) / 2026-07-06 (阶段1 闭环)
+status: 阶段1 已根治 (commit 7e98782b, dot_product_cap 驱动) | residual: 阶段2 (AttentionSpec/kv_bytes_per_token, OE-4 后位置过时待重新定位) + 阶段3.1 (TurboQuant 解耦, task#2 blockedBy已清)
 ```
+
+### 阶段1 闭环记录 (2026-07-06, commit 7e98782b)
+
+- **改动**: dtype_chain.rs derive_compute_dtype 从 `match storage_dtype { BF16=>F32, ... }` 改为 `match device.dot_product_cap() { NativeBf16 if BF16=>BF16, NativeFp4 if FP4-class=>storage, NativeInt8* if U8=>U8, _=>F32 兜底 }`
+- **行为不变论断验证**: 当前 i9 AVX2 (SimdAssisted) → 走 `_ => F32` 兜底 → 返回值仍 F32 → 下游零变化。4 个 derive_compute_dtype 测试全过 (BF16→F32/F16→F32/F32→F32/quant→F32 在 SimdAssisted device 下仍成立)。
+- **V 验证**: cargo check -p gllm-kernels 0 error / cargo test derive_compute_dtype 4/4 pass / cargo check -p gllm (下游) 0 error / grep 违宪arm残留=0 dot_product_cap=2 reserved=0 NativeBf16=2。
+- **未补 NativeBf16 mock 测试**: DeviceProfile::detect() 返回真实硬件, 字段私有无法轻松 mock NativeBf16 device; dot_product_cap() 自身已有 device_profile.rs 测试覆盖; NativeBf16 路径待未来 GPU 5070Ti SM12.0 (has_bf16=true→NativeBf16) E2E 覆盖。不强 mock 避免测试桩违反 NO-FALLBACK。
+- **残留**: 阶段2 (KV cache dtype 主权归位, build_graph.inc.rs 被 OE-4 删除 AttentionSpec 生产构造点需 search_code 重新定位) + 阶段3.1 (TurboQuant 开关 compute_dtype!=F32→storage量化, task#2, 当前硬件 TurboQuant 对 BF16 storage 支持状态未知需评估)。
 
 ### 修正说明 (C-9 自我修正)
 
