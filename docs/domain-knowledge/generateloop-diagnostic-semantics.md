@@ -355,8 +355,22 @@ if let Some((in_tid, _out_tid)) = &topology.layer_activation_alias {
 input_tid = gather 输出 (embedding) 时, 旧逻辑强制 Intermediate 导致 ActivationSwap 失效.
 修复让 input_tid 走 ActivationPing, gather 写 ping, 层间正确传递.
 
-**副作用**: diagnostic_tensor_offset("embedding") 返回的 offset 不再是 embedding 实际位置
-(embedding 现在写 ping buffer). diag 测试需改读 ping offset. 但生产推理正确.
+**副作用**: ~~diagnostic_tensor_offset("embedding") 返回错误 offset~~ — 已根治 (见下文 BCE-005 三处统一消除).
+
+## BCE-005 三处 gather 强制 Intermediate 统一根治 (2026-07-06, DRY)
+
+旧 BCE-20260629-005 "gather 输出强制 Intermediate" 有**三处重复逻辑**, 都会覆盖 in_tid=embedding 的 ActivationPing:
+1. `buffer_alloc.rs build_tensor_sources()` — gather_outs 跳过 in_tid (根源)
+2. `context.inc.rs build()` — 运行时遍历 ops 强制 gather 输出 Intermediate (覆盖 tensor_sources)
+3. `mod.rs compile_cpu` — 构建 meta.tensor_sources 时再次强制 gather 输出 Intermediate (覆盖正确值)
+
+**根治**: 删除 (2)(3) 的运行时强制, 修改 (1) 让 in_tid 强制 ActivationPing (`map.insert(in_tid, ActivationPing)`, 不跳过 gather 输出).
+- tensor_sources 本身正确 → resolver build() 无需运行时覆盖 → meta.tensor_sources 正确 → named_offsets 正确
+- DRY: 单一真相源 (build_tensor_sources), 消除三处重复
+
+**验证**: embedding named_offset 从 37748736 (旧 Intermediate) → 0 (ActivationPing=activation_a_offset). diagnostic_tensor_offset("embedding") 现返回正确 ping offset.
+- CPU E2E pass (cosine=1.0), 回归测试 pass, 7040+44377 tests 0 failed.
+- BCE-005 的 NaN 担心不成立: gather 在循环前写 ping, layer0 读 ping=embedding.
 
 GEMM stride bug 修复后, layer0 cos=1.0 但 layer1+ norm 逐层放大 (47→91→165→229).
 

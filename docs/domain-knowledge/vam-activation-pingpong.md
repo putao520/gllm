@@ -34,28 +34,27 @@ activation_pong_ptr: scratch_base + pong_offset
 ActivationSwap: 每层迭代边界交换这两个指针（零数据拷贝，只换指针）
 ```
 
-## BCE-20260629-005 排除 Gather 输出（关键，反复踩坑）
+## BCE-20260629-005 → BCE-20260706-ACTSWAP-FIX 根治（关键转折）
 
-源码：`virtual_activation.rs:166-179` + `buffer_alloc.rs:614-660` + `context.inc.rs:246-257`
+**旧 BCE-005（已废止）**：排除 Gather 输出（embedding 走 Intermediate{37748736}），为防 NaN。
+**问题**：layer hidden input = embedding = activation_alias.in_tid。走 Intermediate → 不随 ActivationSwap 切换 → layer1+ 读 embedding 非 layer0 输出 → logits 发散。
 
-**为什么排除 Gather 输出**（BCE-20260629-005 修的 NaN）：
-- 不排除：Gather 输出（embedding）被 VAM 当 activation → 分配 ping/pong slot
-- → resolver materialize 返 activation_ping_ptr
-- → Gather 写 ping buffer（而非 scratchpad intermediate 区）
-- → DIAG 读 scratchpad offset 0 读不到 → NaN
+**根治（BCE-20260706-ACTSWAP-FIX）**：in_tid 强制 ActivationPing（含 gather 输出），三处重复逻辑统一消除：
+1. `buffer_alloc.rs build_tensor_sources()` — `map.insert(in_tid, ActivationPing)`（不跳过 gather 输出，根源）
+2. `context.inc.rs build()` — 删除运行时 gather 强制 Intermediate（DRY，依赖 tensor_sources）
+3. `mod.rs compile_cpu` — 删除 meta 构建时的 gather 强制 Intermediate（DRY）
 
-**排除后**（当前行为）：
-- Gather 输出走 `Intermediate{offset}`（resolver 强制 `context.inc.rs:246-257`）
-- 不分配 ping/pong slot
-- 写入位置：`alloc.offset_of(out_tid)`（动态查，非硬编码）
+**根治后**：
+- embedding (tid=2) → ActivationPing（off=0, ping buffer）
+- gather 写 ping, layer0 读 ping=embedding, ActivationSwap 后 layer1 读 ping=layer0_out
+- named_offset("embedding")=0（正确, 旧值 37748736 已废）
+- BCE-005 的 NaN 不复现（gather 循环前写 ping, layer0 读到正确 embedding）
 
-## H4 确认：映射层全对（commit b672c6ed 日志）
-```
-[RESOLVER] Gather output tid=2 → Intermediate{offset=37748736}
-```
-- embedding (tid=2) → Intermediate{37748736}（非 ActivationPing，offset≠0）
-- layer_input 读 Intermediate{37748736} = Gather 写的位置
-- **映射无断链**（BCE-20260705-RESIDUAL-STREAM-DISCONNECT 假设证伪）
+## H4 确认（旧日志, 已被根治推翻）
+
+~~[RESOLVER] Gather output tid=2 → Intermediate{offset=37748736}~~
+旧 H4 认为"映射无断链"是基于 BCE-005 的 Intermediate 映射。但 ActivationSwap 因此失效（layer1+ 读固定 offset 非 ping/pong）。
+根治后: embedding → ActivationPing, ActivationSwap 正确切换, layer1+ 读上一层输出。
 
 ## TensorPtrSource 枚举（context.inc.rs:273-289）
 ```rust
@@ -73,11 +72,11 @@ match source {
 
 | ❌ 误判 | ✅ 正解（源码证明） |
 |--------|---------|
-| embedding 分配 ActivationPing slot | BCE-20260629-005 排除，走 Intermediate |
-| layer loop 读空 ping buffer | 实际读 Intermediate{37748736}（embedding 写的位置）|
+| ~~embedding 分配 ActivationPing slot（BCE-005 排除）~~ | **embedding → ActivationPing**（BCE-20260706-ACTSWAP-FIX 根治, in_tid 强制 ping）|
+| ~~layer loop 读 Intermediate{37748736}~~ | layer loop 读 ping（off=0），ActivationSwap 切换 layer1+ 读 pong→ping=上一层输出 |
 | activation_alias = (任意 tensor) | = (layer_input=embedding, layer_output) 特定 |
 | ActivationSwap 拷贝数据 | 只交换指针（零拷贝）|
-| gather_outs 排除 input_tid 和 output_tid | 实际只排除 output（input_tid 继承 offset，H4）|
+| gather_outs 排除 input_tid | **已删**（in_tid 强制 ActivationPing, 不跳过 gather 输出）|
 
 ## 解决问题时参考
 
