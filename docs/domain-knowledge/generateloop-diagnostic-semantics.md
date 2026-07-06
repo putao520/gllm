@@ -328,7 +328,35 @@ SmolLM2: q_proj/k_proj/v_proj/o_proj/gate_proj/up_proj/down_proj 全受影响 (t
 
 **BCE 横扫**: 此 bug 影响所有混合精度 trans_b GEMM, 需全项目横扫确认 + 回归测试.
 
-## ★ 根因2 定位: ActivationSwap 后 layer1 读 embedding (非 layer0 输出) (2026-07-06)
+## ★ 根因2: ActivationSwap 后 layer1 读 embedding (定位+修复 2026-07-06, CPU E2E pass)
+
+**根因**: `context.inc.rs:build()` 用 `alloc.tensor_sources` 时, gather 输出 (embedding=activation_alias.input_tid) 被强制映射 `Intermediate{固定offset}`. layer hidden input = embedding → 读 Intermediate{固定offset}, 永远是 embedding (不随 ActivationSwap 切换). layer1+ 读 embedding 非 layer0 输出.
+
+**修复** (`context.inc.rs:build()`):
+```rust
+// BCE-20260706-ACTSWAP-FIX: layer hidden input 必须映射 ActivationPing
+if let Some((in_tid, _out_tid)) = &topology.layer_activation_alias {
+    m.insert(*in_tid, TensorPtrSource::ActivationPing);  // 覆盖 gather 输出的 Intermediate
+}
+```
+
+**效果**:
+- gather 写 embedding → ping buffer (ActivationPing)
+- layer0 读 ping=embedding, 写 pong=layer0_out
+- ActivationSwap 交换 ping↔pong → ping=layer0_out, pong=embedding
+- layer1 读 ping=layer0_out ✅
+
+**验证**:
+- 单 token 逐层 capture: layer0-4 全 cos=1.0000 (之前 layer1 cos=0.27)
+- **CPU E2E: cosine=1.000000, mad=0.008957, test PASS** (之前 cosine=-0.465, argmax=967)
+- 7040 kernels tests passed 0 failed (无回归)
+
+**BCE 泛化**: 此 bug 影响所有 decoder 模型 (含 GenerateLoop + activation_alias).
+input_tid = gather 输出 (embedding) 时, 旧逻辑强制 Intermediate 导致 ActivationSwap 失效.
+修复让 input_tid 走 ActivationPing, gather 写 ping, 层间正确传递.
+
+**副作用**: diagnostic_tensor_offset("embedding") 返回的 offset 不再是 embedding 实际位置
+(embedding 现在写 ping buffer). diag 测试需改读 ping offset. 但生产推理正确.
 
 GEMM stride bug 修复后, layer0 cos=1.0 但 layer1+ norm 逐层放大 (47→91→165→229).
 

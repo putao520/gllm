@@ -787,21 +787,17 @@ fn diag_step13_two_layer_intermediates() {
     let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
     std::env::remove_var("GLLM_DEBUG_LAYERS");
     let elem = 4usize;
-    // layer1 中间张量 (注意 slot 复用, layer1 最后写入的是 layer1 的值, 因 layer0 已被覆盖)
-    // 读 v_proj (唯一 offset), 比 ref layer1 v_proj
     let v_off = client.diagnostic_tensor_offset("layer.v").unwrap();
-    let mut v = vec![0.0f32; 192];  // v_proj output is 192
+    let mut v = vec![0.0f32; 192];
     for h in 0..192 {
         let b = &sp.data[v_off + h*elem..v_off + (h+1)*elem];
         v[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
     }
     let v_norm: f64 = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
     eprintln!("layer.v (last layer=layer1) norm={:.3} first5={:?}", v_norm, &v[0..5]);
-    // dump
     let mut buf = Vec::new();
     for x in &v { buf.extend_from_slice(&x.to_le_bytes()); }
     let _ = std::fs::write("/tmp/gllm_l1_v.bin", &buf);
-    // layer1 output (ffn_resid 唯一 offset)
     let ffn_off = client.diagnostic_tensor_offset("layer.ffn_resid").unwrap();
     let mut ffn = vec![0.0f32; HIDDEN_SIZE];
     for h in 0..HIDDEN_SIZE {
@@ -810,10 +806,54 @@ fn diag_step13_two_layer_intermediates() {
     }
     let ffn_norm: f64 = ffn.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
     eprintln!("layer.ffn_resid (layer1 out) norm={:.3} first5={:?}", ffn_norm, &ffn[0..5]);
-    let _ = std::fs::write("/tmp/gllm_l1_ffn_resid.bin", {
-        let mut b = Vec::new();
-        for x in &ffn { b.extend_from_slice(&x.to_le_bytes()); }
-        b
-    });
 }
 
+#[test]
+fn diag_step14_ping_pong_buffers() {
+    eprintln!("\n=== Step 14: dump ping/pong buffer 内容验证 ActivationSwap ===");
+    std::io::stderr().flush().ok();
+    std::env::set_var("GLLM_DEBUG_LAYERS", "2");
+    let client = build_cpu_client();
+    let all_tokens = client.encode(PROMPT).expect("encode");
+    let single = vec![all_tokens[0]];
+    let sp = client.diagnostic_prefill_scratchpad(&single).expect("sp");
+    std::env::remove_var("GLLM_DEBUG_LAYERS");
+    let elem = 4usize;
+    // 读 named_offsets 找 layer.v (唯一 offset, layer1 最后写入)
+    // ping/pong sentinel 不在 named_offsets, 需从 scratch_base 推断
+    // 但 layer.normed / layer.q / layer.o 等共享 slot — 这些是 activation buffer
+    // 读 layer.v (layer1 v_proj 输出, 唯一 offset 100663296)
+    let v_off = client.diagnostic_tensor_offset("layer.v").unwrap();
+    // dump layer1 attention 输入 (layer.normed slot = layer1 rmsnorm1 输出, 但被覆盖)
+    // 改读 layer.attn (81788928, layer1 attn out, 唯一)
+    let attn_off = client.diagnostic_tensor_offset("layer.attn").unwrap();
+    let mut attn = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[attn_off + h*elem..attn_off + (h+1)*elem];
+        attn[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    eprintln!("layer.attn (layer1) first5={:?} norm={:.3}", &attn[0..5],
+        attn.iter().map(|x| x*x).sum::<f32>().sqrt());
+    // layer1 v_proj 输入 = layer1 rmsnorm1 输出. 如果 = rmsnorm(embedding), layer1 读 embedding
+    // 读 layer.ffn_resid (9437184, layer1 最终输出)
+    let ffn_off = client.diagnostic_tensor_offset("layer.ffn_resid").unwrap();
+    let mut ffn = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[ffn_off + h*elem..ffn_off + (h+1)*elem];
+        ffn[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    eprintln!("layer.ffn_resid (layer1 out) first5={:?} norm={:.3}", &ffn[0..5],
+        ffn.iter().map(|x| x*x).sum::<f32>().sqrt());
+    // 关键: 读 layer0 输出. layer0 输出在 pong (ActivationSwap 前) 或 ping (后)
+    // layer.ffn_resid 在单层时是 layer0 输出, 2层时是 layer1 输出(覆盖)
+    // 用 capture 读 layer0 (cap_off + 0)
+    let cap_off = client.diagnostic_tensor_offset("layer_capture").unwrap();
+    let cap_stride = client.diagnostic_layer_capture_stride();
+    let mut l0_cap = vec![0.0f32; HIDDEN_SIZE];
+    for h in 0..HIDDEN_SIZE {
+        let b = &sp.data[cap_off + h*elem..cap_off + (h+1)*elem];
+        l0_cap[h] = f32::from_le_bytes([b[0],b[1],b[2],b[3]]);
+    }
+    eprintln!("capture layer0 (单token) first5={:?} norm={:.3}", &l0_cap[0..5],
+        l0_cap.iter().map(|x| x*x).sum::<f32>().sqrt());
+}
