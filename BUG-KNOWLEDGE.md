@@ -2792,6 +2792,9 @@ status: 根治 (493e6092) | residual: 0
 
 ## BCE-20260704-GPU-EXECUTOR-NEVER-LAUNCHES-GPU — GPU backend 推理 100% 走 CPU x86 entry_fn, GPU PTX 从不 launch (P0 架构级死代码)
 
+> ✅ **已解决（ARCH-UNIFIED-EXEC 根治，2026-07-05）** — 见 BCE-20260705-GPUDEAD-001。本条目保留为历史归因记录，根因描述中的 `entry_fn`/`gpu_code` 分离字段已不存在（已被 `CompiledExecutable` enum 替代）。Plan MD `eager-jumping-toast.md` 基于本条目的旧前提已全部过时。
+> **领域资料库**: `docs/domain-knowledge/gpu-mega-kernel-execution-path.md`（C-9，ARCH-UNIFIED-EXEC 后的真实实现）
+
 - **patternId**: BCE-20260704-GPU-EXECUTOR-NEVER-LAUNCHES-GPU
 - **title**: Executor.execute_* 永远调 mega.entry_fn (CPU x86 JIT 函数指针), gpu_code (PTX) 编译后从不 launch — GPU 代码全是死代码
 - **layer**: 范式缺陷 (NO-ISLAND-MODULE + ARCH-RUST-IS-CODEGEN, GPU 推理基础设施未接入)
