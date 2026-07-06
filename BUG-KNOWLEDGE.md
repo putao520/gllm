@@ -2956,8 +2956,8 @@ residualEvidence: |
   - 层1 数值自洽: architect 裁决 + 运行时插桩 (compute_dtype=F32, kv_row_stride=768 自洽)
   - 层2 精度预设违宪: dtype_chain.rs:198 硬编码 BF16=>F32 (宪法 -1)
   - 发散根因换方向: M=1 单 token prefill 逐算子 cosine 对齐 golden
-归因时间: 2026-07-05 (初版) / 2026-07-06 (architect 裁决 + 宪法 -1 修正) / 2026-07-06 (阶段1 闭环)
-status: 阶段1 已根治 (commit 7e98782b, dot_product_cap 驱动) | residual: 阶段2 (AttentionSpec/kv_bytes_per_token, OE-4 后位置过时待重新定位) + 阶段3.1 (TurboQuant 解耦, task#2 blockedBy已清)
+归因时间: 2026-07-05 (初版) / 2026-07-06 (architect 裁决 + 宪法 -1 修正) / 2026-07-06 (阶段1 闭环) / 2026-07-06 (阶段3.1 闭环)
+status: 阶段1+3.1 已根治 (commit 7e98782b+5f517f6f+157af7c9) | residual: 阶段2 (AttentionSpec/kv_bytes_per_token, OE-4 后位置过时待重新定位)
 ```
 
 ### 阶段1 闭环记录 (2026-07-06, commit 7e98782b)
@@ -2966,7 +2966,16 @@ status: 阶段1 已根治 (commit 7e98782b, dot_product_cap 驱动) | residual: 
 - **行为不变论断验证**: 当前 i9 AVX2 (SimdAssisted) → 走 `_ => F32` 兜底 → 返回值仍 F32 → 下游零变化。4 个 derive_compute_dtype 测试全过 (BF16→F32/F16→F32/F32→F32/quant→F32 在 SimdAssisted device 下仍成立)。
 - **V 验证**: cargo check -p gllm-kernels 0 error / cargo test derive_compute_dtype 4/4 pass / cargo check -p gllm (下游) 0 error / grep 违宪arm残留=0 dot_product_cap=2 reserved=0 NativeBf16=2。
 - **未补 NativeBf16 mock 测试**: DeviceProfile::detect() 返回真实硬件, 字段私有无法轻松 mock NativeBf16 device; dot_product_cap() 自身已有 device_profile.rs 测试覆盖; NativeBf16 路径待未来 GPU 5070Ti SM12.0 (has_bf16=true→NativeBf16) E2E 覆盖。不强 mock 避免测试桩违反 NO-FALLBACK。
-- **残留**: 阶段2 (KV cache dtype 主权归位, build_graph.inc.rs 被 OE-4 删除 AttentionSpec 生产构造点需 search_code 重新定位) + 阶段3.1 (TurboQuant 开关 compute_dtype!=F32→storage量化, task#2, 当前硬件 TurboQuant 对 BF16 storage 支持状态未知需评估)。
+
+### 阶段3.1 闭环记录 (2026-07-06, commit 5f517f6f + 157af7c9, 方案B修正版)
+
+- **KB 原方案修正 (C-9 自我修正)**: 原方案"TurboQuant 开关从 compute_dtype!=F32 改成 storage 是否量化"有歧义——derive_storage_dtype 只返回浮点 {F32,BF16,F16}, 量化类型被忽略 (测试 storage_dtype_ignores_quantized_weight_dtypes 确认设计行为)。SPEC 00-PHILOSOPHY:157/181-188 契约明确: TurboQuant 触发 = 权重是 INT4/FP4/FP6 量化格式 (与原生混合精度 BF16 正交)。修正为方案 B: 新增 is_weight_quantized 信号。
+- **gllm-kernels 改动** (commit 5f517f6f, graph_geometry.rs): GraphDerivedGeometry 新增 `pub is_weight_quantized: bool` + default_for_simple=false + from_graph 新增 derive_is_weight_quantized(graph) 扫权重 tensor 量化 dtype (U8/F8E4M3/F8E5M2/F6E3M2/F6E2M3/F4E2M1) + 8 新测试 (U8/F8/F4/F6=true, BF16/F32原生=false, mixed=true, only-activation=false)。与 derive_storage_dtype 隔离 (后者不动)。
+- **gllm 改动** (commit 157af7c9, executor_builder.rs): TurboQuant 触发从 `g.compute_dtype != F32` 改成 `ctx.weights.tensor_names().any(|n| ctx.weights.is_quantized(n))`。**设计偏离**: task 指令是方案B (geometry 字段传递), E 在 gllm-kernels 加了字段但 gllm 侧因 ModelGeometry::from_config 无 graph 入参 (加字段破坏 180 处 literal 构造) 改用 ctx.weights.is_quantized 直接探测。两路独立但同源 (权重文件量化状态: graph tensor dtype vs ctx.weights quantized map, 都来自权重 metadata)。语义对齐, 宪法-1 合规 (基于权重实际量化, 非精度预设), SPEC 合规 (BF16原生不触发, INT4/FP4/FP6触发)。加 @trace REQ-DTYPE-CHAIN-005 + 3 test 更新。
+- **行为不变论断验证**: SmolLM2 BF16 权重 (无量化) → ctx.weights 无 quantized entry → is_weight_quantized=false → TurboQuant 仍关。旧逻辑 compute=F32!=F32=false 也是关 → 完全等价零行为变化。
+- **V 验证**: gllm-kernels graph_geometry 59/59 pass (含8新+storage_dtype_ignores仍过) / gllm turboquant 155/155 pass / grep compute_dtype!=F32 在 TurboQuant 触发处=0 (仅2处注释解释旧逻辑) / grep is_weight_quantized graph_geometry=25 executor_builder=11。
+- **隐患 (待未来评估)**: GraphDerivedGeometry.is_weight_quantized 字段当前无 gllm 侧消费者 (gllm 用 ctx.weights 非 geometry 字段)。两路同源不影响正确性, 未来若 gllm 需在 geometry 层判断可启用跨仓传递。非 gate 阻塞。
+- **残留**: 阶段2 (KV cache dtype 主权归位, build_graph.inc.rs 被 OE-4 删除 AttentionSpec 生产构造点需 search_code 重新定位) — 阶段2 独立于阶段1+3.1, 可单独推进。
 
 ### 修正说明 (C-9 自我修正)
 
