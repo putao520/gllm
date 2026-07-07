@@ -588,7 +588,6 @@ mod tests {
                 kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
                 sinks: SinksSpec::None,
                 seq_len: SymDim::Concrete(seq),
-                dtype: DType::F32,
             }),
             vec![q, k, v],
             vec![out],
