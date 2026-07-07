@@ -690,7 +690,7 @@ pub fn build_compiler_graph(
             // Attention
             let causal = features.causal;
             let attn = g.add_tensor(&ptname("attn"), vec![s.clone(), SymDim::Concrete(q_n)], act_dt);
-            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone()  }), 
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 &ptname("mha"),
@@ -1313,7 +1313,7 @@ pub fn build_compiler_graph(
                 // Standard MHA (not MLA attention)
                 let attn = g.add_tensor("layer.attn",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], act_dt);
-                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
+                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone()  }), 
                     vec![rope_q, rope_k, v_restored],
                     vec![attn],
                     "layer.mha_mla_unabs",
@@ -1520,7 +1520,7 @@ pub fn build_compiler_graph(
             // ── Attention ──
             let causal = features.causal;
             let attn = g.add_tensor("layer.attn", vec![s.clone(), SymDim::Concrete(q_n)], act_dt);
-            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), dtype: DType::F32 }), 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone()  }), 
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 "layer.mha",
