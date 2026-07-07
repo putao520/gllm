@@ -23,6 +23,10 @@ pub struct ResolvedConfig {
     pub vocab_size: usize,
     pub rope_theta: f64,
     pub dtype: String,
+    /// Compute dtype for inference (BCE-PHASE2 v2 D1/G2a).
+    /// 从 ModelGeometry.compute_dtype 派生 (用户可配 BF16), 非写死 F32.
+    /// build_graph 的 act_store_dt 从此派生, KV cache buffer + 激活存储 dtype 同源.
+    pub compute_dtype: gllm_kernels::types::DType,
 
     // ── Gemma 4: Dual RoPE ──
     pub global_rope_theta: f64,
@@ -82,6 +86,8 @@ impl ResolvedConfig {
             vocab_size: g.vocab_size,
             rope_theta: g.rope_theta,
             dtype: format!("{:?}", g.dtype).to_lowercase(),
+            // BCE-PHASE2 v2 D1/G2a: compute_dtype 从 ModelGeometry 派生 (用户可配 BF16)
+            compute_dtype: g.compute_dtype,
             global_rope_theta: g.global_rope_theta,
             rope_partial_ratio: g.rope_partial_ratio,
             rope_partial_ratio_global: g.rope_partial_ratio_global,
@@ -465,6 +471,7 @@ mod tests {
             vocab_size: 32000,
             rope_theta: 10000.0,
             dtype: "f16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F16,
             global_rope_theta: 0.0,
             rope_partial_ratio_global: 1.0,
             rope_partial_ratio: 1.0,
@@ -497,6 +504,7 @@ mod tests {
             hidden_size: 2048,
             rope_theta: 500000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
 
@@ -702,6 +710,7 @@ mod tests {
     fn get_str_dtype() {
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         assert_eq!(config.get_str("dtype"), Some("bf16"));
@@ -711,6 +720,7 @@ mod tests {
     fn get_str_unknown_key_returns_none() {
         let config = ResolvedConfig {
             dtype: "f32".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             ..Default::default()
         };
         assert_eq!(config.get_str("hidden_size"), None);
@@ -1788,6 +1798,7 @@ mod tests {
     fn substitute_placeholders_dtype_replacement() {
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         let result = substitute_placeholders("model_${dtype}_v2", &config);
@@ -1866,6 +1877,7 @@ mod tests {
             vocab_size: 1000,
             rope_theta: 50000.0,
             dtype: "f32".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             global_rope_theta: 0.0,
             rope_partial_ratio_global: 1.0,
             rope_partial_ratio: 1.0,
@@ -2079,6 +2091,7 @@ mod tests {
     fn get_str_dtype_empty_string() {
         let config = ResolvedConfig {
             dtype: String::new(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             ..Default::default()
         };
         // Empty dtype is still Some("")
@@ -2372,6 +2385,7 @@ mod tests {
             vocab_size: 7,
             rope_theta: 8.0,
             dtype: "f32".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             global_rope_theta: 9.0,
             rope_partial_ratio: 10.0,
             rope_partial_ratio_global: 1.0,
@@ -3098,6 +3112,7 @@ mod tests {
             vocab_size: 32000,
             rope_theta: 10000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.25,
             rope_partial_ratio_global: 1.0,
@@ -3501,6 +3516,7 @@ mod tests {
     fn resolved_config_clone_preserves_dtype() {
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         let cloned = config.clone();
@@ -4052,6 +4068,7 @@ mod tests {
             vocab_size: 128256,
             rope_theta: 500000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.25,
             rope_partial_ratio_global: 1.0,
@@ -4182,6 +4199,7 @@ mod tests {
         extra.insert("dtype".to_string(), 42);
         let config = ResolvedConfig {
             dtype: "f16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F16,
             extra,
             ..Default::default()
         };
@@ -4197,6 +4215,7 @@ mod tests {
     fn get_str_dtype_returns_consistent_reference() {
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         let first = config.get_str("dtype");
@@ -4436,6 +4455,7 @@ mod tests {
             num_attention_heads: 4,
             vocab_size: 1000,
             dtype: String::new(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             ..Default::default()
         };
         assert!(validate_config(&config).is_ok());
@@ -4519,6 +4539,7 @@ mod tests {
     fn substitute_placeholders_dtype_empty_string() {
         let config = ResolvedConfig {
             dtype: String::new(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             ..Default::default()
         };
         let result = substitute_placeholders("dtype=${dtype}", &config);
@@ -5253,6 +5274,7 @@ mod tests {
         let config = ResolvedConfig {
             num_hidden_layers: 12,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         let result = substitute_placeholders("${num_hidden_layers}_${dtype}", &config);
@@ -5292,6 +5314,7 @@ mod tests {
     fn substitute_placeholders_only_dtype() {
         let config = ResolvedConfig {
             dtype: "f16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F16,
             ..Default::default()
         };
         let result = substitute_placeholders("${dtype}", &config);
@@ -5635,6 +5658,7 @@ mod tests {
     fn get_str_arbitrary_key_returns_none() {
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         assert_eq!(config.get_str("custom_type"), None);
@@ -6265,6 +6289,7 @@ mod tests {
         extra.insert("dtype".to_string(), 16);
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             extra,
             ..Default::default()
         };
@@ -6856,6 +6881,7 @@ mod tests {
             hidden_size: 4096,
             rope_theta: 10000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
 
@@ -7185,6 +7211,7 @@ mod tests {
         // Arrange
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
 
@@ -7822,6 +7849,7 @@ mod tests {
             rope_theta: 500000.0,
             global_rope_theta: 1000000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         // Act
@@ -8029,6 +8057,7 @@ mod tests {
             vocab_size: 5000,
             rope_theta: 50000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             global_rope_theta: 250000.0,
             rope_partial_ratio: 0.5,
             rope_partial_ratio_global: 1.0,
@@ -8158,6 +8187,7 @@ mod tests {
         // Arrange
         let config = ResolvedConfig {
             dtype: "f32".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             ..Default::default()
         };
         // Act: get the string reference, then clone config
@@ -8398,6 +8428,7 @@ mod tests {
             vocab_size: 32000,
             rope_theta: 10000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             global_rope_theta: 500000.0,
             rope_partial_ratio: 0.25,
             rope_partial_ratio_global: 1.0,
@@ -8746,6 +8777,7 @@ mod tests {
         // Arrange
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         // Act & Assert: empty string matches no known field
@@ -8774,6 +8806,7 @@ mod tests {
         // Arrange: config with non-empty dtype
         let original = ResolvedConfig {
             dtype: "f16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::F16,
             ..Default::default()
         };
         // Act: clone and mutate the dtype
@@ -8856,7 +8889,8 @@ mod tests {
     // @trace TEST-RESOLVE-474 [level:unit]
     #[test]
     fn resolved_config_debug_shows_dtype() {
-        let cfg = ResolvedConfig { dtype: "bf16".to_string(), ..Default::default() };
+        let cfg = ResolvedConfig { dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16, ..Default::default() };
         let dbg = format!("{:?}", cfg);
         assert!(dbg.contains("bf16"));
     }
@@ -9171,6 +9205,7 @@ mod tests {
         // extra 中也没有 "dtype" 键
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         // Act & Assert
@@ -9294,6 +9329,7 @@ mod tests {
         // Arrange: dtype 是字符串字段，get_float 只匹配 "rope_theta" 和 "global_rope_theta"
         let config = ResolvedConfig {
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             ..Default::default()
         };
         // Act & Assert
@@ -9430,6 +9466,7 @@ mod tests {
             intermediate_size: None,
             rope_theta: 0.0,
             dtype: String::new(),
+            compute_dtype: gllm_kernels::types::DType::F32,
             global_rope_theta: 0.0,
             rope_partial_ratio_global: 1.0,
             rope_partial_ratio: 0.0,
@@ -9652,6 +9689,7 @@ mod tests {
             vocab_size: 64000,
             rope_theta: 500000.0,
             dtype: "bf16".to_string(),
+            compute_dtype: gllm_kernels::types::DType::BF16,
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.5,
             rope_partial_ratio_global: 1.0,
