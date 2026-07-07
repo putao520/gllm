@@ -197,7 +197,6 @@ pub fn build_intent_tracker_graph(
             kv_source: KvSource::FromTensor,
             sinks: SinksSpec::None,
             seq_len: s.clone(),
-            dtype: dt,
         }),
         vec![q_proj, k_proj, v_modulated],
         vec![attn_out],

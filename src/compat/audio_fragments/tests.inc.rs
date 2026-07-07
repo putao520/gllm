@@ -1047,7 +1047,7 @@ mod tests {
                 mask: AttentionMask::Full,
                 kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
                 sinks: SinksSpec::None,
-                seq_len: s.clone(), dtype: DType::F32,
+                seq_len: s.clone(),
             }),
             vec![q, k, v], vec![attn_out], "attn_mha",
         );
@@ -1258,7 +1258,7 @@ mod tests {
                 mask: AttentionMask::Full,
                 kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
                 sinks: SinksSpec::None,
-                seq_len: s.clone(), dtype: DType::F32,
+                seq_len: s.clone(),
             }),
             vec![q, k, v], vec![attn_out], "mha",
         );
