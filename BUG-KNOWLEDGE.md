@@ -3428,3 +3428,247 @@ act_dt 属第二类。写 F32 不是"对数据预设精度立场",因为根本�
 **fixTemplate**: act_dt = 设备计算精度派生(非字面 F32,非 config.compute_dtype)
 **regressionAssertion**: act_dt=派生F32 + KV cache=config.compute_dtype(BF16) → SmolLM2 E2E PASS(零回归,已验证回退后 PASS)
 **待确认**: FromCache 窄化拷贝(F32 K tensor→BF16 KV buffer)dtype 感知 — 首轮 PASS 路径,architect 判理应已对
+
+---
+
+## BCE-20260708-GGUF-QUANT-WEIGHT-MISS-QUANTTYPES (E2E 发现)
+
+**现象**: e2e_generator_gguf_q4_0 / e2e_generator_gguf_q4_km FAILED(乱码 "阒#${ Albania..."),期望 Paris。Qwen3-0.6B GGUF 量化路径数值崩。SmolLM2 SafeTensors(BF16) PASS。
+
+**根因(architect consult sessionId=028cf48b 确认,方向 C)**:
+- Q4_0 权重没能进入 `weight_quant_types` map → add_gemm_or_quant(build_graph:99-114) 查 weight_quant_types miss → 穿透到 Gemm+tdt(F32) 路径
+- tdt(Q4_0权重) fallback F32 → GEMM B-load 步长按 F32(4B) → Q4_0 实际 4-bit nibble(~0.5B/元素) → 巨大越读 → 乱码
+- tdt fallback F32 是下游症状,根因是 Q4_0 权重没进 weight_quant_types
+
+**断点三环节(executor_compile.rs:556-563)**:
+1. available_names() 包含 GGUF tensor 名?
+2. quantized_tensor(name) 对 Q4_0 返回 Some?
+3. name_map.all_canonical_for(GGUF名) 返回非空?
+最可能断点=环节3(GGUF tensor 名映射不到 canonical),但 name_map 有 test_gguf_basic_mapping 验证 blk.0.attn_q.weight→L0.q_proj,需 E 实际 dump 确认。
+
+**违宪判定**: 宪法 -1(ARCH-NO-PRECISION-ASSUMPTION)。外部权重 dtype(Q4_0) 必须有追踪,禁静默 fallback F32。穿透到 Gemm+F32 = 外部数据 dtype 被代码预设掩盖。
+区分: act_dt=F32 是 JIT scratch(非违宪);此处是外部权重 dtype fallback(违宪)。
+
+**根治方向(C, architect 确认)**:
+- 现有架构已分离量化路径(add_gemm_or_quant :99-114),只需确保 Q4_0 权重落入 weight_quant_types
+- 修复点: 定位三环节断点 + 修复 + 加防御断言(GGUF 模型所有 tensor 必须在 weight_quant_types 有条目,否则 panic 而非静默穿透 F32)
+- A/B 错误: A(量化走 Gemm)stride 仍错; B(DType 加量化变体)破坏 elem_bytes 语义(block 量化无 per-element bytes)
+
+**fixTemplate**: 量化权重必须走 weight_quant_types→QuantGemm 路径,禁穿透 Gemm+tdt fallback;加防御断言防静默丢失
+**regressionAssertion**: e2e_generator_gguf_q4_0 + q4_km PASS(输出含 Paris/capital/France)
+
+### 诊断结果(2026-07-08 E 执行,方向 C 前提证伪)
+
+**结论: 方向 C 前提错误 — Q4_0 权重已经正确落入 weight_quant_types,图已正确生成 QuantGemm。根因在下游 QuantGather/QuantGemm JIT codegen 或执行,不在图构建层。**
+
+QUANTDIAG dump(e2e_generator_gguf_q4_0, bartowski/Qwen3-0.6B Q4_0):
+- link1 available_names: count=311,含全部 blk.N.attn_*.weight + blk.N.ffn_*.weight + token_embd.weight + output.weight ✅
+- link2 quantized_tensor: Q4_0 权重正确返回 Some((Q4_0, shape)) ✅(如 blk.0.attn_q.weight → Some((Q4_0, [2048,1024])))
+- link3 all_canonical_for: GGUF 名正确映射 canonical(如 blk.0.attn_q.weight → ["L0.q_proj"]) ✅
+- final weight_quant_types: count=198 keys,含 L0.q_proj/L0.k_proj/.../embed/lm_head 全集 ✅
+- graph ops: **QuantGemm=8, Gemm=0, other=15** — 图正确生成 QuantGemm(quant_type=Q4_0/Q4_1/Q6K),**未穿透 Gemm+tdt(F32)**
+- op[0] embed_gather = QuantGather{quant_type: Q4_0, vocab_size: 151936, hidden_dim: 1024} ✅
+- op[2] layer.q_proj = QuantGemm{m=seq_len, n=2048, k=1024, quant_type: Q4_0} ✅
+- op[19] lm_head = QuantGemm{quant_type: Q6K} ✅
+
+对比 SmolLM2 SafeTensors(BF16, PASS): graph ops QuantGemm=0, Gemm=8 — Gemm+BF16 路径正确,零回归。
+
+**新根因假设(待 Commander 分析)**: QuantGather(Q4_0 embed lookup) 或 QuantGemm(Q4_0/Q4_1/Q6K GEMM) 的 JIT codegen/执行有 BUG。乱码输出 "阒#${ Albania..." 从第一个 token 就崩,最可能是 embed_gather(QuantGather Q4_0) 解码错 → 整条序列全错。需查:
+1. `quant_gather_emit.rs emit_quant_gather_inline` — Q4_0 block 解码 + scale 是否对
+2. `moe_emit.inc.rs emit_quant_gemm_inline` → `quant_gemm.inc.rs emit_quant_gemm_tiled` — Q4_0 nibble 解码 + FMA 是否对
+3. weight_ptrs canonical→ptr 映射对 QuantGemm B 输入是否正确(Q4_0 raw bytes 起址/步长)
+4. `ctx.accum_dtype` / `ctx.session.dot_cap` 对 Q4_0 路径是否设对
+
+**不变应**: 禁改图构建层(已正确)。禁回退到 Gemm+F32(NO-FALLBACK + 宪法-1)。禁改 weight_quant_types 填充(已正确)。
+
+
+---
+
+## BCE-20260708-VECNARROW-LANE-LOSS (次生 bug, 当前不触发, 待 BF16 激活启用时修)
+
+**发现**: g2b-final-executor 实测 G2b 方案时发现(commit 未落,已回滚)。
+**现象**: `emit_f32_to_bf16_ymm_to_xmm_avx2` VecNarrow 每路 GEMM store 丢高 4 lanes。c_dtype=BF16 → needs_narrow=true → 激活半数丢失 → 全零输出。
+**触发条件**: act_dt=BF16(激活存储 BF16) + c_dtype=BF16(GEMM 输出 narrow)。当前 act_dt=F32 不触发。
+**根因**: VecNarrow 实现 emit_f32_to_bf16_ymm_to_xmm_avx2 只取低半,高 4 lanes 丢弃。需加 vextracti128 取高半。
+**fixTemplate**: emit_f32_to_bf16_ymm_to_xmm_avx2 加 vextracti128 取高 4 lanes,完整 narrow 8 lanes F32→8 lanes BF16。
+**regressionAssertion**: act_dt=BF16 + c_dtype=BF16 → GEMM store 无 lane 丢失(全零 bug 不复现)。
+**状态**: 记录待修。当前 act_dt=F32(JIT scratch 计算精度,非违宪)不触发,优先级低。BF16 激活路径启用时必修。
+**关联**: kv-cache-dtype-dual-layer.md §7 预测的 lane-loss,g2b-final-executor 实测确认。
+
+---
+
+## BCE-20260708-GGUF-QUANT-Q4_0-LAYOUT-MISMATCH (E 静态分析确认, 新真根因)
+
+**背景**: 方向修正段 architect 第2轮 P0 假设(hi_act_off 缺 ei*lanes*elem)被 E 静态分析证伪 — `hi_act_off`(quant_gemm.inc.rs:383-392)已含 `+OffsetExpr::LoopOffset(ei_off)`,lo/hi 对称推进,数学正确。需找新真根因。
+
+**真根因(静态分析确认)**: JIT Assisted GEMM 路径 **Q4_0 布局假设错误**。
+
+GGUF Q4_0 实际布局 = **interleaved**(交错, 参考 `src/macros/quant_primitive/classic.rs:13-46` scalar decode + `test_dequant_q4_0_known_values` tests_quant.rs:253-272):
+```
+byte i: lo_nibble = element[2i], hi_nibble = element[2i+1]
+byte 0: elem[0](lo), elem[1](hi)
+byte 1: elem[2](lo), elem[3](hi)
+...
+byte 15: elem[30](lo), elem[31](hi)
+```
+
+JIT Assisted 路径 **错误假设 split 布局**(quant_gemm.inc.rs:347 注释):
+```
+// GGUF Q4_0 layout: byte_i → lo_nibble = block_pos[i], hi_nibble = block_pos[16+i].
+```
+即 JIT 认为 byte i: lo=elem[i], hi=elem[16+i](低 16 元素在 lo 半,高 16 元素在 hi 半)。
+
+**后果(数值错配)**:
+- SignedNibbleLow 从 byte[0..7] 解码 lo nibbles → JIT 假设 elem[0..7],实际是 elem[0,2,4,6,8,10,12,14](偶数下标)
+- JIT 用 lo 配 act[0..7](连续),但实际应配 act[0,2,4,6,8,10,12,14](偶数下标) → **错配**
+- SignedNibbleHigh 从 byte[0..7] 解码 hi nibbles → JIT 假设 elem[16..23],实际是 elem[1,3,5,7,9,11,13,15](奇数下标)
+- JIT 用 hi 配 act[16..23](half_block 偏移),但实际应配 act[1,3,5,7,9,11,13,15](奇数下标) → **错配**
+- K 维 dot product 全错 → 乱码输出
+
+**证据链(确定性, 非猜)**:
+1. 参考 scalar decode (classic.rs:13-27): `out[2i]=d*(lo-8); out[2i+1]=d*(hi-8)` → byte i: lo=elem[2i], hi=elem[2i+1] = interleaved
+2. 参考 avx2 decode (classic.rs:48-88): 显式 `_mm256_unpacklo_ps(rl0,rh0)` interleave 恢复连续顺序 → 证实 layout 是 interleaved
+3. test_dequant_q4_0_known_values (tests_quant.rs:253): `qs[0]=0x12 → out[0]=0.5*(2-8), out[1]=0.5*(1-8)` → byte 0: lo=elem[0], hi=elem[1] = interleaved ✓
+4. JIT Assisted (quant_gemm.inc.rs:347,383-392): 注释 + half_block_elem=block_size/2*elem=64字节(16元素)偏移 → 假设 split layout ✗
+5. SignedNibbleLow/High 汇编 (finalize_quant.inc.rs:686-767): 正确解码 nibble+减8, 但无 interleave 恢复顺序 → 半值顺序保持 [lo0,lo1,...,lo7] 而非 [elem0,elem1,...]
+
+**影响范围**: Q4_0 + Q4_1 共用 Assisted 路径(emit_gemm_assisted_from_plan) + 同一 PackedNibbles{low_first:true} interleaved 布局。Q4_1 down_proj(op[16]) 也受影响。Q6K lm_head(op[19]) 走 DequantFma 路径(不同代码),需独立验证。
+
+**根治方向(需 architect 确认,架构级重构)**:
+- 方案A(参考 avx2 decode): SignedNibbleLow+High 解码后,用 `unpacklo_ps`/`unpackhi_ps` interleave b_lo/b_hi → 恢复连续顺序 → 配连续 act → FMA。每次迭代处理 16 元素(8 lo + 8 hi interleave)。
+- 方案B: 加载 strided activation(偶数下标 act[0,2,...,14] 配 lo,奇数下标 act[1,3,...,15] 配 hi)匹配半值顺序。AVX2 无原生 strided F32 load,需 gather 或shuffle,复杂。
+- 方案A 更优(对齐参考实现, 已验证正确)。但需重构 ei 循环结构(从 2×8 改为 1×16 interleave),非简单 +ei*lanes*elem 补丁。
+
+**fixTemplate(方向, 非最终)**: Assisted 路径内层 ei 循环改为: 解码 b_lo(8 lo) + b_hi(8 hi) → interleave 成 b[0..15](连续顺序) → 加载 act[0..15](连续) → FMA 16 元素。参考 classic.rs:74-85 的 interleave 序列(unpacklo/unpackhi/permute2f128)。
+
+**不变应**: 禁改图构建层(已正确)。禁 fallback Gemm+F32(NO-FALLBACK + 宪法-1)。禁改参考 decode(已正确)。
+
+**执行状态**: 静态分析确认根因,未改代码(架构级重构超原子任务)。file_lock 已释放。需 Commander 决策:拆子任务实现方案A,或重新 architect consult 确认方案。
+
+---
+
+## BCE-20260708-GGUF-QUANT-WEIGHT-MISS-QUANTTYPES 方向修正 (architect 第2轮)
+
+**修正**: 方向 C(weight_quant_types miss) 证伪。实测 dump:
+- 三环节全通(available_names 311 + quantized_tensor Some(Q4_0) + all_canonical_for blk.0.attn_q.weight→L0.q_proj)
+- graph ops: qg=8 gm=0(8 QuantGemm,0 Gemm,无穿透)
+- Q4_0 权重正确走 QuantGemm 路径
+
+**新根因方向(architect sessionId=028cf48b 第2轮)**: QuantGemm Q4_0 lowering 实现 bug。
+P0 嫌疑: quant_gemm.inc.rs hi_act_off 不随内层 ei 循环推进。
+- 内层 nibble_iters 循环: lo FMA act[k_base+ei*lanes*elem] ✓(ei 递增)
+- hi FMA act[k_base+half_block_elem] ✗(缺 +ei*lanes*elem,固定值)
+- hi 半每次打同一位置 act[16..16+lanes-1] 而非 act[16]/act[20]/act[24]/act[28]
+- K 维累加严重错误 → 乱码
+
+**P1 嫌疑**: finalize_quant.inc.rs SignedNibbleLow DUP Vd.B[0] 广播 byte[0] 丢弃 byte[1](可能缩写,需 E 看完整汇编)
+**P2 嫌疑**: block 遍历后 k_act_base += 32*elem 步进值是否匹配 act 行步长
+
+**根治**: P0 最高概率,先查 quant_gemm.inc.rs hi_act_off 的 OffsetExpr,补 ei*lanes*elem 项。
+
+---
+
+## BCE-20260708-GGUF-QUANT 根因排查进展 (architect 第3轮 + 数值诊断)
+
+已排除(全部正确):
+- Q4_0 GEMV 实现(scalar reference 对 + numerical_sim PASS)
+- weight_quant_types 填充(qg=8 gm=0,无穿透 Gemm)
+- weight_physical_bytes(:342 量化走 n*(k/32)*18 block_bytes,非 numel*4)
+- weight_stride 累加(_lc_weight_stride 用 weight_physical_bytes,Q4_0 正确)
+- blob raw 字节(合法 Q4_0: d=f16=-0.0041 + qs nibble,468MB)
+- weight_layout offset(:241 优先 quant_weight_bytes,不依赖 t.dtype)
+
+仍乱码。剩余嫌疑:
+- pack_observe.inc.rs:451 copy_size = size.min(...) 的 size 来源(可能 F32 numel*4 而非 Q4_0 block_bytes?)
+- QuantGemm op 接线(b_ptr materialize 偏移)
+- diagnostic_weight_offsets 标 Q4_0 dt=F32(诊断层误读,非推理 bug,但反映 graph tensor dtype=F32 污染)
+
+下一步: 用 diagnostic API 逐层数值对比(跑 Q4_0 layer0 vs Python 参考,定位首个发散算子)。不是盲改代码。
+
+## BCE-20260708-GGUF-QUANT 二分进展 (architect 第4轮 QuantGather 洞察 + 数值诊断)
+
+architect 第4轮关键洞察: SmolLM2 BF16 PASS → 主干对; Q4_0 挂 → 量化专属 op。两个: QuantGemm(已穷尽验证) + **QuantGather(embed,build_graph:207,不在清单)**。embed 是第1个 op,坏则后面全垃圾。
+
+已排除: QuantGather row_stride(derive_row_stride_bytes = hidden/block_size*block_bytes,正确)
+
+数值诊断(二分):
+- prefill_logits: **范围合理**(nan=0 inf=0 max_abs=60.15,值 [0.70,23.5,1.86,...] 非垃圾)
+- **prefill_argmax = 121034**(错! 期望 Paris~7310)
+- gen_text = 乱码
+
+结论: prefill 路径有 op 数值"范围合理但值错"(非崩溃非NaN)。不是 decode 坏(之前猜)。embed(QuantGather) 嫌疑仍有效 — 解量化可能产"范围合理但值错"结果。
+
+下一步: dump embed op 直接输出(token0 hidden)对比手算 Q4_0 解量化参考。需读 scratchpad intermediate(named_offsets 当前只有 weight tensor,需补 intermediate offset)。
+
+---
+
+## BCE-20260708-GGUF-QUANT-Q4_0-LAYOUT 方向反转修正 (知识库建设发现)
+
+**重大认知修正**: 知识库建设抓 llama.cpp 权威源码(ggml-quants.c dequantize_row_q4_0)发现,之前 gguf-quant-executor 的"E 静态分析"判定方向**反了**。
+
+### 真实布局方向(llama.cpp 权威)
+```c
+// llama.cpp ggml-quants.c dequantize_row_q4_0 (GGUF 标准,权威):
+for (int j = 0; j < qk/2; ++j) {  // qk=32, j=0..15
+    y[i*qk + j + 0 ] = ((qs[j] & 0x0F) - 8) * d;   // byte j lo → element j (前半 0..15)
+    y[i*qk + j + qk/2] = ((qs[j] >> 4) - 8) * d;   // byte j hi → element j+16 (后半 16..31)
+}
+```
+即 **byte j: low=elem[j], high=elem[j+16] = SPLIT 布局**（GGUF 标准）。
+
+### 三方对照
+| 实现 | 布局 | 对照标准 |
+|---|---|---|
+| llama.cpp ggml-quants.c (GGUF 权威) | **SPLIT** | ✅ 标准 |
+| gllm JIT Assisted (quant_gemm.inc.rs:347 注释 + 实现) | SPLIT | ✅ 符合标准 |
+| **gllm classic.rs (Q4_0/Q4_1/Q5_0/Q5_1 scalar + AVX2 参考)** | **INTERLEAVED** | ❌ 偏离标准 |
+
+### 之前判定(错误方向,已废)
+gguf-quant-executor 结论: "JIT Assisted 错误假设 split,实际 interleaved,要改 JIT 成 interleaved"。
+**此方向反了**。若按此改 JIT 会让 JIT 也偏离 GGUF 标准,放大 bug。
+
+### 新根因方向(待验证)
+高度怀疑 **classic.rs INTERLEAVED 是 BUG**(偏离 GGUF 标准):
+1. loader 重排 nibble 罕见且违宪(ARCH-BLOB-YIELDS-WEIGHT),无证据
+2. JIT Assisted SPLIT 与 llama.cpp 一致,像查过标准
+3. test_dequant_q4_0_known_values 可能循环论证(known values 由 INTERLEAVED 解码器自生成,自然 PASS 但与 GGUF 标准不符)
+4. prefill 乱码症状与 "用 INTERLEAVED 解 SPLIT 的 GGUF blob" 吻合(elem[1] 拿到 elem[16] 值,全错位)
+
+### 待验证(建库完成后用库指导)
+1. classic.rs 在运行时是否被调用?(NO-SCALAR 铁律说不应该,但 AVX2 参考可能被某条 codegen 路径引用)
+2. 若被调用 → classic.rs INTERLEAVED 是 Q4_0 乱码真根因,根治=改 classic.rs 成 SPLIT(对齐 llama.cpp)
+3. 用真实 .gguf 文件数值验证:读 embed block 手算 SPLIT vs INTERLEAVED,对比 Python transformers 参考
+
+### 知识库建设价值证明
+此发现是知识库驱动范式的闭环证明:抓 llama.cpp 权威源码建库才发现真相,否则按错误的 interleaved 方向放大 bug。符合 DEC-KB-DRIVEN-001 + C-9。
+
+### 资料库
+docs/domain-knowledge/gguf-classic-quant-layout.md(含两方向事实 + 6 条易误判点,不替决策只提供事实)
+
+---
+
+## 知识库建设副产出：3 个潜在量化 bug（预防性记录，待验证）
+
+建 task#4 quant-kquant-iq-proprietary.md 时对照 llama.cpp 发现 3 处疑似不一致，**未触发 BCE，预防性记录待 team-lead 验证**：
+
+### 嫌疑1: AWQ4 zero 字段遗漏 (commercial.rs)
+- quant_format.rs:805 AWQ4 声明 ZeroLayout::BlockScalar{offset:4}（per-block zero）
+- commercial.rs:7-22 AWQ4 scalar decode **不读 block.zeros**，用静态 q-8.0
+- 对比 GPTQ4 (commercial.rs:43-58) 正确读 block.zeros 用 q-zero
+- 标准 AWQ = d*(q-zero)，项目 AWQ4 疑似遗漏 zero。待验证是 BUG 还是 loader 预编 zero=8 约定
+
+### 嫌疑2: IQ1_S simplified 实现 (iq_series.rs:7-50)
+- 注释明示 "simplified: use byte pairs as index"(L18) + "Remaining 16 values (simplified: reuse grid pattern)"(L43)
+- 与 llama.cpp dequantize_row_iq1_s 差距大：缺 IQ1S_DELTA=0.125 偏移 + qh 高位索引简化 + 后16元素复用前8 grid
+- 若 IQ1_S 模型走此 impl，输出数值错误（类似 Q4_0 classic.rs 循环论证风险）
+- 使用前必须用真实 IQ1_S .gguf 验证或参照 llama.cpp 重写
+
+### 嫌疑3: TQ1_0 data_layout 误标 (quant_format.rs:902)
+- TQ1_0 data_layout: PackedNibbles 但实际是 5-trit-per-byte 编码（3^5=243，非 nibble）
+- storage_layout: Packed 正确，但 data_layout 误用 PackedNibbles → JIT 按 nibble 语义解码会错
+
+### 已确认正确（对照 llama.cpp）
+- K-Quant Q4_K (k_quant.rs:14-51)：get_scale_min_k4 6-bit + SPLIT nibble 正确
+- IQ4_NL codebook (quant_format.rs:1018)：= llama.cpp kvalues_iq4nl 一致
+- IQ1S_GRID (codebooks.rs)：2048 条目三值字节 {0x00,0x01,0xFF} 正确
+- NVFP4/MXFP4 descriptor：MXFP4 block=32 单级 E8M0 vs NVFP4 block=64 两级 正确区分

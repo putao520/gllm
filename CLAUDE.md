@@ -101,6 +101,13 @@
 | lm_head Tied Embedding 权重解析 | `docs/domain-knowledge/lm-head-tied-embedding.md` | tie data-driven 检测 + 独立 TensorId 共享指针 + blob 双倍拷贝 + trans_b=true 正确；排除 lm_head 嫌疑 |
 | derive_compute_dtype 违宪铁证 | `docs/domain-knowledge/derive-compute-dtype-unconstitution.md` | dtype_chain.rs:198 硬编码 BF16→F32 降级（无视 device）→ loader dequantize BF16→F32 进 blob（宪法1违宪）；运行时钉死 SmolLM2 compute_dtype=F32；根治必读 |
 | DotProductCap 硬件能力 API | `docs/domain-knowledge/dot-product-cap-api.md` | device.dot_product_cap() 已存在（device_profile.rs:566，10 变体）；derive_compute_dtype 重构 API 就绪，无需新建 |
+| GGUF Classic 量化布局（Q4_0/Q4_1/Q5/Q8）| `docs/domain-knowledge/gguf-classic-quant-layout.md` | llama.cpp 权威 SPLIT 布局（byte j: lo=elem[j], hi=elem[j+16]）；classic.rs INTERLEAVED 偏离标准疑似 BUG；JIT 量化 codegen 必读 |
+| x86 SIMD ISA（AVX2/AVX-512/VNNI/AMX/AVX10.2）| `docs/domain-knowledge/x86-simd-isa.md` | 半 lanes（vextractf64x4）/ BF16 VNNI guard（CPUID）/ AMX tile palette / FP8 / REGALLOC OOB；x86 JIT codegen 诊断必读 |
+| GGUF 文件格式规范（header/dtype/tensor 命名/row padding）| `docs/domain-knowledge/gguf-format-spec.md` | 36 dtype 枚举 + dims 反转（ne[0]=innermost）+ row padding（block boundary）+ MoE 命名双源；loader 解析 GGUF 必读 |
+| K-Quant + IQ + 专有量化（NVFP4/MXFP4/AWQ/GPTQ/TQ）| `docs/domain-knowledge/quant-kquant-iq-proprietary.md` | 22 格式（K-Quant 两级 scale + IQ codebook + Float4 E2M1 + Ternary 5-trit）；含 AWQ4 zero 遗漏/IQ1_S simplified/TQ1_0 data_layout 3 嫌疑；量化 codegen 必读 |
+| JIT 数值诊断方法论（三层二分 + diagnostic API）| `docs/domain-knowledge/jit-numerical-debug-method.md` | prefill_logits 二分+逐层+逐算子定位发散点；8 diagnostic API；JIT 推理乱码/logits 发散必读 |
+| G2b 真根因（a_dtype 当 A-load 步长）| `docs/domain-knowledge/g2b-root-cause-a_dtype-load-stride.md` | GEMM 激活 A-load dtype 硬编码 ctx.accum_dtype(F32) 不跟随激活张量存储 dtype（lower_op:1365）；JIT codegen 诊断必读 |
+| LSP（rust-analyzer via gsc-spec MCP）| `docs/domain-knowledge/lsp.md` | MCP server 内嵌 LSP socket；search_code analyze/scan "Socket not connected" 诊断；MCP 工具故障排查必读 |
 
 ## SPEC Index
 
