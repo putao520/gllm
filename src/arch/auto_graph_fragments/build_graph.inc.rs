@@ -73,11 +73,20 @@ pub fn build_compiler_graph(
     //   - 计算/GEMM 输出轨按 graph_dtype()=F32(4B) 写入 → 写溢出污染相邻 tensor → NaN
     // 根治：拆成两个主权来源，单一职责，杜绝再次混淆。
     //
-    // (1) act_dt = 激活/计算精度（activation compute precision）。
-    //     与 graph_dtype() 的 compute-precision 策略单源对齐（context.inc.rs 无条件 F32）。
-    //     所有激活 tensor（embedding 输出及之后、Norm/Attention/FFN 中间结果）按此精度
-    //     分配与存储。GEMM 的 A-load / FMA 累加 / C-store 全程用此精度。
-    //     未来走 F16-compute 时这里集中改一处，杜绝再次 split-brain。
+    // (1) act_dt = 激活存储 dtype = JIT 内部 scratch 计算精度（activation compute precision）。
+    //     非"外部数据存储"（权重←文件、KV cache←config 那类），是 JIT 自分配临时张量，
+    //     dtype = 设备计算精度（CPU WidenCompute → F32）。与 graph_dtype()（context.inc.rs:167
+    //     无条件 F32）/ accumulator_dtype()（trace.rs:1100 WidenCompute→F32）同源派生，非字面精度预设。
+    //     BCE-PHASE2 G2b-ROOT-CAUSE-CORRECTION（architect sessionId=426a2014 第3轮修正）:
+    //       ✗ 禁止 act_dt = config.compute_dtype。SmolLM2 compute_dtype=BF16 语义是"权重 BF16"，
+    //         非"激活 BF16 算"。误读此字段当激活存储 → 唯一异类 act_dt=BF16 vs 全系统 F32 →
+    //         2× 越读 → NaN 链式 → 采样全零 → 空输出（已实测复现，见 BUG-KNOWLEDGE.md 该条）。
+    //       ✓ act_dt = CPU 计算精度派生（当前 = F32）。CPU FMA 恒 F32，存 BF16 = 存前 narrow +
+    //         载入 widen 两次掉精度换零收益，违反"顺从计算模型"。
+    //     所有激活 tensor（embedding 输出及之后、Norm/Attention/FFN 中间结果）按此精度分配与存储。
+    //     GEMM 的 A-load / FMA 累加 / C-store 全程用此精度。未来走 F16-compute 时集中改此处派生逻辑。
+    //     注：QuantPrecision 层有 accumulator_dtype()/graph_dtype() 派生函数（返回 F32），
+    //     DType 层无等价派生；此处 DType::F32 是该派生结果在 DType 域的等价表达，非硬编码预设。
     // (2) tdt(name) = 权重存储精度（per-weight storage precision）。
     //     每个 weight tensor 的 dtype 顺从其自描述（safetensors/GGUF 元数据），不统一。
     //     混合精度模型中不同权重可不同 dtype（lm_head F16 + 中间层 BF16）。
