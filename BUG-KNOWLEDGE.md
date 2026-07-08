@@ -3672,3 +3672,263 @@ docs/domain-knowledge/gguf-classic-quant-layout.md(含两方向事实 + 6 条易
 - IQ4_NL codebook (quant_format.rs:1018)：= llama.cpp kvalues_iq4nl 一致
 - IQ1S_GRID (codebooks.rs)：2048 条目三值字节 {0x00,0x01,0xFF} 正确
 - NVFP4/MXFP4 descriptor：MXFP4 block=32 单级 E8M0 vs NVFP4 block=64 两级 正确区分
+
+---
+
+## BCE-20260708-GGUF-QUANT 根因再修正：通用 prefill 路径（非量化布局，数值铁证）
+
+**数值验证(q4-verify-executor 阶段1)彻底推翻量化布局根因**。Q4_0/Q8_0/BF16 三版本对照:
+
+| 版本 | argmax | decode | max_abs | generate | weight 布局 |
+|------|--------|--------|---------|----------|------------|
+| Q4_0 | 121034 | "阒"中文乱码 | 99 | 乱码 | nibble SPLIT |
+| Q8_0 | 328 | " S" | 19 | 含 France(部分对) | Bytes 无 nibble |
+| BF16 | 7640 | " fish" | 19 | "fish if French..."退化 | F32/BF16 非量化 |
+
+**铁证**: Q8_0(Bytes 无 nibble) 和 BF16(非量化走 Gemm) prefill 也错 → **bug 在通用 prefill 路径, 与 nibble/量化无关**。前5轮猜量化布局全错。
+
+### 已排除(数值确证,非静态猜)
+- quant_decode.rs:670 QuantConcatSeq = concat [lo16,hi16] = SPLIT 正确(非 bug)
+- quant_gather_emit.rs:460 SM61 是 GPU 路径,本地 CPU 不触发
+- nibble 布局(SPLIT vs INTERLEAVED)非根因
+- GGUF embed 物理布局读取正确(d=f16=-0.0066, row_stride=576B)
+
+### 关键差异(新根因方向)
+SmolLM2 BF16 **PASS**, 但 Qwen3 BF16 **FAIL**。两者都 BF16 decoder, 差异在 Qwen3 特性:
+- **QK norm**(q_norm/k_norm): Qwen3 有, SmolLM2 可能无(嫌疑最高)
+- partial RoPE: Qwen3 partial, SmolLM2 可能不同
+- GEMM trans_b/dtype 传播(BCE-20260706-MIXED-GEMM-STRIDE 区域 regression 嫌疑)
+
+### Q4_0 max_abs=99 vs Q8_0/BF16=19 暗示
+Q4_0 有额外 logits 发散(量化放大), 但非主因。修通用 prefill 路径后 Q4_0 发散可能消失。
+
+### 下一步
+- architect(retrospect) 归因通用 prefill 路径(带三版本证据)
+- Python transformers golden 逐层对比 Qwen3-0.6B(BF16 跑 layer0 vs JIT SINGLE_LAYER=1)
+- **禁改 quant_decode.rs/quant_gather_emit.rs**(nibble 非根因,改了破坏正确 SPLIT)
+
+### 知识库价值再证
+jit-numerical-debug-method 库三层二分法 + Q8_0/BF16 对照一锤定音, 避免第6轮静态误判。建库驱动范式闭环。
+
+---
+
+## BCE-20260708-QWEN3-HEADRMSNORM-GROUPS-PER-ROW (Qwen3 通用 prefill bug 真根因)
+
+## 确定性根因定位(静态+数值双重确证)
+Qwen3-0.6B(及所有 Qwen3)prefill 乱码根因: HeadRmsNorm groups_per_row 硬编码 1。
+
+### 代码铁证
+`gllm-kernels/src/compiler/codegen/vm/plan_lower/lower_op.inc.rs:1717`:
+\`\`\`rust
+emit_normlike_inline(
+    prog, &pattern,
+    feature_dim,   // = head_dim = 128 (从 spec ✓)
+    1,             // ← groups_per_row 硬编码 1 (BUG! 应 = num_heads)
+    spec.has_weight, norm_kind, ...
+);
+\`\`\`
+
+HeadRmsNorm 走 :1708 else 分支(RmsNorm/ValueNorm/HeadRmsNorm 共用 emit_normlike_inline)。
+
+### 数值影响(为什么乱码)
+- Qwen3 q_proj 输出 = num_heads×head_dim = 16×128 = **2048 维**
+- HeadRmsNorm 应**逐 head 归一**: 每 128 维一组, 16 组(groups_per_row=16)
+- 当前 groups_per_row=1 + feature_dim=128 → row_bytes=128×4=512字节
+- emit_normlike_inline(norm_softmax_emit.rs:81-114) 只处理前 128 维, **后 1920 维跳过/未归一**
+- → q/k 向量大部分元素未归一 → attention dot product 错 → prefill argmax 飘 → 乱码
+
+### 验证排除链(确认根因唯一性)
+- 量化布局(SPLIT/INTERLEAVED): 排除(Q8_0 Bytes + BF16 非量化也乱码)
+- head_dim: 排除(tensor derive :222 强制 128, attn_q_norm shape=[128] 确证)
+- rope_theta: 排除(GGUF 读对 1M)
+- nibble 布局: 排除(ConcatSeq=SPLIT 正确)
+
+三版本乱码程度不同(Q8_0 含 France 最接近, BF16 最退化)的反常: groups_per_row=1 对三版本同样影响, 乱码程度差异来自量化精度叠加(非主因)。
+
+### 根治
+:1717 groups_per_row 从 1 改为按 num_heads 推导:
+\`\`\`rust
+// HeadRmsNorm: 逐 head 归一, groups_per_row = total_elems / feature_dim
+let groups_per_row = match norm_kind {
+    NormKind::HeadRmsNorm => {
+        // 从 op.inputs[0] tensor shape 推 num_heads (total/head_dim)
+        let total = op.inputs[0].tensor total elems;
+        total / feature_dim  // Qwen3: 2048/128 = 16
+    }
+    _ => 1,  // RmsNorm/ValueNorm 整体归一
+};
+\`\`\`
+emit_normlike_inline 已支持 groups_per_row>1(norm_softmax_emit.rs:113-114 有 emit_loop groups_per_row 分支)。
+
+### 知识库驱动范式闭环
+建库(jit-numerical-debug-method 三层二分 + gguf-classic-quant-layout 排除量化) +
+数值验证(Q4_0/Q8_0/BF16 对照排除量化) + architect 归因(HeadRmsNorm 逐head) +
+静态定位(:1717 groups_per_row=1) = 确定性根因,非猜。
+
+### fixTemplate
+HeadRmsNorm emit_normlike_inline groups_per_row 必=num_heads(total/head_dim),禁硬编码 1
+### regressionAssertion
+Qwen3-0.6B Q4_0/Q8_0/BF16 prefill argmax 正确(Paris/capital/France),generate 合理
+
+## BCE-20260708-QWEN3-HEADRMSNORM fix 部分有效，下游 bug 待查
+
+groups_per_row fix 实现正确(headnorm-fix-executor):
+- q_norm op=OpId(5): input=[seq,2048] feature_dim=128 → groups_per_row=**16** ✓
+- k_norm op=OpId(6): input=[seq,1024] feature_dim=128 → groups_per_row=**8** ✓
+- SmolLM2(RmsNorm)零回归证明无害
+
+**但 Q4_0 仍乱码**(输出 "estr%Bpapers药业 CapcomdanaaysrongEAR")。
+
+### 重要信号: 输出模式变化
+- fix 前: "阒#${ Albaniaescapingnoun Printer虻ently"
+- fix 后: "estr%Bpapers药业 CapcomdanaaysrongEAR"
+**乱码模式变了** → fix 确实改善计算(部分对), HeadRmsNorm 是 bug 之一, 但还有**下游独立 bug**。
+
+### 已排除(确定性)
+- groups_per_row fix 正确(q=16/k=8 确认, SmolLM2 零回归)
+- 量化布局(SPLIT/INTERLEAVED): 排除
+- head_dim/rope_theta: 排除(读对 128/1M)
+
+### 下游 bug 嫌疑(architect 待重新诊断)
+HeadRmsNorm 之后的下游:
+- RoPE(partial? Qwen3 partial_rotary)
+- attention GQA 合并(16 q-heads / 8 kv-heads)
+- 或别的 Qwen3 独有路径
+
+### 注意
+Q8_0(Bytes)/BF16(非量化)之前也乱码 → 非 Q4_0 专属, 是 Qwen3 通用 prefill 路径下游 bug。fix groups_per_row 后三版本应都部分改善, 待验证。
+
+## BCE-20260708-QWEN3-GQA-KV-GROUP-SIZE (下游 bug architect 归因,待验证)
+
+groups_per_row fix(1e02a21b)后 Q4_0 仍乱码(输出模式变, 部分改善)。architect 归因下游 bug:
+
+### 高置信根因(architect)
+`gllm-kernels/src/compiler/codegen/vm/algo_templates/attention_norm_rope_moe.rs:63`:
+\`\`\`rust
+("kv_group_size", AlgoParam::Derived { base: "num_q_heads", op: ParamArith::Div, operand: 0 }),
+\`\`\`
+operand:0 → kv_group_size = num_q_heads / 0(应 = num_q_heads / num_kv_heads = 16/8 = 2)。
+
+### 完美解释铁证
+- SmolLM2 纯 MHA(num_kv==num_q)走 ATTN_MHA, 不碰 GQA 模板 → PASS
+- Qwen3 GQA 2:1 走 ATTN_GQA → 撞 operand:0 → FAIL
+- 与量化无关(Q4_0/Q8_0/BF16 都过此模板) → 三版本全乱码 ✓
+- groups_per_row fix 改善 q_norm 但 attention 映射仍错 → 输出变但仍乱 ✓
+
+### 待验证(数值/逻辑)
+1. 确认 Op::MultiHeadAttention GQA 情形 lowering 到 ATTN_GQA 模板(非另一条 MHA kernel)
+2. 确认 ParamArith::Div operand:0 的求值语义(字面除 0? 还是参数索引 0?)
+3. 次根因: attention scale LoadConst value:0.0 是否被 head_dim=128 正确回填(qk_scaled=0?)
+
+### 验证路径
+Step 1: dump attention 输出(o_proj 前)对比 golden → 发散则 attention 内部
+Step 2: dump softmax 后 attn_weights → 看 q→kv head 映射错位(kv_group_size bug 特征)
+Step 3: dump qk_scaled 排 scale=0
+
+### fixTemplate(待确认后)
+kv_group_size operand:0 → operand:num_kv_heads 或改 Derived 求值逻辑用 num_kv_heads
+
+## BCE-20260708-QWEN3 决定性数值诊断: layer0 完全正确，bug 在 layer1+ 或 tail
+
+### 诊断方法(数值,非猜)
+- transformers Qwen3-0.6B(BF16) hook layer0 各算子 → golden(tests/e2e_alignment/data/golden_qwen3_0.6b.npz)
+- gllm Q4_0 layer0 dump(/tmp/qwen3_golden_layer0/*.bin, 前 E 已 dump)
+- 逐算子 cosine 对比
+
+### 结果: layer0 全算子 cosine=1.000000(完全一致)
+| 算子 | cosine |
+|------|--------|
+| embedding | 1.0 |
+| input_norm | 1.0 |
+| q_proj(2048维) | 1.0 |
+| **q_norm(HeadRmsNorm, fix 后)** | **1.0** |
+| k_proj | 1.0 |
+| **k_norm** | **1.0** |
+| o_proj | 1.0 |
+| layer0_out | 1.0 |
+
+### 决定性结论
+1. **groups_per_row fix(commit 1e02a21b)数值正确** — HeadRmsNorm 已修好(q_norm/k_norm cosine=1.0)
+2. **layer0 完全正确** — head_dim 解耦(2048≠1024) + GQA 2:1 + RoPE + HeadRmsNorm 全对
+3. **bug 在 layer1+ 或 tail**(final_norm + lm_head) — layer0 输出对但 prefill argmax 错(gllm 121034 vs golden 12095)
+
+### 排除(累计)
+- 量化布局(SPLIT/INTERLEAVED): 排除
+- head_dim/rope_theta: 排除(读对)
+- HeadRmsNorm groups_per_row: 已 fix 验证对
+- layer0 全部算子: 排除(cosine=1.0)
+- GQA 死代码: 排除
+
+### 下游嫌疑(architect 主嫌疑全排除后新方向)
+- layer1+: 层循环(layer_loop_config)在 layer1+ 的 KV cache/activation 传递?
+- final_norm: final RMSNorm 实现?
+- lm_head: tied embedding 或 lm_head GEMM?
+- 或: layer0 对但 generate 循环(decode)错? 但 prefill argmax 也错(非 decode)
+
+### 关键: prefill argmax 错(121034 vs 12095), 但 layer0 对
+→ bug 在 layer0 之后到 logits 之间: layer1-27 循环 / final_norm / lm_head
+
+### 下一步诊断
+dump 多层(layer0/1/2/27)或 final_norm/lm_head 中间值,对比 golden,定位 layer0 之后首个发散点。
+
+## BCE-20260708-QWEN3 决定性: layer0 单独对(cosine=1.0)但 28层循环全错(cosine=0.005)
+
+### 决定性对比(数值)
+- **GLLM_SINGLE_LAYER=1 (只跑 layer0)**: layer0 全算子 cosine=1.0(完全对) ✓
+- **全 28 层循环 (默认)**: layer27 阶段 cosine=0.005-0.1(几乎正交,全错) ✗
+  - layer27 ffn_resid vs golden hs_28: 0.005
+  - final_normed vs hs_28: 0.10
+  - layer27 attn o: 0.10
+- logits cosine=0.21(发散)
+
+### 决定性结论
+**bug 在层循环结构(layer_loop_config 跨层传递), 非单层算子**:
+- layer0 单独跑(GLLM_SINGLE_LAYER=1)→ 完全对
+- 28 层循环 → layer27 全错
+- layer0 算子本身正确(HeadRmsNorm/GQA/RoPE/head_dim解耦 全对)
+
+### 下游嫌疑(层循环结构)
+1. **weight_stride 跨层权重推进**(pack_weights_from_graph :440-444): layer1+ 的 b_ptr 用 layer_idx*weight_stride, Q4_0 量化权重 stride 算错?
+2. **KV cache 跨层**: layer1+ 的 KV cache 传递(FromCache)
+3. **activation_alias 跨层**: ActivationPing/Pong 层间残差流(layer_out→下个 layer_in)
+4. **layer_loop_config 配置**: weight_stride/layer_blob_base_offset/activation_alias 错误
+
+### 已排除(累计)
+- 单层算子(HeadRmsNorm/GQA/RoPE/embed/norm/q_proj/q_norm/k_norm/o_proj/layer_out): 全 cosine=1.0
+- 量化布局/head_dim/rope_theta: 排除
+- groups_per_row fix(1e02a21b): 验证正确
+
+### 下一步
+dump layer0(全循环模式,非 SINGLE_LAYER)对比 golden hs_1(=layer0 out in full run)
+- 若 layer0(全循环)≠ golden hs_1 → 循环第0层就错(weight_stride 或 activation 接线)
+- 若 layer0(全循环)= golden hs_1 但 layer27 错 → 中间层累积
+
+key: GLLM_SINGLE_LAYER=1 隔离了层循环。全循环 layer0 值是否对?
+
+### 知识库价值
+jit-numerical-debug-method 库 + golden 工具 + diagnostic API 三层 bisection 定位:
+单层对(1.0) + 循环全错(0.005) = 层循环结构 bug,静态永远找不到。
+
+## architect Probe B 隐含验证 + 聚焦 activation_alias/weight_stride 跨层
+
+architect 建议 Probe B(dump 全循环 layer0 vs golden hs_1)。已隐含验证:
+- gllm layer0 out(无论 SINGLE_LAYER 还是全循环)对比 golden post_layer0(cosine=1.0)
+- golden post_layer0 = hook layer0(全循环) = hs_1
+- => layer0 全循环也对(cosine=1.0 vs hs_1)
+
+### 结论: 循环第0层就对, bug 在 layer1+ 累积(跨层传递)
+layer0 执行对, layer1 执行时读到错误输入或权重:
+1. weight_stride(layer_loop weight_ptr 推进): 但 weight_physical_bytes 对 Q4_0 用 block_bytes 正确, _lc_weight_stride 应对
+2. **activation_alias 跨层残差流**(layer_out→下个 layer_in): 最高嫌疑
+3. KV cache 跨层(FromCache)
+
+### 下一步(继续诊断)
+dump gllm 中间层(layer1/2)对比 golden hs_2/hs_3:
+- 需 ring-buffer capture(GLLM_DEBUG_LAYERS) 或单层隔离 layer1
+- 首个 ≠ golden 的层 = 跨层传递开始错的位置
+- layer_loop_config: activation_alias/layer_weight_input_indices 嫌疑
+
+### 已交付
+- groups_per_row fix(1e02a21b): layer0 HeadRmsNorm 验证对(cosine=1.0)
+- 诊断工具: generate_golden_qwen3.py + diag_qwen3_compare.py + diag_qwen3_tail.py
+- golden 数据: golden_qwen3_0.6b.npz(layer0) + golden_qwen3_full.npz(28层+logits)
