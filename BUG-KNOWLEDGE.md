@@ -3207,9 +3207,83 @@ let kv_row_stride = spec.geometry.num_kv_heads * spec.geometry.head_dim * dtype.
 - `docs/domain-knowledge/dtype-propagation.md`：BF16 传播链（WidenCompute），NormSpec.dtype 语义参考
 - `docs/domain-knowledge/derive-compute-dtype-unconstitution.md`：阶段 2 原方案（AttentionSpec.dtype 从 k_out 推导），本类扩展到所有 Spec.dtype
 
-归因时间: 2026-07-06 (横扫) / 2026-07-06 (运行时消费确认)
-status: 违宪嫌疑待 architect 评审 (2 点: NormSpec 范式根治 + Spec.dtype 从 inputs 推导) | residual: 8 处生产违宪(5 graph_impl + 3 build_graph) + 阶段2 联动(AttentionSpec.dtype 须与 KV cache dtype 同步, lower_op.inc.rs:1517 kv_row_stride 确认)
+归因时间: 2026-07-06 (横扫) / 2026-07-06 (运行时消费确认) / 2026-07-07 (architect 方案定稿) / 2026-07-07 (方案作废, 用户纠正方向)
+status: architect 方案作废 (决策6 "不碰 act_dt=F32 硬编码" 是错误根源), T1.1/T1.1b/T1.2/T1.3 已回滚, T2.1 commit 24c66c8e 保留 (真正顺数据) | residual: 8 处生产违宪(5 graph_impl + 3 build_graph) + act_dt=F32 硬编码 (build_graph.inc.rs:85, 真正违宪根) + AttentionSpec.dtype 硬编码 F32
+architect_session: 0f131618-d55d-48e5-adda-16b8de84ba94 (方案作废)
+方案作废原因:
+  - architect 决策6 "act_dt=F32 硬编码 (build_graph.inc.rs:85) 归阶段3, 阶段2 不碰" 是错误: act_dt 是精度立场预设 (写死 F32), 不碰它就保留 "写死精度" 的根
+  - 我机械执行决策2 "新增 geometry.kv_dtype SSOT", 但填 act_dt (硬编码 F32) 派生 → 给违宪穿 "kv_dtype SSOT" 马甲, 仍写死精度
+  - 用户一配 compute_dtype=BF16: buffer=BF16 vs stride=F32(从act_dt) → 768/384 越界, 原 BUG 没修, 只是换了马甲
+  - sed 还误伤 DiagnosticScratchpad (有 compute_dtype 无 kv_dtype 字段), 纯机械扩散没理解语义
+真正方向 (用户设计): JIT 代码根据权重文件 + 配置生成, 不预设数据
+  - KV cache dtype 派生源: K/V projection 输出张量 TensorMeta.dtype (graph.tensor(k_out).dtype, 权重文件实际 dtype 逐张量读), 已有 kv_cache_elem_bytes (context.inc.rs:196) 就是这个思路 (majority vote)
+  - act_dt=F32 硬编码 (build_graph.inc.rs:85) 必须改: 从 ctx.dtype/配置派生, 非写死
+  - AttentionSpec.dtype 字段根治: 删字段 + lowering 从 graph.tensor(op.inputs[i]).dtype 派生 (像 T2.1 的 op_input_dtype 那样), 非加 kv_dtype 字段绕开
+  - 系统性清理: SPEC + 代码里一切违反 "数据/配置驱动" 的写死精度内容, 非原方案修修补补
+保留: T2.1 commit 24c66c8e (NormSpec 从 op.inputs[0].dtype 派生, op_input_dtype 从 TensorMeta.dtype 读, 真正顺数据)
 ```
+
+### 本轮教训 (2026-07-07, 用户纠正)
+
+**错误**: 我把 architect 方案"决策2 新增 geometry.kv_dtype SSOT"机械执行, 但填 act_dt (硬编码 F32) 派生, 给违宪穿马甲。sed 还误伤 DiagnosticScratchpad。这是"代码绑架数据"——把用户可配的 compute_dtype (BF16) 路径, 改成从 act_dt (写死 F32) 派生, 反而保留并扩大了原 BUG。
+
+**根因**: 没守住宪法 -1 底线。architect 决策6 "不碰 act_dt" 本身是回避根治, 我没质疑就执行。把"零回归" (当前测试全 F32) 当成正确性证据, 忽略"用户配 BF16 就越界"的潜伏 BUG。
+
+**真正根治原则 (用户设计)**:
+1. JIT 代码根据权重文件 (TensorMeta.dtype) + 配置 (ModelConfig) 生成, 不预设任何精度
+2. 派生源永远是数据 (权重张量 dtype) 或配置 (用户显式指定), 不是代码里写死的 DType::F32
+3. act_dt=F32 硬编码 / AttentionSpec.dtype=F32 硬编码 / ctx.dtype=graph_dtype()=F32 硬编码 — 都是违宪根, 必须切除, 不归"阶段3 回避"
+4. 已有的正确先例: kv_cache_elem_bytes (从权重 majority vote), op_input_dtype (从 TensorMeta.dtype), T2.1 — 复用这些, 不新造马甲字段
+5. 系统性清理 SPEC + 代码, 非原方案"加 kv_dtype 字段绕开"的修补
+
+### 作废方案 (architect 定稿, 见 docs/plans/BCE-PHASE2-PRECISION-SOVEREIGNTY.md, 已作废)
+
+~~病灶 = KV cache dtype 双源分裂~~ (部分对, 但根治方向错):
+- buffer 分配读 `executor_builder.rs:97 geometry.compute_dtype` (用户可配 BF16, 顺配置 ✅)
+- stride 计算读 `lower_op.inc.rs:1488 AttentionSpec.dtype` (写死 F32, 违宪 ❌)
+
+~~根治 = 主权归位~~ (错: 把 buffer 也改成从 act_dt 硬编码派生, 反而把顺配置的改成写死的):
+1. ~~建立 KV cache dtype 单一真源: geometry.kv_dtype, 从 graph.tensor(k_out).dtype 派生~~ (实际填了 act_dt=F32 硬编码)
+2. ~~buffer 分配 + attention stride 双消费者读同一源~~ (双源都变成 act_dt=F32 硬编码, 比原来更糟)
+
+**正确根治**: buffer 保持读 compute_dtype (顺配置), stride 改成读 graph.tensor(k_out).dtype (顺数据), 删 AttentionSpec.dtype 字段, act_dt 从配置派生非写死。两源各自顺从正确的源头 (配置/数据), 自然一致。
+
+**阶段边界 (零回归前提)**:
+- 阶段2 = 让 dtype 顺着数据流 (机制层, K/V 输出当前=F32 → 派生结果=F32 → 零行为变化)
+- 阶段3 = ctx.dtype + act_dt 解耦 (策略层, 改 KV=BF16, 有数值回归, 独立阶段)
+
+### 新定稿方案 (2026-07-07, architect session 304fc1ec, 旧方案作废后的真正根治)
+
+> 旧方案 (geometry.kv_dtype SSOT + 不碰 act_dt) 已作废. 新方案核心: act_dt 注释撒谎 (声称计算精度, 实际只是存储 dtype), 真正计算精度在 lowering (op_input_dtype→promote F32). 切除 act_dt 写死 + 删 AttentionSpec.dtype + GEMM c_dtype 顺输出张量 (D3 强制项, 上轮 missed).
+
+**5 个切除点 (D1-D5)**:
+- D1: act_dt 改名 act_store_dt, 派生源 = config.compute_dtype (需 ResolvedConfig 加 compute_dtype 字段). SmolLM2 F32→零回归, BF16 配置→激活 BF16.
+- D2: 删 AttentionSpec.dtype 字段, lowering kv_row_stride 从 K 张量 op.inputs[1] TensorMeta.dtype 派生 (复用 GEMM b_dtype 先例), debug_assert V==K dtype.
+- D3 (强制, 上轮 missed): GEMM c_dtype 从 ctx.accum_dtype(F32) 改成 op.outputs[0] TensorMeta.dtype. 否则 BF16 时 F32 写进 2B 槽溢出 (从 KV copy 上移到 projection). 累加寄存器仍 F32, VecStore 负责 narrow.
+- D4: KV buffer 保持 compute_dtype (D1+D2+D3 后四点经 compute_dtype 统一, 链闭合).
+- D5: 同批清 dtype_chain.rs:118 QuantGemm 输出 F32 + dump.rs + SPEC 24-QUANT-PIPELINE-JIT:464.
+- D6 (新增): ctx.dtype rename accum_dtype (命名误导是 D3 bug 根因, 不改名还会再犯).
+
+**DAG (主会话串行, 不派 Agent)**:
+```
+K1(D2a 消费点脱钩, lower_op:1488 从 K 张量派生) →
+K2(D6 rename ctx.dtype→accum_dtype) →
+K3(D3 GEMM c_dtype 顺输出张量, lower_op:1357) →
+K4(D5a QuantGemm 输出脱 F32, dtype_chain:118) →
+K5(D2b-kernels 删 AttentionSpec.dtype 字段 + kernels 构造点) → [red 窗口] →
+G1(D2b-gllm 删 build_graph×3+vision+audio+intent 构造点) →
+G2a(D1-config ResolvedConfig 加 compute_dtype 字段) →
+G2b(D1-graph act_dt→act_store_dt 顺配置, rename 200+处) →
+G3(D5b dump.rs + SPEC:464 清理)
+```
+关键顺序: D3 先于 D1 (跨仓依赖 + 正确性: c_dtype 窄化必须先于激活变 BF16). K2 rename 紧接 K1 (杜绝 D3 中途混淆). K5→G1 跨仓 red 窗口背靠背. BF16 测试放 G2b 后 (中间态会溢出).
+
+**风险防范**:
+- 跨仓 red 窗口 (K5→G1): 两步连做不中断, 只在 G1 后 commit
+- K2 rename 过界: 限定 LoweringContext.dtype 字段, rename 后 grep ctx.dtype 残留=0
+- BF16 正确性只在末尾可测: G2b 后扩展 executor_builder:3250 断言 emit kv_row_stride elem_bytes==buffer elem_bytes; lower_attention_v2 加 debug_assert(k_dtype.elem_bytes()*num_kv_heads*head_dim==abi_kv_row_stride)
+- 零回归底线: 每步 SmolLM2 全 F32 byte-identical, delta≠0 立即停
+- K3 唯一未验证假设: VecStore 是否支持 F32→BF16 narrow (若不支持立即停回报)
 
 ### 根治状态
 
@@ -3291,3 +3365,66 @@ if let Some((in_tid, _out_tid)) = &topology.layer_activation_alias {
 **最终验证**: CPU E2E `cpu_e2e_smollm2_135m_logits_alignment` PASS (cosine=1.000000, mad=0.008957). 44377+7040 tests 无回归.
 
 诊断方法论沉淀: GLLM_SINGLE_LAYER/GLOBAL_DEBUG_LAYERS + named_offsets 中间张量读 + Python 参考逐算子对比, 定位首个发散算子 (v_proj GEMM), 再用 GLLM_DEBUG_LAYERS=2 定位层间传递 bug (ActivationSwap).
+
+---
+
+## BCE-20260708-G2B-ACCUM-AS-LOAD-STRIDE (精度主权最终根治)
+
+**模式签名**: 累加器 dtype 被误当激活 load 步长 → act_dt=BF16 时 2× 越读 → 乱码
+
+**根因（architect consult sessionId=426a2014 判定）**:
+- `build_graph.inc.rs:85` `let act_dt = DType::F32;` 硬编码激活存储 dtype → **B 违宪**（ARCH-NO-PRECISION-ASSUMPTION）
+- act_dt 被 stride 计算（lower_op:1549 kv_row_stride）消费 → 定义上就是「激活存储 dtype」，不是累加器
+- 解释 A「累加器恒 F32 合法」是偷换概念：累加器（accumulator_dtype()）合法恒 F32，但不能当挡箭牌掩护激活存储写死 F32
+- G2b 之前失败（act_dt=BF16 → E2E FAIL）的真正渗透点：`lower_op.inc.rs:1365 let a_dtype = ctx.accum_dtype;` 被 gemm_emit 当 **A-load 步长**（gemm_emit.rs:313 `a_elem = a_dtype.elem_bytes()`）
+  - accum_dtype 恒 F32（正确，累加器独立）→ a_elem=4
+  - act_dt=BF16 时激活存 2B → A-load 步长 4B → **2× 越读 → 乱码**
+  - 渗透方向：不是 act_dt 污染累加器，而是**累加器 dtype 被错当激活存储 dtype 算步长**
+
+**根治（三路正交，最终版）**:
+1. `build_graph.inc.rs:85`: `act_dt = config.compute_dtype`（激活存储顺 config，B 违宪修正）
+2. `lower_op.inc.rs:1365`: `a_dtype` 从 `ctx.accum_dtype` 改为 `op.inputs[0].dtype`（激活输入张量存储 dtype）—— G2b 失败真正根因
+3. accum_dtype 保持恒 F32（已对，不动，只喂累加器）
+4. VecLoad 自动 WidenCompute（BF16 load→F32 累加），VecStore narrow（F32→BF16 存）
+
+**三路正交最终架构**:
+- 激活存储 dtype ← config（act_dt 真身）
+- 累加器 dtype ← 恒 F32（accumulator_dtype() 独立导出，emit 时用）
+- 权重存储 dtype ← 逐权重自描述（tdt）
+
+**待确认项**: mega_kernel_emit.rs 4 处 `accum_dtype: graph_dtype(graph)`（恒 F32 无害，但若有"accum_dtype 当激活 load 步长"的点需同审；SmolLM2 走 plan_lower 不走 mega_kernel，本次不改 mega_kernel）
+
+**fixTemplate**: a_dtype = op.inputs[0].dtype（激活存储），勿用 accum_dtype（累加器）当 load 步长
+**regressionAssertion**: act_dt=config.compute_dtype(BF16) + a_dtype=激活tensor.dtype → SmolLM2 E2E PASS（零回归）
+
+---
+
+## BCE-20260708-G2B-ROOT-CAUSE-CORRECTION (architect 自我纠正)
+
+**修正**: architect consult sessionId=426a2014 第3轮推翻第1轮判定。act_dt=F32 **不违宪**。
+
+**原错误判定(第1轮)**: act_dt 被 stride 消费 → 是存储 dtype → 必须顺 config → B 违宪
+**修正判定(第3轮)**: 上述论据过度外推。缺的区分:
+- **外部数据的存储**(权重←文件、KV cache←config): 必须顺数据/配置,宪法 -1 管这个。K1-K4 真违宪全属此类,已修对。
+- **JIT 内部 scratch 存储**(激活中间结果): 无外部数据规定 dtype,是 JIT 自分配临时张量,= 设备计算精度(CPU=F32 WidenCompute)。
+
+act_dt 属第二类。写 F32 不是"对数据预设精度立场",因为根本没有"数据"的精度被覆盖。反证:CPU 上把激活存 BF16 = 存前 narrow + 载入 widen,两次掉精度换零收益(CPU FMA 恒 F32),那才违反"顺从计算模型"。
+
+**关键误解**: SmolLM2 `compute_dtype=BF16` 实际语义是"权重是 BF16",**不是**"激活用 BF16 算"。误读此字段直接当激活存储 dtype → G2b 两次失败(乱码→空输出)。
+
+**G2b 失败链**:
+1. act_dt=config.compute_dtype=BF16 → 激活张量声明 2B
+2. 但全系统其余(accum_dtype 恒 F32,~30 处 emit 按 4B)一致 → 唯一异类是 act_dt=BF16
+3. 2× 越读 → NaN 链式 → 采样全零 → 空输出
+4. 不是 30 处 bug,是 split-brain 的 30 个投影。改 30 处是错误方向(把错误决定往下游推)。
+
+**三路正交最终定型**(修正后):
+- 激活存储 ← **计算精度**(accumulator_dtype/设备策略,CPU=F32)← act_dt 真身
+- 权重存储 ← 文件自描述(tdt)✓
+- KV cache 存储 ← config(executor_builder:95)✓
+
+**满足宪法的写法**: 别写字面 `DType::F32`,写成从设备计算策略派生(CPU-WidenCompute→F32, GPU-native-BF16→BF16)。即 `accumulator_dtype()` 已有逻辑。当前 CPU E2E 派生结果=F32 → 零级联改动。
+
+**fixTemplate**: act_dt = 设备计算精度派生(非字面 F32,非 config.compute_dtype)
+**regressionAssertion**: act_dt=派生F32 + KV cache=config.compute_dtype(BF16) → SmolLM2 E2E PASS(零回归,已验证回退后 PASS)
+**待确认**: FromCache 窄化拷贝(F32 K tensor→BF16 KV buffer)dtype 感知 — 首轮 PASS 路径,architect 判理应已对
