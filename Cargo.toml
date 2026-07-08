@@ -32,6 +32,11 @@ metal = ["gllm-kernels/jit-metal"]
 nccl = ["gllm-kernels/nccl", "dep:gllm-nccl"]
 sg-debug = []
 
+# §diagnostic-layer-capture: 转发 gllm-kernels 的 ring-buffer 逐层 capture
+# (scratchpad 内 capture_base + N*stride, 每层输出 F32 side-channel copy).
+# 开启后 diagnostic_layer_capture_stride() > 0, 诊断 harness 逐层定位发散起始层.
+diagnostic-layer-capture = ["gllm-kernels/diagnostic-layer-capture"]
+
 # nvCOMP GPU ANS 压缩 (NVIDIA only)
 nvcomp = []
 
