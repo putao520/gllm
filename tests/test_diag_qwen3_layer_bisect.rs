@@ -517,3 +517,68 @@ fn diag_qwen3_step4_conditional_analysis() {
     eprintln!("  BF16/Q4_0 compute_dtype 都 F32 (步骤1) → swap 作用于相同 F32 buffer →");
     eprintln!("  共用同 swap 代码路径 (dtype 无关). BF16 过 → swap 没坏 → A 排除 (若步骤1 两F32).");
 }
+
+// ─── architect round 26: 0层截断 embed dump (Q4_0 vs BF16) ───────────
+//
+// 0层截断乱码 + 9 oracle 过 → bug 在 embed(QuantGather) 或 lm_head(QuantGemm) 真实组合.
+// 0层无 ActivationSwap → embed 输出不被 ping-pong 覆盖 → dump 可信 (round-16 工件不适用).
+// 对比 Q4_0 embed vs BF16 embed (同 prompt token 0):
+//   - 差异大 → Q4_0 embed (QuantGather) 错
+//   - 相似 → embed 对, bug 在 final_norm/lm_head
+
+#[test]
+fn diag_qwen3_0layer_embed_dump() {
+    eprintln!("\n=== architect round 26: 1层截断 logits dump (Q4_0 vs BF16) ===");
+    std::io::stderr().flush().ok();
+
+    let prompt = "The capital of France is";
+
+    // 1层截断 (0层 SIGSEGV, num_layers=0 不合法). 1层 = embed→1层→final_norm→lm_head→argmax
+    std::env::set_var("GLLM_TRUNCATE_LAYERS", "1");
+
+    // ── Run A: Q4_0 1层 ──
+    let q4_client = Client::builder()
+        .model("bartowski/Qwen_Qwen3-0.6B-GGUF")
+        .kind(ModelKind::Chat)
+        .gguf_file_filter("q4_0")
+        .build()
+        .expect("Q4_0 client");
+    let q4_tokens = q4_client.encode(prompt).expect("encode");
+    let q4_sp = q4_client.diagnostic_prefill_scratchpad(&q4_tokens).expect("q4 scratchpad");
+    // logits 在最后一行 (seq_len-1) 的 vocab 区
+    let q4_vocab = q4_sp.vocab_size;
+    let q4_logits = q4_sp.read_dtype_aware(
+        q4_sp.logits_offset, q4_vocab
+    );
+    let q4_argmax = q4_logits.iter().enumerate()
+        .max_by(|(_,a),(_,b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i,_)| i).unwrap_or(0);
+    let q4_max = q4_logits.iter().fold(0.0f32, |m,&v| m.max(v.abs()));
+    eprintln!("[Q4_0 1层] argmax={} (BF16 应 Paris=12095), logits|max|={:.4}, vocab={}", q4_argmax, q4_max, q4_vocab);
+    drop(q4_client);
+
+    // ── Run B: BF16 1层 ──
+    let bf_client = Client::builder()
+        .model("bartowski/Qwen_Qwen3-0.6B-GGUF")
+        .kind(ModelKind::Chat)
+        .gguf_file_filter("bf16")
+        .build()
+        .expect("BF16 client");
+    let bf_tokens = bf_client.encode(prompt).expect("encode");
+    let bf_sp = bf_client.diagnostic_prefill_scratchpad(&bf_tokens).expect("bf16 scratchpad");
+    let bf_vocab = bf_sp.vocab_size;
+    let bf_logits = bf_sp.read_dtype_aware(
+        bf_sp.logits_offset, bf_vocab
+    );
+    let bf_argmax = bf_logits.iter().enumerate()
+        .max_by(|(_,a),(_,b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i,_)| i).unwrap_or(0);
+    let bf_max = bf_logits.iter().fold(0.0f32, |m,&v| m.max(v.abs()));
+    eprintln!("[BF16 1层] argmax={} (Paris=12095), logits|max|={:.4}, vocab={}", bf_argmax, bf_max, bf_vocab);
+
+    std::env::remove_var("GLLM_TRUNCATE_LAYERS");
+
+    eprintln!("[对比] Q4_0 argmax={} vs BF16 argmax={}", q4_argmax, bf_argmax);
+    eprintln!("  Q4_0 logits|max|={:.4} vs BF16 |max|={:.4} (量级差异大→Q4_0 dequant 错)", q4_max, bf_max);
+}
+
