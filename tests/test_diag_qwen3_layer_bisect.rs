@@ -580,5 +580,211 @@ fn diag_qwen3_0layer_embed_dump() {
 
     eprintln!("[对比] Q4_0 argmax={} vs BF16 argmax={}", q4_argmax, bf_argmax);
     eprintln!("  Q4_0 logits|max|={:.4} vs BF16 |max|={:.4} (量级差异大→Q4_0 dequant 错)", q4_max, bf_max);
+
+    // ── dump 中间张量 |max| 序列, 定位量级放大点 ──
+    eprintln!("\n=== 中间张量 |max| 序列 (定位量级放大点) ===");
+    let dump_intermediates = |sp: &gllm::engine::mega_kernel::DiagnosticScratchpad, label: &str| {
+        eprintln!("[{}] named_offsets count={}", label, sp.named_offsets.len());
+        let mut sorted: Vec<&(String, usize, gllm_kernels::types::DType)> = sp.named_offsets.iter().collect();
+        sorted.sort_by_key(|e| e.1);
+        for (name, off, dt) in sorted.iter().take(40) {
+            let elem = dt.size_bytes();
+            if elem == 0 { continue; }
+            // 读前 1024 elem 算 |max|
+            let count = 1024.min((sp.data.len() - off) / elem);
+            if count == 0 { continue; }
+            let vals = sp.read_dtype_aware(*off, count);
+            let mx = vals.iter().fold(0.0f32, |m, &v| if v.is_finite() { m.max(v.abs()) } else { m });
+            eprintln!("  [{}] {:30} off={:8} dt={:?} |max|={:.6}", label, name, off, dt, mx);
+        }
+    };
+    // 重新跑 Q4_0 + BF16 dump 中间张量 (前面 client 已 drop, 重跑)
+    std::env::set_var("GLLM_TRUNCATE_LAYERS", "1");
+    let q4_client2 = Client::builder().model("bartowski/Qwen_Qwen3-0.6B-GGUF").kind(ModelKind::Chat).gguf_file_filter("q4_0").build().expect("q4");
+    let q4_tok2 = q4_client2.encode(prompt).expect("encode");
+    let q4_sp2 = q4_client2.diagnostic_prefill_scratchpad(&q4_tok2).expect("sp");
+    dump_intermediates(&q4_sp2, "Q4_0");
+    drop(q4_client2);
+    let bf_client2 = Client::builder().model("bartowski/Qwen_Qwen3-0.6B-GGUF").kind(ModelKind::Chat).gguf_file_filter("bf16").build().expect("bf");
+    let bf_tok2 = bf_client2.encode(prompt).expect("encode");
+    let bf_sp2 = bf_client2.diagnostic_prefill_scratchpad(&bf_tok2).expect("sp");
+    dump_intermediates(&bf_sp2, "BF16");
+    std::env::remove_var("GLLM_TRUNCATE_LAYERS");
+
+    // ── architect round 27: lm_head 权重 blob vs embed 字节级对照 ──
+    // lm_head 是 embed 的 tied 副本. 若副本字节一致 → QuantGemm 读法错;
+    // 若副本字节错位 → loader copy 错. 读真实 weight_blob (非 scratchpad).
+    eprintln!("\n=== round 27: lm_head blob vs embed blob 字节级对照 (Q4_0) ===");
+    std::env::set_var("GLLM_TRUNCATE_LAYERS", "1");
+    let q4c = Client::builder().model("bartowski/Qwen_Qwen3-0.6B-GGUF").kind(ModelKind::Chat).gguf_file_filter("q4_0").build().expect("q4");
+    let q4t = q4c.encode(prompt).expect("encode");
+    let q4s = q4c.diagnostic_prefill_scratchpad(&q4t).expect("sp");
+    let wblob = q4c.diagnostic_weight_blob_bytes().expect("weight_blob");
+    let woffs = q4c.diagnostic_weight_offsets().expect("weight_offsets");
+    let find_woff = |name: &str| -> Option<(usize, gllm_kernels::types::DType)> {
+        woffs.iter().find(|(n,_,_)| n == name).map(|(_,o,d)| (*o, *d))
+    };
+    let (embed_off, _) = find_woff("embed").expect("embed woff");
+    let (lm_off, _) = find_woff("lm_head").expect("lm_head woff");
+    eprintln!("[round27] weight_blob len={} embed off={} lm_head off={}", wblob.len(), embed_off, lm_off);
+    let row_bytes = 576usize;
+    let emb_row0 = &wblob[embed_off..embed_off+row_bytes];
+    let lm_row0  = &wblob[lm_off..lm_off+row_bytes];
+    let byte_match = emb_row0.iter().zip(lm_row0.iter()).filter(|(a,b)| a==b).count();
+    eprintln!("[round27] embed row0 vs lm_head row0 字节一致: {}/{}", byte_match, row_bytes);
+    let decode_q4_0_block = |bytes: &[u8]| -> Vec<f32> {
+        assert!(bytes.len() >= 18);
+        let scale = half::f16::from_le_bytes([bytes[0], bytes[1]]).to_f32();
+        let mut out = Vec::with_capacity(32);
+        for j in 0..16 {
+            let lo = (bytes[2 + j] & 0x0F) as f32;
+            let hi = ((bytes[2 + j] >> 4) & 0x0F) as f32;
+            out.push((lo - 8.0) * scale);
+            out.push((hi - 8.0) * scale);
+        }
+        out
+    };
+    let emb_blk = decode_q4_0_block(&wblob[embed_off..embed_off+18]);
+    let lm_blk  = decode_q4_0_block(&wblob[lm_off..lm_off+18]);
+    eprintln!("[round27] embed block0 首8值: {:?}", &emb_blk[..8.min(emb_blk.len())]);
+    eprintln!("[round27] lm_head block0 首8值: {:?}", &lm_blk[..8.min(lm_blk.len())]);
+    let blk_match = emb_blk.iter().zip(lm_blk.iter()).filter(|(a,b)| ((*a)-(*b)).abs() < 1e-6).count();
+    eprintln!("[round27] embed block0 vs lm_head block0 值一致: {}/32", blk_match);
+    let lm_row1 = &wblob[lm_off+row_bytes..(lm_off+2*row_bytes).min(wblob.len())];
+    let lm_row1_blk0 = decode_q4_0_block(&lm_row1[..18]);
+    eprintln!("[round27] lm_head row1 block0 首4值: {:?}", &lm_row1_blk0[..4.min(lm_row1_blk0.len())]);
+    // 逐块 scale 对照: lm_head row0 的 32 个块 scale (f16)
+    let mut r0_scales = Vec::new();
+    for b in 0..32 {
+        let bo = lm_off + b*18;
+        if bo+2 <= wblob.len() {
+            r0_scales.push(half::f16::from_le_bytes([wblob[bo], wblob[bo+1]]).to_f32());
+        }
+    }
+    eprintln!("[round27] lm_head row0 32块 scale (首8): {:?}", &r0_scales[..8.min(r0_scales.len())]);
+    // embed row0 scales 对照
+    let mut e0_scales = Vec::new();
+    for b in 0..32 {
+        let bo = embed_off + b*18;
+        if bo+2 <= wblob.len() {
+            e0_scales.push(half::f16::from_le_bytes([wblob[bo], wblob[bo+1]]).to_f32());
+        }
+    }
+    eprintln!("[round27] embed   row0 32块 scale (首8): {:?}", &e0_scales[..8.min(e0_scales.len())]);
+    // 跨多行统计 lm_head blob 是否非零
+    let lm_region = &wblob[lm_off..(lm_off + 28*row_bytes).min(wblob.len())];
+    let nonzero = lm_region.iter().filter(|b| **b != 0).count();
+    eprintln!("[round27] lm_head 首28行非零字节: {}/{}", nonzero, lm_region.len());
+    let emb_region = &wblob[embed_off..(embed_off + 28*row_bytes).min(wblob.len())];
+    let emb_nonzero = emb_region.iter().filter(|b| **b != 0).count();
+    eprintln!("[round27] embed  首28行非零字节: {}/{}", emb_nonzero, emb_region.len());
+    let _ = q4s;
+    // ── architect round 28: output.weight 是 Q6_K (非 Q4_0!). 标量参考解码 vs 我们路径 ──
+    eprintln!("\n=== round 28: output.weight Q6_K 解码对照 (标量参考 vs 我们路径) ===");
+    // Q6_K block: qs[128] + qh[64] + scales[16 i8] + d(f16) = 210B, block_size=256
+    // 标量参考 (k_quant.rs:442): value = d * sc[idx] * (6bit_val - 32)
+    //   6bit_val = (ql[l]&0xF) | ((qh[l]>>(2*q))&3)<<4)  q=0..3 分 4 quarter
+    // 我们路径: NibbleWithHighBits, qh<<6 & 0x30 (疑似丢高 2 bit)
+    let decode_q6k_row_scalar = |blob: &[u8], row_off: usize, n_elem: usize| -> Vec<f32> {
+        let mut out = vec![0.0f32; n_elem];
+        let blocks = n_elem / 256;
+        for blk in 0..blocks {
+            let bo = row_off + blk * 210;
+            let d = half::f16::from_le_bytes([blob[bo+208], blob[bo+209]]).to_f32();
+            let qs = &blob[bo..bo+128];
+            let qh = &blob[bo+128..bo+192];
+            let sc = &blob[bo+192..bo+208];
+            for n_group in 0..2usize {
+                let ql_off = n_group*64; let qh_off = n_group*32; let sc_off = n_group*8; let out_off = n_group*128;
+                for l in 0..32usize {
+                    let is = l/16;
+                    let q1 = (((qs[ql_off+l] & 0xF) | (((qh[qh_off+l] >> 0) & 3) << 4)) as i32) - 32;
+                    let q2 = (((qs[ql_off+l+32] & 0xF) | (((qh[qh_off+l] >> 2) & 3) << 4)) as i32) - 32;
+                    let q3 = (((qs[ql_off+l] >> 4) | (((qh[qh_off+l] >> 4) & 3) << 4)) as i32) - 32;
+                    let q4 = (((qs[ql_off+l+32] >> 4) | (((qh[qh_off+l] >> 6) & 3) << 4)) as i32) - 32;
+                    out[blk*256 + out_off + l]     = d * (sc[sc_off+is] as i8 as f32) * (q1 as f32);
+                    out[blk*256 + out_off + l+32]   = d * (sc[sc_off+is+2] as i8 as f32) * (q2 as f32);
+                    out[blk*256 + out_off + l+64]   = d * (sc[sc_off+is+4] as i8 as f32) * (q3 as f32);
+                    out[blk*256 + out_off + l+96]   = d * (sc[sc_off+is+6] as i8 as f32) * (q4 as f32);
+                }
+            }
+        }
+        out
+    };
+    // lm_head row0 = first 1024 elements (hidden of vocab 0). Q6_K row stride = (1024/256)*210 = 840 bytes
+    let q6k_row_bytes = (1024/256)*210; // 840
+    let lm_row0_scalar = decode_q6k_row_scalar(&wblob, lm_off, 1024);
+    let lm_row0_smax = lm_row0_scalar.iter().fold(0.0f32, |m,&v| if v.is_finite(){m.max(v.abs())}else{m});
+    eprintln!("[round28] lm_head row0 Q6_K 标量参考解码: |max|={:.4} 首8值: {:?}", lm_row0_smax, &lm_row0_scalar[..8]);
+    // 对照: 我们路径若丢高 2 bit, value=(lo4)-32, 范围[-32,-17]
+    let decode_q6k_row_4bit = |blob: &[u8], row_off: usize, n_elem: usize| -> Vec<f32> {
+        // 模拟我们的 buggy 路径: 仅取 lo4, 高 2 bit 丢失
+        let mut out = vec![0.0f32; n_elem];
+        let blocks = n_elem / 256;
+        for blk in 0..blocks {
+            let bo = row_off + blk*210;
+            let d = half::f16::from_le_bytes([blob[bo+208], blob[bo+209]]).to_f32();
+            let qs = &blob[bo..bo+128];
+            let sc = &blob[bo+192..bo+208];
+            for n_group in 0..2usize {
+                for l in 0..32usize {
+                    let is = l/16;
+                    let q1 = (qs[n_group*64+l] & 0xF) as i32 - 32;
+                    let q2 = (qs[n_group*64+l+32] & 0xF) as i32 - 32;
+                    let q3 = (qs[n_group*64+l] >> 4) as i32 - 32;
+                    let q4 = (qs[n_group*64+l+32] >> 4) as i32 - 32;
+                    out[blk*256+n_group*128+l]    = d*(sc[n_group*8+is] as i8 as f32)*(q1 as f32);
+                    out[blk*256+n_group*128+l+32]  = d*(sc[n_group*8+is+2] as i8 as f32)*(q2 as f32);
+                    out[blk*256+n_group*128+l+64]  = d*(sc[n_group*8+is+4] as i8 as f32)*(q3 as f32);
+                    out[blk*256+n_group*128+l+96]  = d*(sc[n_group*8+is+6] as i8 as f32)*(q4 as f32);
+                }
+            }
+        }
+        out
+    };
+    let lm_row0_4bit = decode_q6k_row_4bit(&wblob, lm_off, 1024);
+    let lm_4bit_max = lm_row0_4bit.iter().fold(0.0f32, |m,&v| if v.is_finite(){m.max(v.abs())}else{m});
+    eprintln!("[round28] lm_head row0 我们路径(4bit丢高2bit): |max|={:.4} 首8值: {:?}", lm_4bit_max, &lm_row0_4bit[..8]);
+    // BF16 对照 (off from bf wblob, not available here; use prior knowledge ~0.3)
+    eprintln!("[round28] 判定: 标量参考|max|≈0.3(BF16级)→我们路径若~0.3则Q6K解码对,bug在别处; 若>>0.3则Q6K解码错");
+
+    // ── round 28b: 真实 dot product 对照. act=final_normed, weight=lm_head row j ──
+    // 手算 dot(act, lm_head_row_j) Q6_K 标量参考, 对比 JIT logits[j]
+    eprintln!("\n=== round 28b: dot(act, lm_head_row_j) 标量参考 vs JIT logits ===");
+    // act = final_normed (sp.data @ final_normed off, 1024 f32 for last token)
+    let fnorm_off = q4s.named_offsets.iter().find(|(n,_,_)| n=="final_normed").map(|(_,o,_)|*o).expect("final_normed off");
+    // final_normed 是 [seq, hidden]; last token (pos seq_len-1) = offset + (seq_len-1)*hidden*4
+    let ntok = q4s.prompt_len;
+    // 先读 final_normed 第 0 个 token (前 1024 elem, 之前 dump 显示 |max|=82.77)
+    let act0_off = fnorm_off;
+    let act0: Vec<f32> = (0..1024).map(|i| {
+        let b = act0_off + i*4;
+        if b+4 <= q4s.data.len() { f32::from_le_bytes([q4s.data[b],q4s.data[b+1],q4s.data[b+2],q4s.data[b+3]]) } else { 0.0 }
+    }).collect();
+    let act0_max = act0.iter().fold(0.0f32, |m,&v| m.max(v.abs()));
+    eprintln!("[round28b] final_normed token0 (off={}) |max|={:.4}, prompt_len={}", act0_off, act0_max, ntok);
+    let act_off = fnorm_off + (ntok.saturating_sub(1)) * 1024 * 4;
+    let act: Vec<f32> = (0..1024).map(|i| {
+        let b = act_off + i*4;
+        if b+4 <= q4s.data.len() { f32::from_le_bytes([q4s.data[b],q4s.data[b+1],q4s.data[b+2],q4s.data[b+3]]) } else { 0.0 }
+    }).collect();
+    let act_max = act.iter().fold(0.0f32, |m,&v| m.max(v.abs()));
+    eprintln!("[round28b] act(final_normed last token off={}) 1024 elem |max|={:.4}", act_off, act_max);
+    // JIT logits
+    let jit_logits: Vec<f32> = (0..q4s.vocab_size).map(|i| {
+        let b = q4s.logits_offset + i*4;
+        f32::from_le_bytes([q4s.data[b],q4s.data[b+1],q4s.data[b+2],q4s.data[b+3]])
+    }).collect();
+    let jit_argmax = jit_logits.iter().enumerate().max_by(|(_,a),(_,b)| a.partial_cmp(b).unwrap()).map(|(i,_)| i).unwrap_or(0);
+    eprintln!("[round28b] JIT logits argmax={} val={:.4}, |max|={:.4}", jit_argmax, jit_logits[jit_argmax], jit_logits.iter().fold(0.0f32,|m,&v|m.max(v.abs())));
+    // 手算 dot for token 0 和 argmax token, 对比
+    for &tok in &[0usize, jit_argmax, 12095usize] {
+        let row_off = lm_off + tok * q6k_row_bytes;
+        let row = decode_q6k_row_scalar(&wblob, row_off, 1024);
+        let dot: f64 = act0.iter().zip(row.iter()).map(|(a,w)| (*a as f64)*(*w as f64)).sum();
+        let jit_val = jit_logits.get(tok).copied().unwrap_or(f32::NAN);
+        eprintln!("[round28b] token {}: 手算dot(act0,Q6K_row)={:.4} vs JIT logit={:.4} (差 {:.4})", tok, dot, jit_val, (dot as f32 - jit_val).abs());
+    }
+    std::env::remove_var("GLLM_TRUNCATE_LAYERS");
 }
 
