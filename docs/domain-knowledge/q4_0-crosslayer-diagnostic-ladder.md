@@ -958,6 +958,41 @@ Q3 hidden=1024 QuantGather 可能过(blk_ctr 已验、multi-block hidden=64 过)
 终于收窄的纪律：**"什么 Q4_0 特有 AND oracle 结构测不到 AND embed 检查不覆盖？"→唯一答案=层权重 blob 偏移/pack。**
 oracle 手喂指针→**永不能验偏移计算**=oracle regime 永久盲区，故 7 过不闭合。可信 build-time blob dump 是对的仪器；missing=21 自 round16 起就是指向这里的未解释旗标。
 
+---
+
+# 【新方向·组合执行@真实寄存器压力 + 最小复现二分（round 25）】
+
+## blob pack 也验对（round24 TOP 已查）
+L0.q_proj offset=215149568、size=1179648(n=2048,k=1024,bs32,bb18)、raw Q4_0 bytes、canonical key=true；missing=21 全是 activation（非 weight）正常。
+→ decode/op-select/dtype/blob-pack/emit-params 全验对，BF16 清共享，**E2E 仍乱码**。
+
+## 候选机制（组合专属、Q4_0 专属、oracle 测不到）
+finalize_quant scratch_ymm(0/1/2)=ymm13/14/15 硬编码；emit_helpers:317「分配器保留：**仅**高编号 ymm 不分配给**短活跃** VReg」。
+QuantGemm accumulator **长活跃**（跨 k=1024 循环）。真实融合核高压下若 acc 落 ymm13-15，quant scratch 循环中途 clobber→错累加→垃圾。
+- oracle 单 op 低压→acc 落低 ymm→scratch 不重叠→过。
+- BF16 走 dense scratch 路→不用 quant scratch→过。
+- **仅真实融合核(197 QuantGemm+活跃 acc)造成的压力逼出重叠。**
+= "BF16 清组合"的洞：清 dense 组合，非 quant-scratch-under-pressure。（保留注释歧义，未定论，architect 已错 6 机制）
+
+## ★决定性方法（机制无关）：最小复现 + 二分 argmax
+24 轮从未做最基本调试：**缩小失败案例，用唯一从未坏的信号(最终 argmax)二分 onset。**
+1. **0 层**（embed→final_norm→lm_head→argmax）真实组合/寄存器/scratchpad，仅少 op。argmax 垃圾/合理？
+   垃圾→bug 在 **embed+head**（QuantGather+lm_head QuantGemm）真实组合→微型 2-op 真实图复现→直接调（register 候选在此可查）。
+   合理→embed+head 组合对，加层。
+2. **二分层数** 1/2/4/8/14/28（~5 跑）。首个垃圾 onset=断点深度。
+3. BF16 同截断=合理输出对照。
+闭合理由：**首个观测真实失败执行**（真实寄存器/scratchpad/fusion=oracle 无法复现）**用可信信号**（argmax=从未坏，不同于 capture/ping-pong/encode_to_layer）。机制无关，骗不了。
+
+## 五问答
+1. 剩余未验面=**真实寄存器压力下的组合执行**（无 oracle 复现）。scratch-reg clobber 是具体候选。
+2. QuantGather hidden=1024 较低（blk_ctr 已验；0 层截断更决定性覆盖 embed@真实组合）。
+3. 两-op mini-oracle 仍手构（自身低压分配）→可能不复现压力依赖 clobber。**截断真实图严格更优（真实压力）。**
+4. embedding_scale=None(Qwen3) 已排除。
+5. prefill m=5 由截断跑覆盖（就是真实 prefill）。
+
+## ★元教训（round 25）：跳过 24 轮的招 = 最小复现 + 可信端信号
+24 轮探中间值（全坏）+ 验隔离 op（全过），却没做标准调试招：**缩小真实失败案例、用输出信号二分 onset**。中间探针执念挤掉了它。argmax 全程可信。截断真实图→二分→定位深度（或 0 层的 embed+head）→对该最小真实复现套 register-scratch lens。
+
 ## ★差分实测结果（2026-07-09，arch 控、never-broken E2E 信号类）
 
 | 模型 | 量化 | 输出 | 结果 |
@@ -1356,3 +1391,59 @@ GemmMode::General => {
 - 这是 oracle regime 最后未测面：跨 op 集成
 
 **元教训**：oracle 构造时 act 布局必须匹配 emit 假设（[m,k] row-major, a_row_stride=k*elem）。错误的 oracle 布局会假阳性 FAIL。
+
+## architect round 25：停止猜机制，最小复现 + argmax 二分（2026-07-10）
+
+### 已完成进展（commit d32e18e5）
+- QuantGather PackedNibbles SPLIT 修复（两阶段，7 oracle 验证）
+- QuantGemm per-role dtype 分离
+- 7055 回归过
+- blob pack 验证对（offset/size/数据/ext_ptrs 全对）
+
+### 但 E2E 仍乱码
+
+### architect round 25 决定性方法
+停止猜机制（已错过 6 个）。用**最小复现 + 可信信号(argmax)二分**：
+1. 截断真实 Q4_0 图: 0层(embed→final_norm→lm_head→argmax). 真实寄存器/scratchpad/fusion.
+   - argmax 垃圾 → bug 在 embed+head 真实组合 → 微型 2-op 真实图复现
+   - argmax 合理 → 加层
+2. 二分层数 1/2/4/8/14/28, 首个垃圾 onset = 断点深度
+3. BF16 同截断 = 对照
+
+### 候选机制（组合专属，未确认）
+scratch 寄存器 clobber: emit_helpers.inc.rs:317 ymm13/14/15 保留给短活跃 VReg.
+QuantGemm accumulator 长活跃(跨 k=1024 循环). 真实融合核高压下若 acc 落 ymm13-15,
+quant scratch_ymm(0/1/2) 循环中途 clobber 它 → 错累加 → 垃圾.
+- 隔离 oracle 近零压力 → acc 落低 ymm → 不重叠 → 过(漏!)
+- BF16 走 dense scratch 路径, 不用 quant scratch → 过
+- 只有真实融合核(197 QuantGemm + 长活跃 acc)压力逼出重叠
+
+### 元教训
+24 轮跳过了标准调试招: 缩小真实失败案例 + 输出信号二分 onset.
+中间探针执念挤掉了它. argmax 全程可信.
+
+### 下一步
+实施截断测试: 改 geometry.num_layers (0/1/2/4/8/14/28), 跑 Q4_0 argmax 二分 onset.
+
+## ★★★0 层截断定位：bug 在 embed+head 真实组合（architect round 25 命中）
+
+**截断二分**（GLLM_TRUNCATE_LAYERS 环境变量，截断 layer_loop_config.num_layers）：
+- Q4_0 **0 层**（embed→final_norm→lm_head→argmax）: output="eraçãoected肥ückenaptivemountgbaкупardotic" **乱码**
+- Q4_0 1 层: "şa生態われる\n fluffy'],\r\nيح $? bulunduğugerald" 乱码
+- BF16 0 层: "is is is is is is is is is is" **合理重复 token**（非乱码）
+
+**结论**（architect round 25 预测命中）：
+- 0 层垃圾 → bug 在 **embed + head 真实组合**（QuantGather + lm_head QuantGemm）
+- BF16 0 层合理 → 共享组件（final_norm/argmax/层外接线）对
+- Q4_0 0 层乱码 → Q4_0 特有的 embed(QuantGather) 或 lm_head(QuantGemm) 在真实规模错
+
+**缩小到 2-op 真实图**：
+- embed = QuantGather（真实: hidden=1024, vocab=151936, 32 block/token）
+- lm_head = QuantGemm（真实: m=seq, n=vocab=151936, k=hidden=1024）
+- oracle 只测 QuantGather hidden=32/64, QuantGemm k=32/64/1024(m=1,n=1/4)
+- 真实规模 QuantGather(hidden=1024) + lm_head(n=151936) 未测
+
+**下一步**：
+- 建 QuantGather 真实规模 oracle（hidden=1024, 从真实 GGUF 读 embed block, 对比手算 SPLIT dequant）
+- 或 dump 0 层截断下 QuantGather 输出（embed 后, final_norm 前）
+- 候选: QuantGather 真实 hidden=1024 (32 block) 的 blk_ctr 跨 block 在真实规模暴露? 或 lm_head n=151936?
