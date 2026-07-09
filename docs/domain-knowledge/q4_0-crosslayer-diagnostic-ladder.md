@@ -993,6 +993,40 @@ QuantGemm accumulator **长活跃**（跨 k=1024 循环）。真实融合核高�
 ## ★元教训（round 25）：跳过 24 轮的招 = 最小复现 + 可信端信号
 24 轮探中间值（全坏）+ 验隔离 op（全过），却没做标准调试招：**缩小真实失败案例、用输出信号二分 onset**。中间探针执念挤掉了它。argmax 全程可信。截断真实图→二分→定位深度（或 0 层的 embed+head）→对该最小真实复现套 register-scratch lens。
 
+---
+
+# 【定位·0 层乱码，retract register 假设，lm_head n=151936 未测（round 26）】
+
+## 截断命中 + 两事实
+- Q4_0 0 层（embed→final_norm→lm_head→argmax）乱码；BF16 0 层合理。bug 在 tiny 图。
+- **tie_word_embeddings=True → lm_head=embed 同一 Q4_0 tensor**（name_map:206-209）。lm_head QuantGemm **n=vocab=151936**，oracle 9 只测 n=2048 → **74× 未测**。
+- 0 层无 ActivationSwap 执行（layer_loop_config 只驱动层循环，0 层=0 swap）→ **embed 输出不被 ping-pong 覆盖→dump 可信**（round16 工件不适用）。
+
+## ★retract round25 register-clobber 假设（0 层结果杀死它）
+0 层=3 op=**低寄存器压力**，仍失败。round25 假设是**压力依赖** clobber（197 QuantGemm 造压力）→低压仍败反对它。
+更紧：**oracle 9(单 QuantGemm,k=1024,acc+scratch_ymm) 过 → within-one-QuantGemm acc-vs-scratch clobber 被 refute**。残余只能 cross-op，3 op 下弱。**architect 提的假设被 0 层证据 demote，诚实纠正。**
+
+## 领先假设（都具体、无 register 理论）
+1. **lm_head QuantGemm @ n=151936**——唯一真未测规模(74×)。候选：large-n 偏移算术（weight_row_ptr 累进 151936×576=87.5MB，查 i32 截断）或仅大 n 可见的 per-row 迭代 bug。
+2. **QuantGather 输出@真实组合**——oracle8 隔离过(hidden=1024)，组合可能不同；split 测定。
+
+## 验证手段排序
+1. **A(TOP)：0 层跑 dump embed(QuantGather) 输出 vs 手算。** 已确认可信(0 层无 swap)。机制无关 split：
+   embed 错→QuantGather 组合坏→localize；embed 对→final_norm(dense/BF16 共享,不太可能)或 lm_head→再 dump lm_head 输入(=normed)，对→**lm_head QuantGemm @ n=151936 是 bug**。
+2. **扩 oracle 9 到 n=151936**（非 2048）。失败→隔离复现 lm_head bug→可信可调。直测假设1。
+3. C(ymm 保留检查)demote——仅 A/B 定位到 within-op register 才查(oracle9 过使其不太可能)。静态低优。
+4. D(2-op mini-oracle)低——手构，不优于可信 0 层 split。
+
+## 四问答
+1. scratch clobber **retract**。0 层低压仍败 + oracle9 过 refute 压力/within-op 形式。非 lead。
+2. 最高压 op moot（压力假设撤）。lm_head 工作量最大(n=151936)。
+3. 排序：A→B→扩 oracle 到 n=151936→(C 静态低)→(D 低)。
+4. 必然 register 压力？**否，撤**。最可能 lm_head n=151936 未测规模，或 QuantGather 组合细节。**split 测 A 机制无关地告诉哪个**，别先定机制。
+
+## ★元教训（round 26）
+0 层截断不仅定位——其**低寄存器压力 falsify 了 architect 自己的领先机制**，tie 事实曝出**具体 74× 未测规模(lm_head n=151936)**无 oracle 触及。
+纪律：**让机制无关的 reduction(截断+可信信号)选靶，别预设机制**——architect 上轮预设 register-clobber 被数据 refute。做 split A，再扩 oracle 到真实 lm_head n。
+
 ## ★差分实测结果（2026-07-09，arch 控、never-broken E2E 信号类）
 
 | 模型 | 量化 | 输出 | 结果 |
@@ -1447,3 +1481,22 @@ quant scratch_ymm(0/1/2) 循环中途 clobber 它 → 错累加 → 垃圾.
 - 建 QuantGather 真实规模 oracle（hidden=1024, 从真实 GGUF 读 embed block, 对比手算 SPLIT dequant）
 - 或 dump 0 层截断下 QuantGather 输出（embed 后, final_norm 前）
 - 候选: QuantGather 真实 hidden=1024 (32 block) 的 blk_ctr 跨 block 在真实规模暴露? 或 lm_head n=151936?
+
+## ★1层截断 logits dump（architect round 26，Q4_0 vs BF16 量级对比）
+
+**1层截断**（0层 SIGSEGV, num_layers=0 不合法）：
+- Q4_0 1层: argmax=129008, logits|max|=**98.12**, vocab=151936
+- BF16 1层: argmax=1172, logits|max|=**22.64**, vocab=151936
+- Paris=12095 (两者 1层都不够, 但量级对比可信)
+
+**关键**: Q4_0 logits|max| = 98.12 vs BF16 = 22.64 → Q4_0 **量级放大 ~4.3×**
+
+**分析**:
+- 4.3× 不是 nibble 当 float 读 (那会 100×+)
+- 4.3× 可能: 某层 dequant 小错累积 / lm_head n=151936 偏移 / Q4_0 特有 dtype 传播
+- 两者 argmax 都非 Paris (1层不够), 但 Q4_0 量级异常
+
+**下一步**: 
+- architect Step B: 扩 oracle 到 n=151936 (真实 lm_head vocab) 复现
+- 或 dump Q4_0 1层的中间张量 (QuantGather 输出 / lm_head 输入) 定位量级放大点
+- DiagnosticScratchpad.named_offsets 可读中间张量 (find_first_nan_tensor 模式)
