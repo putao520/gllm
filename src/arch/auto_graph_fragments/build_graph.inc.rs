@@ -2587,7 +2587,10 @@ pub fn build_compiler_graph(
             0
         };
         g.layer_loop_config = Some(gllm_kernels::compiler::graph::LayerLoopConfig {
-            num_layers: features.num_layers,
+            num_layers: std::env::var("GLLM_TRUNCATE_LAYERS").ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n <= features.num_layers)
+                .unwrap_or(features.num_layers),
             weight_stride: _lc_weight_stride,
             layer_blob_base_offset: global_weight_bytes,
             layer_weight_input_indices,
