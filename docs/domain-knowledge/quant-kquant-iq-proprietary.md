@@ -120,6 +120,17 @@ E2M1 decode：nibble 低 3 bit 查 `kvalues_mxfp4`（绝对值），高 bit 决�
 - 证据：llama.cpp `dequantize_row_q4_K` 的 `q[l] & 0xF`（前 32）+ `q[l] >> 4`（后 32）；项目 `k_quant.rs:38-51` 一致
 - 关联：参见 `gguf-classic-quant-layout.md` 的 SPLIT 布局定义。**项目 K-Quant 实现是正确的**（与 llama.cpp 对齐），不同于 classic.rs 的 INTERLEAVED 偏离
 
+### 易误判点 2b：Q6_K 高2bit 是 quarter 结构（位置相关），非简单 bit-plane（BCE-20260710-Q6K-HIGHBITS 已根治）
+
+- ❌ 误判：Q6_K 高2bit 像简单 bit-plane，可用统一 `qh << shift & mask` 提取
+- ✅ 正解：Q6_K 高2bit 是 **quarter 结构**：同一 qh 字节的 bit0-1/2-3/4-5/6-7 分给 q1/q2/q3/q4，输出位置差 32（`k_quant.rs:442-468`）。提取是位置相关的：
+  - `hi2 = (qh[qh_off+l] >> (2*quarter)) & 3`，quarter=(global_elem%128)/32
+  - lo4 按 quarter 奇偶选 `qs[ql_off+l+32*(quarter%2)]`，按 quarter≥2 选 `>>4` 或 `&0xF`
+  - value = `d * sc[n_group*8 + (l/16) + 2*quarter] * ((lo4|(hi2<<4)) - 32)`
+- JIT 实现：走单片 `QuantQ6KDecode` → `q6k_decode_step_native`（scalar 循环，对齐 llama.cpp）。**禁止**用 NibbleWithHighBits 的统一 shift+mask（`qh<<6 & 0x30` 丢高2bit，6bit 值塌成 4bit）
+- 证据：BCE-20260710-Q6K-HIGHBITS — Qwen3-0.6B Q4_0 E2E 修前乱码，修后 output="Paris"；1层截断 Q4_0 argmax==BF16 argmax==1172
+- 关联：Q5_0/Q5_1 高1bit 是 bit-index plane `(qh[i/8]>>(i%8))&1`，同类位置相关嫌疑（独立待查）
+
 ### 易误判点 3：IQ4_NL nibble 是码本下标，不是线性值
 
 - ❌ 误判：IQ4_NL 的 nibble 像 Q4_0 一样 `value = d * (nibble - 8)`
