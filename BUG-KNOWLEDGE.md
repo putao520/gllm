@@ -3932,3 +3932,58 @@ dump gllm 中间层(layer1/2)对比 golden hs_2/hs_3:
 - groups_per_row fix(1e02a21b): layer0 HeadRmsNorm 验证对(cosine=1.0)
 - 诊断工具: generate_golden_qwen3.py + diag_qwen3_compare.py + diag_qwen3_tail.py
 - golden 数据: golden_qwen3_0.6b.npz(layer0) + golden_qwen3_full.npz(28层+logits)
+
+---
+
+## BCE-20260710-Q6K-HIGHBITS (Q6_K JIT quarter 高2bit 解码错)
+
+**状态**: ✅ 根治 (2026-07-10)
+
+### 现象
+Qwen3-0.6B Q4_0 GGUF prompt "The capital of France is" 输出乱码 (非 Paris).
+1层截断: Q4_0 argmax=129008 logits|max|=98.12 vs BF16 argmax=1172 |max|=22.64 (4.3× 放大, 反号).
+BF16 正常输出 Paris. layer0 单独跑 cosine=1.0 (层路径对).
+
+### 根因 (定位链)
+1. **output.weight 是 Q6_K (非 Q4_0)**: bartowski Qwen3-0.6B-Q4_0.gguf 中 output.weight (lm_head) tensor_type=14=Q6_K, 而 layer proj 权重是 Q4_0 (type=2). token_embd 是 Q4_0. 仅 lm_head 是 Q6_K.
+2. **JIT Q6_K DequantFMA 路径错**: emit_unpack NibbleWithHighBits 分支 `qh << (4+(4-high_bits))` + `& high_mask` 假设高 bit 是简单 bit-plane (每元素固定位置). 但 Q6_K 是 quarter 结构: 同一 qh 字节的 bit0-1/2-3/4-5/6-7 分给 q1/q2/q3/q4, 输出位置差 32 (llama.cpp k_quant.rs:442-468).
+3. **Q6_K 旧路径 `qh<<6 & 0x30`**: 对 Q6_K (high_bits=2), shift=6 把 qh bit0-1 移到 bit6-7, `& 0x30` (bit4-5) 取到 0 → 高2bit 全丢. 6bit 值塌成 4bit (lo4), 范围 [0,16) 而非 [0,64), -32 偏置后全负且范围错.
+4. **标量参考对**: k_quant.rs scalar q6_k decode 与 llama.cpp 一致, token0 dot=-3.82 与 BF16 一致. JIT 错 (token129008 JIT=+91.69 vs 手算=-1.99, 反号 46×).
+
+### 模式签名
+```yaml
+patternId: BCE-20260710-Q6K-HIGHBITS
+title: Q6_K quarter 位置相关高2bit 提取错 (NibbleWithHighBits 假设简单 bit-plane)
+layer: 设计 (位置相关 bit 提取用统一 shift+mask 表达失败)
+codePattern:
+  - "NibbleWithHighBits layout 用单一 shift+mask 提取高 bit, 但实际是 quarter 结构 (位置相关 bit-pair)"
+  - "qh << (4+(4-high_bits)) & high_mask 对 Q6_K (high_bits=2) 丢高2bit (shift 6 + mask 0x30 = 0)"
+triggerCondition:
+  - Q6_K 权重经 JIT DequantFMA 路径解码 (lm_head/output.weight)
+  - logits 量级 4×+ 放大且部分 token 反号
+detectionSignatures:
+  literal: "TraceOp::QuantShiftLeft { amount: 6"  # Q6_K 旧 buggy 路径
+  structural: "DataLayout::NibbleWithHighBits { high_bits_per_elem: 2 }"  # Q6_K
+sameClassCriterion:
+  - "高 bit 提取位置相关 (quarter/bit-index) 却用统一 shift+mask"
+  - "Q5_0/Q5_1 (高1bit plane, bit-index) 同类嫌疑 (独立待查)"
+fixTemplate:
+  - "复杂高 bit 布局走单片 decode (类比 build_q3k_decode): build_q6k_decode + QuantQ6KDecode TraceOp + Q6KDecodeStep VmInstr + native scalar 循环"
+  - "native 内部按 quarter 位置相关提取: hi2 = (qh[qh_off+l] >> (2*quarter)) & 3, lo4 按 quarter 奇偶/≥2 选 qs 偏移+移位"
+regressionAssertion:
+  - "test_q6_k_quant_gemm_x86_oracle: 真实执行 out=[10,0] (q1=1,q2=2,q3=3,q4=4 全 quarter 高 bit 参与)"
+  - "Qwen3-0.6B Q4_0 E2E: output 含 'Paris'"
+  - "1层截断: Q4_0 argmax==BF16 argmax, logits|max 比例≈1.0"
+```
+
+### 根治
+- `gllm-kernels/src/asm/x86_64/quant_gemv.rs`: 新增 `q6k_decode_step_native` (scalar 循环, quarter 位置相关高2bit 提取, 对齐 llama.cpp)
+- 新增 `QuantQ6KDecode` TraceOp + `Q6KDecodeStep` VmInstr (trace.rs / vminstr.inc.rs / auto_select.rs / 各 lower dispatch)
+- `quant_decode.rs`: `is_q6k_format` + `build_q6k_decode` (build() 优先走单片, 跳过 buggy emit_unpack)
+- x86_lower: `lower_q6_k_decode_step_x86` (委托 native, 同 Q3K ABI)
+- aarch64/GPU: not-yet-implemented 占位 (CPU 路径已验证)
+- 8 个 Q6K trace 测试更新 (旧 NibbleWithHighBits 断言 → QuantQ6KDecode 整体式断言)
+
+### 残留 / 后续
+- **Q5_0/Q5_1 仍用 NibbleWithHighBits** (高1bit plane, bit-index `(qh[i/8]>>(i%8))&1`): 同类嫌疑, 当前 lm_head 不用 Q5_0 (Q6_K), 但 layer 权重可能用. 独立待查 (有 Q5_0 oracle 时验).
+- classic.rs INTERLEAVED vs SPLIT (独立 backlog).
