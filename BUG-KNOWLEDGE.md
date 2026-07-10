@@ -3987,3 +3987,61 @@ regressionAssertion:
 ### 残留 / 后续
 - **Q5_0/Q5_1 仍用 NibbleWithHighBits** (高1bit plane, bit-index `(qh[i/8]>>(i%8))&1`): 同类嫌疑, 当前 lm_head 不用 Q5_0 (Q6_K), 但 layer 权重可能用. 独立待查 (有 Q5_0 oracle 时验).
 - classic.rs INTERLEAVED vs SPLIT (独立 backlog).
+
+---
+
+## BCE-20260710-Q5_0-HIGHBITS (Q5_0/Q5_1 JIT 高1bit plane 解码错, 同类横扫)
+
+**状态**: ✅ 根治 (2026-07-10, 同 Q6_K 同类)
+
+### 现象
+Q5_0 oracle: 真实执行 out=[28,0] want [-2,0] (Q5_0 权重解码错). 修前 SIGSEGV (lane_offset 未传).
+无 E2E 触发 (bartowski Qwen3-0.6B Q4_0/Q4_1 文件 layer 权重是 Q4_0/Q4_1, lm_head 是 Q6_K; Q5_0/Q5_1 仅在 Q5_0/Q5_1 量化文件用, 本次未跑 E2E).
+
+### 根因 (同类, 与 Q6_K 同源)
+1. **Q5_0/Q5_1 高1bit 是 bit-index plane (位置相关)**: `hi = (qh[i/8] >> (i%8)) & 1` (llama.cpp classic.rs:493). qh[4字节]=32个bit, 每元素i取 qh[i/8] 的 bit(i%8). 非简单 bit-plane, 单一 shift+mask 表达不了.
+2. **旧 NibbleWithHighBits qh<<7 & 0x10**: 对 Q5_0 (high_bits=1), shift=7 把 qh bit0 移到 bit7, `& 0x10` (bit4) 取到 0 → 高1bit 全丢. 5bit 值塌成 4bit.
+3. **phase 无关**: raw_data_slot 两阶段 SPLIT (Lo/Hi phase), 但 qh 提取无 phase 概念.
+4. **qs 是 byte-packed (非 SPLIT)**: `lo = (qs[i/2] >> ((i%2)*4)) & 0xF` — 元素 i,i+1 共享 qs[i/2] 字节 (低/高 nibble). 旧路径假设 SPLIT.
+5. **HighBitMerge (QuantBiPlaneLoad) 路径**: Q5_0/Q5_1 走 HighBitMerge kernel, QuantBiPlaneLoad 高 bit 提取在 ISA 层, 同类错.
+
+### 模式签名 (同 Q6_K 类)
+```yaml
+patternId: BCE-20260710-Q5_0-HIGHBITS
+title: Q5_0/Q5_1 高1bit plane (bit-index) 位置相关提取错 (同 Q6_K 类)
+layer: 设计
+codePattern:
+  - "NibbleWithHighBits(high_bits=1) 用单一 shift+mask 提取高1bit, 实际是 bit-index plane (位置相关)"
+  - "Q5_0/Q5_1 走 HighBitMerge (QuantBiPlaneLoad), 高 bit 提取在 ISA 层错"
+triggerCondition:
+  - Q5_0/Q5_1 权重经 JIT 解码 (QuantGemm/QuantGather)
+  - 解码值范围错 (5bit 塌成 4bit) → logits 量级偏差
+detectionSignatures:
+  literal: "QuantShiftLeft { amount: 7"  # Q5_0 旧 buggy 路径
+  structural: "GemmKernel::HighBitMerge + quant_type Q5_0/Q5_1"
+sameClassCriterion:
+  - "高 bit 提取位置相关 (bit-index/quarter) 却用统一 shift+mask 或 ISA QuantBiPlaneLoad"
+  - "与 BCE-20260710-Q6K-HIGHBITS 同类 (高 bit plane 位置相关)"
+fixTemplate:
+  - "Q5_0/Q5_1 走单片 build_q5_decode (类比 build_q6k_decode): QuantQ5Decode TraceOp + Q5DecodeStep VmInstr + q5_0/q5_1_decode_step_native"
+  - "native 内部 bit-index 提取: hi=(qh[i/8]>>(i%8))&1, lo=(qs[i/2]>>((i%2)*4))&0xF"
+  - "has_min 区分: Q5_0=d*(q-16), Q5_1=d*q+m"
+  - "HighBitMerge kernel guard 排除 Q5_0/Q5_1 (改走 DequantFma + 单片)"
+regressionAssertion:
+  - "test_q5_0_quant_gemm_x86_oracle: out=[-2,0] (q1=-1,q2=0 交替, 双 phase bit 提取)"
+  - "Q5_0/Q5_1 trace 含 QuantQ5Decode, 非旧 QuantShiftLeft(7)/QuantBitOr/QuantBlockLoad QhBitExpand"
+```
+
+### 根治
+- `gllm-kernels/src/asm/x86_64/quant_gemv.rs`: 新增 `q5_0_decode_step_native` + `q5_1_decode_step_native`
+- 新增 `QuantQ5Decode` TraceOp + `Q5DecodeStep` VmInstr (has_min 区分, 全链路: trace/vminstr/auto_select/各 lower/cache/cost_model/reg_alloc/verify/numerical_sim)
+- `quant_decode.rs`: `is_q5_format` (限 Q5_0/Q5_1, 排除 Q5_K Hierarchical) + `build_q5_decode`
+- `moe_emit.inc.rs`: HighBitMerge guard `!matches!(quant_type, Q5_0|Q5_1)` → Q5_0/Q5_1 走 DequantFma
+- `needs_lane_offset` 扩展含 NibbleWithHighBits (单片 decode 需元素位置, 修 SIGSEGV)
+- `build()` Input(3) 创建移到单片 early-return 后 (Q5/Q6K 不需 high_bits_ptr Input)
+- 9 个 Q5 trace/kernel 测试更新 (旧 HighBitMerge/NibbleWithHighBits 断言 → QuantQ5Decode 整体式)
+
+### 残留 / 后续
+- **Q5_K (Hierarchical scale + NibbleWithHighBits)**: 仍走旧路径, 同类高 bit bug 未修. Q5_K 有 hierarchical scale (get_scale_min_k4 6bit-packed), 单片需含 sub-scale 解码, 比 Q5_0 复杂. 独立 backlog (有 Q5_K 模型 E2E 时修).
+- classic.rs INTERLEAVED vs SPLIT (独立 backlog).
+- Q6_K/Q5 scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
