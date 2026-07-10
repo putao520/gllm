@@ -131,13 +131,15 @@ E2M1 decode：nibble 低 3 bit 查 `kvalues_mxfp4`（绝对值），高 bit 决�
 - 证据：BCE-20260710-Q6K-HIGHBITS — Qwen3-0.6B Q4_0 E2E 修前乱码，修后 output="Paris"；1层截断 Q4_0 argmax==BF16 argmax==1172
 - 关联：Q5_0/Q5_1 高1bit 是 bit-index plane `(qh[i/8]>>(i%8))&1`，**同类已根治**（见下 2c）
 
-### 易误判点 2c：Q5_0/Q5_1 高1bit 是 bit-index plane（位置相关），非简单 bit-plane（BCE-20260710-Q5_0-HIGHBITS 已根治）
+### 易误判点 2c：Q5_0/Q5_1 高1bit 是 bit-index plane + qs 是 SPLIT（位置相关），非简单 bit-plane（BCE-20260710-Q5_0-HIGHBITS 已根治）
 
 - ❌ 误判：Q5_0/Q5_1 高1bit 像简单 bit-plane，可用统一 `qh << shift & mask` 提取（旧 `qh<<7 & 0x10` 丢高1bit，5bit 塌成 4bit）
-- ✅ 正解：Q5_0/Q5_1 高1bit 是 **bit-index plane**（位置相关）：`hi = (qh[i/8] >> (i%8)) & 1`（llama.cpp classic.rs:493）。qh[4字节]=32个bit，每元素i取 qh[i/8] 的 bit(i%8)。qs 是 **byte-packed**（非 SPLIT）：`lo = (qs[i/2] >> ((i%2)*4)) & 0xF`，元素 i,i+1 共享 qs[i/2] 字节
+- ❌ 误判：Q5_0/Q5_1 的 qs 是 byte-packed/INTERLEAVED（`lo = (qs[i/2] >> ((i%2)*4)) & 0xF`）— 这是项目 classic.rs 的偏离实现，非 llama.cpp 标准
+- ✅ 正解（权威，对齐 llama.cpp + `gguf-classic-quant-layout.md`）：Q5_0/Q5_1 的 qs 是 **SPLIT 布局**：`qs[j]` 低 nibble → elem[j]（j<16），`qs[j]` 高 nibble → elem[j+16]。即 `lo = if i < 16 { qs[i] & 0xF } else { qs[i-16] >> 4 }`
+- ✅ 正解：Q5_0/Q5_1 高1bit 是 **bit-index plane**（位置相关）：`hi = (qh[i/8] >> (i%8)) & 1`（llama.cpp classic.rs:493）。qh[4字节 LE u32]=32个bit，每元素i取 qh[i/8] 的 bit(i%8)
 - value = `d * ((hi<<4 | lo) - 16)`（Q5_0）或 `d * (hi<<4 | lo) + m`（Q5_1，BlockScalarWithMin）
-- JIT 实现：走单片 `QuantQ5Decode` → `q5_0/q5_1_decode_step_native`（has_min 区分）。**禁止**用旧 HighBitMerge（QuantBiPlaneLoad）或 NibbleWithHighBits 统一 shift+mask
-- 证据：BCE-20260710-Q5_0-HIGHBITS — Q5_0 oracle 修前 out=[28,0] want [-2,0]，修后 [-2,0]
+- JIT 实现：走单片 `QuantQ5Decode` → `q5_0/q5_1_decode_step_native`（has_min 区分，SPLIT + bit-index plane）。**禁止**用旧 HighBitMerge（QuantBiPlaneLoad）或 NibbleWithHighBits 统一 shift+mask
+- 证据：BCE-20260710-Q5_0-HIGHBITS — Q5_0 SPLIT oracle（elem0=q15 val=-1, elem16=q17 val=+1, act=2,1 → dot=-1）PASS；INTERLEAVED 误判会得 -2（已用 oracle 区分）。Q5_1 SPLIT+min oracle（elem0=35, elem16=39 → dot=74）PASS；INTERLEAVED 误判会得 72
 - 关联：Q5_K（Hierarchical scale + NibbleWithHighBits）同类高 bit bug **未修**（独立 backlog，需含 sub-scale 解码的单片）
 
 ### 易误判点 3：IQ4_NL nibble 是码本下标，不是线性值

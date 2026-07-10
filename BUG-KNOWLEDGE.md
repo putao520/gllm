@@ -3995,14 +3995,16 @@ regressionAssertion:
 **状态**: ✅ 根治 (2026-07-10, 同 Q6_K 同类)
 
 ### 现象
-Q5_0 oracle: 真实执行 out=[28,0] want [-2,0] (Q5_0 权重解码错). 修前 SIGSEGV (lane_offset 未传).
+Q5_0 oracle (初版 INTERLEAVED 构造): 真实执行 out=[28,0] want [-2,0] (Q5_0 权重解码错). 修前 SIGSEGV (lane_offset 未传).
+architect 关键反馈: 初版 oracle 按 INTERLEAVED 构造 (`qs[i/2]=elem[2i]|elem[2i+1]<<4`) 与错误 JIT 自洽 → oracle PASS 但不符合真实 GGUF SPLIT. 必须用 SPLIT 区分 oracle 重建.
+SPLIT 重建后: Q5_0 oracle out=[-1,0] (elem0=q15 val=-1, elem16=q17 val=+1, act=2,1 → dot=-1; INTERLEAVED 误判会得 -2); Q5_1 oracle out=[74,74] (elem0=35, elem16=39 → dot=74; INTERLEAVED 误判会得 72).
 无 E2E 触发 (bartowski Qwen3-0.6B Q4_0/Q4_1 文件 layer 权重是 Q4_0/Q4_1, lm_head 是 Q6_K; Q5_0/Q5_1 仅在 Q5_0/Q5_1 量化文件用, 本次未跑 E2E).
 
 ### 根因 (同类, 与 Q6_K 同源)
 1. **Q5_0/Q5_1 高1bit 是 bit-index plane (位置相关)**: `hi = (qh[i/8] >> (i%8)) & 1` (llama.cpp classic.rs:493). qh[4字节]=32个bit, 每元素i取 qh[i/8] 的 bit(i%8). 非简单 bit-plane, 单一 shift+mask 表达不了.
 2. **旧 NibbleWithHighBits qh<<7 & 0x10**: 对 Q5_0 (high_bits=1), shift=7 把 qh bit0 移到 bit7, `& 0x10` (bit4) 取到 0 → 高1bit 全丢. 5bit 值塌成 4bit.
 3. **phase 无关**: raw_data_slot 两阶段 SPLIT (Lo/Hi phase), 但 qh 提取无 phase 概念.
-4. **qs 是 byte-packed (非 SPLIT)**: `lo = (qs[i/2] >> ((i%2)*4)) & 0xF` — 元素 i,i+1 共享 qs[i/2] 字节 (低/高 nibble). 旧路径假设 SPLIT.
+4. **qs 是 SPLIT 布局 (权威, 对齐 llama.cpp + `gguf-classic-quant-layout.md`)**: `qs[j]` 低 nibble → elem[j] (j<16), 高 nibble → elem[j+16]. 即 `lo = if i < 16 { qs[i] & 0xF } else { qs[i-16] >> 4 }`. ~~旧 BCE 误标 byte-packed/INTERLEAVED~~ (项目 classic.rs 的 INTERLEAVED `lo=(qs[i/2]>>((i%2)*4))&0xF` 是偏离实现, 非 llama.cpp 标准).
 5. **HighBitMerge (QuantBiPlaneLoad) 路径**: Q5_0/Q5_1 走 HighBitMerge kernel, QuantBiPlaneLoad 高 bit 提取在 ISA 层, 同类错.
 
 ### 模式签名 (同 Q6_K 类)
@@ -4024,11 +4026,12 @@ sameClassCriterion:
   - "与 BCE-20260710-Q6K-HIGHBITS 同类 (高 bit plane 位置相关)"
 fixTemplate:
   - "Q5_0/Q5_1 走单片 build_q5_decode (类比 build_q6k_decode): QuantQ5Decode TraceOp + Q5DecodeStep VmInstr + q5_0/q5_1_decode_step_native"
-  - "native 内部 bit-index 提取: hi=(qh[i/8]>>(i%8))&1, lo=(qs[i/2]>>((i%2)*4))&0xF"
+  - "native 内部 bit-index 提取: hi=(qh[i/8]>>(i%8))&1, lo=if i<16 {qs[i]&0xF} else {qs[i-16]>>4} (SPLIT 布局)"
   - "has_min 区分: Q5_0=d*(q-16), Q5_1=d*q+m"
   - "HighBitMerge kernel guard 排除 Q5_0/Q5_1 (改走 DequantFma + 单片)"
 regressionAssertion:
-  - "test_q5_0_quant_gemm_x86_oracle: out=[-2,0] (q1=-1,q2=0 交替, 双 phase bit 提取)"
+  - "test_q5_0_quant_gemm_x86_oracle: out=[-1,0] (SPLIT: elem0=q15 val=-1, elem16=q17 val=+1, act=2,1 → dot=-1; 区分 SPLIT/INTERLEAVED, INTERLEAVED 误判会得 -2)"
+  - "test_q5_1_quant_gemm_x86_oracle: out=[74,74] (SPLIT+min: elem0=35, elem16=39 → dot=74; INTERLEAVED 误判会得 72)"
   - "Q5_0/Q5_1 trace 含 QuantQ5Decode, 非旧 QuantShiftLeft(7)/QuantBitOr/QuantBlockLoad QhBitExpand"
 ```
 
