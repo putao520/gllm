@@ -140,7 +140,18 @@ E2M1 decode：nibble 低 3 bit 查 `kvalues_mxfp4`（绝对值），高 bit 决�
 - value = `d * ((hi<<4 | lo) - 16)`（Q5_0）或 `d * (hi<<4 | lo) + m`（Q5_1，BlockScalarWithMin）
 - JIT 实现：走单片 `QuantQ5Decode` → `q5_0/q5_1_decode_step_native`（has_min 区分，SPLIT + bit-index plane）。**禁止**用旧 HighBitMerge（QuantBiPlaneLoad）或 NibbleWithHighBits 统一 shift+mask
 - 证据：BCE-20260710-Q5_0-HIGHBITS — Q5_0 SPLIT oracle（elem0=q15 val=-1, elem16=q17 val=+1, act=2,1 → dot=-1）PASS；INTERLEAVED 误判会得 -2（已用 oracle 区分）。Q5_1 SPLIT+min oracle（elem0=35, elem16=39 → dot=74）PASS；INTERLEAVED 误判会得 72
-- 关联：Q5_K（Hierarchical scale + NibbleWithHighBits）同类高 bit bug **未修**（独立 backlog，需含 sub-scale 解码的单片）
+- 关联：Q5_K（Hierarchical scale + NibbleWithHighBits）同类高 bit bug **已根治** (BCE-20260710-Q5_K-HIGHBITS, 见下 2d)
+
+### 易误判点 2d：Q5_K 高1bit 是转置高位平面（qh[l=i%32] bit[i/32]），非 Q5_0 的 bit-index plane（BCE-20260710-Q5_K-HIGHBITS 已根治）
+
+- ❌ 误判：Q5_K 高1bit 像 Q5_0 一样是 bit-index plane（`hi=(qh[i/8]>>(i%8))&1`）或通用 NibbleWithHighBits 连续 bit stream
+- ✅ 正解（权威，对齐 llama.cpp ggml-quants.c:1482-1507 + 项目 k_quant.rs:381-435）：Q5_K 高1bit 是 **转置高位平面**：`hi = (qh[i%32] >> (i/32)) & 1`。qh[32] byte，每 byte qh[l] 的 bit[mini] = elem[mini*32+l] 的 hi1（mini=i/32, l=i%32）。**转置关系**：qh 字节索引 = i%32（local pos），字节内 bit = i/32（mini-block）— 与 Q5_0 的 qh[i/8] bit(i%8) 相反
+- ✅ 正解：Q5_K 的 qs 是 **SPLIT per 64-element group**：group=mini/2, half=mini%2。`lo4 = if half==0 { qs[group*32+l] & 0xF } else { qs[group*32+l] >> 4 }`（mini 偶=low nibble, 奇=high nibble）。注意与 Q5_0 的 SPLIT（per 32-element，qs[j] 低→elem[j], 高→elem[j+16]）粒度不同
+- ✅ 正解：value = `d * sc * q5 - dmin * m`（**无 bias，min 减法**，与 Q4_K 同公式但多高1bit）。q5 = lo4 | (hi1<<4)
+- ✅ 正解：(sc,m) = `get_scale_min_k4(mini, scales)`：mini<4 直接（scales[mini]&63, scales[mini+4]&63）；mini>=4 交错拼（sc=(scales[mini+4]&0xF)|((scales[mini-4]>>6)<<4), m=(scales[mini+4]>>4)|((scales[mini]>>6)<<4)）
+- JIT 实现：走单片 `QuantQ5KDecode` → `q5k_decode_step_native`（转置 qh + SPLIT per 64-group + get_scale_min_k4）。**禁止**用旧 Hierarchical QuantKQuantPackedScaleLookup+FMA+Add 路径或通用 NibbleWithHighBits
+- 证据：BCE-20260710-Q5_K-HIGHBITS — Q5_K oracle（mini 0-3, j<4: out=[43,43]；mini 4-7, j>=4 交错拼: out=[26,26]）PASS；真实 GGUF block 标量参考 d=0.0001 dmin=0.0019（合理）；1层截断 full logits cosine(Q5_K,BF16)=0.9998 top10=10/10（decode 正确性闭环）
+- block 结构：d(f16,off0)+dmin(f16,off2)+scales[12](off4)+qh[32](off16)+qs[128](off48)=176B, block_size=256, 8 mini-blocks of 32
 
 ### 易误判点 3：IQ4_NL nibble 是码本下标，不是线性值
 

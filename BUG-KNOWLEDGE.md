@@ -4045,6 +4045,66 @@ regressionAssertion:
 - 9 个 Q5 trace/kernel 测试更新 (旧 HighBitMerge/NibbleWithHighBits 断言 → QuantQ5Decode 整体式)
 
 ### 残留 / 后续
-- **Q5_K (Hierarchical scale + NibbleWithHighBits)**: 仍走旧路径, 同类高 bit bug 未修. Q5_K 有 hierarchical scale (get_scale_min_k4 6bit-packed), 单片需含 sub-scale 解码, 比 Q5_0 复杂. **E2E 已确认乱码**: bartowski Qwen3-0.6B Q5_K_M output='oa.CreateCommand...' (非 Paris). 独立 backlog (Task: Q5_K JIT hierarchical+bit-index plane 解码修复).
+- **Q5_K decode 已根治 (BCE-20260710-Q5_K-HIGHBITS)**: 转置高位平面 (hi=(qh[i%32]>>(i/32))&1) 单片 decode 已修 (见独立 BCE 条目). oracle 全过 (mini 0-7, j<4/j>=4, SPLIT, get_scale_min_k4). 真实 GGUF block 标量参考 d=0.0001 dmin=0.0019 (合理). **1层截断 full logits cosine=0.9998, top10=10/10** (非 argmax 巧合, decode 正确性闭环).
+- **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍 output='遇浚lar菊花...' (非 Paris). 截断诊断 N=1 cos 0.9998 (对), N≥2 cos 跌到 0.78→0.0. **但 architect 指出截断 harness N≥2 不可信** (post-layer global relocation 只改 loop bound 不重建 blob → final_norm/lm_head 偏移错 → 4层全零是 harness 工件). L1 权重已 byte-scan 确认正确 pack (GGUF L1.attn_q sig 在 blob 偏移 245977088, stride=11379712=GGUF stride, 无静默 fallback). 疑似独立 layer-loop/activation swap/post-layer relocation bug, 非 Q5_K decode 本身. 独立 backlog (需可信多层诊断, 非截断 harness).
 - classic.rs INTERLEAVED vs SPLIT (独立 backlog).
 - Q6_K/Q5 scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
+
+---
+
+## BCE-20260710-Q5_K-HIGHBITS (Q5_K JIT 转置高位平面解码错, Q5_0/Q6_K 同类)
+
+**状态**: ✅ decode 根治 (2026-07-11); 多层 E2E 乱码为独立 bug (非 decode)
+
+### 现象
+Q5_K_M (bartowski Qwen3-0.6B) 28层 E2E output='遇浚lar菊花因为他们 scarcity...' (非 Paris).
+1层截断 full logits cosine(Q5_K, BF16)=0.9998, top10=10/10, max_abs_diff=0.95 (decode 正确).
+(N≥2 截断 cos 跌到 0.78→0.0, 但 architect 指出截断 harness N≥2 不可信 — post-layer global relocation 工件.)
+
+### 根因 (Q5_0/Q6_K 同类高 bit plane bug)
+1. **Q5_K 高1bit 是转置高位平面 (位置相关)**: `hi = (qh[i%32] >> (i/32)) & 1` (llama.cpp ggml-quants.c:1482-1507 + 项目 k_quant.rs:381-435). qh[32] byte, 每 byte 的 bit[mini] = elem[mini*32+l] 的 hi1. **非** Q5_0 的 bit-index plane (qh[i/8] bit(i%8)), **非** 通用 NibbleWithHighBits 连续 bit stream.
+2. **旧 NibbleWithHighBits 错**: 把 qh 当连续 bit stream (qh[i/8] bit(i%8)), 转置关系丢失 → hi1 全错 → 5bit 值错.
+3. **value 公式**: `value = d * sc * q5 - dmin * m` (无 bias, min 减法, 与 Q4_K 同公式但多高1bit). q5 = lo4 | (hi1<<4).
+4. **lo4 SPLIT per 64-group**: mini 偶 (0,2,4,6) = qs[group*32+l] & 0xF (low nibble); mini 奇 (1,3,5,7) = qs[group*32+l] >> 4 (high nibble).
+5. **(sc,m) = get_scale_min_k4(mini, scales)**: mini<4 直接 (scales[mini]&63, scales[mini+4]&63); mini>=4 交错拼 ((scales[mini+4]&0xF)|((scales[mini-4]>>6)<<4), (scales[mini+4]>>4)|((scales[mini]>>6)<<4)).
+
+### 模式签名
+```yaml
+patternId: BCE-20260710-Q5_K-HIGHBITS
+title: Q5_K 高1bit 转置高位平面 (qh[l] bit[mini]) 位置相关提取错 (Q5_0/Q6_K 同类)
+layer: 设计
+codePattern:
+  - "NibbleWithHighBits(high_bits=1) 用连续 bit stream (qh[i/8] bit(i%8)) 提取, 实际是转置 (qh[i%32] bit(i/32))"
+  - "Q5_K 走旧 Hierarchical QuantKQuantPackedScaleLookup+FMA+Add 路径, 高 bit 提取在通用 NibbleWithHighBits 层错"
+triggerCondition:
+  - Q5_K 权重经 JIT 解码 (QuantGemm/QuantGather)
+  - 高1bit 全错 → 5bit 值错 → logits 偏差
+detectionSignatures:
+  literal: "QuantKQuantPackedScaleLookup"  # Q5_K 旧 buggy 路径
+  structural: "GemmKernel::HighBitMerge + quant_type Q5_K (旧) / QuantQ5KDecode (新)"
+sameClassCriterion:
+  - "高 bit 提取位置相关 (bit-index/quarter/转置) 却用统一 shift+mask 或连续 bit stream"
+  - "与 BCE-20260710-Q6K-HIGHBITS / BCE-20260710-Q5_0-HIGHBITS 同类 (高 bit plane 位置相关)"
+fixTemplate:
+  - "Q5_K 走单片 build_q5k_decode (类比 build_q6k_decode/build_q5_decode): QuantQ5KDecode TraceOp + Q5KDecodeStep VmInstr + q5k_decode_step_native"
+  - "native 内部转置提取: hi=(qh[i%32]>>(i/32))&1, lo=if half==0 {qs[group*32+l]&0xF} else {qs[group*32+l]>>4} (SPLIT per 64-group)"
+  - "get_scale_min_k4(mini, scales): mini<4 直接, mini>=4 交错拼"
+  - "value = d*sc*q5 - dmin*m (无 bias, min 减法)"
+  - "从通用 NibbleWithHighBits early-return 分流 (is_q5k_format)"
+regressionAssertion:
+  - "test_q5_k_quant_gemm_x86_oracle: out=[43,43] (mini 0-3, j<4 scale branch; 旧连续 bit stream 会错)"
+  - "test_q5_k_j4_scale_branch_oracle: out=[26,26] (mini 4-7, j>=4 交错拼分支)"
+  - "test_q5k_trace + test_q5k_full_hierarchical_structure: 断言单片 QuantQ5KDecode, 禁止旧 QuantKQuantPackedScaleLookup"
+  - "1层截断 full logits cosine(Q5_K, BF16)=0.9998 (真实模型验证)"
+```
+
+### 根治
+- `gllm-kernels/src/asm/x86_64/quant_gemv.rs`: 新增 `q5k_decode_step_native` (scalar 循环, 转置 qh + SPLIT + get_scale_min_k4, 对齐 k_quant.rs:381-435 + llama.cpp)
+- 新增 `QuantQ5KDecode` TraceOp + `Q5KDecodeStep` VmInstr (全链路: trace/vminstr/auto_select/cache/cost_model/reg_alloc/verify/numerical_sim/program.remap/vm_instr_category/x86_lower)
+- `quant_decode.rs`: `is_q5k_format` + `build_q5k_decode` (build() early return, 从通用 NibbleWithHighBits 分流)
+- Q5_K 不再走旧 Hierarchical QuantKQuantPackedScaleLookup+FMA+Add 路径
+- test_q5k_trace + test_q5k_full_hierarchical_structure 更新 (断言单片, 禁旧路径)
+
+### 残留 / 后续
+- **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍乱码. 1层 cos 0.9998 (decode 对). 截断 N≥2 不可信 (harness 工件). L1 权重 byte-scan 确认正确 pack (stride 对, 无静默 fallback). 疑似独立 layer-loop/activation swap/post-layer relocation bug. 独立 backlog.
+- Q5_K scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
