@@ -4042,6 +4042,6 @@ regressionAssertion:
 - 9 个 Q5 trace/kernel 测试更新 (旧 HighBitMerge/NibbleWithHighBits 断言 → QuantQ5Decode 整体式)
 
 ### 残留 / 后续
-- **Q5_K (Hierarchical scale + NibbleWithHighBits)**: 仍走旧路径, 同类高 bit bug 未修. Q5_K 有 hierarchical scale (get_scale_min_k4 6bit-packed), 单片需含 sub-scale 解码, 比 Q5_0 复杂. 独立 backlog (有 Q5_K 模型 E2E 时修).
+- **Q5_K (Hierarchical scale + NibbleWithHighBits)**: 仍走旧路径, 同类高 bit bug 未修. Q5_K 有 hierarchical scale (get_scale_min_k4 6bit-packed), 单片需含 sub-scale 解码, 比 Q5_0 复杂. **E2E 已确认乱码**: bartowski Qwen3-0.6B Q5_K_M output='oa.CreateCommand...' (非 Paris). 独立 backlog (Task: Q5_K JIT hierarchical+bit-index plane 解码修复).
 - classic.rs INTERLEAVED vs SPLIT (独立 backlog).
 - Q6_K/Q5 scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
