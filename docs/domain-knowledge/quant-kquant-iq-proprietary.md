@@ -129,7 +129,16 @@ E2M1 decode：nibble 低 3 bit 查 `kvalues_mxfp4`（绝对值），高 bit 决�
   - value = `d * sc[n_group*8 + (l/16) + 2*quarter] * ((lo4|(hi2<<4)) - 32)`
 - JIT 实现：走单片 `QuantQ6KDecode` → `q6k_decode_step_native`（scalar 循环，对齐 llama.cpp）。**禁止**用 NibbleWithHighBits 的统一 shift+mask（`qh<<6 & 0x30` 丢高2bit，6bit 值塌成 4bit）
 - 证据：BCE-20260710-Q6K-HIGHBITS — Qwen3-0.6B Q4_0 E2E 修前乱码，修后 output="Paris"；1层截断 Q4_0 argmax==BF16 argmax==1172
-- 关联：Q5_0/Q5_1 高1bit 是 bit-index plane `(qh[i/8]>>(i%8))&1`，同类位置相关嫌疑（独立待查）
+- 关联：Q5_0/Q5_1 高1bit 是 bit-index plane `(qh[i/8]>>(i%8))&1`，**同类已根治**（见下 2c）
+
+### 易误判点 2c：Q5_0/Q5_1 高1bit 是 bit-index plane（位置相关），非简单 bit-plane（BCE-20260710-Q5_0-HIGHBITS 已根治）
+
+- ❌ 误判：Q5_0/Q5_1 高1bit 像简单 bit-plane，可用统一 `qh << shift & mask` 提取（旧 `qh<<7 & 0x10` 丢高1bit，5bit 塌成 4bit）
+- ✅ 正解：Q5_0/Q5_1 高1bit 是 **bit-index plane**（位置相关）：`hi = (qh[i/8] >> (i%8)) & 1`（llama.cpp classic.rs:493）。qh[4字节]=32个bit，每元素i取 qh[i/8] 的 bit(i%8)。qs 是 **byte-packed**（非 SPLIT）：`lo = (qs[i/2] >> ((i%2)*4)) & 0xF`，元素 i,i+1 共享 qs[i/2] 字节
+- value = `d * ((hi<<4 | lo) - 16)`（Q5_0）或 `d * (hi<<4 | lo) + m`（Q5_1，BlockScalarWithMin）
+- JIT 实现：走单片 `QuantQ5Decode` → `q5_0/q5_1_decode_step_native`（has_min 区分）。**禁止**用旧 HighBitMerge（QuantBiPlaneLoad）或 NibbleWithHighBits 统一 shift+mask
+- 证据：BCE-20260710-Q5_0-HIGHBITS — Q5_0 oracle 修前 out=[28,0] want [-2,0]，修后 [-2,0]
+- 关联：Q5_K（Hierarchical scale + NibbleWithHighBits）同类高 bit bug **未修**（独立 backlog，需含 sub-scale 解码的单片）
 
 ### 易误判点 3：IQ4_NL nibble 是码本下标，不是线性值
 
