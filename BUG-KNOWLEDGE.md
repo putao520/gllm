@@ -4046,7 +4046,7 @@ regressionAssertion:
 
 ### 残留 / 后续
 - **Q5_K decode 已根治 (BCE-20260710-Q5_K-HIGHBITS)**: 转置高位平面 (hi=(qh[i%32]>>(i/32))&1) 单片 decode 已修 (见独立 BCE 条目). oracle 全过 (mini 0-7, j<4/j>=4, SPLIT, get_scale_min_k4). 真实 GGUF block 标量参考 d=0.0001 dmin=0.0019 (合理). **1层截断 full logits cosine=0.9998, top10=10/10** (非 argmax 巧合, decode 正确性闭环).
-- **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍 output='遇浚lar菊花...' (非 Paris). Q5_K decode 已根治 (1层 cos 0.9998, JIT vs scalar 逐元素 diff=0). **第一性原理二分 (Q6_K 模型决定性测试)**: Q6_K 模型 (全层 Q6KDecodeStep) N=2 cos 0.9999 完美 → 排除 Q6KDecodeStep reentrancy. bug 源锁定 Q5_K_M 独有的 Q5KDecodeStep + Q6KDecodeStep 同 program 交替. **但矛盾未解**: Q5_K decode 逐元素正确 (diff=0), Q6_K decode 正确, 两者各自正确混合却崩. test_q5k_q6k_mixed_program (同 program 连续 emit Q5K+Q6K GEMM) SIGSEGV (#[ignore], 疑 VReg/liveness/stack 冲突, 也可能 harness 问题). 已排除: decode 逻辑/pack/layer-loop weight base/Q6K reentrancy/BF16 harness. 下一步确认 SIGSEGV 真实性.
+- **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍 output='遇浚lar菊花...' (非 Paris). Q5_K decode 已根治 (1层 cos 0.9998, JIT vs scalar 逐元素 diff=0). **第一性原理二分 (Q6_K 模型决定性测试)**: Q6_K 模型 (全层 Q6KDecodeStep) N=2 cos 0.9999 完美 → 排除 Q6KDecodeStep reentrancy. **test_q5k_q6k_mixed_program SIGSEGV 是 harness 问题** (Q5K+Q5K 同 program 也 SIGSEGV → 非 Q5K+Q6K 混合格式冲突, 是裸 StackArg 布局与 native call stack 冲突; 真实 mega-kernel 用不同 ABI 不触发). 已排除: decode 逻辑/pack/layer-loop weight base/Q6K reentrancy/BF16 harness/VReg 冲突(harness 假象). Q5_K_M N=2 崩的真正根因仍未定位 — 需用可信 mega-kernel 级诊断 (非裸 StackArg harness).
 - classic.rs INTERLEAVED vs SPLIT (独立 backlog).
 - Q6_K/Q5 scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
 
@@ -4106,5 +4106,5 @@ regressionAssertion:
 - test_q5k_trace + test_q5k_full_hierarchical_structure 更新 (断言单片, 禁旧路径)
 
 ### 残留 / 后续
-- **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍乱码. Q5_K decode 根治 (1层 cos 0.9998, diff=0 vs scalar). Q6_K 模型 N=2 完美 (排除 Q6KDecodeStep). 矛盾: Q5K+Q6K 各自正确混合却崩. test_q5k_q6k_mixed_program SIGSEGV (疑 VReg/liveness 冲突). 已排除 decode/pack/layer-base/Q6K reentrancy.
+- **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍乱码. Q5_K decode 根治 (1层 cos 0.9998, diff=0 vs scalar). Q6_K 模型 N=2 完美 (排除 Q6KDecodeStep). test_q5k_q6k_mixed_program SIGSEGV 是 harness 问题 (Q5K+Q5K 也崩, 非混合格式冲突). 已排除 decode/pack/layer-base/Q6K reentrancy/VReg冲突(harness假象). 真正根因未定位, 需可信 mega-kernel 级诊断.
 - Q5_K scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
