@@ -33,3 +33,15 @@ fn inspect_q5km_q6k_tensors() {
         .map(|t| t.name.as_ref().to_string()).collect();
     eprintln!("Q5K tensors ({}): first 10 = {:?}", q5k.len(), &q5k[..q5k.len().min(10)]);
 }
+
+#[test]
+fn inspect_q5km_layer0_v_down() {
+    let path = "/home/putao/.gllm/models/huggingface/models--bartowski--Qwen_Qwen3-0.6B-GGUF/snapshots/60b85c0e3d8fe0f6474f406922a26d12aca4550d/Qwen_Qwen3-0.6B-Q5_K_M.gguf";
+    let r = GgufReader::open(path).expect("open");
+    for name in &["blk.0.attn_v.weight", "blk.0.ffn_down.weight", "blk.1.attn_v.weight", "blk.1.ffn_down.weight",
+                  "blk.0.attn_q.weight", "blk.1.attn_q.weight"] {
+        if let Some(t) = r.tensors().iter().find(|t| t.name.as_ref() == *name) {
+            eprintln!("{}: dtype={:?} shape={:?}", name, t.dtype, t.shape);
+        }
+    }
+}
