@@ -108,6 +108,7 @@
 | JIT 数值诊断方法论（三层二分 + diagnostic API）| `docs/domain-knowledge/jit-numerical-debug-method.md` | prefill_logits 二分+逐层+逐算子定位发散点；8 diagnostic API；JIT 推理乱码/logits 发散必读 |
 | G2b 真根因（a_dtype 当 A-load 步长）| `docs/domain-knowledge/g2b-root-cause-a_dtype-load-stride.md` | GEMM 激活 A-load dtype 硬编码 ctx.accum_dtype(F32) 不跟随激活张量存储 dtype（lower_op:1365）；JIT codegen 诊断必读 |
 | LSP（rust-analyzer via gsc-spec MCP）| `docs/domain-knowledge/lsp.md` | MCP server 内嵌 LSP socket；search_code analyze/scan "Socket not connected" 诊断；MCP 工具故障排查必读 |
+| RegAlloc × Native Call 交互（自研线性扫描 + call 边界）| `docs/domain-knowledge/regalloc-native-call-interaction.md` | SysV ABI caller/callee-saved + save_gprs 兜底机制 + RegAlloc 不建模 call clobber；native call 跨层运行时值丢失类 bug 诊断必读 |
 
 ## SPEC Index
 
