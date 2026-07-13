@@ -4181,3 +4181,15 @@ regressionAssertion:
   - save_gprs 兜底 (方向14 验证对称), 但可能 N=2 时新增的 VReg 跨 call 边界未覆盖
 - **与 regalloc-native-call-interaction.md knowledgeGap 完全吻合**: "RegAlloc 在混合 native-call 序列下的运行时机器码执行后物理寄存器实际值无文档覆盖"
 - **下一步**: architect(retrospect) 归因 — 为什么 num_layers=2 的 regalloc 输出破坏 layer0; 或 dump N=1/N=2 regalloc 分配 (GLLM_REGALLOC_DEBUG) 对比跨 call 的 VReg 分配差异
+
+### 方向 27: regalloc N=1 vs N=2 对比 — 696 VReg 分配策略不同 (2026-07-13)
+- **测试**: `tests/test_diag_regalloc_n1n2.rs` — GLLM_REGALLOC_DEBUG dump N=1/N=2 regalloc
+- **结果**: N1: 7038 intervals, 4213 spills (110888B); N2: 7041 intervals, 4165 spills (110504B)
+  - N2 多 3 intervals 但**少 48 spills** → 更多 VReg 分配到物理寄存器
+  - **696 个 VReg 在 N1 spill (安全) 但 N2 分配到物理寄存器 (潜在跨 call 危险)**
+- **样本 v51**: N1 Spilled(26) [def=109,last=5059 长生命周期]; N2 Gpr(PhysGpr(7)=rsi) [def=110,last=165 短生命周期]
+  - N1/N2 的 live interval 长度不同 (N1 last=5059 vs N2 last=165) → num_layers 影响 live interval 计算
+  - v51 不跨 DecodeStep (def=110 < first DecodeStep@94? 不, def=110 > 94, 且 last=127 < 230) → v51 本身安全
+- **DecodeStep 位置 (N2)**: 27 个 DecodeStep, 第一个 @instr94 (layer0 q_proj Q5K), 后续 @230/301/372... 全在循环内
+- **根因方向精化**: 696 个 VReg 分配策略变化中, 可能存在某个 VReg 跨 DecodeStep 且 N2 分配到 caller-saved → 被 native call clobber. 需精确找 def < DecodeStep < last 且 N2 分配 caller-saved 的 VReg
+- **architect(retrospect) 分析中** (agentId a43f790eee9886b15) — 归因 num_layers 影响 regalloc 的机制
