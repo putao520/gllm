@@ -4428,3 +4428,12 @@ regressionAssertion:
   2. N=4 的 KV cache 写入 (prefill 写 layer0-3 KV) 有 layer3 特有问题
   3. 或 N=4 触发 spill/内存布局边界 (虽然 buffer_alloc N=1==N=2, 但 N=4 可能不同)
 - **待验证**: dump N=4 buffer_alloc (之前只比 N=1 vs N=2); N=4 vs N=3 的 VmProgram 层循环结构; N=4 prefill layer3 的 KV cache 写入
+
+### 方向 43: N=4 VmProgram 与 N=3 几乎相同 (代码逻辑非根因, 2026-07-13)
+- **测试**: `tests/test_diag_dump_n4.rs` — dump N=4 VmProgram
+- **结果**: N=4 有 3 layer loop (bound=Const(4)) @instr174/5526/11070. 与 N=3 结构相同 (只 bound 4 vs 3).
+- **组1 layer loop body 对比** (N=3 vs N=4): 归一化 VRegId 后几乎相同, 只 bound Const(3) vs Const(4) + 2 行偏移. **代码逻辑相同**.
+- **byte_offset 验证**: LoopEnd `add offset_reg, step_bytes as i32` (11379712). iter3 byte_offset = 3×11379712 = 34139136 (i32 范围内, 不溢出). layer3 权重 offset 正确.
+- **排除**: 代码逻辑 (N3==N4), byte_offset 计算 (不溢出), regalloc (N2==N4), buffer (N1==N2).
+- **N=4 prefill layer3 NaN 根因仍不明**. architect v4 重新归因中 (agentId ab075b703dd052c0a).
+- **可能需 DAP** (用户不倾向): 在 N=4 prefill layer3 断点检查激活值, 找 NaN 产生的具体 op. 或逐层 capture (开 diagnostic-layer-capture) 定位 N=4 哪层开始 NaN (layer0/1/2/3).
