@@ -4337,3 +4337,14 @@ regressionAssertion:
   - 或 N=4 触发别的 bug (累积腐败, 与奇偶性无关)
 - **★关键进展★**: N=1,2,3 修复证明 parity fix 奇偶性根因正确 + 方案 C 有效. N=4 NaN 是独立 bug.
 - **下一步**: 验证完整 E2E (N=28 全模型) 是否输出 "Paris" (原始乱码 bug); 调查 N=4 NaN.
+
+### 方向 37: 完整 E2E 仍乱码 — parity fix 修复但剩余独立 bug (2026-07-13)
+- **测试**: `tests/test_e2e_q5km_capital.rs` — Q5_K_M 28层全模型 "The capital of France is"
+- **结果**: output="ousousousousousousousousousous" (重复 "ous", 仍乱码, 非 Paris)
+- **结论**: parity fix 奇偶性 bug 已修复 (N=1,2,3 pong 正确), 但完整 28层 E2E 仍有**独立 bug**
+- **线索**: N=4 pong=NaN (方向36) — 4层就 NaN, 说明累积腐败. 28层 E2E "ousous" 重复是 layer 循环后推理腐败 (可能 KV cache / generate loop / 累积精度)
+- **剩余 bug 候选**:
+  1. N=4 NaN 根因 (parity fix 修复后仍 NaN, 非 parity 相关)
+  2. 28层累积腐败 (每层小误差累积, 或某层激活 NaN 传播)
+  3. generate loop (decode) 路径独立 bug (prefill 修复但 decode 仍有)
+- **下一步**: 调查 N=4 NaN (开 capture 看 layer0-3 哪层开始 NaN); 或对比 N=2 vs N=4 capture 找腐败起点
