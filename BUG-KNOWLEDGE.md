@@ -4108,3 +4108,20 @@ regressionAssertion:
 ### 残留 / 后续
 - **Q5_K_M 多层 E2E 乱码 (独立 bug, 非 decode)**: 28层 E2E 仍乱码. Q5_K decode 根治 (1层 cos 0.9998, diff=0 vs scalar). Q6_K 模型 N=2 完美 (排除 Q6KDecodeStep). test_q5k_q6k_mixed_program SIGSEGV 是 harness 问题 (Q5K+Q5K 也崩, 非混合格式冲突). 已排除 decode/pack/layer-base/Q6K reentrancy/VReg冲突(harness假象). 真正根因未定位, 需可信 mega-kernel 级诊断.
 - Q5_K scalar native 循环 (非 SIMD): 性能后续优化 (backlog, 待 profile).
+
+### 方向 22: Q5_K_M N=2 pong buffer 被清零 (决定性运行时发现, 2026-07-13)
+- **测试**: `tests/test_diag_ping_pong.rs` — dump N=1/N=2 的 ping(offset 0) / pong(offset 167772160) 内容, Q5_K_M vs Q6_K 对照
+- **决定性结果**:
+  | 模型 | N=1 ping | N=1 pong | N=2 ping | N=2 pong |
+  |------|---------|---------|---------|---------|
+  | Q5_K_M | 0.0527 (embed) | **1.6617 (layer0_out 正确)** | 0.7148 (layer1_out) | **0.0000 (全零!)** |
+  | Q6_K | 0.0539 (embed) | 1.6583 (layer0_out) | 1.6812 (layer1_out) | **1.6583 (layer0_out 保留)** |
+- **关键对比**: Q5_K_M N=1 pong(1.6617) ≈ Q6_K N=1 pong(1.6583) → **layer0 在 Q5_K_M 完全正确** (排除 layer0 没写 pong)
+- **矛盾**: Q5_K_M N=2 pong=0 但 Q6_K N=2 pong=1.6583 → **layer1 执行后 pong 被清零** (Q6_K 同 swap 逻辑完美保留)
+- **swap 语义验证** (buffer_alloc.rs:737-739 + resource_planner.rs:584-585):
+  - layer0: read ping(0)=embed, write pong(167772160)=layer0_out → N=1 pong=1.6617 ✓
+  - ActivationSwap xchg: layer1 read pong(167772160)=layer0_out, write ping(0)=layer1_out
+  - N=2 后: offset 0=layer1_out (Q5:0.7148 ✓), offset 167772160=layer0_out (Q5:0.0000 ✗, Q6:1.6583 ✓)
+- **根因方向**: layer1 执行期间 (Q5KDecodeStep native call) 把 pong(167772160) 内容清零. 静态对称 (方向12-16) 排除 lowering 差异 → **运行时 Q5KDecodeStep 内存写入越界覆盖 pong**
+- **排除**: layer0 没写 pong (N=1 pong=1.6617 证伪), swap 时机 (Q6_K 同 swap 完美保留), buffer 布局 (方向10 对称), VReg (方向14 对称)
+- **待定位**: Q5KDecodeStep native call 的具体越界写入点 — block_base/lane_offset/stride 计算导致写入地址落在 pong(167772160) 区域
