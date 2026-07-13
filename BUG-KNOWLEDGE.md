@@ -4294,3 +4294,19 @@ regressionAssertion:
   - **方案 A (推荐根治)**: 移除 3 处 parity-fix swap (pipeline.inc.rs:509-511, 817-819, 955-957), 循环前 Mov 保存 ping/pong spill, 循环后 Mov 恢复. 保证 v25 无论 N 都指向初始 buffer.
   - **方案 B (最小)**: 仅 N 为奇数时 emit parity-fix (BoundExpr::Const 编译时判). 假设组数=3(奇), 组数变则失效.
 - **待实施**: 选方案 A 根治 (C-E-W-V, Agent 编码). 先验证修复 (临时移除 parity fix 测 N=2/4).
+
+### 方向 34: 移除 parity fix 验证 — 修复 N=偶数但破坏 N=奇数 (2026-07-13)
+- **修复**: Executor 移除 3 处 parity-fix swap (commit 210b0d6e in gllm-kernels)
+- **验证** (test_diag_ping_pong N=1/2/3/4 修复后):
+  | N | ping |max| | pong |max| | 修复前 pong |
+  |---|----------|----------|------------|
+  | N=1 | 0.0527 (embed) | 1.6617 | 1.6617 (不变) |
+  | N=2 | 0.0527 (embed) | **0.6740** ✓ | 0.0000 (修复!) |
+  | N=3 | 0.1762 | **0.0000** ✗ | 0.2115 (退化!) |
+  | N=4 | 0.0527 (embed) | **NaN** ✗ | 0.0000 (更差!) |
+- **结论**: 移除 parity fix **修复 N=偶数但破坏 N=奇数** — 奇偶性反转!
+  - 修复前: N=奇数对, N=偶数错 (parity fix 让 N=奇数回初始, N=偶数翻转)
+  - 修复后: N=偶数对, N=奇数错 (无 parity fix, N=偶数次 swap 回初始, N=奇数次翻转)
+- **根本问题**: 循环内 N 次 swap, v25 状态依赖 N 奇偶性. **无论有无 parity fix, 总有一半 N 错**.
+- **正确修复 (architect v2 方案 A 完整版)**: 移除 parity fix + **循环前 Mov 保存 v25/v26 spill, 循环后 Mov 恢复**. 保证 v25 无论 N 都回初始 buffer. Executor 只移除了 parity fix 没加保存/恢复 → 不完整.
+- **待实施**: 完整方案 A (保存/恢复). 或 architect v3 的正确方案 (验证中).
