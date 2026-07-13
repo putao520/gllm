@@ -22,9 +22,9 @@ fn dump_ra(n: usize, outfile: &str) {
 fn diag_regalloc_n1_n2() {
     let _ = std::fs::remove_file("/tmp/ra_n1.log");
     let _ = std::fs::remove_file("/tmp/ra_n2.log");
-    eprintln!("=== Dump Q5_K_M regalloc N=1 vs N=2 ===");
-    dump_ra(1, "/tmp/ra_n1.log");
+    eprintln!("=== Dump Q5_K_M regalloc N=2 vs N=4 (N=4 NaN 调查) ===");
     dump_ra(2, "/tmp/ra_n2.log");
-    eprintln!("N=1: /tmp/ra_n1.log, N=2: /tmp/ra_n2.log");
+    dump_ra(4, "/tmp/ra_n4.log");
+    eprintln!("N=2: /tmp/ra_n2.log, N=4: /tmp/ra_n4.log");
     eprintln!("对比: spills 数量, 跨 call VReg 分配 (caller-saved vs callee-saved)");
 }

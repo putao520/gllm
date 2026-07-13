@@ -4362,3 +4362,15 @@ regressionAssertion:
   3. 或 N=4 有第4个隐藏结构 (3 融合组外)
 - **与 28层 E2E 乱码关系**: N=4 layer0 NaN 说明 4层就腐败. 28层 E2E "ousous" 乱码可能源于此累积.
 - **下一步**: dump N=4 VmProgram + regalloc, 对比 N=2 找组1 layer0 的差异; 或 architect(retrospect) 归因 N=4 特有问题
+
+### 方向 39: regalloc N=2==N=4 + capture 3组共享覆盖 (2026-07-13)
+- **regalloc 对比** (test_diag_regalloc_n1n2 N=2 vs N=4): 完全相同! 16493 instrs, 7041 intervals, 4165 spills. **regalloc 不是 N=4 NaN 根因**.
+- **capture 3组共享覆盖** (源码确认): 
+  - locals.layer_capture 单一 capture_base (pipeline.inc.rs:326 构建, 所有组共享)
+  - 每组 layer_loop_counter 从 0 开始 (LoopBegin 初始化)
+  - 3 组 layer0 (counter=0) capture 都写 capture_base+0 → **互相覆盖, 最后写(组3)的决定**
+  - 所以 "layer0 capture" 读的是组3 layer0, 非组1
+- **但 ping/pong N=4 pong(167772160)=NaN (固定offset, 不覆盖)**: 组1 layer0 也 NaN
+- **确认**: 组1 和组3 layer0 都 NaN (capture 读组3, ping/pong 读组1, 两者都NaN)
+- **核心矛盾仍存**: N=2,4 regalloc/IR/buffer 全相同, 组1 layer0 代码相同, 但 N=2 非NaN N=4 NaN
+- **architect(retrospect) v4 归因中** (agentId ab075b703dd052c0a)
