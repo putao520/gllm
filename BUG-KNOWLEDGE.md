@@ -4391,3 +4391,21 @@ regressionAssertion:
   2. generate loop (多 token 生成) 的 KV cache 更新 / 状态传递 bug
   3. "argest" 重复 → 采样/argmax 路径问题, 或 decode logits 发散
 - **下一步**: 调查 decode 路径 (N=2 prefill 正确但 decode 乱码); architect v4 归因 N=4 NaN 可能相关
+
+### 方向 41: ★architect v4 根因修正★ N=4 NaN 是 decode 路径 bug (非 prefill, 2026-07-13)
+- **architect v4 结论** (agentId ab075b703dd052c0a):
+  - N=4 NaN **不是 prefill layer3 计算错误**, 而是 **decode 路径 bug 在 layer3 先暴露**
+  - N=1,2,3 pong 正确 (prefill + 1 decode step 都正确)
+  - N=2 E2E 乱码 (多 decode step 退化) → decode 路径有累积 bug
+  - N=4 pong=NaN (1 decode step 就 NaN) → 层数越多, decode bug 越早暴露
+  - **layer3 不是 NaN 源头, decode 路径才是**
+- **关键验证**: diagnostic_prefill_scratchpad 用 max_new_tokens=1 (executor_ops.inc.rs:239) — **不只 prefill, 含 1 decode step**! 所以 ping/pong/capture 测试都含 decode. N=4 NaN 在这 1 decode step 暴露.
+- **decode 路径 bug 候选** (architect v4):
+  - decode 时 seq_len=1, KV cache 读取路径与 prefill 不同
+  - layer3 的 KV cache 累积了 4 层写入 (N=2 只 2 层), 触发 KV cache 边界问题
+  - KV cache 分配 28 层, 但 layer loop 只跑 N 次. decode 时 layer3 读 KV cache, 但 KV cache 的 layer3 区可能从未被正确初始化
+- **需要的验证**:
+  1. N=4 纯 prefill (max_new_tokens=0) 看 pong 是否非 NaN → 确认 decode bug (但 diagnostic API 硬编码 max_new_tokens=1, 需改)
+  2. N=4 vs N=3 KV cache dump 对比, 找 layer3 区是否有全零/NaN
+  3. DAP runtime 检查 decode 时 KV cache 指针 (但用户不倾向 GDB)
+- **与 28层 E2E 乱码关系**: 28层 E2E "ousous" = decode 路径累积退化. N=4 NaN 是 decode bug 在 4 层时的极端表现. 两者同根 (decode 路径).
