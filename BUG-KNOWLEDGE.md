@@ -4149,3 +4149,21 @@ regressionAssertion:
 - **假设 (待验证)**: N=2 循环结构让 layer0 行为不同 — loop 内 layer0 的 ping/pong 初始化 或 计算路径 与 N=1 单次执行不同. 或 capture feature 改变了行为 (但 Q6_K capture 正确, 排除 feature bug)
 - **排除**: capture feature 本身 (Q6_K capture 正确非零); capture 覆盖源 (emit_side_channel_copy 只读 VecLoad/VecStore)
 - **下一步**: 开 capture feature 测 N=1, 若 Q5_K_M N=1 layer0 capture=非零(1.6617) → N=2 循环破坏 layer0; 若 N=1 也零 → capture 改变行为
+
+### 方向 25: N=1 layer0 非零 vs N=2 layer0 零 (决定性根因方向, 2026-07-13)
+- **测试**: `tests/test_diag_capture.rs` 开 diagnostic-layer-capture, N=1 vs N=2 对比
+- **决定性结果**:
+  | 模型 | N=1 layer0 capture | N=2 layer0 capture |
+  |------|---------------------|---------------------|
+  | Q5_K_M | **-0.7709 (非零, 正确)** | **全零** |
+  | Q6_K | -0.7692 (非零) | (待测, 预期非零) |
+- **根因锁定**: **同一 layer0, 同一 embed 输入, 同一 layer0 权重, N=1 非零 N=2 零**
+  - 排除 capture feature bug (N=1 capture 正确非零)
+  - 排除 layer0 计算本身错误 (N=1 正确)
+  - 排除 capture 覆盖源 (只读 VecLoad/VecStore)
+- **根因方向**: **num_layers 是编译时常量 (BoundExpr::Const(num_layers))** → N=1 和 N=2 生成**不同的 JIT 机器码**
+  - iter0 layer0 逻辑相同, 但 JIT 代码布局/regalloc 因 num_layers 不同而异
+  - N=2 时 regalloc live interval 分析不同 → 跨 native call (Q5KDecodeStep/Q6KDecodeStep) 的 VReg 可能被错误分配/覆盖
+  - 这正是 regalloc-native-call-interaction.md 的 knowledgeGap: **混合 native-call 序列 (Q5K+Q6K) 在 num_layers≥2 时 regalloc 运行时行为**
+- **与 Q6_K 对比**: Q5_K_M 是混合精度 (Q5K q/k/o/gate/up + Q6K v/down), Q6_K 是纯 Q6K. 混合序列的 native call 交替可能触发 regalloc 边界 bug
+- **下一步**: dump N=1 vs N=2 JIT 机器码 diff (用户要求"确认JIT出来的代码"); 或 architect(retrospect) 归因 num_layers 影响 regalloc 的机制
