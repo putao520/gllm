@@ -4373,4 +4373,10 @@ regressionAssertion:
 - **但 ping/pong N=4 pong(167772160)=NaN (固定offset, 不覆盖)**: 组1 layer0 也 NaN
 - **确认**: 组1 和组3 layer0 都 NaN (capture 读组3, ping/pong 读组1, 两者都NaN)
 - **核心矛盾仍存**: N=2,4 regalloc/IR/buffer 全相同, 组1 layer0 代码相同, 但 N=2 非NaN N=4 NaN
-- **architect(retrospect) v4 归因中** (agentId ab075b703dd052c0a)
+- **architect(retrospect) v4 归因中** (agentId ab075b703dd052c0a) — 调查 capture stride + N=4 特有 NaN. 已补充 ping/pong 证实组1真实 NaN (非 capture 假象).
+
+### 阶段总结 (2026-07-13)
+- **★已修复★ parity fix 奇偶性 bug** (commit 01bbbc20 gllm-kernels): 方案 C 组循环重置 ping/pong. N=1,2,3 layer0 正确 (pong 非零). 奇偶性消除.
+- **剩余独立 bug**: N=4 layer0 NaN + 28层 E2E "ousous" 乱码. regalloc N=2==N=4 (相同), 非简单奇偶性. architect v4 归因中.
+- **用户方法论验证**: "规范性死东西, 先确认算法→JIT代码→寄存器/堆栈/内存布局, 不需要 GDB" — 通过静态分析 + diagnostic API (capture/ping-pong/regalloc/VmProgram dump) 定位 parity fix 奇偶性根因, 无需 GDB.
+- **39 个方向排查**: 1-21 (前序排除 decode/pack/layout 等), 22 (ping/pong 内容), 23 (KV dtype 排除), 24-25 (capture layer0 全零), 26 (VmProgram IR 对称), 27 (regalloc 696 VReg 差异), 28 (buffer N1==N2), 29 (JIT 机器码逻辑相同), 30-31 (奇偶性 N1,3对 N2,4错), 32 (3融合组×N+1 swap), 33 (architect v2 完整根因), 34 (移除parity fix 验证 破坏N奇), 35 (architect v3 方案C), 36 (方案C验证 N1,2,3修复), 37 (E2E仍乱码), 38 (N4 NaN 非简单奇偶), 39 (regalloc N2==N4).
