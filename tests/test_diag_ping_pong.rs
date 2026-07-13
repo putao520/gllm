@@ -32,12 +32,11 @@ fn dump_act(label: &str, filter: &str, n: usize) {
 #[ignore]
 fn diag_ping_pong_n1_n2() {
     let _ = std::fs::write("/tmp/q5km_pingpong.txt", "");  // clear
-    eprintln!("\n=== ping/pong 内容 N=1 vs N=2 (Q5_K_M vs Q6_K) ===");
+    eprintln!("\n=== ping/pong 内容 N=1 vs N=2 vs N=3 vs N=4 (Q5_K_M) ===");
     dump_act("Q5_K_M", "q5_k_m", 1);
     dump_act("Q5_K_M", "q5_k_m", 2);
-    dump_act("Q6_K", "q6_k", 1);
-    dump_act("Q6_K", "q6_k", 2);
-    eprintln!("\n理论 N=1: pong=layer0_out(非零)");
-    eprintln!("理论 N=2: pong=layer0_out(仍非零, layer1写ping非pong)");
-    eprintln!("若 Q5_K_M N=2 pong=零 → layer0_out 被清零 (bug)");
+    dump_act("Q5_K_M", "q5_k_m", 3);
+    dump_act("Q5_K_M", "q5_k_m", 4);
+    eprintln!("\n理论 N=奇: pong=layer0_out(非零); N=偶: pong=0?");
+    eprintln!("奇偶性验证: N=1,3 pong应非零; N=2,4 pong应零");
 }

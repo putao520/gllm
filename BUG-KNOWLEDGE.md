@@ -4236,3 +4236,24 @@ regressionAssertion:
 - **但 N=3 正确**: 结构差异不是唯一原因 (若 N≥2 都结构不同, N=3 应也错, 但 N=3 正确) → **奇偶性才是关键**
 - **根因假设**: N=偶数时 layer0 执行时 ping/pong 已被预 swap (读 pong 空 buffer 而非 ping=embed) → 输出 0. 或 ActivationSwap 奇偶性让 layer0 读错 buffer.
 - **下一步**: architect(retrospect) v2 验证 ActivationSwap 位置/次数 + layer0 ping/pong 读取. 已发决定性线索.
+
+### 方向 31: ping/pong N1-N4 奇偶性完美确认 (2026-07-13)
+- **测试**: `tests/test_diag_ping_pong.rs` N=1/2/3/4 (不开 capture feature, 读固定 offset)
+- **决定性结果**:
+  | N | ping |max| | pong |max| | 奇偶 |
+  |---|----------|----------|------|
+  | N=1 | 0.0527 (embed) | **1.6617** (layer0_out) | 奇 ✓ |
+  | N=2 | 0.7148 (layer1_out) | **0.0000** | 偶 ✗ |
+  | N=3 | **0.0527 (embed!)** | **0.2115** (非零) | 奇 ✓ |
+  | N=4 | **0.0000 (NaN!)** | 0.0000 | 偶 ✗ |
+- **关键观察**:
+  1. N=1,3 ping=0.0527 (embed, 相同) → N=奇数循环结束后 ping 回到初始 (embed)
+  2. N=2 ping=0.7148 (layer1_out) → N=偶数循环结束后 ping 翻转 (指向 layer1_out)
+  3. N=4 ping=NaN → 腐败累积
+- **parity fix 奇偶性**: 循环内 N 次 swap + parity fix 1 swap = N+1 次
+  - N=1: 2 swap (偶) → ping 回初始 ✓
+  - N=2: 3 swap (奇) → ping 翻转 ✗
+  - N=3: 4 swap (偶) → ping 回初始 ✓
+  - N=4: 5 swap (奇) → ping 翻转 ✗
+- **★根因锁定★**: parity fix 的额外 ActivationSwap (close_layer_loop line 509-511) 在 N=偶数时让 ping/pong 翻转. 但我读固定 offset (0/167772160) 非 ping/pong ptr, 所以翻转应不影响 offset 内容...
+- **待 architect 解释**: 为什么 ping/pong ptr 翻转影响固定 offset 内容? 可能 layer0 在 N=偶数时写错 buffer (写 ping 而非 pong). N=2/N=3 layer loop body 相同 (96 DeclareVReg + 3 VecScalarStore) 但 N=2 layer0=0 N=3 layer0=非零 → 奇偶性是唯一变量.
