@@ -4380,3 +4380,14 @@ regressionAssertion:
 - **剩余独立 bug**: N=4 layer0 NaN + 28层 E2E "ousous" 乱码. regalloc N=2==N=4 (相同), 非简单奇偶性. architect v4 归因中.
 - **用户方法论验证**: "规范性死东西, 先确认算法→JIT代码→寄存器/堆栈/内存布局, 不需要 GDB" — 通过静态分析 + diagnostic API (capture/ping-pong/regalloc/VmProgram dump) 定位 parity fix 奇偶性根因, 无需 GDB.
 - **39 个方向排查**: 1-21 (前序排除 decode/pack/layout 等), 22 (ping/pong 内容), 23 (KV dtype 排除), 24-25 (capture layer0 全零), 26 (VmProgram IR 对称), 27 (regalloc 696 VReg 差异), 28 (buffer N1==N2), 29 (JIT 机器码逻辑相同), 30-31 (奇偶性 N1,3对 N2,4错), 32 (3融合组×N+1 swap), 33 (architect v2 完整根因), 34 (移除parity fix 验证 破坏N奇), 35 (architect v3 方案C), 36 (方案C验证 N1,2,3修复), 37 (E2E仍乱码), 38 (N4 NaN 非简单奇偶), 39 (regalloc N2==N4).
+
+### 方向 40: N=2 E2E 仍乱码 — prefill 修复但 decode/generate 路径独立 bug (2026-07-13)
+- **测试**: `tests/test_e2e_q5km_n2.rs` — N=2 截断 E2E "The capital of France is"
+- **结果**: output="portMARYargestargestargest..." (乱码, 重复 "argest")
+- **关键**: N=2 layer0 pong=0.6740 (非零, prefill 正确, 方向36), 但 N=2 E2E 仍乱码
+- **结论**: parity fix 修复了 prefill layer0 输出 (N=1,2,3 pong 正确), 但 **E2E 生成路径 (decode/generate loop) 有独立 bug**
+- **候选根因**:
+  1. decode 路径 (seq_len=1) 与 prefill (seq_len=5) 不同, decode 的 layer loop 可能也有 parity 问题
+  2. generate loop (多 token 生成) 的 KV cache 更新 / 状态传递 bug
+  3. "argest" 重复 → 采样/argmax 路径问题, 或 decode logits 发散
+- **下一步**: 调查 decode 路径 (N=2 prefill 正确但 decode 乱码); architect v4 归因 N=4 NaN 可能相关
