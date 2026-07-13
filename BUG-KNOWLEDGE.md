@@ -4125,3 +4125,27 @@ regressionAssertion:
 - **根因方向**: layer1 执行期间 (Q5KDecodeStep native call) 把 pong(167772160) 内容清零. 静态对称 (方向12-16) 排除 lowering 差异 → **运行时 Q5KDecodeStep 内存写入越界覆盖 pong**
 - **排除**: layer0 没写 pong (N=1 pong=1.6617 证伪), swap 时机 (Q6_K 同 swap 完美保留), buffer 布局 (方向10 对称), VReg (方向14 对称)
 - **待定位**: Q5KDecodeStep native call 的具体越界写入点 — block_base/lane_offset/stride 计算导致写入地址落在 pong(167772160) 区域
+
+### 方向 23: KV cache dtype 双地层陷阱排除 (SmolLM2 前车之鉴不适用, 2026-07-13)
+- **假设**: Q5_K_M 踩 SmolLM2 同陷阱 — JIT graph_dtype()=F32(stride 768) vs buffer compute_dtype=BF16(stride 384) → KV cache 越界踩踏
+- **测试**: `tests/test_diag_embd_dtype.rs` — dump Q5_K_M vs Q6_K 所有非量化 tensor dtype, 算 derive_dtype majority vote
+- **结果**: Q5_K_M: F32 count=113, BF16 count=0, F16 count=0 → derive_dtype=F32; Q6_K: F32 count=113, BF16 count=0, F16 count=0 → derive_dtype=F32
+- **结论**: 三者一致 = F32 (config.dtype=F32, compute_dtype=F32, graph_dtype()=F32). **SmolLM2 陷阱不适用** (两边都 F32, stride 一致, 无越界)
+- **附加排除**: KV cache 用独立 kv_cache_ptr (effective_pool_base), 非 scratchpad offset → 即使 KV 越界也不覆盖 activation buffer. 所以 pong 清零与 KV cache 无关
+- **根因转移**: activation buffer 内部清零, 非 KV cache 越界. 仍待定位 layer1 执行期间什么操作清零了 offset 167772160
+
+### 方向 24: diagnostic-layer-capture 揭示 layer0 capture 全零 (N=2, 决定性矛盾, 2026-07-13)
+- **测试**: `tests/test_diag_capture.rs` — 开 diagnostic-layer-capture feature, dump 每层 capture (swap 前拷贝 pong)
+- **决定性结果 (N=2)**:
+  | 模型 | layer0 capture | layer1 capture |
+  |------|---------------|----------------|
+  | Q5_K_M | **全零** | 全零 |
+  | Q6_K | **-0.7692 (非零, = pong first4)** | 全零 |
+- **关键**: Q6_K layer0 capture first4=[-0.7692368...] 完全等于 Q6_K N=2 pong(167772160) first4 → capture 机制正确, 拷了真实 layer0_out
+- **决定性矛盾**: Q5_K_M layer0 capture=零, 但 test_diag_ping_pong N=1 时 pong(167772160)=1.6617 (非零)
+  - capture 在 ActivationSwap **之前**拷 pong, 拷的是 layer0 刚写入的输出
+  - N=1 (1层截断) pong=1.6617, N=2 (2层截断) layer0 capture=0
+  - **同一 layer0, 同一 embed 输入, 同一 layer0 权重, 为什么 N=1 非零 N=2 零?**
+- **假设 (待验证)**: N=2 循环结构让 layer0 行为不同 — loop 内 layer0 的 ping/pong 初始化 或 计算路径 与 N=1 单次执行不同. 或 capture feature 改变了行为 (但 Q6_K capture 正确, 排除 feature bug)
+- **排除**: capture feature 本身 (Q6_K capture 正确非零); capture 覆盖源 (emit_side_channel_copy 只读 VecLoad/VecStore)
+- **下一步**: 开 capture feature 测 N=1, 若 Q5_K_M N=1 layer0 capture=非零(1.6617) → N=2 循环破坏 layer0; 若 N=1 也零 → capture 改变行为
