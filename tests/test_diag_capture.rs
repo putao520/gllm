@@ -40,9 +40,7 @@ fn dump_capture(label: &str, filter: &str, n: usize) {
 #[ignore]
 fn diag_capture_per_layer() {
     let _ = std::fs::write("/tmp/q5km_capture.txt", "");
-    eprintln!("=== diagnostic-layer-capture 逐层 dump ===");
-    dump_capture("Q5_K_M", "q5_k_m", 1);
+    eprintln!("=== diagnostic-layer-capture N=2 vs N=4 对比 layer0 NaN ===");
     dump_capture("Q5_K_M", "q5_k_m", 2);
-    dump_capture("Q5_K_M", "q5_k_m", 3);
     dump_capture("Q5_K_M", "q5_k_m", 4);
 }

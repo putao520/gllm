@@ -4348,3 +4348,17 @@ regressionAssertion:
   2. 28层累积腐败 (每层小误差累积, 或某层激活 NaN 传播)
   3. generate loop (decode) 路径独立 bug (prefill 修复但 decode 仍有)
 - **下一步**: 调查 N=4 NaN (开 capture 看 layer0-3 哪层开始 NaN); 或对比 N=2 vs N=4 capture 找腐败起点
+
+### 方向 38: N=2 layer0 正确 vs N=4 layer0 NaN (非简单奇偶性, 2026-07-13)
+- **测试**: `tests/test_diag_capture.rs` N=2 vs N=4 capture 对比
+- **结果**:
+  - N=2 layer0 capture = -0.5161 (非零, 正确!)
+  - N=4 layer0 capture = NaN (第一层就 NaN!)
+- **关键**: N=1,2,3 layer0 正确; N=4 layer0 NaN. **非简单奇偶性** (N=2,4 都是偶数, 但 N=2 对 N=4 错)
+- **组1 iter0 layer0 代码相同** (只 bound Const 不同), 但 N=4 产生 NaN
+- **可能根因**:
+  1. N=4 的 regalloc 与 N=2 不同 (num_layers=4 多 VReg), 某跨 native call VReg 被错误分配 → NaN
+  2. N=4 触发 spill slot 覆盖 (spill 区更大, offset 冲突)
+  3. 或 N=4 有第4个隐藏结构 (3 融合组外)
+- **与 28层 E2E 乱码关系**: N=4 layer0 NaN 说明 4层就腐败. 28层 E2E "ousous" 乱码可能源于此累积.
+- **下一步**: dump N=4 VmProgram + regalloc, 对比 N=2 找组1 layer0 的差异; 或 architect(retrospect) 归因 N=4 特有问题
