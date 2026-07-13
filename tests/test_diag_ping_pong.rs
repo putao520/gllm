@@ -10,7 +10,8 @@ fn dump_act(label: &str, filter: &str, n: usize) {
     std::env::set_var("GLLM_TRUNCATE_LAYERS", n.to_string());
     let c = Client::builder().model("bartowski/Qwen_Qwen3-0.6B-GGUF").kind(ModelKind::Chat)
         .gguf_file_filter(filter).build().expect("client");
-    let t = c.encode("The capital of France is").expect("encode");
+    // 单 token prompt → generate loop 跑 1 次 (纯 prefill, 无 decode step)
+    let t = c.encode(" ").expect("encode");
     let sp = c.diagnostic_prefill_scratchpad(&t).expect("sp");
     std::env::remove_var("GLLM_TRUNCATE_LAYERS");
     // 读 ping (offset 0) 和 pong (offset 167772160) 前 8 个 f32

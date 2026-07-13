@@ -4409,3 +4409,22 @@ regressionAssertion:
   2. N=4 vs N=3 KV cache dump 对比, 找 layer3 区是否有全零/NaN
   3. DAP runtime 检查 decode 时 KV cache 指针 (但用户不倾向 GDB)
 - **与 28层 E2E 乱码关系**: 28层 E2E "ousous" = decode 路径累积退化. N=4 NaN 是 decode bug 在 4 层时的极端表现. 两者同根 (decode 路径).
+
+### 方向 42: ★architect v4 decode 假设证伪★ N=4 纯 prefill 也 NaN (2026-07-13)
+- **测试**: `tests/test_diag_ping_pong.rs` 单 token prompt (纯 prefill, 无 decode step) N=1/2/3/4
+  - generate loop 边界 = max_new_tokens(1) + prompt_len(1) - 1 = 1 次, 只处理 position 0 (prefill), 无 decode
+- **结果**:
+  | N | ping |max| | pong |max| |
+  |---|----------|----------|
+  | N=1 | 0.0970 | 0.9868 ✓ |
+  | N=2 | 0.0970 | 0.8236 ✓ |
+  | N=3 | 0.0970 | 0.5593 ✓ |
+  | N=4 | 0.0970 | **NaN** ✗ |
+- **★architect v4 decode 假设证伪★**: N=4 **纯 prefill (无 decode) 仍 NaN**! NaN 在 prefill 就出现, 非 decode 路径 bug.
+- **根因修正回 prefill**: N=4 prefill 的 layer3 (最后层) 输出 NaN. 但 N=1,2,3 prefill 正确. 代码相同 (只 num_layers bound).
+- **重新聚焦**: N=4 prefill layer3 NaN 的根因. 不是 decode, 不是 parity fix (已修复 N=1,2,3), 不是 regalloc (N=2==N=4). 
+- **新候选**:
+  1. N=4 prefill 时 layer3 计算读了被污染数据 (layer2 输出? 但 N=3 layer2 正确)
+  2. N=4 的 KV cache 写入 (prefill 写 layer0-3 KV) 有 layer3 特有问题
+  3. 或 N=4 触发 spill/内存布局边界 (虽然 buffer_alloc N=1==N=2, 但 N=4 可能不同)
+- **待验证**: dump N=4 buffer_alloc (之前只比 N=1 vs N=2); N=4 vs N=3 的 VmProgram 层循环结构; N=4 prefill layer3 的 KV cache 写入
