@@ -4257,3 +4257,20 @@ regressionAssertion:
   - N=4: 5 swap (奇) → ping 翻转 ✗
 - **★根因锁定★**: parity fix 的额外 ActivationSwap (close_layer_loop line 509-511) 在 N=偶数时让 ping/pong 翻转. 但我读固定 offset (0/167772160) 非 ping/pong ptr, 所以翻转应不影响 offset 内容...
 - **待 architect 解释**: 为什么 ping/pong ptr 翻转影响固定 offset 内容? 可能 layer0 在 N=偶数时写错 buffer (写 ping 而非 pong). N=2/N=3 layer loop body 相同 (96 DeclareVReg + 3 VecScalarStore) 但 N=2 layer0=0 N=3 layer0=非零 → 奇偶性是唯一变量.
+
+### 方向 32: ★根因完整确认★ 3 融合组 × (N+1) swap 奇偶性 (2026-07-13, architect v1 结论 + 实证)
+- **3 融合组确认** (VmProgram N=2): 3 个 layer loop (step=11379712) @instr168/5474/10972, 各用不同 ping/pong VReg 对:
+  - 组1: v25/v26 (ActivationSwap @386/388)
+  - 组2: v2300/v2301 (ActivationSwap @5692/5694)
+  - 组3: v4673/v4674 (ActivationSwap @11190/11192)
+- **每组 swap 次数**: N 次循环内 swap + 1 parity fix swap = N+1 次
+- **奇偶性**: 3 组各 N+1 swap. 当 N=偶数, 每组 N+1=奇 → 该组 ping/pong VReg 翻转
+- **★根因机制★**:
+  1. 组1 layer loop 跑 N 次 + parity swap. N=偶数时组1的 v25/v26 翻转 (v25→pong, v26→ping)
+  2. 组2 初始化 v2300/v2301 时, 若依赖组1翻转后的 ping/pong 状态 (materialize 用全局 abi.activation_ping_ptr, context.inc.rs:332-333) → 组2 的 ping 指向 pong(空 buffer)
+  3. 组2 layer0 读 ping=pong(空) → 计算 0×weight=0 → 写 pong=0
+  4. capture 拷组2的 pong=0 → layer0 capture=0
+- **architect v1 根因 (task notification a43f790eee9886b15)**: "3 融合组 × (N+1) swap = 3(N+1). N 偶数 → 3(N+1) 奇 → ping/pong 翻转. 翻转后组间代码读 ping 获取错误 buffer"
+- **architect v1 修复方案 A (推荐)**: 移除 parity fix swap (close_layer_loop line 509-511 + 817-819 + 955-957), 改为循环前保存 ping/pong 原始 spill 值, 循环后恢复. 确保 ping/pong 无论 N 都指向初始 buffer.
+- **architect v1 修复方案 B (最小)**: N 为偶数时不 emit parity fix swap (N 是 BoundExpr::Const 编译时常量可条件判断). 但假设组数=3(奇), 若组数变则失效.
+- **architect v2 (abf4f4d20acee4968) 验证中** — 确认修复方案 + 奇偶性如何影响固定 offset (组间状态传递)
