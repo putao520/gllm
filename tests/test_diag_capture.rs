@@ -43,6 +43,6 @@ fn diag_capture_per_layer() {
     eprintln!("=== diagnostic-layer-capture 逐层 dump ===");
     dump_capture("Q5_K_M", "q5_k_m", 1);
     dump_capture("Q5_K_M", "q5_k_m", 2);
-    dump_capture("Q6_K", "q6_k", 1);
-    dump_capture("Q6_K", "q6_k", 2);
+    dump_capture("Q5_K_M", "q5_k_m", 3);
+    dump_capture("Q5_K_M", "q5_k_m", 4);
 }

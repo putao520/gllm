@@ -4218,3 +4218,21 @@ regressionAssertion:
   2. 或 spill slot offset 在 N2 被其他 VReg 覆盖 (spill 区布局虽不同但大小够, 可能 offset 冲突)
   3. 或循环**回边** (jmp loop_start) 在 N2 跳错 — 循环执行次数错
 - **architect(retrospect) v2 分析中** (agentId abf4f4d20acee4968)
+
+### 方向 30: ★决定性奇偶性根因★ N=奇数正确 N=偶数零 (2026-07-13)
+- **测试**: `tests/test_diag_capture.rs` N=1/2/3/4 (diagnostic-layer-capture)
+- **决定性结果**:
+  | N | layer0 capture | 奇偶 |
+  |---|----------------|------|
+  | N=1 | -0.7709 (非零, 正确) | 奇 ✓ |
+  | N=2 | 0 (零) | 偶 ✗ |
+  | N=3 | 0.4038 (非零, 正确!) | 奇 ✓ |
+  | N=4 | 0 (零) | 偶 ✗ |
+- **奇偶性模式确认**: N=奇数(1,3) layer0 正确, N=偶数(2,4) layer0 零
+- **VmProgram 结构差异 (方向26 "IR对称"判断修正)**: layer loop (step=11379712) 之前:
+  - N1: instr88(bound=32) → instr105(layer loop) → instr129(seq loop 在 layer loop **内**)
+  - N2: instr88(bound=32) → instr122(seq loop 在 layer loop **之前**) → instr168(layer loop)
+  - N=1 seq 循环在 layer loop 内, N=2 seq 循环在 layer loop 外. **layer loop 嵌套结构不同**
+- **但 N=3 正确**: 结构差异不是唯一原因 (若 N≥2 都结构不同, N=3 应也错, 但 N=3 正确) → **奇偶性才是关键**
+- **根因假设**: N=偶数时 layer0 执行时 ping/pong 已被预 swap (读 pong 空 buffer 而非 ping=embed) → 输出 0. 或 ActivationSwap 奇偶性让 layer0 读错 buffer.
+- **下一步**: architect(retrospect) v2 验证 ActivationSwap 位置/次数 + layer0 ping/pong 读取. 已发决定性线索.
