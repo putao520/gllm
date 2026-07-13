@@ -4310,3 +4310,14 @@ regressionAssertion:
 - **根本问题**: 循环内 N 次 swap, v25 状态依赖 N 奇偶性. **无论有无 parity fix, 总有一半 N 错**.
 - **正确修复 (architect v2 方案 A 完整版)**: 移除 parity fix + **循环前 Mov 保存 v25/v26 spill, 循环后 Mov 恢复**. 保证 v25 无论 N 都回初始 buffer. Executor 只移除了 parity fix 没加保存/恢复 → 不完整.
 - **待实施**: 完整方案 A (保存/恢复). 或 architect v3 的正确方案 (验证中).
+
+### 方向 35: ★architect v3 正确方案★ 每组重置 ping/pong (方案 C, 2026-07-13)
+- **architect v3 结论** (agentId afd91fb3a49673ea3 完成):
+  - **方案 A (移除 parity fix) 错误** — parity fix 对单组 post-loop 正确性必需, 移除破坏所有 N (方向34 实证: N=3 退化, N=4 NaN)
+  - **正确方案 C**: 组循环 (pipeline.inc.rs:376) 顶部, 每组 emit AddPtr 重置 v25/v26 = scratch + ping_off/pong_off. 覆盖前一组 parity-fix 翻转. parity fix 保留不动 (单组正确).
+  - 方案 D (parity-fix 后再加 swap) 只转移奇偶性, 不根治
+  - 方案 E (post-loop 从 counter 推导) 违反 JIT 原则 (运行时分支)
+- **BUG-KNOWLEDGE 更正 (architect v3)**: 方向 32 "组2 用 v2300/v2301" **错误**. 源码确认 activation_swap_vregs 在 pipeline.inc.rs:293-318 分配一次, 存 locals (line 368) 所有组共享. **3 组都用 v25/v26**. VmProgram 的 v2300/v4673 是其他 VReg (weight base 等), 非 ping/pong.
+- **影响面**: 所有 ≥2 融合组的多层模型受影响; 单融合组不受影响; 异构模型 (Gemma 4) 也受影响 (817-819 parity-fix); CPU+GPU 都受影响
+- **修复位置**: pipeline.inc.rs:376 组循环 (for group in plan.groups). 在 emit_one_fusion_group 前加 AddPtr 重置 v25/v26. parity-fix (509-511/817-819/955-957) 保留.
+- **待实施**: revert 错误修复 (commit 210b0d6e 移除 parity fix) + 实施方案 C (组循环重置).
