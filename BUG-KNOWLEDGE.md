@@ -4203,3 +4203,18 @@ regressionAssertion:
 - **结论**: scratchpad layout N=1 == N=2, ping/pong offset 完全相同. 排除 buffer layout 差异导致 layer0 读错位置.
 - **剩余变量**: 仅 regalloc (696 VReg 差异, 方向27) 或 JIT 机器码 lowering. architect 分析中.
 - **dump 文件** (供 architect): /tmp/ra_n1.log /tmp/ra_n2.log (regalloc), /tmp/q5km_vm_dump/vm_q5km_N{1,2}.txt (VmProgram), /tmp/bufalloc_all.log (buffer_alloc)
+
+### 方向 29: JIT 机器码 N=1 vs N=2 — 逻辑相同, 布局偏移 (2026-07-13)
+- **测试**: `tests/test_diag_jit_code.rs` + executable.rs 临时 GLLM_DUMP_JIT_CODE — dump 最终机器码
+- **结果**: N1=1245184 bytes, N2=1245184 bytes (相同大小). 1,117,287 字节不同 (几乎全部)
+- **objdump 对比** (objdump -D -b binary -m i386:x86-64):
+  - prologue 对称 (push rbp/rbx/r12-r15/rdi/rsi/rdx/rcx/r8/r9)
+  - **第一个差异**: `sub $0x1b158,%rsp` (N1, 111064B) vs `sub $0x1afd8,%rsp` (N2, 110424B) — 栈大小差 640B (对应 spill 差 48×~13B)
+  - spill init 区 (mov %rax,-XX(%rbp) 序列) offset 不同 (spill 布局不同)
+  - **循环内代码逻辑相同**: N1 @0x17bbd vs N2 @0x17a6d, 指令序列/寄存器用法完全相同 (xor rbx/xor r12/mov/cmp/jge/lea/movabs 0x8d400000/add), 仅 offset 偏移 + jge 跳转目标不同 (0x98388 vs 0x98082, 差 0x306=774B)
+- **关键观察**: 机器码**功能逻辑相同**, 仅布局偏移 (spill 大小 + label 地址). N1/N2 layer0 执行的指令语义相同.
+- **新假设**: 若机器码逻辑相同, N=2 layer0 零的原因可能是:
+  1. jge 跳转目标在 N2 算错 (跳到错位置, 循环边界 bug) — 需验证 0x98082 是否真是 loop_done
+  2. 或 spill slot offset 在 N2 被其他 VReg 覆盖 (spill 区布局虽不同但大小够, 可能 offset 冲突)
+  3. 或循环**回边** (jmp loop_start) 在 N2 跳错 — 循环执行次数错
+- **architect(retrospect) v2 分析中** (agentId abf4f4d20acee4968)
