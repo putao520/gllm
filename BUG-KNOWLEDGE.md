@@ -4321,3 +4321,19 @@ regressionAssertion:
 - **影响面**: 所有 ≥2 融合组的多层模型受影响; 单融合组不受影响; 异构模型 (Gemma 4) 也受影响 (817-819 parity-fix); CPU+GPU 都受影响
 - **修复位置**: pipeline.inc.rs:376 组循环 (for group in plan.groups). 在 emit_one_fusion_group 前加 AddPtr 重置 v25/v26. parity-fix (509-511/817-819/955-957) 保留.
 - **待实施**: revert 错误修复 (commit 210b0d6e 移除 parity fix) + 实施方案 C (组循环重置).
+
+### 方向 36: ★方案 C 验证★ N=1,2,3 全修复, N=4 仍 NaN (2026-07-13)
+- **修复**: Executor 恢复 parity fix + 方案 C 组循环重置 (commit 01bbbc20 in gllm-kernels)
+- **验证** (test_diag_ping_pong N=1/2/3/4 方案C后):
+  | N | ping |max| | pong |max| | 修复前 | 方案A | 方案C |
+  |---|----------|----------|------|--------|-------|
+  | N=1 | 0.0527 (embed) | **1.6617** ✓ | 1.6617 | 1.6617 | 1.6617 |
+  | N=2 | 0.0527 (embed) | **0.6740** ✓ | 0.0000 | 0.6740 | 0.6740 |
+  | N=3 | 0.0527 (embed) | **0.2115** ✓ | 0.2115 | 0.0000 | **0.2115** |
+  | N=4 | 0.0527 (embed) | **NaN** ✗ | 0.0000 | NaN | NaN |
+- **结论**: **方案 C 修复 N=1,2,3 (奇偶性消除)**! N=2,3 都对 (之前方案A N=3 退化, 方案C 修复). ping 全部=0.0527(embed) 正确.
+- **N=4 仍 NaN**: 独立问题待查. ping=embed 正确但 pong=NaN → layer0 输出 NaN. 可能:
+  - 重置没覆盖 N=4 某组 (3 组都重置了, 但 N=4 可能有第4个隐藏组?)
+  - 或 N=4 触发别的 bug (累积腐败, 与奇偶性无关)
+- **★关键进展★**: N=1,2,3 修复证明 parity fix 奇偶性根因正确 + 方案 C 有效. N=4 NaN 是独立 bug.
+- **下一步**: 验证完整 E2E (N=28 全模型) 是否输出 "Paris" (原始乱码 bug); 调查 N=4 NaN.
