@@ -4274,3 +4274,23 @@ regressionAssertion:
 - **architect v1 修复方案 A (推荐)**: 移除 parity fix swap (close_layer_loop line 509-511 + 817-819 + 955-957), 改为循环前保存 ping/pong 原始 spill 值, 循环后恢复. 确保 ping/pong 无论 N 都指向初始 buffer.
 - **architect v1 修复方案 B (最小)**: N 为偶数时不 emit parity fix swap (N 是 BoundExpr::Const 编译时常量可条件判断). 但假设组数=3(奇), 若组数变则失效.
 - **architect v2 (abf4f4d20acee4968) 验证中** — 确认修复方案 + 奇偶性如何影响固定 offset (组间状态传递)
+
+### 方向 33: ★architect v2 完整根因★ parity fix 翻转 v25, 组间 materialize 读翻转值 (2026-07-13)
+- **architect v2 结论** (agentId abf4f4d20acee4968 完成):
+  - 根因: parity-fix ActivationSwap 翻转 ping/pong VReg (v25/v26) 的 spill slot 值
+  - materialize (context.inc.rs:332) 用全局 abi.activation_ping_ptr, **不随组重置**
+  - 组间代码 (instr 4790 残差连接) 读 v25=ping: N=2 被 parity-fix 翻转, N=3 未翻转
+  - ActivationSwap 操作 VReg (spilled), 不修改 AbiPtrs 结构体 → materialize 读翻转后的 spill slot
+- **instr 4790 验证** (N=2 == N=3 逐指令相同): `LoadPtr { dst: v2053, src: VRegPlusVReg(v25, v2057) }` — 组2 残差读 v25(ping)
+  - N=2: 组1 跑 2 swap + parity = 3 swap (奇) → v25 翻转 (→167772160=pong 空)
+  - N=3: 组1 跑 3 swap + parity = 4 swap (偶) → v25 回初始 (→0=embed)
+- **★根因机制完整链★**:
+  1. 3 融合组共享 abi.activation_ping_ptr (=v25, 单一 pair, locals.activation_swap_vregs)
+  2. 组1 layer loop 跑 N 次 swap + 1 parity swap = N+1 次
+  3. N=偶数 → N+1 奇 → v25 (spill slot) 翻转
+  4. 组2/组3 虽重新 alloc v2300/v4673, 但 materialize 用全局 abi.activation_ping_ptr (v25, 翻转后)
+  5. 组2 残差连接 (instr 4790) 读 v25=翻转后 → 读 pong(空/错 buffer) → layer0 输出 0
+- **修复方案 (architect v2)**:
+  - **方案 A (推荐根治)**: 移除 3 处 parity-fix swap (pipeline.inc.rs:509-511, 817-819, 955-957), 循环前 Mov 保存 ping/pong spill, 循环后 Mov 恢复. 保证 v25 无论 N 都指向初始 buffer.
+  - **方案 B (最小)**: 仅 N 为奇数时 emit parity-fix (BoundExpr::Const 编译时判). 假设组数=3(奇), 组数变则失效.
+- **待实施**: 选方案 A 根治 (C-E-W-V, Agent 编码). 先验证修复 (临时移除 parity fix 测 N=2/4).
