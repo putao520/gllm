@@ -4193,3 +4193,13 @@ regressionAssertion:
 - **DecodeStep 位置 (N2)**: 27 个 DecodeStep, 第一个 @instr94 (layer0 q_proj Q5K), 后续 @230/301/372... 全在循环内
 - **根因方向精化**: 696 个 VReg 分配策略变化中, 可能存在某个 VReg 跨 DecodeStep 且 N2 分配到 caller-saved → 被 native call clobber. 需精确找 def < DecodeStep < last 且 N2 分配 caller-saved 的 VReg
 - **architect(retrospect) 分析中** (agentId a43f790eee9886b15) — 归因 num_layers 影响 regalloc 的机制
+
+### 方向 28: buffer_alloc N=1 == N=2 (scratchpad layout 对称, 排除, 2026-07-13)
+- **测试**: `tests/test_diag_bufalloc_n1n2.rs` — GLLM_DEBUG_BUFFER_ALLOC dump N=1/N=2
+- **结果**: N=1 和 N=2 完全相同:
+  - total_bytes=2348810240 (两者一致)
+  - ping(TensorId 4294967040) offset=0 size=167772160
+  - pong(TensorId 4294967041) offset=167772160 size=167772160
+- **结论**: scratchpad layout N=1 == N=2, ping/pong offset 完全相同. 排除 buffer layout 差异导致 layer0 读错位置.
+- **剩余变量**: 仅 regalloc (696 VReg 差异, 方向27) 或 JIT 机器码 lowering. architect 分析中.
+- **dump 文件** (供 architect): /tmp/ra_n1.log /tmp/ra_n2.log (regalloc), /tmp/q5km_vm_dump/vm_q5km_N{1,2}.txt (VmProgram), /tmp/bufalloc_all.log (buffer_alloc)
