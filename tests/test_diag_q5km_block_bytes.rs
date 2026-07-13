@@ -88,7 +88,7 @@ fn diag_q5km_gguf_block_decode() {
 
     // ★关键: 对比 blob 的 L0.q_proj block0 字节 vs GGUF block0 字节
     eprintln!("\n=== ★对比 blob L0.q_proj block0 vs GGUF block0 ===");
-    std::env::set_var("GLLM_TRUNCATE_LAYERS", "1");
+    std::env::set_var("GLLM_TRUNCATE_LAYERS", "2");  // N=2 让 blob 含 layer1
     let client = Client::builder()
         .model("bartowski/Qwen_Qwen3-0.6B-GGUF")
         .kind(ModelKind::Chat)
@@ -139,6 +139,35 @@ fn diag_q5km_gguf_block_decode() {
         let gguf_block1 = &q_bytes[176..352];
         let m1 = blob_block1.iter().zip(gguf_block1.iter()).filter(|(a,b)| a != b).count();
         eprintln!("[block1] {} 处不匹配", m1);
+    }
+
+    // ★第18方向: layer1 q_proj blob 字节 vs GGUF blk.1.attn_q.weight
+    eprintln!("\n=== ★layer1 q_proj blob vs GGUF blk.1 (第18方向) ===");
+    let weight_stride = 11379712usize; // Q5_K_M weight_stride (已验证)
+    let l1_q_proj_blob_off = l0_q_proj.1 + weight_stride;
+    eprintln!("[BLOB] L1.q_proj 推算 offset = L0.off({}) + stride({}) = {}",
+        l0_q_proj.1, weight_stride, l1_q_proj_blob_off);
+
+    // GGUF blk.1.attn_q.weight
+    let gguf_l1_q = r.tensors().iter()
+        .find(|t| t.name.as_ref() == "blk.1.attn_q.weight")
+        .expect("find blk.1.attn_q.weight");
+    eprintln!("[GGUF] blk.1.attn_q.weight: offset={} size={}", gguf_l1_q.offset, gguf_l1_q.size);
+    let gguf_l1_bytes = &file_bytes[gguf_l1_q.offset..gguf_l1_q.offset + 176];
+
+    if l1_q_proj_blob_off + 176 <= blob.len() {
+        let blob_l1 = &blob[l1_q_proj_blob_off..l1_q_proj_blob_off + 176];
+        eprintln!("[BLOB] L1.q_proj block0 head 16B = {:02x?}", &blob_l1[0..16]);
+        eprintln!("[GGUF] blk.1.q_proj block0 head 16B = {:02x?}", &gguf_l1_bytes[0..16]);
+        let m_l1 = blob_l1.iter().zip(gguf_l1_bytes.iter()).filter(|(a,b)| a != b).count();
+        if m_l1 == 0 {
+            eprintln!("[✓] blob L1.q_proj block0 == GGUF blk.1.q_proj (176/176) — layer1 weight base 正确");
+        } else {
+            eprintln!("[✗] blob L1.q_proj block0 != GGUF blk.1.q_proj: {} 处不匹配!", m_l1);
+            eprintln!("  → layer1 weight base 算错! (stride 对但 rel_offset 或层对齐错)");
+        }
+    } else {
+        eprintln!("[警告] L1.q_proj 推算 offset {} 超出 blob len {}", l1_q_proj_blob_off, blob.len());
     }
 
     eprintln!("\n=== 结论 ===");
