@@ -4167,3 +4167,17 @@ regressionAssertion:
   - 这正是 regalloc-native-call-interaction.md 的 knowledgeGap: **混合 native-call 序列 (Q5K+Q6K) 在 num_layers≥2 时 regalloc 运行时行为**
 - **与 Q6_K 对比**: Q5_K_M 是混合精度 (Q5K q/k/o/gate/up + Q6K v/down), Q6_K 是纯 Q6K. 混合序列的 native call 交替可能触发 regalloc 边界 bug
 - **下一步**: dump N=1 vs N=2 JIT 机器码 diff (用户要求"确认JIT出来的代码"); 或 architect(retrospect) 归因 num_layers 影响 regalloc 的机制
+
+### 方向 26: VmProgram IR 对称 (N=1 vs N=2 仅 bound 不同), 根因锁定 regalloc (2026-07-13)
+- **测试**: `tests/test_diag_dump_vm.rs` — GLLM_DUMP_MEGA dump N=1/N=2 VmProgram
+- **结果**: N1=16349 instrs, N2=16355 instrs (差 6). diff 显示:
+  - **唯一语义差异**: `LoopBegin { bound: Const(1) }` vs `bound: Const(2)` (num_layers 编译时常量)
+  - 其余差异全是 VRegId 编号偏移 (num_layers=2 多分配 VReg 导致后续 ID 偏移) + DeclareVReg 顺序微调
+  - 算子类型/逻辑/offset 语义完全相同
+- **结论**: **IR 层正确** — layer0 算子序列在 N=1/N=2 完全相同 (只差循环次数 bound)
+- **根因锁定**: 问题在 **regalloc 或 x86 lowering 阶段** — num_layers=2 时:
+  - VReg 总数不同 (N2 多 6 VReg) → regalloc live interval 分析输入不同
+  - 线性扫描 regalloc 在更多 VReg + 混合 native-call 序列 (Q5K+Q6K) 下, 可能把跨 call 的 live VReg 分配到被 clobber 的 caller-saved 寄存器
+  - save_gprs 兜底 (方向14 验证对称), 但可能 N=2 时新增的 VReg 跨 call 边界未覆盖
+- **与 regalloc-native-call-interaction.md knowledgeGap 完全吻合**: "RegAlloc 在混合 native-call 序列下的运行时机器码执行后物理寄存器实际值无文档覆盖"
+- **下一步**: architect(retrospect) 归因 — 为什么 num_layers=2 的 regalloc 输出破坏 layer0; 或 dump N=1/N=2 regalloc 分配 (GLLM_REGALLOC_DEBUG) 对比跨 call 的 VReg 分配差异
