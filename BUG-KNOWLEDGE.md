@@ -4541,3 +4541,27 @@ regressionAssertion:
   - 若 normed 在 v_proj 读时正常 → v_proj 输出不应整个腐败. 但 v 全腐败.
 - **新假设**: v_proj (Q6K) 的**权重读取**在 N=4 layer3 错. v_proj 权重 block_base = v79 + 236760064. N=3/N=4 offset 相同, 但运行时 v79 (layer weight base = weight_ptr + counter×stride) 在 N=4 counter=3 时可能算错.
 - **下一步**: 验证 N=4 layer3 v_proj 权重 block_base 运行时值; 或看 normed 是否在 v_proj 前被覆盖 (算子顺序).
+
+### 方向 49: ★第一性原理★ N≥4 腐败随 N 增长 (N=4/5 都腐败), 非边界特例 (2026-07-13)
+- **测试**: `tests/test_diag_dump_v.rs` — layer.v 前32值 N=3/4/5
+- **决定性结果**:
+  | N | layer.v |max| | nan_count |
+  |---|----------|-----------|
+  | N=3 | 0.4212 (正常) | 0/32 |
+  | N=4 | 2.3亿 (腐败) | 5/32 |
+  | N=5 | 3.9亿 (更腐败) | 5/32 |
+- **结论**: **N≥4 腐败, 随 N 增长更严重**. 不是 N=4 边界特例, 是 N≥4 系统性问题.
+- **第一性原理**: N=3→N=4 是突变 (0.42→2.3亿), 非渐进. N=4→N=5 渐进 (2.3亿→3.9亿). 说明 N=4 触发某边界, N>4 累积.
+- **权重 pack 分析** (executor_core.inc.rs:361-371 + pack_observe.inc.rs:442):
+  - pack_weights_from_graph 传 geometry.num_layers(28) → pack 28 层
+  - total_weight_bytes 用 llcfg.num_layers(4) 算 = total_bytes + 3×stride (>28层所需)
+  - blob 足够 pack 28 层, layer3 权重 (3×stride+rel_off) 在内. 权重 pack 正确.
+- **num_layers 影响范围** (第一性原理):
+  1. layer loop 循环次数 (N)
+  2. KV cache buffer 大小 (N×kv_stride, 独立 Vec, 不覆盖 scratchpad)
+  3. capture region 大小 (N×stride, scratchpad 末尾, 不覆盖 activation 503316480)
+- **3 融合组**: N=3 时每组 3 次, N=4 时每组 4 次. 腐败从 N=4 (每组 4 次) 开始. 3 是融合组数, N>3 即 N>融合组数.
+- **★第一性原理假设★**: N > 融合组数(3) 时触发. 可能:
+  - 某组的 iter3 (第4次) 首次触发某边界 (KV cache layer3 / 权重 layer3 / spill)
+  - 或 N>3 时某 VReg 的 live interval 跨更多指令, 触发 regalloc 边界 (但 regalloc N=2==N=4 相同)
+- **architect(retrospect) v5 第一性原理归因中** (agentId ae880488bf9b22d54)

@@ -30,4 +30,5 @@ fn diag_dump_v_n3_n4() {
     let _ = std::fs::write("/tmp/v_dump.txt", "");
     dump_v(3, "/tmp/v_dump.txt");
     dump_v(4, "/tmp/v_dump.txt");
+    dump_v(5, "/tmp/v_dump.txt");
 }
