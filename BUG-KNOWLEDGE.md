@@ -4508,3 +4508,20 @@ regressionAssertion:
 - **为什么 v_proj N=4 异常 N=3 正常**: v_proj 权重 offset = layer_base + v_rel_offset. layer3 v_proj 权重在 blob 3×weight_stride + v_rel. 需验证 N=4 layer3 v_proj 权重读取.
 - **与 q_proj NaN 关系**: q_proj (Q5K) NaN 但 k_proj (Q5K) 正常. 可能 normed 在 q_proj 计算后被 v 污染的 NaN 覆盖 (槽位复用), k_proj 在污染前计算.
 - **下一步**: 验证 v_proj Q6K decode 在 N=4 layer3 的 d (scale) 值; 或对比 N=3/N=4 v_proj 权重 block_base.
+
+### 方向 47: ★第一性原理★ N=4 layer.v 整个向量腐败 (非部分), v_proj 计算全错 (2026-07-13)
+- **测试**: `tests/test_diag_dump_v.rs` — dump layer.v 前 32 值 N=3 vs N=4
+- **决定性结果**:
+  - N=3 layer.v: 全正常 [0.079, -0.235, -0.246, ...] |max|=0.4212, 0 NaN
+  - N=4 layer.v: 全腐败 [-4694979.5, 233808770.0, -54571, ..., NaN, 112267240, NaN, ...] |max|=2.3亿, 5/32 NaN
+- **结论**: N=4 的 layer.v **整个向量腐败** (非部分异常). v_proj (Q6K GEMM) 在 N=4 的计算**完全错误**.
+- **整个输出腐败的原因** (第一性原理):
+  1. 输入腐败: v_proj 输入 normed 整个腐败 → v 腐败
+  2. 权重读取错: v_proj 权重 block_base 错, 读垃圾
+  3. decode 算法错: Q6K decode 本身 bug
+- **关键矛盾**: q_proj NaN, k_proj 正常, 都读 normed. 若 normed 腐败, q/k 都应腐败. 但 k 正常.
+  - 假设: normed (offset 503316480) 被 buffer 槽位复用覆盖. q_proj 读覆盖后 NaN, k_proj 读不同时刻正常, v_proj 读垃圾.
+  - 或: q/k/v_proj 读的 normed 不同时刻 (槽位复用时序)
+- **layer.q offset=671088640, layer.k offset=1006632960, layer.normed offset=503316480** (不同 offset)
+- **第一性原理焦点**: normed (offset 503316480) 在 N=4 被 NaN 覆盖. 谁覆盖? normed 生命周期: RMSNorm 写 → q/k/v_proj 读 → 复用. 若中间有 op 写 503316480 覆盖 normed, 后续 proj 读垃圾.
+- **下一步**: 看算子执行顺序, 确认 normed 何时被覆盖; 或验证 v_proj 权重 block_base 在 N=4 layer3 是否读对.
