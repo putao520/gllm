@@ -4564,4 +4564,70 @@ regressionAssertion:
 - **★第一性原理假设★**: N > 融合组数(3) 时触发. 可能:
   - 某组的 iter3 (第4次) 首次触发某边界 (KV cache layer3 / 权重 layer3 / spill)
   - 或 N>3 时某 VReg 的 live interval 跨更多指令, 触发 regalloc 边界 (但 regalloc N=2==N=4 相同)
-- **architect(retrospect) v5 第一性原理归因中** (agentId ae880488bf9b22d54)
+- **architect(retrospect) v5 归因完成** (agentId ae880488bf9b22d54, stop_reason:end_turn):
+  - **v5 结论**: v_proj 相对偏移 (129708608) 是 stride (11379712) 的 11.4 倍, 超出 layer template 区域 → pack 跨层覆盖
+  - **★v5 结论错误★**: v5 用**估算的 embed 大小** (107051456) 当 layer_blob_base, 算 rel_off_v = 236760064 - 107051456 = 129708608. 但实际 layer_blob_base_offset = global_weight_bytes = 234593280 (build_graph.inc.rs:2595 设的真实值, = L0.input_norm offset). 实际 rel_off_v = 236760064 - 234593280 = 2166784 < stride(11379712). v_proj 权重在 layer template 内, **未越界**. v5 归因无效.
+
+### 方向 51: ★第一性原理根因锁定★ Q5_K_M per-layer mixed quantization (attn_v/ffn_down 14层Q6K+14层Q5K), 单模板层假设同 dtype (2026-07-14)
+- **决定性发现 (GGUF 直读)**: Q5_K_M 的 attn_v / ffn_down **逐层 dtype 不同**:
+  ```
+  attn_v:   14 层 Q6K (860160 bytes) + 14 层 Q5K (720896 bytes)
+  ffn_down: 14 层 Q6K + 14 层 Q5K
+  attn_q/k/output, ffn_gate/up: 全 28 层 Q5K (统一)
+  ```
+  具体: layer 0,1,2,5,8,11,14,17,20,23,24,25,26,27 = Q6K; layer 3,4,6,7,9,10,12,13,15,16,18,19,21,22 = Q5K
+- **根因链 (代码侧)**:
+  1. `build_graph.inc.rs` 构建模板层 L0.* 用 **layer0 的量化类型** (v_proj=Q6K, layer0 是 Q6K)
+  2. `weight_stride` 按模板层 Q6K v_proj (860160 bytes) 算 = 11379712
+  3. `pack_observe.inc.rs:442` pack 时 layer3 v_proj 用 L3.v_proj weight_ptr, 实际是 **Q5K (720896 bytes)**
+  4. `pack_observe.inc.rs:458` 检测 `layer_size(720896) != copy_size(860160)` → 进 mixed quantization 分支
+  5. `pack_observe.inc.rs:459-490` mixed quant 分支**只处理 Q4_0→Q4_1** (template_bb==20). Q5K↔Q6K (210 vs 176 bytes/block) 条件不满足
+  6. `pack_observe.inc.rs:488` `log::warn!("no requant handler")` → fallthrough
+  7. `pack_observe.inc.rs:491-492` **raw copy**: Q5K 权重 (720896B) copy 到 Q6K slot (860160B), 只 copy 前 720896B, 剩 139264B 是旧数据/未初始化
+  8. JIT 按**模板层 Q6K decode** (QuantQ6KDecode) 解码 Q5K 字节流 → 垃圾值 (巨值非NaN)
+- **完美解释所有证据**:
+  - 纯 Q6K N=4 正常: 所有层同 Q6K, 无 mixed quant
+  - Q5_K_M N=3 正常: layer0,1,2 都是 Q6K (同模板), 无 mixed quant
+  - Q5_K_M N=4 腐败: layer3 是 Q5K (不同模板) → 触发 mixed quant bug
+  - v_proj 腐败但 k_proj 正常: k_proj 全 28 层 Q5K (统一, 同模板), v_proj 14Q6K+14Q5K (mixed)
+  - 腐败随 N 增长: N≥4 后每多一个 Q5K 层 (layer4,6,7...) 都错误 pack
+  - 28 层 E2E 乱码: layer3-22 的 Q5K v_proj/down 全错误 pack → attention/ffn 全错 → 乱码
+- **宪法违反**:
+  - ARCH-BLOB-YIELDS-WEIGHT: blob 没保留权重原始 dtype 字节, 把 Q5K 字节塞进 Q6K slot
+  - ARCH-NO-PRECISION-ASSUMPTION: 单模板层假设所有层同 dtype (用 layer0 dtype), 实际 per-layer 不同
+  - ARCH-JIT-DATA-YIELDS: JIT 代码 (Q6K decode) 不顺从数据 (Q5K 字节)
+- **架构矛盾**: NO-LAYER-EXPAND 铁律要求单模板 + layer loop (所有层共享 JIT 代码). 但 per-layer mixed dtype 要求逐层特化 decode. 单模板无法处理 per-layer dtype 不同.
+- **architect v5 归因错误**: v5 结论 (v_proj offset 超出 stride 11.4 倍) 基于错误的 base 估算 (用 embed 大小 107051456 而非实际 layer_blob_base 234593280). 实际 rel_off=2166784 < stride. v5 未发现 per-layer mixed quantization 真根因.
+- **精确代码位置 (根因侧)**:
+  - `src/engine/executor_compile.rs:556-566`: `weight_quant_types` map **正确存了 per-layer quant type** (从 weights.quantized_tensor(name) 读, name_map.all_canonical_for 映射 blk.3.attn_v.weight → L3.v_proj). map["L3.v_proj"]=Q5K, map["L0.v_proj"]=Q6K.
+  - `src/arch/auto_graph_fragments/build_graph.inc.rs:1432`: `weight_quant_types.get(&v_cn)` where `v_cn = cn_layer(0, "v_proj") = "L0.v_proj"`. **只用 layer0 的 Q6K**, 忽略 per-layer 差异 (map 里有 L3.v_proj=Q5K 但不查).
+  - 即: weight_quant_types map 有正确的 per-layer 数据, 但 build_graph 用 cn_layer(0,...) 只取 layer0 → 模板层 dtype = layer0 dtype, 假设所有层同 dtype.
+- **横扫同类验证**: Q4_K_M 同样 per-layer mixed (attn_v/ffn_down 14层Q6K type14 + 14层Q4K type12). 所有 K-Quant _M 变体 (Q2_K_M/Q3_K_M/Q4_K_M/Q5_K_M) 都有此 per-layer mixed quant 策略, 都会触发此 bug. 泛化根治必需.
+- **待 architect 设计根治方案**: per-layer mixed dtype 下如何兼顾 NO-LAYER-EXPAND (单模板) + ARCH-BLOB-YIELDS-WEIGHT (原始 dtype). 选项: (a) blob per-layer 保留原始字节 + per-layer dtype 元数据 + JIT layer loop 内 dtype 分发 (但单模板零分支原则冲突) (b) pack 时 requant 到模板 dtype (Q5K→Q6K 升精度可无损, Q6K→Q5K 降精度损精度, 违反 Accuracy First) (c) 检测 per-layer dtype 不一致时逐层展开 (违反 NO-LAYER-EXPAND 但保证正确)
+- **测试**: `tests/test_diag_q6k_pure_n4.rs` — 纯 Q6K 模型 N=3/4 layer.v
+- **决定性结果**:
+  | 模型 | N=3 layer.v |max| | N=4 layer.v |max| |
+  |------|---------------------|---------------------|
+  | Q5_K_M (混合 Q5K+Q6K) | 0.2466 (正常) | 2.3亿 (腐败) |
+  | 纯 Q6K (全 Q6K) | 0.1800 (正常) | **0.8193 (正常!)** |
+- **结论**: 纯 Q6K N=4 **完全正常**, 排除了: Q6K JIT 代码 bug / N>3 通用问题 / Q6K decode bug / Q6K weight offset bug.
+- **腐败是 Q5K+Q6K 混合布局专属问题**: Q5_K_M 里 v_proj 是 Q6K 但其他权重是 Q5K. 纯 Q6K 所有权重 Q6K.
+- **核心矛盾 (v_flow 测试)**: Q5_K_M N=4 同一层 layer3:
+  - layer.k (Q5K k_proj→k_rope) **正常** |max|=4.24
+  - layer.v (Q6K v_proj) **腐败** |max|=2.3亿 (非NaN)
+  - 两者读同一 normed. k 正常 → normed 在 layer3 k_proj 执行时正常.
+  - v 巨值非NaN = v_proj 的 **Q6K 权重字节错** (错误权重 × 正确 normed = 巨值非NaN), 非输入 NaN.
+- **slot 归属 (test_diag_slot_owner)**:
+  - layer.v slot (off=1174405120) **独占** (只 layer.v), dump 读 = layer3 v_proj 输出
+  - layer.k slot (off=1006632960) 与 layer.k_rope 共享, dump 读 = layer3 k_rope 输出 (正常)
+  - layer.normed slot (off=503316480) 与 final_normed/post_normed/o/token_id/k_normed/down 共享, dump 读 = 最后写入者 (layer3 down, NaN 因 down 读腐败 v)
+- **weight layout 自洽 (test_diag_stride_cmp)**:
+  - Q5K block=176B, Q6K block=210B (vminstr.inc.rs:1401)
+  - Q5_K_M 各权重 block 数全整数: q_proj Q5K 8192 blocks, v_proj Q6K 4096 blocks, down_proj Q6K 12288 blocks
+  - weight_physical_bytes (build_graph.inc.rs:342) 按各权重实际 qt.block_bytes() 累加, 混合布局 stride 正确 = 11379712
+  - down_proj (最后) rel_off=8799232 + down_size=2580480 = 11379712 = stride ✓
+- **v_proj weight offset (正确计算)**: layer_blob_base(234593280) + rel_off(2166784) + 3×stride = 270899200, 在 blob 范围内
+- **JIT weight_ptr 逻辑 (pipeline.inc.rs:920-923)**: `layer_weight_base = fresh_weight(ABI base) + byte_offset(counter×stride)`, op 读权重用 `layer_weight_base + op_graph_offset(含 layer_blob_base)`. layer3 v_proj = blob_start + 3×stride + 236760064 = 270899200 ✓
+- **capture feature (diagnostic-layer-capture) 全 0**: 3 融合组各 emit capture copy (CAP-EMIT 3 次), 但 capture 区域全 0 → copy 运行时未写入有效数据 (src pong 时刻/写址问题). 待修 capture 后逐层定位.
+- **下一步**: 加 weight_blob 暴露到 DiagnosticScratchpad (Task #1, agent diag-weightblob), 字节级验证 layer3 v_proj 权重 vs layer0
+- **architect(retrospect) v5 归因完成** (agentId ae880488bf9b22d54, stop_reason:end_turn):
