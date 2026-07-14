@@ -4602,6 +4602,13 @@ regressionAssertion:
   - `src/engine/executor_compile.rs:556-566`: `weight_quant_types` map **正确存了 per-layer quant type** (从 weights.quantized_tensor(name) 读, name_map.all_canonical_for 映射 blk.3.attn_v.weight → L3.v_proj). map["L3.v_proj"]=Q5K, map["L0.v_proj"]=Q6K.
   - `src/arch/auto_graph_fragments/build_graph.inc.rs:1432`: `weight_quant_types.get(&v_cn)` where `v_cn = cn_layer(0, "v_proj") = "L0.v_proj"`. **只用 layer0 的 Q6K**, 忽略 per-layer 差异 (map 里有 L3.v_proj=Q5K 但不查).
   - 即: weight_quant_types map 有正确的 per-layer 数据, 但 build_graph 用 cn_layer(0,...) 只取 layer0 → 模板层 dtype = layer0 dtype, 假设所有层同 dtype.
+- **★字节级根因证实★ (test_diag_wblob_verify.rs, 2026-07-14)**:
+  - blob len=280112128 (N=4, 含 4 层权重)
+  - layer0 v_proj off=236760064 (Q6K, 860160B) — 正常 Q6K 权重
+  - layer3 v_proj off=270899200 — **应是 Q5K (720896B), 但被 pack 到 Q6K slot (860160B)**
+  - layer3 gap [271620096..271759360) (即 layer3 v_proj 的 720896..860160 区域, 139264B) = **全 0** (未初始化)
+  - 证实: pack 只 copy 了前 720896B Q5K 字节到 860160B slot, 后 139264B 全 0. JIT 按 Q6K decode 这混合字节流 → 巨值垃圾 (非 NaN, 因为 decode 出错误大值不是 NaN)
+  - weight_blob 通过 diagnostic_weight_blob_bytes() 暴露 (src/backend/mod.rs:514)
 - **横扫同类验证**: Q4_K_M 同样 per-layer mixed (attn_v/ffn_down 14层Q6K type14 + 14层Q4K type12). 所有 K-Quant _M 变体 (Q2_K_M/Q3_K_M/Q4_K_M/Q5_K_M) 都有此 per-layer mixed quant 策略, 都会触发此 bug. 泛化根治必需.
 - **待 architect 设计根治方案**: per-layer mixed dtype 下如何兼顾 NO-LAYER-EXPAND (单模板) + ARCH-BLOB-YIELDS-WEIGHT (原始 dtype). 选项: (a) blob per-layer 保留原始字节 + per-layer dtype 元数据 + JIT layer loop 内 dtype 分发 (但单模板零分支原则冲突) (b) pack 时 requant 到模板 dtype (Q5K→Q6K 升精度可无损, Q6K→Q5K 降精度损精度, 违反 Accuracy First) (c) 检测 per-layer dtype 不一致时逐层展开 (违反 NO-LAYER-EXPAND 但保证正确)
 - **测试**: `tests/test_diag_q6k_pure_n4.rs` — 纯 Q6K 模型 N=3/4 layer.v
