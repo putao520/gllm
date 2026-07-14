@@ -106,6 +106,7 @@ fn pack_weights_from_graph(
     name_map: &crate::loader::name_map::TensorNameMap,
     layer_config: Option<&gllm_kernels::compiler::graph::LayerLoopConfig>,
     hetero_config: Option<&gllm_kernels::compiler::graph::HeteroLayerLoopConfig>,
+    mixed_quant_config: Option<&gllm_kernels::compiler::graph::MixedQuantLayerLoopConfig>,
     num_layers: usize,
     gemma_norm_residual: bool,
 ) -> Vec<u8> {
@@ -426,8 +427,10 @@ fn pack_weights_from_graph(
             continue;
         }
 
-        // For per-layer weights with layer_loop_config, replicate across all layers.
-        let is_per_layer = layer_config.is_some()
+        // For per-layer weights with layer_loop_config or mixed_quant_config, replicate
+        // across all layers. Mixed-quant (e.g. Q5_K_M: per-layer Q6K/Q5K interleaving)
+        // uses a non-linear offset_table — each layer's actual weight bytes vary by dtype.
+        let is_per_layer = (layer_config.is_some() || mixed_quant_config.is_some())
             && canonical_name.starts_with("L0.")
             && !canonical_name.contains("embed")
             // SPEC/39: global weights (final_norm, output head) don't start with "L0."
@@ -435,6 +438,77 @@ fn pack_weights_from_graph(
             && !canonical_name.contains("final_norm");
 
         if is_per_layer {
+            // ── Mixed-quant path (ARCH-BLOB-YIELDS-WEIGHT, ARCH-DTYPE-MIXED-PRECISION) ──
+            // Per-layer weight dtype varies IRREGULARLY (e.g. Q5_K_M attn_v/ffn_down:
+            // 14 Q6K + 14 Q5K interleaved non-contiguously). A single linear stride
+            // cannot describe per-layer offsets, so the graph bakes a non-linear
+            // offset_table (layer_idx → absolute offset within the layer blob region).
+            //
+            // Blob preserves each layer's ORIGINAL dtype bytes (no requant). Each layer
+            // is copied at offset_table[layer_idx] + rel_within, using that layer's
+            // actual byte size (read from weight_sizes[L{layer}.{suffix}]), not the
+            // template's size. Within a group the stride is uniform (same dtype), but
+            // across groups it differs (Q6K stride > Q5K stride) — handled implicitly
+            // by the offset_table's running sum.
+            if let Some(mcfg) = mixed_quant_config {
+                // rel_within = template offset relative to layer blob base.
+                // Template weight is laid out at layer_blob_base_offset + rel_within
+                // in the WeightLayout; offset_table[layer_idx] is that layer's start
+                // relative to layer_blob_base_offset.
+                let rel_within = (*offset).saturating_sub(mcfg.layer_blob_base_offset);
+                let suffix = &canonical_name["L0.".len()..];
+
+                for layer_idx in 0..num_layers {
+                    if layer_idx >= mcfg.offset_table.len() {
+                        break;
+                    }
+                    let abs_off = mcfg.layer_blob_base_offset
+                        + mcfg.offset_table[layer_idx]
+                        + rel_within;
+
+                    // Per-layer canonical name → per-layer actual byte size.
+                    // ARCH-DTYPE-MIXED-PRECISION: copy_size is THIS layer's actual
+                    // dtype size, not the template's. A Q5K layer packed into a Q6K
+                    // template slot would otherwise leave 139264 trailing zero bytes
+                    // (the Q6K−Q5K size gap), which JIT then mis-decodes as Q6K.
+                    let layer_cn = format!("L{}.{}", layer_idx, suffix);
+                    let (src_ptr, src_size) = if layer_idx == 0 {
+                        (ptr, size)
+                    } else {
+                        weight_ptrs.get(&layer_cn)
+                            .map(|&p| {
+                                let ls = *weight_sizes.get(&layer_cn).unwrap_or(&size);
+                                (p, ls)
+                            })
+                            .unwrap_or((ptr, size))
+                    };
+                    if src_ptr.is_null() {
+                        continue;
+                    }
+                    let copy_size = src_size.min(blob.len().saturating_sub(abs_off));
+                    if copy_size == 0 || abs_off >= blob.len() {
+                        continue;
+                    }
+                    let src = unsafe { std::slice::from_raw_parts(src_ptr, copy_size) };
+                    blob[abs_off..abs_off + copy_size].copy_from_slice(src);
+
+                    // Gemma RMSNorm residual (+1.0) if applicable — respects the
+                    // layer's actual dtype via raw_floats lookup (same as hetero path).
+                    if gemma_norm_residual
+                        && (canonical_name.ends_with(".q_norm")
+                            || canonical_name.ends_with(".k_norm"))
+                    {
+                        let layer_ext = name_map.resolve_external_to_string(&layer_cn);
+                        let norm_dtype = raw_floats.get(&layer_ext)
+                            .map(|r| r.dtype)
+                            .unwrap_or(::safetensors::Dtype::F32);
+                        add_one_inplace(&mut blob[abs_off..abs_off + copy_size], norm_dtype);
+                    }
+                }
+                packed_count += 1;
+                continue;
+            }
+
             let cfg = layer_config.unwrap();
             let stride = cfg.weight_stride;
             let rel_off = *offset;
@@ -510,6 +584,27 @@ fn pack_weights_from_graph(
                 let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
                 if *offset >= graph_globals_start {
                     *offset + total_layers_blob.saturating_sub(templates_blob)
+                } else {
+                    *offset
+                }
+            } else if let Some(mcfg) = mixed_quant_config {
+                // Mixed-quant: template layer region is layer_0's bytes; the full
+                // layer region is the sum of ALL layers' actual (per-dtype) bytes
+                // (non-linear). Post-layer globals (final_norm, lm_head, ...) must
+                // be shifted past the full layer region, not just the template.
+                let last = num_layers.saturating_sub(1);
+                let template_layer_bytes = mcfg.group_of.first()
+                    .and_then(|&gi| mcfg.groups.get(gi))
+                    .map(|g| g.weight_stride)
+                    .unwrap_or(0);
+                let total_layers_blob = mcfg.offset_table.get(last).copied().unwrap_or(0)
+                    + mcfg.group_of.get(last)
+                        .and_then(|&gi| mcfg.groups.get(gi))
+                        .map(|g| g.weight_stride)
+                        .unwrap_or(0);
+                let graph_globals_start = mcfg.layer_blob_base_offset + template_layer_bytes;
+                if *offset >= graph_globals_start {
+                    *offset + total_layers_blob.saturating_sub(template_layer_bytes)
                 } else {
                     *offset
                 }

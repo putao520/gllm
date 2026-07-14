@@ -123,6 +123,10 @@ impl MegaKernelExecutor {
         // Also save layer_loop_config for weight packing (needed even without GPU).
         let layer_loop_cfg = graph.layer_loop_config.clone();
         let hetero_loop_cfg = graph.hetero_layer_loop_config.clone();
+        // Mixed-quant per-layer dtype config (Q5_K_M etc.): saved here because `graph`
+        // is moved into compile() below, and pack_weights_from_graph needs the
+        // non-linear offset_table to place each layer at its actual dtype size.
+        let mixed_quant_loop_cfg = graph.mixed_quant_layer_loop_config.clone();
         // ARCH-UNIFIED-EXEC 阶段2: graph_for_gpu 克隆已删除 — 单次编译,
         // target 决定编译 CPU 还是 GPU, 不再克隆两份图编两次。
         let weight_layout = graph.weight_layout();
@@ -367,6 +371,7 @@ impl MegaKernelExecutor {
             name_map,
             layer_loop_cfg.as_ref(),
             hetero_loop_cfg.as_ref(),
+            mixed_quant_loop_cfg.as_ref(),
             geometry.num_layers,
             has_gemma_norm_residual,
         );
