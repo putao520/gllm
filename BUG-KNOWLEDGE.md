@@ -4487,3 +4487,24 @@ regressionAssertion:
   - (c) layer.v 异常大 (-4694979.5) → v_proj 计算溢出? v_proj 是 Q6K.
 - **buffer 槽位复用**: offset 503316480 被多个 tensor 复用 (k_normed/normed/post_normed/o/down/final_normed/token_id). 这是 buffer_alloc 的 non-overlapping 复用. NaN 是最后写入的 tensor.
 - **下一步**: 定位 layer.normed 为何 NaN (RMSNorm 输入 embed 非 NaN 但输出 NaN); 或定位 q_proj 为何 NaN 而 k_proj 正常 (对比 q/k 权重读取).
+
+### 方向 46: ★第一性原理根因锁定★ layer.v (Q6K v_proj) N=4 异常大值 (-4694979.5) 是 NaN 源头 (2026-07-13)
+- **测试**: `tests/test_diag_n4_nan_names.rs` N=3 vs N=4 对比所有 tensor
+- **决定性对比**:
+  | tensor | N=3 | N=4 |
+  |--------|-----|-----|
+  | embed | -0.0196 | -0.0196 |
+  | **layer.v (Q6K v_proj)** | **0.0792 (正常)** | **-4694979.5 (异常大 6000万倍!)** |
+  | **layer.q (Q5K q_proj)** | **-0.0349 (正常)** | **NaN** |
+  | layer.k (Q5K k_proj) | 正常 | 1.127 (正常) |
+  | layer.normed | 3.7028 (正常) | NaN |
+  | layer.gate/up/o/down/ffn | 全正常 | 全 NaN |
+- **★第一性原理根因链★**:
+  1. **layer.v (v_proj Q6K GEMM) 在 N=4 输出异常大值 -4694979.5** (N=3 正常 0.0792)
+  2. v 的异常大值流入 attention (Q·K·V 计算), 溢出到 NaN
+  3. NaN 传播: attention → o_proj → attn_resid → post_norm → ffn (gate/up/down) → ffn_resid
+  4. layer.q (q_proj) NaN: 可能是 normed 已被 v 的 NaN 污染 (buffer 槽位复用), 或 q_proj 独立问题
+- **根因焦点**: **v_proj (Q6K) 在 N=4 layer3 输出异常大值**. v_proj 的 Q6K decode 产生未缩放巨大值 → d (scale) 异常, 或 decode 错误.
+- **为什么 v_proj N=4 异常 N=3 正常**: v_proj 权重 offset = layer_base + v_rel_offset. layer3 v_proj 权重在 blob 3×weight_stride + v_rel. 需验证 N=4 layer3 v_proj 权重读取.
+- **与 q_proj NaN 关系**: q_proj (Q5K) NaN 但 k_proj (Q5K) 正常. 可能 normed 在 q_proj 计算后被 v 污染的 NaN 覆盖 (槽位复用), k_proj 在污染前计算.
+- **下一步**: 验证 v_proj Q6K decode 在 N=4 layer3 的 d (scale) 值; 或对比 N=3/N=4 v_proj 权重 block_base.

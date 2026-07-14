@@ -6,14 +6,14 @@ use gllm::{Client, ModelKind};
 #[test]
 #[ignore]
 fn diag_n4_nan_tensor_names() {
-    std::env::set_var("GLLM_TRUNCATE_LAYERS", "4");
+    std::env::set_var("GLLM_TRUNCATE_LAYERS", "3");
     let c = Client::builder().model("bartowski/Qwen_Qwen3-0.6B-GGUF").kind(ModelKind::Chat)
         .gguf_file_filter("q5_k_m").build().expect("client");
     let t = c.encode(" ").expect("encode");
     let sp = c.diagnostic_prefill_scratchpad(&t).expect("sp");
     std::env::remove_var("GLLM_TRUNCATE_LAYERS");
     use std::io::Write;
-    let mut f = std::fs::File::create("/tmp/n4_nan_names.txt").expect("f");
+    let mut f = std::fs::File::create("/tmp/n3_nan_names.txt").expect("f");
     // NaN 区域 offset (方向44 扫描结果)
     let nan_offsets = [167772160usize, 503316480, 671088640, 838860800, 1342177280, 1845493760, 2369781760];
     let _ = writeln!(f, "=== N=4 NaN 区域对应的 named tensor ===");
