@@ -4458,3 +4458,32 @@ regressionAssertion:
 - **关键观察**: offset 0 在 N=3/N=4 都是 -0.0196 (embed, 未被层覆盖). 说明 layer loop body 不写 activation ping/pong, 只写 intermediate. offset 167772160 (pong) 由 post-loop 残差写.
 - **NaN 来源**: intermediate tensor (q/k/v_proj 输出) 在 N=4 产生 NaN. 这是**计算 NaN** (GEMM 输出), 非 buffer 覆盖.
 - **根因方向**: N=4 的 layer2/3 GEMM 计算产生 NaN. 需定位哪个 GEMM (q/k/v/o/gate/up/down) 的 intermediate NaN, 向上游追踪.
+
+### 方向 45: ★第一性原理 NaN 定位★ layer.q=NaN, layer.k/v 非 NaN (2026-07-13)
+- **测试**: `tests/test_diag_n4_nan_names.rs` — 查 NaN offset 对应的 named tensor
+- **决定性结果** (N=4 单 token prefill, 所有 named tensor 前4值):
+  **NaN 的 tensor**:
+  - layer.q (off 671088640) = NaN ★
+  - layer.normed / k_normed / post_normed / o / down / final_normed / token_id (off 503316480, 复用槽) = NaN
+  - layer.gate (838860800) = NaN
+  - layer.up / q_normed (1342177280) = NaN
+  - layer.attn (1342177280) = NaN
+  - layer.ffn_resid (167772160) = NaN
+  - layer.q_rope / attn_resid (671088640) = NaN
+  - layer.ffn_act (1845493760) = NaN
+  **非 NaN 的 tensor**:
+  - embed (0) = -0.0196 ✓
+  - **layer.k (1006632960) = 1.127 ✓ (非NaN!)**
+  - **layer.k_rope (1006632960) = 1.127 ✓**
+  - **layer.v (1174405120) = -4694979.5 ✓ (非NaN, 但值异常大!)**
+- **★第一性原理根因方向★**:
+  1. layer.q (q_proj GEMM 输出) = NaN, 但 layer.k (k_proj) = 1.127 正常. **q_proj 和 k_proj 都是 Q5K 量化, 为什么 q NaN 而 k 正常?**
+  2. layer.v = -4694979.5 (异常大值, 接近溢出). v_proj 输出异常大可能让下游 attention/o_proj 溢出到 NaN.
+  3. layer.normed (RMSNorm 输出) = NaN. RMSNorm(embed) → NaN? 但 embed 非 NaN.
+- **关键矛盾**: q_proj/k_proj 同 Q5K decode, 同输入(embed via normed), 但 q NaN k 正常.
+- **假设**: 
+  - (a) q_proj 权重在 N=4 读取错 (offset 算错读到垃圾) → NaN. 但 k_proj 权重正确.
+  - (b) 或 layer.normed (RMSNorm 输出) 已经 NaN → q_proj 读 NaN 输入 → q NaN. 但 k_proj 也读 normed, 为何 k 正常? (除非 k 在 normed 变 NaN 前计算)
+  - (c) layer.v 异常大 (-4694979.5) → v_proj 计算溢出? v_proj 是 Q6K.
+- **buffer 槽位复用**: offset 503316480 被多个 tensor 复用 (k_normed/normed/post_normed/o/down/final_normed/token_id). 这是 buffer_alloc 的 non-overlapping 复用. NaN 是最后写入的 tensor.
+- **下一步**: 定位 layer.normed 为何 NaN (RMSNorm 输入 embed 非 NaN 但输出 NaN); 或定位 q_proj 为何 NaN 而 k_proj 正常 (对比 q/k 权重读取).
