@@ -4525,3 +4525,19 @@ regressionAssertion:
 - **layer.q offset=671088640, layer.k offset=1006632960, layer.normed offset=503316480** (不同 offset)
 - **第一性原理焦点**: normed (offset 503316480) 在 N=4 被 NaN 覆盖. 谁覆盖? normed 生命周期: RMSNorm 写 → q/k/v_proj 读 → 复用. 若中间有 op 写 503316480 覆盖 normed, 后续 proj 读垃圾.
 - **下一步**: 看算子执行顺序, 确认 normed 何时被覆盖; 或验证 v_proj 权重 block_base 在 N=4 layer3 是否读对.
+
+### 方向 48: ★第一性原理★ N=3/N=4 buffer 布局完全相同, normed 被覆盖成 NaN (2026-07-13)
+- **测试**: `tests/test_diag_offsets_n3n4.rs` — 对比 N=3/N=4 named_offsets
+- **结果**: N=3 和 N=4 **完全相同**:
+  - data.len = 2373428224 (相同)
+  - 35 tensors (相同)
+  - layer.q=671088640, layer.v=1174405120, layer.k=1006632960, layer.normed=503316480 (全相同)
+- **结论**: buffer 布局 N=3==N=4. tensor offset 一样. **排除 buffer 布局差异**.
+- **第一性原理**: normed (offset 503316480) 在 N=3=3.7028(正常), N=4=NaN. 同 offset 同 RMSNorm(embed) 输入, 但内容不同 → **normed 被 N=4 某 op 覆盖成 NaN**.
+- **RMSNorm 本身不产生 NaN**: embed 非 NaN, mean(embed²) 非 NaN, rsqrt(非零) 非 NaN, weight 非 NaN (N=3 正常). RMSNorm(embed) 不应 NaN.
+- **覆盖来源**: offset 503316480 被多 tensor 复用 (normed/k_normed/o/down/final_normed/token_id). N=4 某层后期 op (o/down) 写 NaN 到 503316480, 覆盖 normed. 但 v_proj 在 o/down 之前读 normed → 不应被覆盖.
+- **★核心矛盾★**: 
+  - 若 normed 在 v_proj 读时已 NaN → q/k/v 都应腐败. 但 k 正常.
+  - 若 normed 在 v_proj 读时正常 → v_proj 输出不应整个腐败. 但 v 全腐败.
+- **新假设**: v_proj (Q6K) 的**权重读取**在 N=4 layer3 错. v_proj 权重 block_base = v79 + 236760064. N=3/N=4 offset 相同, 但运行时 v79 (layer weight base = weight_ptr + counter×stride) 在 N=4 counter=3 时可能算错.
+- **下一步**: 验证 N=4 layer3 v_proj 权重 block_base 运行时值; 或看 normed 是否在 v_proj 前被覆盖 (算子顺序).
