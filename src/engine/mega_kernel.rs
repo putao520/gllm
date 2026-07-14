@@ -4819,4 +4819,191 @@ mod tests {
         assert_eq!(vals[0], 0.0); // -0.0 == 0.0 in IEEE 754
         assert!(vals[0].is_sign_negative()); // but sign bit is preserved
     }
+
+    // ── compute_total_weight_bytes: mixed-quant expansion (TASK #7) ──
+    // @trace TEST-MKO-MQ-1 [req:REQ-DTYPE-MIXED-PRECISION] [level:unit]
+    //
+    // weight_layout.total_bytes holds ONE template copy + globals. For mixed-quant
+    // (per-layer varying dtype), total must expand by (total_layers_blob -
+    // template_layer_bytes) — the non-linear sum of all layers' actual bytes
+    // minus the single template already counted. Mirrors pack_observe globals shift.
+
+    fn mk_mixed_quant_cfg(
+        num_layers: usize,
+        layer_blob_base_offset: usize,
+        group_specs: &[(usize /*stride*/, &[usize] /*layer_indices*/)],
+        // per-layer actual bytes, in file layer order (drives offset_table running sum)
+        layer_bytes: &[usize],
+    ) -> gllm_kernels::compiler::graph::MixedQuantLayerLoopConfig {
+        use gllm_kernels::compiler::graph::{MixedQuantGroup, MixedQuantLayerLoopConfig};
+        // offset_table = running sum of layer_bytes (build_graph.inc.rs:2746-2753 semantics)
+        let mut offset_table = vec![0usize; num_layers];
+        let mut acc: usize = 0;
+        for i in 0..num_layers {
+            offset_table[i] = acc;
+            if i < layer_bytes.len() {
+                acc += layer_bytes[i];
+            }
+        }
+        // group_of: layer_idx -> group_idx
+        let mut group_of = vec![0usize; num_layers];
+        let groups: Vec<MixedQuantGroup> = group_specs
+            .iter()
+            .enumerate()
+            .map(|(gi, &(stride, idxs))| {
+                for &li in idxs {
+                    if li < num_layers {
+                        group_of[li] = gi;
+                    }
+                }
+                let mut bitset: u64 = 0;
+                for &li in idxs {
+                    if li < 64 {
+                        bitset |= 1u64 << li;
+                    }
+                }
+                MixedQuantGroup {
+                    prefix: format!("layer_g{}.", gi),
+                    weight_stride: stride,
+                    layer_indices: idxs.to_vec(),
+                    layer_bitset: bitset,
+                    weight_input_indices: vec![],
+                }
+            })
+            .collect();
+        MixedQuantLayerLoopConfig {
+            num_layers,
+            num_groups: groups.len(),
+            layer_blob_base_offset,
+            groups,
+            offset_table,
+            group_of,
+            activation_alias: None,
+        }
+    }
+
+    #[test]
+    fn total_weight_bytes_mixed_quant_q5km_two_groups_14_14() {
+        // Q5_K_M shape: 28 layers, 2 groups (14 Q6K + 14 Q5K interleaved).
+        // Q6K stride = 1_000_000, Q5K stride = 800_000 (Q6K > Q5K as Q6 has more bits).
+        // layer_bytes[i] = that layer's group stride (uniform within group).
+        let q6k_stride = 1_000_000usize;
+        let q5k_stride = 800_000usize;
+        // Interleaving (mirrors Q5_K_M attn_v/ffn_down): layers 0,1,2,5,8,...=Q6K
+        // For this unit test use a simple deterministic interleaving that yields
+        // 14 Q6K + 14 Q5K: even layers Q6K, odd layers Q5K.
+        let mut q6k_layers = Vec::new();
+        let mut q5k_layers = Vec::new();
+        let mut layer_bytes = vec![0usize; 28];
+        for i in 0..28 {
+            if i % 2 == 0 {
+                q6k_layers.push(i);
+                layer_bytes[i] = q6k_stride;
+            } else {
+                q5k_layers.push(i);
+                layer_bytes[i] = q5k_stride;
+            }
+        }
+        let base = 5_000_000usize;
+        let cfg = mk_mixed_quant_cfg(
+            28,
+            base,
+            &[(q6k_stride, &q6k_layers), (q5k_stride, &q5k_layers)],
+            &layer_bytes,
+        );
+        // weight_layout.total_bytes = base + template_layer_bytes + globals_size
+        // template = layer 0's group (Q6K) stride = 1_000_000
+        // globals_size (arbitrary) = 3_000_000
+        let template_layer_bytes = q6k_stride;
+        let globals_size = 3_000_000usize;
+        let layout_total = base + template_layer_bytes + globals_size;
+        let layout = gllm_kernels::compiler::graph::WeightLayout {
+            offsets: Vec::new(),
+            total_bytes: layout_total,
+        };
+        let total = compute_total_weight_bytes(
+            &layout,
+            None, // layer_loop_cfg
+            None, // hetero_loop_cfg
+            Some(&cfg),
+        );
+        // total_layers_blob = sum of all 28 layers' actual bytes
+        //   = 14 * q6k_stride + 14 * q5k_stride
+        let total_layers_blob = 14 * q6k_stride + 14 * q5k_stride;
+        let expected = base + total_layers_blob + globals_size;
+        assert_eq!(total, expected);
+        // Sanity: expansion is larger than template layout (more layers added)
+        assert!(total > layout_total);
+        // Sanity: total_layers_blob - template_layer_bytes bytes were added
+        assert_eq!(
+            total - layout_total,
+            total_layers_blob - template_layer_bytes
+        );
+    }
+
+    #[test]
+    fn total_weight_bytes_mixed_quant_matches_offset_table_last_plus_last_group() {
+        // total_layers_blob must equal offset_table[last] + last_group.stride
+        // (the non-linear running-sum form used by pack_observe globals shift).
+        // Use non-uniform interleaving so the last layer isn't trivially the
+        // largest group's last member.
+        let q6k_stride = 1_000_000usize;
+        let q5k_stride = 800_000usize;
+        // 5 layers: [Q6K, Q5K, Q6K, Q5K, Q6K] — last is Q6K
+        let q6k_layers = vec![0usize, 2, 4];
+        let q5k_layers = vec![1usize, 3];
+        let layer_bytes = vec![q6k_stride, q5k_stride, q6k_stride, q5k_stride, q6k_stride];
+        let base = 1_000usize;
+        let cfg = mk_mixed_quant_cfg(
+            5,
+            base,
+            &[(q6k_stride, &q6k_layers), (q5k_stride, &q5k_layers)],
+            &layer_bytes,
+        );
+        let layout = gllm_kernels::compiler::graph::WeightLayout {
+            offsets: Vec::new(),
+            total_bytes: base + q6k_stride + 500, // template(Q6K) + globals
+        };
+        let total = compute_total_weight_bytes(&layout, None, None, Some(&cfg));
+        let last = 4usize;
+        let last_group_stride = cfg.groups[cfg.group_of[last]].weight_stride;
+        let total_layers_blob = cfg.offset_table[last] + last_group_stride;
+        let template_layer_bytes = cfg.groups[cfg.group_of[0]].weight_stride;
+        let globals_size = layout.total_bytes - (base + template_layer_bytes);
+        let expected = base + total_layers_blob + globals_size;
+        assert_eq!(total, expected);
+    }
+
+    #[test]
+    fn total_weight_bytes_mixed_quant_none_falls_back_to_layout_total() {
+        // No mixed-quant config (uniform models): total == layout.total_bytes
+        let layout = gllm_kernels::compiler::graph::WeightLayout {
+            offsets: Vec::new(),
+            total_bytes: 42_000,
+        };
+        let total = compute_total_weight_bytes(&layout, None, None, None);
+        assert_eq!(total, 42_000);
+    }
+
+    #[test]
+    fn total_weight_bytes_mixed_quant_does_not_affect_uniform_layer_loop() {
+        // layer_loop_cfg path (uniform quant) must still work when mixed_quant is None.
+        use gllm_kernels::compiler::graph::LayerLoopConfig;
+        let llcfg = LayerLoopConfig {
+            num_layers: 12,
+            weight_stride: 7_000,
+            layer_blob_base_offset: 1_000,
+            layer_weight_input_indices: Vec::new(),
+            activation_alias: None,
+            per_layer_input_stride: 0,
+        };
+        let layout = gllm_kernels::compiler::graph::WeightLayout {
+            offsets: Vec::new(),
+            total_bytes: 1_000 + 7_000 + 2_000, // base + template + globals
+        };
+        let total = compute_total_weight_bytes(&layout, Some(&llcfg), None, None);
+        // base + num_layers*stride + globals_size
+        let expected = 1_000 + 12 * 7_000 + 2_000;
+        assert_eq!(total, expected);
+    }
 }

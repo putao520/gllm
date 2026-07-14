@@ -152,29 +152,14 @@ impl MegaKernelExecutor {
             .collect();
         // Expand total_weight_bytes for layer loop: the layout only contains 1 copy of
         // per-layer weights (L0.*), but packing replicates to num_layers copies.
-        let total_weight_bytes = if let Some(ref hcfg) = hetero_loop_cfg {
-            // Hetero mode: total = base + sum of all segment strides + post-layer globals
-            let templates_blob = hcfg.sliding_small_stride + hcfg.full_small_stride
-                + hcfg.sliding_large_stride + hcfg.full_large_stride;
-            let small_segs = hcfg.large_ffn_start_segment;
-            let large_segs = hcfg.num_segments - small_segs;
-            let total_layers_blob = small_segs * hcfg.small_segment_stride
-                + large_segs * hcfg.large_segment_stride;
-            let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
-            let globals_size = weight_layout.total_bytes.saturating_sub(graph_globals_start);
-            let total = hcfg.layer_blob_base_offset + total_layers_blob + globals_size;
-            total
-        } else if let Some(ref llcfg) = layer_loop_cfg {
-            let num_layers = llcfg.num_layers;
-            let stride = llcfg.weight_stride;
-            let base = llcfg.layer_blob_base_offset;
-            // Globals after layer area: final_norm, logits-producer, etc.
-            let globals_start = base + stride;
-            let globals_size = weight_layout.total_bytes.saturating_sub(globals_start);
-            base + num_layers * stride + globals_size
-        } else {
-            weight_layout.total_bytes
-        };
+        // Mixed-quant (Q5_K_M etc.) uses a non-linear offset_table — see
+        // compute_total_weight_bytes for the per-mode expansion math.
+        let total_weight_bytes = compute_total_weight_bytes(
+            &weight_layout,
+            layer_loop_cfg.as_ref(),
+            hetero_loop_cfg.as_ref(),
+            mixed_quant_loop_cfg.as_ref(),
+        );
         // Default graph compiles with kv_load_mode=None (Direct).
         // KIVI4 variant compiles with kv_load_mode=Kivi4 for compressed KV load.
         let graph_kivi4 = {

@@ -94,6 +94,77 @@ pub(crate) fn decode_slice_to_f32(
 }
 
 
+/// Compute the total weight blob byte size, expanding the single-template
+/// `WeightLayout.total_bytes` to account for all N layer copies.
+///
+/// `WeightLayout` contains exactly ONE copy of per-layer weights (the L0
+/// template) plus the post-layer globals (final_norm, lm_head, ...). When the
+/// mega-kernel replicates per-layer weights across `num_layers` copies — whether
+/// by a uniform linear stride (`layer_loop_cfg`), hetero segments
+/// (`hetero_loop_cfg`), or a non-linear per-layer dtype table
+/// (`mixed_quant_loop_cfg`, e.g. K-Quant _M variants like Q5_K_M) — the blob
+/// must grow by the full N-layer region minus the single template already
+/// counted.
+///
+/// This MUST stay byte-identical with the globals-shift logic inside
+/// `pack_weights_from_graph` (which writes globals at
+/// `offset + (total_layers_blob - template_layer_bytes)`): the highest written
+/// byte is `base + total_layers_blob + globals_size`, so the allocated blob
+/// size must equal exactly that.
+///
+/// @trace REQ-DTYPE-MIXED-PRECISION ARCH-BLOB-YIELDS-WEIGHT
+fn compute_total_weight_bytes(
+    weight_layout: &gllm_kernels::compiler::graph::WeightLayout,
+    layer_loop_cfg: Option<&gllm_kernels::compiler::graph::LayerLoopConfig>,
+    hetero_loop_cfg: Option<&gllm_kernels::compiler::graph::HeteroLayerLoopConfig>,
+    mixed_quant_loop_cfg: Option<&gllm_kernels::compiler::graph::MixedQuantLayerLoopConfig>,
+) -> usize {
+    if let Some(hcfg) = hetero_loop_cfg {
+        // Hetero mode: total = base + sum of all segment strides + post-layer globals
+        let templates_blob = hcfg.sliding_small_stride + hcfg.full_small_stride
+            + hcfg.sliding_large_stride + hcfg.full_large_stride;
+        let small_segs = hcfg.large_ffn_start_segment;
+        let large_segs = hcfg.num_segments - small_segs;
+        let total_layers_blob = small_segs * hcfg.small_segment_stride
+            + large_segs * hcfg.large_segment_stride;
+        let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
+        let globals_size = weight_layout.total_bytes.saturating_sub(graph_globals_start);
+        hcfg.layer_blob_base_offset + total_layers_blob + globals_size
+    } else if let Some(mcfg) = mixed_quant_loop_cfg {
+        // Mixed-quant mode: per-layer dtype varies IRREGULARLY (e.g. Q5_K_M
+        // interleaves 14 Q6K + 14 Q5K across attn_v/ffn_down), so a single
+        // linear stride cannot describe per-layer offsets. The graph bakes a
+        // non-linear offset_table (running sum of each layer's actual bytes).
+        // total_layers_blob = offset_table[last] + last_group.stride, matching
+        // the pack_observe globals-shift ground truth (pack_observe.inc.rs).
+        let last = mcfg.num_layers.saturating_sub(1);
+        let total_layers_blob = mcfg.offset_table.get(last).copied().unwrap_or(0)
+            + mcfg.group_of.get(last)
+                .and_then(|&gi| mcfg.groups.get(gi))
+                .map(|g| g.weight_stride)
+                .unwrap_or(0);
+        // template_layer_bytes = layer_0's group stride (the single template
+        // already counted in weight_layout.total_bytes).
+        let template_layer_bytes = mcfg.group_of.first()
+            .and_then(|&gi| mcfg.groups.get(gi))
+            .map(|g| g.weight_stride)
+            .unwrap_or(0);
+        let globals_start = mcfg.layer_blob_base_offset + template_layer_bytes;
+        let globals_size = weight_layout.total_bytes.saturating_sub(globals_start);
+        mcfg.layer_blob_base_offset + total_layers_blob + globals_size
+    } else if let Some(llcfg) = layer_loop_cfg {
+        let num_layers = llcfg.num_layers;
+        let stride = llcfg.weight_stride;
+        let base = llcfg.layer_blob_base_offset;
+        // Globals after layer area: final_norm, logits-producer, etc.
+        let globals_start = base + stride;
+        let globals_size = weight_layout.total_bytes.saturating_sub(globals_start);
+        base + num_layers * stride + globals_size
+    } else {
+        weight_layout.total_bytes
+    }
+}
+
 /// 完全由图结构驱动，所有名字都是 canonical name。
 /// weight_ptrs/weight_sizes 以 canonical name 为 key。
 /// raw_floats 以外部名为 key，通过 name_map 做反向查找。
