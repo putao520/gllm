@@ -4437,3 +4437,24 @@ regressionAssertion:
 - **排除**: 代码逻辑 (N3==N4), byte_offset 计算 (不溢出), regalloc (N2==N4), buffer (N1==N2).
 - **N=4 prefill layer3 NaN 根因仍不明**. architect v4 重新归因中 (agentId ab075b703dd052c0a).
 - **可能需 DAP** (用户不倾向): 在 N=4 prefill layer3 断点检查激活值, 找 NaN 产生的具体 op. 或逐层 capture (开 diagnostic-layer-capture) 定位 N=4 哪层开始 NaN (layer0/1/2/3).
+
+### 方向 44: ★第一性原理★ N=4 有 7 个 NaN 区域, N=3 零 NaN (2026-07-13)
+- **测试**: `tests/test_diag_n4_scratch_scan.rs` — 扫描 scratchpad 所有 f32 找 NaN 区域
+- **决定性对比** (单 token 纯 prefill):
+  | | N=3 | N=4 |
+  |---|-----|-----|
+  | offset 0 | -0.0196 (非NaN) | -0.0196 (非NaN) |
+  | offset 167772160 | **0.2716 (非NaN)** | **NaN** |
+  | NaN 区域数 | **0** | **7** |
+- **N=4 的 7 个 NaN 区域**:
+  1. offset 167772160, size 4096 (1 hidden 向量 = pong buffer)
+  2. offset 503316480, size 4096 (intermediate, TensorId(4/14/16/19/20/22))
+  3. offset 671088640, size 4096 (intermediate, TensorId(6/15/17))
+  4. offset 838860800, size 12288 (intermediate, TensorId(24))
+  5. offset 1342177280, size 12288 (intermediate, TensorId(26))
+  6. offset 1845493760, size 12288 (intermediate, TensorId(27))
+  7. offset 2369781760, size 610304 (capture region)
+- **第一性原理结论**: N=3 完全干净 (0 NaN), N=4 有 7 个 NaN. **N=4 特有产生 NaN**.
+- **关键观察**: offset 0 在 N=3/N=4 都是 -0.0196 (embed, 未被层覆盖). 说明 layer loop body 不写 activation ping/pong, 只写 intermediate. offset 167772160 (pong) 由 post-loop 残差写.
+- **NaN 来源**: intermediate tensor (q/k/v_proj 输出) 在 N=4 产生 NaN. 这是**计算 NaN** (GEMM 输出), 非 buffer 覆盖.
+- **根因方向**: N=4 的 layer2/3 GEMM 计算产生 NaN. 需定位哪个 GEMM (q/k/v/o/gate/up/down) 的 intermediate NaN, 向上游追踪.
