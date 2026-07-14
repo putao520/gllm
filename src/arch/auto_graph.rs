@@ -13,7 +13,7 @@
 // @trace REQ-FATOP-023 OpKind enum 物理删除 — Op 单 IR 收敛
 // @trace REQ-FATOP-024 [entity:Op] add_op(Op) 统一 API — OpKind 参数删除
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use gllm_kernels::compiler::graph::{
     AttentionGeometry, AttentionMask, AttentionSpec, CompilerGraph, DualRopeSpec, GemmSpec, MlaSpec,

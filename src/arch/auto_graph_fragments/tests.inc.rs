@@ -1827,6 +1827,224 @@ mod tests {
         assert_eq!(q4k_gemms.len(), 1, "should have exactly 1 Q4K QuantGemm");
     }
 
+    /// Mixed-quant per-layer dtype detection (ARCH-DTYPE-MIXED-PRECISION).
+    ///
+    /// Mirrors Q5_K_M: per-layer weights vary in quant dtype IRREGULARLY.
+    /// Layers 0,1 use Q6K for attn_v/ffn_down; layers 2,3 use Q5K.
+    /// build_graph must detect the variation and assemble a
+    /// MixedQuantLayerLoopConfig (2 groups) instead of the standard
+    /// uniform-stride LayerLoopConfig.
+    #[test]
+    fn mixed_quant_per_layer_dtype_detected_and_grouped() {
+        use gllm_kernels::quant::QuantType;
+        let num_layers = 4usize;
+        let config = make_config(num_layers, 64, 4, 2, 16);
+
+        let ri = make_role_index(vec![
+            (TensorRole::Embedding, None, "model.embed_tokens.weight"),
+            (TensorRole::OutputHead, None, "lm_head.weight"),
+            (TensorRole::FinalNorm, None, "model.norm.weight"),
+            // Layer 0 (reference layer used by the single emitted template)
+            (TensorRole::InputNorm, Some(0), "model.layers.0.input_layernorm.weight"),
+            (TensorRole::AttentionQuery, Some(0), "model.layers.0.self_attn.q_proj.weight"),
+            (TensorRole::AttentionKey, Some(0), "model.layers.0.self_attn.k_proj.weight"),
+            (TensorRole::AttentionValue, Some(0), "model.layers.0.self_attn.v_proj.weight"),
+            (TensorRole::AttentionOutput, Some(0), "model.layers.0.self_attn.o_proj.weight"),
+            (TensorRole::PostAttnNorm, Some(0), "model.layers.0.post_attention_layernorm.weight"),
+            (TensorRole::FfnGate, Some(0), "model.layers.0.mlp.gate_proj.weight"),
+            (TensorRole::FfnUp, Some(0), "model.layers.0.mlp.up_proj.weight"),
+            (TensorRole::FfnDown, Some(0), "model.layers.0.mlp.down_proj.weight"),
+        ]);
+        let ws_ext = make_weight_shapes(vec![
+            ("model.embed_tokens.weight", vec![100, 64]),
+            ("model.layers.0.self_attn.q_proj.weight", vec![64, 64]),
+            ("model.layers.0.self_attn.k_proj.weight", vec![32, 64]),
+            ("model.layers.0.self_attn.v_proj.weight", vec![32, 64]),
+            ("model.layers.0.self_attn.o_proj.weight", vec![64, 64]),
+            ("model.layers.0.mlp.gate_proj.weight", vec![256, 64]),
+            ("model.layers.0.mlp.up_proj.weight", vec![256, 64]),
+            ("model.layers.0.mlp.down_proj.weight", vec![64, 256]),
+        ]);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
+        assert_eq!(features.num_layers, 1, "role_index only declares layer 0");
+
+        // Override num_layers to 4 (the full model has 4 layers even though
+        // only layer 0's role/shape is declared; the executor provides
+        // per-layer shapes+quant_types for all layers).
+        let features = ArchitectureFeatures {
+            num_layers,
+            ..features
+        };
+
+        // Per-layer canonical shapes for ALL 4 layers (same shape, only dtype
+        // varies — mirrors Q5_K_M where attn_v/ffn_down differ in quant dtype).
+        let mut ws_entries: Vec<(&str, Vec<usize>)> = vec![
+            ("embed", vec![100, 64]),
+            ("final_norm", vec![64]),
+            ("lm_head", vec![100, 64]),
+        ];
+        for i in 0..num_layers {
+            ws_entries.push((Box::leak(format!("L{}.input_norm", i).into_boxed_str()), vec![64]));
+            ws_entries.push((Box::leak(format!("L{}.q_proj", i).into_boxed_str()), vec![64, 64]));
+            ws_entries.push((Box::leak(format!("L{}.k_proj", i).into_boxed_str()), vec![32, 64]));
+            ws_entries.push((Box::leak(format!("L{}.v_proj", i).into_boxed_str()), vec![32, 64]));
+            ws_entries.push((Box::leak(format!("L{}.o_proj", i).into_boxed_str()), vec![64, 64]));
+            ws_entries.push((Box::leak(format!("L{}.post_attn_norm", i).into_boxed_str()), vec![64]));
+            ws_entries.push((Box::leak(format!("L{}.gate_proj", i).into_boxed_str()), vec![256, 64]));
+            ws_entries.push((Box::leak(format!("L{}.up_proj", i).into_boxed_str()), vec![256, 64]));
+            ws_entries.push((Box::leak(format!("L{}.down_proj", i).into_boxed_str()), vec![64, 256]));
+        }
+        let ws = make_weight_shapes(ws_entries);
+
+        // Mixed per-layer quant dtype: layers 0,1 = Q6K; layers 2,3 = Q5K.
+        // q/k/o/gate/up are UNIFORM Q5K across all layers; only v_proj/down_proj
+        // vary — exactly the Q5_K_M pattern. Detection is data-driven.
+        let mut qt: HashMap<String, QuantType> = HashMap::new();
+        for i in 0..num_layers {
+            let group_qt = if i < 2 { QuantType::Q6K } else { QuantType::Q5K };
+            qt.insert(format!("L{}.v_proj", i), group_qt);
+            qt.insert(format!("L{}.down_proj", i), group_qt);
+            // Uniform dtype for the rest (same across all layers → no variation
+            // contribution, but included so signatures are complete).
+            qt.insert(format!("L{}.q_proj", i), QuantType::Q5K);
+            qt.insert(format!("L{}.k_proj", i), QuantType::Q5K);
+            qt.insert(format!("L{}.o_proj", i), QuantType::Q5K);
+            qt.insert(format!("L{}.gate_proj", i), QuantType::Q5K);
+            qt.insert(format!("L{}.up_proj", i), QuantType::Q5K);
+        }
+
+        let graph = build_compiler_graph(
+            &features, &config, &ws, &HashMap::new(), &qt,
+            &BusinessConfig::default(), 512,
+        ).unwrap();
+
+        // Mixed-quant detected → MixedQuantLayerLoopConfig set, standard path off.
+        let mq = graph.mixed_quant_layer_loop_config
+            .expect("mixed-quant per-layer dtype must assemble MixedQuantLayerLoopConfig");
+        assert!(graph.layer_loop_config.is_none(),
+            "standard LayerLoopConfig must NOT be set when mixed-quant is detected");
+        assert_eq!(mq.num_layers, num_layers);
+        assert_eq!(mq.num_groups, 2, "Q6K group + Q5K group = 2 groups");
+        assert_eq!(mq.groups.len(), 2);
+
+        // group_of: layers 0,1 → one group; layers 2,3 → the other. The exact
+        // group index is determined by the data-driven deterministic ordering
+        // (groups sorted by representative-quant Debug string), so we verify
+        // the partition is correct without hardcoding which group index is 0.
+        assert_eq!(mq.group_of[0], mq.group_of[1], "layers 0,1 share a group");
+        assert_eq!(mq.group_of[2], mq.group_of[3], "layers 2,3 share a group");
+        assert_ne!(mq.group_of[0], mq.group_of[2],
+            "layers {{0,1}} and {{2,3}} must be in different groups");
+        assert_eq!(mq.group_of.len(), num_layers);
+
+        // Identify which group is Q6K (larger bytes) vs Q5K by weight_stride.
+        let (q6k_group, q5k_group) = if mq.groups[0].weight_stride > mq.groups[1].weight_stride {
+            (0usize, 1usize)
+        } else {
+            (1usize, 0usize)
+        };
+        assert!(mq.groups[q6k_group].weight_stride > mq.groups[q5k_group].weight_stride,
+            "Q6K group (block_bytes=210) must have larger per-layer bytes than Q5K (block_bytes=176)");
+        // Q6K group = layers {0,1}, Q5K group = layers {2,3}.
+        assert_eq!(mq.groups[q6k_group].layer_indices, vec![0, 1]);
+        assert_eq!(mq.groups[q5k_group].layer_indices, vec![2, 3]);
+
+        // offset_table is NON-LINEAR: Q6K layers have different (larger) byte
+        // sizes than Q5K layers. Verify per-group byte uniformity + cross-group
+        // difference + correct running-sum.
+        let lb0 = mq.offset_table[1] - mq.offset_table[0]; // bytes of layer 0 (Q6K)
+        let lb1 = mq.offset_table[2] - mq.offset_table[1]; // bytes of layer 1 (Q6K)
+        let lb2 = mq.offset_table[3] - mq.offset_table[2]; // bytes of layer 2 (Q5K)
+        assert_eq!(lb0, lb1, "layers 0,1 share Q6K dtype → equal bytes");
+        assert_ne!(lb0, lb2, "Q6K layer bytes must differ from Q5K (non-linear table)");
+        assert!(lb0 > lb2, "Q6K (block_bytes=210) must have more bytes than Q5K (block_bytes=176)");
+
+        // offset_table[0] must be 0 (first layer starts at layer_blob_base_offset).
+        assert_eq!(mq.offset_table[0], 0);
+
+        // layer_bitset: Q6K group covers layers {0,1} = 0b0011;
+        // Q5K group covers layers {2,3} = 0b1100.
+        assert_eq!(mq.groups[q6k_group].layer_bitset, 0b0011, "Q6K group bitset = layers 0,1");
+        assert_eq!(mq.groups[q5k_group].layer_bitset, 0b1100, "Q5K group bitset = layers 2,3");
+
+        // Group weight_stride = that group's uniform per-layer bytes.
+        assert_eq!(mq.groups[q6k_group].weight_stride, lb0, "Q6K group stride = Q6K layer bytes");
+        assert_eq!(mq.groups[q5k_group].weight_stride, lb2, "Q5K group stride = Q5K layer bytes");
+
+        // activation_alias present (single loop, in-place residual).
+        assert!(mq.activation_alias.is_some());
+        assert!(mq.layer_blob_base_offset > 0, "global weights precede layer blob");
+    }
+
+    /// Uniform-quant models must NOT trigger mixed-quant path.
+    #[test]
+    fn uniform_quant_model_keeps_standard_layer_loop_config() {
+        use gllm_kernels::quant::QuantType;
+        let config = make_config(1, 64, 4, 2, 16);
+        let ri = make_role_index(vec![
+            (TensorRole::Embedding, None, "model.embed_tokens.weight"),
+            (TensorRole::OutputHead, None, "lm_head.weight"),
+            (TensorRole::FinalNorm, None, "model.norm.weight"),
+            (TensorRole::InputNorm, Some(0), "model.layers.0.input_layernorm.weight"),
+            (TensorRole::AttentionQuery, Some(0), "model.layers.0.self_attn.q_proj.weight"),
+            (TensorRole::AttentionKey, Some(0), "model.layers.0.self_attn.k_proj.weight"),
+            (TensorRole::AttentionValue, Some(0), "model.layers.0.self_attn.v_proj.weight"),
+            (TensorRole::AttentionOutput, Some(0), "model.layers.0.self_attn.o_proj.weight"),
+            (TensorRole::PostAttnNorm, Some(0), "model.layers.0.post_attention_layernorm.weight"),
+            (TensorRole::FfnGate, Some(0), "model.layers.0.mlp.gate_proj.weight"),
+            (TensorRole::FfnUp, Some(0), "model.layers.0.mlp.up_proj.weight"),
+            (TensorRole::FfnDown, Some(0), "model.layers.0.mlp.down_proj.weight"),
+        ]);
+        let ws_ext = make_weight_shapes(vec![
+            ("model.embed_tokens.weight", vec![100, 64]),
+            ("model.layers.0.self_attn.q_proj.weight", vec![64, 64]),
+            ("model.layers.0.self_attn.k_proj.weight", vec![32, 64]),
+            ("model.layers.0.self_attn.v_proj.weight", vec![32, 64]),
+            ("model.layers.0.self_attn.o_proj.weight", vec![64, 64]),
+            ("model.layers.0.mlp.gate_proj.weight", vec![256, 64]),
+            ("model.layers.0.mlp.up_proj.weight", vec![256, 64]),
+            ("model.layers.0.mlp.down_proj.weight", vec![64, 256]),
+        ]);
+        let features = analyze_architecture(&ri, &ws_ext, None, None);
+        let ws = make_weight_shapes(vec![
+            ("embed", vec![100, 64]),
+            ("L0.input_norm", vec![64]),
+            ("L0.q_proj", vec![64, 64]),
+            ("L0.k_proj", vec![32, 64]),
+            ("L0.v_proj", vec![32, 64]),
+            ("L0.o_proj", vec![64, 64]),
+            ("L0.post_attn_norm", vec![64]),
+            ("L0.gate_proj", vec![256, 64]),
+            ("L0.up_proj", vec![256, 64]),
+            ("L0.down_proj", vec![64, 256]),
+            ("final_norm", vec![64]),
+            ("lm_head", vec![100, 64]),
+        ]);
+        let qt: HashMap<String, QuantType> = [
+            ("L0.q_proj", QuantType::Q4_0),
+            ("L0.k_proj", QuantType::Q4_0),
+            ("L0.v_proj", QuantType::Q4_0),
+            ("L0.o_proj", QuantType::Q4_0),
+            ("L0.gate_proj", QuantType::Q4_0),
+            ("L0.up_proj", QuantType::Q4_0),
+            ("L0.down_proj", QuantType::Q4_0),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+
+        let graph = build_compiler_graph(
+            &features, &config, &ws, &HashMap::new(), &qt,
+            &BusinessConfig::default(), 512,
+        ).unwrap();
+
+        // Uniform → standard LayerLoopConfig, no mixed-quant config.
+        assert!(graph.mixed_quant_layer_loop_config.is_none(),
+            "uniform-quant model must NOT set MixedQuantLayerLoopConfig");
+        assert!(graph.layer_loop_config.is_some(),
+            "uniform-quant model must keep standard LayerLoopConfig");
+    }
+
     /// REQ-MTP-003: MTP graph nodes are added when mtp_config is present and MTP weights exist.
     #[test]
     fn auto_mtp_projection_nodes_added_with_global_weights() {

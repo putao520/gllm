@@ -367,6 +367,143 @@ pub fn build_compiler_graph(
         }
     };
 
+    // ── Mixed-quant per-layer dtype detection (ARCH-DTYPE-MIXED-PRECISION) ──
+    //
+    // K-Quant _M variants (e.g. Q5_K_M) mix per-layer quant dtype IRREGULARLY:
+    // Q5_K_M has 14 Q6K attn_v/ffn_down layers {0,1,2,5,8,...} + 14 Q5K layers
+    // {3,4,6,7,...} interleaved non-contiguously. The standard LayerLoopConfig
+    // assumes a uniform weight_stride across all layers, which is WRONG when
+    // per-layer dtype varies (Q6K and Q5K have different block_bytes).
+    //
+    // This block is DATA-DRIVEN (ARCH-NO-PRECISION-ASSUMPTION): it scans
+    // weight_quant_types for per-layer canonical names `L{i}.{suffix}` and
+    // groups layers by their full per-layer quant-type signature. No Q6K/Q5K
+    // hardcoding — any model whose per-layer weights vary in quant dtype
+    // across layers is detected and grouped.
+    //
+    // Result: `mixed_quant_plan` is Some(plan) iff per-layer dtype varies;
+    // otherwise None (uniform models keep the standard LayerLoopConfig path).
+    //
+    // @trace REQ-DTYPE-MIXED-PRECISION per-layer dtype grouping + offset_table
+    struct MixedQuantPlan {
+        groups: Vec<(gllm_kernels::quant::QuantType, Vec<usize>)>, // (group_quant, layer_indices)
+        layer_bytes: Vec<usize>,  // per-layer actual weight bytes (file order)
+        group_of: Vec<usize>,     // layer_idx → group_idx
+    }
+    let mixed_quant_plan: Option<MixedQuantPlan> = {
+        // 1. Collect per-layer quant-type signatures from weight_quant_types.
+        //    A layer's signature = sorted [(suffix, QuantType)] over all its
+        //    canonical weights `L{i}.{suffix}` present in weight_quant_types.
+        let mut layer_sigs: BTreeMap<usize, Vec<(String, gllm_kernels::quant::QuantType)>> = BTreeMap::new();
+        for cn in weight_quant_types.keys() {
+            // Parse "L{i}.{suffix}" — only per-layer canonical names.
+            let rest = match cn.strip_prefix('L') {
+                Some(r) => r,
+                None => continue,
+            };
+            let (idx_str, suffix) = match rest.split_once('.') {
+                Some(p) => p,
+                None => continue,
+            };
+            let layer_idx: usize = match idx_str.parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let qt = weight_quant_types[cn];
+            layer_sigs.entry(layer_idx).or_default().push((suffix.to_string(), qt));
+        }
+        // Bound by the model's declared layer count (ignore stray higher indices).
+        let num_layers = features.num_layers;
+        // 2. Detect variation: are all layer signatures identical?
+        //    (Only consider layers within [0, num_layers).)
+        let mut sig_iter = layer_sigs.iter().filter(|(i, _)| **i < num_layers);
+        let first_sig: Vec<(String, gllm_kernels::quant::QuantType)> = match sig_iter.next() {
+            Some((_, sig)) => sig.clone(),
+            None => Vec::new(), // no per-layer quant weights → not mixed
+        };
+        // Sort each signature for stable comparison (suffix order may vary).
+        let mut first_sig_sorted = first_sig.clone();
+        first_sig_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut uniform = true;
+        for (_, sig) in layer_sigs.iter().filter(|(i, _)| **i < num_layers) {
+            let mut s = sig.clone();
+            s.sort_by(|a, b| a.0.cmp(&b.0));
+            if s != first_sig_sorted {
+                uniform = false;
+                break;
+            }
+        }
+        if uniform {
+            None
+        } else {
+            // 3. Mixed-quant detected. Group layers by signature.
+            //    QuantType implements Eq but not Hash/Ord, so we key the grouping
+            //    map by a stable string projection of the sorted signature:
+            //    "suffix:QtDebug;suffix:QtDebug;...". This is data-driven (no
+            //    Q6K/Q5K hardcoding) and deterministic.
+            let sig_key = |sig: &[(String, gllm_kernels::quant::QuantType)]| -> String {
+                sig.iter()
+                    .map(|(s, qt)| format!("{}:{:?}", s, qt))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            let mut sig_to_layers: BTreeMap<String, (Vec<(String, gllm_kernels::quant::QuantType)>, Vec<usize>)> = BTreeMap::new();
+            for (i, sig) in layer_sigs.iter().filter(|(i, _)| **i < num_layers) {
+                let mut s = sig.clone();
+                s.sort_by(|a, b| a.0.cmp(&b.0));
+                let key = sig_key(&s);
+                let entry = sig_to_layers.entry(key).or_insert((s, Vec::new()));
+                entry.1.push(*i);
+            }
+            // Deterministic group ordering: by signature key string (stable).
+            // representative_quant = the quant type of the first suffix in the
+            // sorted signature (stable proxy for the group's per-layer dtype).
+            let mut grouped: Vec<(gllm_kernels::quant::QuantType, Vec<usize>)> = sig_to_layers
+                .into_iter()
+                .map(|(_, (sig, layers))| {
+                    let rep_qt = sig.first().map(|(_, qt)| *qt).unwrap_or(gllm_kernels::quant::QuantType::F32);
+                    (rep_qt, layers)
+                })
+                .collect();
+            grouped.sort_by(|a, b| {
+                format!("{:?}", a.0).cmp(&format!("{:?}", b.0))
+                    .then(a.1.first().cmp(&b.1.first()))
+            });
+
+            // 4. Per-layer actual weight bytes (file layer order).
+            //    For each layer i, sum weight_physical_bytes over all its
+            //    canonical weights (each computed with that layer's actual qt).
+            //    This is NON-LINEAR because Q6K/Q5K layers have different byte sizes.
+            let mut layer_bytes: Vec<usize> = vec![0; num_layers];
+            for i in 0..num_layers {
+                let mut total = 0usize;
+                for (suffix, _) in layer_sigs.get(&i).cloned().unwrap_or_default() {
+                    let cn = cn_layer(i, &suffix);
+                    if let Some(shape) = weight_shapes.get(&cn) {
+                        total += weight_physical_bytes(&cn, shape);
+                    }
+                }
+                layer_bytes[i] = total;
+            }
+
+            // 5. group_of: layer_idx → group_idx lookup.
+            let mut group_of = vec![0usize; num_layers];
+            for (g_idx, (_, layers)) in grouped.iter().enumerate() {
+                for &li in layers {
+                    if li < num_layers {
+                        group_of[li] = g_idx;
+                    }
+                }
+            }
+
+            Some(MixedQuantPlan {
+                groups: grouped,
+                layer_bytes,
+                group_of,
+            })
+        }
+    };
+
     // ── Layer template (single copy, JIT loops at runtime via layer_loop_config) ──
     //
     // ARCH-LAYER-LOOP: Instead of emitting N separate op sets (L0_*, L1_*, ..., L27_*),
@@ -2586,17 +2723,95 @@ pub fn build_compiler_graph(
         } else {
             0
         };
-        g.layer_loop_config = Some(gllm_kernels::compiler::graph::LayerLoopConfig {
-            num_layers: std::env::var("GLLM_TRUNCATE_LAYERS").ok()
+
+        // ── Mixed-quant dispatch (ARCH-DTYPE-MIXED-PRECISION) ──
+        // If per-layer dtype varies (e.g. Q5_K_M interleaves Q6K/Q5K across
+        // attn_v/ffn_down), the uniform weight_stride assumption is wrong.
+        // Assemble a MixedQuantLayerLoopConfig instead of the standard
+        // LayerLoopConfig. The single emitted "layer." template still serves
+        // as the L0-referenced template; task #6 (pipeline handle_mixed_quant)
+        // will later branch per-group templates. For uniform models this branch
+        // is skipped (mixed_quant_plan is None) and the standard path applies.
+        if let Some(plan) = &mixed_quant_plan {
+            let num_layers_eff = std::env::var("GLLM_TRUNCATE_LAYERS").ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n <= features.num_layers)
-                .unwrap_or(features.num_layers),
-            weight_stride: _lc_weight_stride,
-            layer_blob_base_offset: global_weight_bytes,
-            layer_weight_input_indices,
-            activation_alias: Some((_lc_layer_input.unwrap(), _lc_layer_output.unwrap())),
-            per_layer_input_stride: _ple_stride,
-        });
+                .unwrap_or(features.num_layers);
+            let num_groups = plan.groups.len();
+
+            // offset_table: per-layer absolute byte offset in weight blob,
+            // computed as a running sum of each layer's actual weight bytes in
+            // file layer order (NON-LINEAR because per-layer dtype varies).
+            // layer_weight = layer_blob_base_offset + offset_table[layer_idx].
+            let mut offset_table = vec![0usize; features.num_layers];
+            let mut acc: usize = 0;
+            for i in 0..features.num_layers {
+                offset_table[i] = acc;
+                if i < plan.layer_bytes.len() {
+                    acc += plan.layer_bytes[i];
+                }
+            }
+
+            // Per-group config. Group prefix is data-driven from the group's
+            // representative quant type (Debug name lowercased), not hardcoded
+            // to Q6K/Q5K (ARCH-NO-PRECISION-ASSUMPTION).
+            let groups: Vec<gllm_kernels::compiler::graph::MixedQuantGroup> = plan.groups.iter()
+                .enumerate()
+                .map(|(g_idx, (rep_qt, layer_indices))| {
+                    let prefix = format!("layer_{:?}_g{}.", rep_qt, g_idx).to_ascii_lowercase();
+                    // weight_stride = intra-group stride = this group's uniform
+                    // per-layer byte size (all layers in a group share the same
+                    // quant dtype, so per-layer bytes are uniform within a group).
+                    let weight_stride = layer_indices.first()
+                        .and_then(|&li| plan.layer_bytes.get(li).copied())
+                        .unwrap_or(0);
+                    // layer_bitset: bit i set iff layer i belongs to this group.
+                    let mut layer_bitset: u64 = 0;
+                    for &li in layer_indices {
+                        if li < 64 {
+                            layer_bitset |= 1u64 << li;
+                        }
+                    }
+                    // weight_input_indices: the single template's weight input
+                    // indices (shared until per-group templates land in task #6).
+                    let weight_input_indices = layer_weight_input_indices.clone();
+                    gllm_kernels::compiler::graph::MixedQuantGroup {
+                        prefix,
+                        weight_stride,
+                        layer_indices: layer_indices.clone(),
+                        layer_bitset,
+                        weight_input_indices,
+                    }
+                })
+                .collect();
+
+            g.mixed_quant_layer_loop_config = Some(gllm_kernels::compiler::graph::MixedQuantLayerLoopConfig {
+                num_layers: num_layers_eff,
+                num_groups,
+                layer_blob_base_offset: global_weight_bytes,
+                groups,
+                offset_table,
+                group_of: plan.group_of.clone(),
+                activation_alias: Some((_lc_layer_input.unwrap(), _lc_layer_output.unwrap())),
+            });
+            // Suppress unused warning for _ple_stride when mixed-quant path is taken
+            // (per_layer_input_stride is not part of MixedQuantLayerLoopConfig yet —
+            // PLE stride applies to AltUp per-layer-input which is orthogonal to
+            // weight-quant grouping). Kept computed for the standard-path branch below.
+            let _ = _ple_stride;
+        } else {
+            g.layer_loop_config = Some(gllm_kernels::compiler::graph::LayerLoopConfig {
+                num_layers: std::env::var("GLLM_TRUNCATE_LAYERS").ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|&n| n <= features.num_layers)
+                    .unwrap_or(features.num_layers),
+                weight_stride: _lc_weight_stride,
+                layer_blob_base_offset: global_weight_bytes,
+                layer_weight_input_indices,
+                activation_alias: Some((_lc_layer_input.unwrap(), _lc_layer_output.unwrap())),
+                per_layer_input_stride: _ple_stride,
+            });
+        }
     }
 
     // ── Expert loop config (MoE per-expert runtime loop) ──
