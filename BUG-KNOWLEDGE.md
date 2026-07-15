@@ -4721,3 +4721,53 @@ regressionAssertion:
   - pipeline.inc.rs:1094 (fresh 副本 emit, 已修 58b37b41)
   - lower_op.inc.rs:1538 (KV copy 读 fresh 副本, 已修 58b37b41)
 - **当前状态**: standard 路径正常 (KV counter 修复有效). mixed-quant 待修 regalloc clobber 模型.
+
+### 方向 55: ★真根因锁定★ graph_geometry.rs 漏 mixed_quant_layer_loop_config fallback → num_layers=1 → KV buffer 仅 1/3 大小 → 写 layer-2 越界 SIGSEGV (2026-07-16)
+- **方向 54 归因错误**: fix-regalloc-clobber (commit 83826810) 实施 regalloc Shl/Shr rcx clobber 建模后, 静态验证发现 `phys_clobbers=0` — **当前程序无任何 GprBinOp{Shl/Shr/BitTest,VReg} 指令** (KV copy pos_off 用 `Mul` 而非 `Shl`, lower_op.inc.rs:1599). 所以方向 54 "Shl clobbers rcx" 假设不可能成立. rcx=0 在 SIGSEGV 点是**正确**的 (v307=pos_off=gen_ctr(kv_row_stride), 迭代0 gen_ctr=0 → pos_off=0, rcx 已被 v304(Counter,live[687,689]) 在 KV copy loop(~700) 前 dead 后重用). 方向 53/54 把 rcx 当 counter 副本(应=2)是 **live-range 混淆**.
+- **commit 83826810 性质**: 有效独立 latent fix (Shl/Shr rcx clobber 建模正确, 7 契约测试通过, 标准 Q6K N=3/N=4 无回归), 但**不解决本 SIGSEGV** (本路径无 Shl/Shr).
+- **★真根因 (字节级证实)★ = BCE-20260713-MIXEDQUANT-VAM 残留** (933b86e1 修了一半):
+  - `graph_geometry.rs:127` 推导 `num_layers` = `layer_loop_config` → `hetero_layer_loop_config` → **`unwrap_or(1)`**, **不读 `mixed_quant_layer_loop_config`**
+  - Q5_K_M mixed-quant 图 build_graph 只设 `mixed_quant_layer_loop_config` (不设 `layer_loop_config`), build_graph.inc.rs:2788
+  - → `geometry.num_layers = unwrap_or(1) = 1` (而非 N=3 或 full 28)
+  - **分配链** (abi_types.inc.rs:492 + executor_core.inc.rs:700): `kv_cache_bytes = num_layers(1) × kv_layer_stride(320MB) = 320MB`
+  - **JIT 链** (lower_op.inc.rs:1591): 层循环跑 `mixed_quant_layer_loop_config.num_layers = 3`, layer_off = counter × kv_layer_stride(320MB), counter=2 → 写 `kv_cache_ptr + 2×320MB = +640MB`
+  - **640MB > 320MB buffer → SIGSEGV** (写 kv_cache_ptr+0x28000000, 落在 320MB buffer 外)
+- **stride 两链一致 (已静态验证)**: kv_row_stride=8(kv_heads)×128(head_dim)×4(F32 elem_bytes)=4096, kv_layer_stride=2×40960(max_seq)×4096=0x14000000=320MB. 分配侧 elem_bytes=compute_dtype.size_bytes()=4, JIT 侧 K 中间张量 to_quant_precision().elem_bytes()=4, **一致**. 故非 stride mismatch, 纯 num_layers=1 导致 buffer 太小.
+- **修复**: graph_geometry.rs:127 加 `mixed_quant_layer_loop_config` fallback (镜像 topology.rs:251-252):
+  ```rust
+  let num_layers = graph.layer_loop_config.as_ref().map(|c| c.num_layers)
+      .or_else(|| graph.mixed_quant_layer_loop_config.as_ref().map(|c| c.num_layers))
+      .or_else(|| graph.hetero_layer_loop_config.as_ref().map(|c| { c.num_segments * (c.sliding_per_segment + 1) }))
+      .unwrap_or(1);
+  ```
+- **BCE 横扫残留点**:
+  - graph_geometry.rs:127 (★本 SIGSEGV 根因, 必修)
+  - buffer_alloc.rs:630 (compute_layer_capture_region num_layers, 同漏 fallback, 但 diagnostic-only feature, 低优先)
+  - fusion/pass.rs:784 (num_iterations, 734 行 mixed-quant 分支已覆盖, 待确认)
+- **教训**: 933b86e1 修 mixed_quant fallback 时漏了 graph_geometry.rs, 违反 C-7「残留即未完成」. **同类 BUG 必须全量横扫所有 layer_loop_config 读取点**, 不能只修触发的几个. 这正是用户方法论「规范性死东西, 内存布局也要验证」的价值 — 静态对照分配链 vs JIT 链的 num_layers 即刻暴露 mismatch.
+- **验证门**: cargo test --test test_diag_v_n3only -- diag_v_n3 --ignored → layer.v |max|<1, 0 NaN, 无 SIGSEGV. 标准 Q6K N=3/N=4 无回归. 终极: 28 层 Q5_K_M E2E 输出 "Paris".
+
+### 方向 56: ★SIGSEGV 已修但 NaN 残留★ 真根因 = per-group quant decode template 未实现 (task #6 缺口), build_graph 单模板 QuantGemmSpec.quant_type 钉死 layer0 Q6K → Q5K 层用 Q6K 解码 → NaN (2026-07-16)
+- **方向 55 修复 (commit fa66bb58) 有效**: graph_geometry.rs mixed_quant fallback → num_layers=1→3 → KV buffer 3× → **N=3 不再 SIGSEGV** (exit 0). 但新现象: **N=3/4/5 全层 NaN** (layer.normed/q/k/v/o/gate/up/down 全 NaN=8/8), 含首层首算 normed.
+- **字节级定位 (test_diag_wblob_verify)**: weight blob **pack 正确但 layout 预留错误**:
+  - layer3 v_proj off=270899200, Q5K 数据 720896B 正确 copy (first32 非零有效)
+  - 但**预留 Q6K slot 860160B** (layer0 模板 size), 留 **139264B 零填充 gap**
+  - JIT 读取 860160B (模板 w_v_bytes) → 含 139264B 零 → 按 **Q6K** 解码 → 腐败/NaN
+- **★真根因 (架构层) = PerLayerWeightLayout + build_graph 单模板钉死 quant_type★**:
+  - `mega_kernel_abi.rs:419` `w_v_bytes = num_kv_heads * head_dim * hidden * elem_bytes` — 用**模板 elem_bytes** (layer0 Q6K 的), 所有层预留同 size
+  - `build_graph.inc.rs:746` `v_cn = cn_layer(ref_layer, "v_proj")` (ref_layer=0=Q6K), `:757` `QuantGemmSpec { quant_type: qt }` qt=Q6K (ref_layer 的) — **单模板 QuantGemmSpec.quant_type 钉死 Q6K**, 写进图 IR
+  - JIT 按图 IR 的 quant_type=Q6K 生成 **Q6K decode 机器码**, 对所有层 (含 Q5K 层) 用 Q6K 解码
+  - LoadLayerWeightOffset (offset_table) 正确选了 per-layer weight **base**, 但 decode **template** 仍是单 Q6K — base 对了, decode 不对
+- **MixedQuantGroup 设计已就绪但 task #6 未实施**: build_graph.inc.rs:2776 注释 "weight_input_indices shared until per-group templates land in task #6". MixedQuantLayerLoopConfig 有 groups[].prefix (layer_q6k_g0./layer_q5k_g1.) + weight_stride + layer_bitset, 但 **handle_mixed_quant_layer_loop 未按 group 选不同 decode template** — 只有一个 Q6K template.
+- **为何全 NaN (不只是 layer3)**: N=3 时 layer3 是 Q5K 但用 Q6K 解码 → v_proj 输出 NaN → 残差流污染 → 后续所有层 normed/q/k/v 全 NaN. 首层 (layer0=Q6K, 模板匹配) 理论上应正常, 但 N=3 首层也 NaN 说明残差流从 layer3 回灌 (layer loop 顺序 0→1→2, layer3 未跑? 或 activation_alias ping-pong 残差链). **需进一步定位 NaN 起点** (但根因已明确: per-group decode template 缺失).
+- **架构修复方向 (task #6, 里程碑级)**:
+  - 方案 A (per-group template codegen): handle_mixed_quant_layer_loop 按 group 的 rep_qt 选不同 QuantGemm decode template — Q6K 组用 Q6K decode, Q5K 组用 Q5K decode. IndirectJump/JumpToLabel 按 layer_bitset 分支. (MixedQuantGroup.prefix + weight_stride 已为此设计)
+  - 方案 B (build_graph 多模板): build_graph 为每个 group 建独立 template tensor (L0_q6k.v_proj / L0_q5k.v_proj), 各自正确 quant_type. 图 IR 含多 template.
+  - 方案 A 更合 ARCH-JIT-DATA-YIELDS (单模板 + 运行时按 layer_bitset 分支选 decode), 复用已设计的 LayerCondition bitset + IndirectJump.
+- **关键文件**:
+  - mega_kernel_abi.rs:419 (PerLayerWeightLayout 模板 size — 需 per-group size 或不改 layout 让 decode 适配)
+  - build_graph.inc.rs:746-757 (单模板 ref_layer=0 Q6K, quant_type 钉死)
+  - pipeline.inc.rs:1067-1133 (handle_mixed_quant_layer_loop — 需加 per-group decode 分支)
+  - pack_observe.inc.rs:524-580 (pack 正确, copy per-layer actual bytes; 但 layout 预留模板 size — gap 零填充, JIT 读穿)
+- **当前状态**: SIGSEGV 已修 (方向 55). NaN 残留 = task #6 per-group decode template 未实施. 这是里程碑级多文件改动 (build_graph + pipeline codegen + 可能 abi layout), 需用户决策推进方式 (架构师归因 / 直接实施 task #6 / 评估工作量).
+- **已验证可用 (无回归)**: 标准 Q6K N=3/N=4 正常 (uniform quant, 单模板匹配). BF16 路径不受影响. 仅 mixed-quant (Q5_K_M per-layer Q6K/Q5K 交错) 路径 NaN.
