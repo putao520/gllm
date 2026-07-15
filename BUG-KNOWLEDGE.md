@@ -4609,6 +4609,23 @@ regressionAssertion:
   - layer3 gap [271620096..271759360) (即 layer3 v_proj 的 720896..860160 区域, 139264B) = **全 0** (未初始化)
   - 证实: pack 只 copy 了前 720896B Q5K 字节到 860160B slot, 后 139264B 全 0. JIT 按 Q6K decode 这混合字节流 → 巨值垃圾 (非 NaN, 因为 decode 出错误大值不是 NaN)
   - weight_blob 通过 diagnostic_weight_blob_bytes() 暴露 (src/backend/mod.rs:514)
+- **★architect 实施级 JIT 设计★ (arch-quant-fix, 2026-07-14)**:
+  - **方案 (i) 合宪澄清**: 单层 LoopBegin + 按 layer_idx 选已 bake 模板段, **不违 ARCH-JIT-DATA-YIELDS 铁律4**. 区分: 违宪 = 按 dtype 数据值 match decode 逻辑; 合宪 = 按 layer_idx 控制流选已 bake 模板段 (类比 Gemma4 SharedKvRef GprCondAction 生产验证).
+  - **JIT 结构** (单层 LoopBegin, 非双层, 非逐层展开):
+    ```
+    LoopBegin(counter=layer_idx, bound=28, step=0)  // step=0, 不线性步进
+      weight_off = offset_table[layer_idx]  // 编译时 bake 28 个绝对偏移, 查表非 stride
+      IndirectJump(group_of[layer_idx], targets=[label_g0, label_g1])
+      MarkLabel label_g0: [Q6K 模板: v=Q6KDecode, down=Q6KDecode]  // 已 bake
+      MarkLabel label_g1: [Q5K 模板: v=Q5KDecode, down=Q5KDecode]  // 已 bake
+      MarkLabel label_merge: [共享 op: q/k/o/gate/up=Q5KDecode]  // 单份, 全层统一
+    LoopEnd
+    ```
+  - **关键属性**: (1) 单层 loop 按文件层序 → 残差流不破坏 (activation_alias 单一); (2) 模板段=组数(2)×K 非 28×K → 满足 NO-LAYER-EXPAND; (3) offset_table 查表非 stride → 处理非连续交错; (4) 共享 op 单份 emit (q/k/o/gate/up 全层统一 Q5K).
+  - **复用现成原语** (已实现+生产验证): GprCondAction+LayerCondition (pipeline.inc.rs:1055-1133, Gemma4 SharedKvRef) / GprBranchAction::JumpToLabel+MarkLabel (lower_op.inc.rs:390-397, DualRoPE) / IndirectJump (vminstr.inc.rs:568, MoE).
+  - **扩展点**: LayerCondition (op_kind.inc.rs:99) 加 LayerInGroup(u64 bitset)/LayerNotInGroup (不规则交错必备, Gemma4 单阈值不够). x86: BT+JNC, AArch64: TST+B.NE. 已有 BitClear/BitSet GprCondition (dispatch_emit.rs:2153-2203) 可复用.
+  - **否决 (ii) blob 重排+双层 LoopBegin**: 双层按组连续执行 (先全 Q6K 再全 Q5K) 破坏残差流 (layer3 Q5K 在 layer5 Q6K 后执行, 层间残差依赖断裂). (i) 单层按文件序规避.
+  - **改动 6 文件**: (1) types.inc.rs 新 MixedQuantLayerLoopConfig+MixedQuantGroup struct (2) graph.rs 持有 (3) op_kind.inc.rs LayerCondition 扩展 (4) pipeline.inc.rs handle_mixed_quant_layer_loop emit + 三分支 (5) build_graph.inc.rs per-layer dtype 检测+分组+offset_table (6) pack_observe.inc.rs 按 offset_table pack (7) executor_core.inc.rs total_weight_bytes 按 mixed config.
 - **横扫同类验证**: Q4_K_M 同样 per-layer mixed (attn_v/ffn_down 14层Q6K type14 + 14层Q4K type12). 所有 K-Quant _M 变体 (Q2_K_M/Q3_K_M/Q4_K_M/Q5_K_M) 都有此 per-layer mixed quant 策略, 都会触发此 bug. 泛化根治必需.
 - **待 architect 设计根治方案**: per-layer mixed dtype 下如何兼顾 NO-LAYER-EXPAND (单模板) + ARCH-BLOB-YIELDS-WEIGHT (原始 dtype). 选项: (a) blob per-layer 保留原始字节 + per-layer dtype 元数据 + JIT layer loop 内 dtype 分发 (但单模板零分支原则冲突) (b) pack 时 requant 到模板 dtype (Q5K→Q6K 升精度可无损, Q6K→Q5K 降精度损精度, 违反 Accuracy First) (c) 检测 per-layer dtype 不一致时逐层展开 (违反 NO-LAYER-EXPAND 但保证正确)
 - **测试**: `tests/test_diag_q6k_pure_n4.rs` — 纯 Q6K 模型 N=3/4 layer.v
@@ -4638,3 +4655,18 @@ regressionAssertion:
 - **capture feature (diagnostic-layer-capture) 全 0**: 3 融合组各 emit capture copy (CAP-EMIT 3 次), 但 capture 区域全 0 → copy 运行时未写入有效数据 (src pong 时刻/写址问题). 待修 capture 后逐层定位.
 - **下一步**: 加 weight_blob 暴露到 DiagnosticScratchpad (Task #1, agent diag-weightblob), 字节级验证 layer3 v_proj 权重 vs layer0
 - **architect(retrospect) v5 归因完成** (agentId ae880488bf9b22d54, stop_reason:end_turn):
+
+### 方向 52: ★mixed-quant 根治实施★ 架构级根治完成 + SIGSEGV 调试 (2026-07-15)
+- **根治架构已实施 (10 commits 跨两仓)**:
+  - gllm-kernels: MixedQuantLayerLoopConfig struct / LayerCondition bitset (LayerInGroup) / LoadLayerWeightOffset VmInstr+三端lowering / handle_mixed_quant_layer_loop (单层LoopBegin step=0 + offset_table查表) / VAM activation_alias fallback / data_tables (table移出fall-through)
+  - gllm: build_graph per-layer dtype分组+offset_table / pack_observe按offset_table pack / executor_core total_weight_bytes非线性
+- **编译通过 (两仓 0 error, 7076 测试全过)**, VmProgram 正确生成 (单层LoopBegin + LoadLayerWeightOffset 28项offset_table + GprBinOp weight_ptr)
+- **★SIGSEGV 调试 (运行时, mixed-quant 路径)★**:
+  - **SIGSEGV-1 (已修, commit 24790a9c)**: LoadLayerWeightOffset 的 offset_table data 用 forward-reference `set_label+db` 紧跟 mov 后 → 执行流 fall-through 到表字节当指令执行 → SIGSEGV. 修复: data_tables 机制 (table 移到 ret 后 const_pool, lea rip+table 查表). x86+AArch64 三端.
+  - **★SIGSEGV-2 (未修, 调试中)★**: JIT offset 0x198c1 `mov [r10],rax` (KV-cache copy MemCopy store) SIGSEGV. fix-sigsegv 定位:
+    1. **k_ptr/v_ptr 解析为 weight-derived 地址**: KV-cache copy src = `LoadPtr(VRegPlusConst(17, 1006632960))` 其中 VRegId(17)=weight_base, offset 0x3C000000=k_proj 权重. src=权重内存(只读) → MemCopy 读只读 + dst 写 → 崩. standard 路径 k_ptr 应是 activation (k_proj 输出, 可写 scratchpad).
+    2. **kv_cache_ptr 错位 1.5GB**: mixed-quant kv_cache_ptr=0x52a84010000 (在 2GB KV-cache mmap 的 1.5GB 处), standard 应在 mmap 起点 (0 偏移). 嫌疑 parity-fix ActivationSwap xchg 污染 kv_cache_ptr.
+    3. **KV-cache size 不匹配**: kv_layer_stride=0x14000000 (335MB/层) × 28 层 = 9.4GB, 但 KV-cache mmap 只 2GB. effective_layers 或 max_seq 推导可能错.
+    4. **parity-fix ActivationSwap xchg**: lower_activation_swap_x86 用 resolve_gpr_read(slot1/2 scratch r10/r11) + xchg. spilled 时可能 regalloc 冲突.
+  - **根因嫌疑**: mixed-quant handle_mixed_quant_layer_loop 的 parity-fix ActivationSwap + post-loop weight reload 可能污染 activation/kv 指针 VReg (与 standard 路径 LayerLoopConfig 的 parity-fix 行为不一致).
+- **待修**: SIGSEGV-2. k_ptr/v_ptr 应解析为 activation (k_proj/v_proj 输出 buffer), 非 weight. 需查 mixed-quant buffer_alloc 是否正确分配 k/v activation slot + parity-fix 是否污染 kv_cache_ptr.
