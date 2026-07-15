@@ -4698,3 +4698,26 @@ regressionAssertion:
   1. 直接实证 counter 污染: LoopEnd counter inc 后 + KV copy 点各插 eprintln 打印 counter VReg 物理寄存器/spill slot 值. N=3 跑, 预期崩点 counter≈30 而非≤2
   2. 反向验证: 临时给 VRegKind::Counter 加 no-spill pin (r12-r15 callee-saved), 重跑 N=3. 若不崩 → 确认 counter spill 污染
   3. 对照: standard N=3 KV copy 点 GprLoadImm 0 改读真实 layer counter, 预期 standard 也崩同样 KV offset 越界 → 证明 standard 硬编码 0 是靠掩盖逃过的同类
+
+### 方向 54: ★KV counter 修复有效 + 真根因是 regalloc clobber 模型★ (2026-07-15)
+- **fix-kv-counter 实施方案 A 完成** (commit 58b37b41): fresh use-site re-materialization for KV-cache layer offset.
+  - standard 路径 `GprLoadImm{value:0}` latent bug 修复 (改读真实 layer counter + fresh 副本) → **standard Q6K N=3/N=4 正常** (layer.v |max|<1, 无 NaN, 无 SIGSEGV) ✓
+  - mixed-quant fresh counter 副本 emit (VRegId(53) = counter + 0) → counter 不再被污染到 ~30 (r14=2 正确) ✓
+- **★但 mixed-quant N=3 仍 SIGSEGV★ — 真根因非 spill pollution, 是更深 regalloc bug**:
+  - fresh 副本 v53 分配到 rcx, 但 KV copy 点 rcx=0 (不是 2)
+  - 原始 counter v48 分配到 r14, r14=2 (正确)
+  - **根因**: regalloc 的 `referenced_vregs` 只返回 `[dst, a, b?]`, 不知道 `GprBinOp{Shl/Shr,VReg}` (变量移位 shl/shr reg,cl) **隐式 clobber rcx** (x86 cl 是移位计数寄存器)
+  - 任何生命周期跨越变量移位并被分配到 rcx 的 VReg (含 fresh 副本 v53) 会被 Shl/Shr 破坏 → rcx=0
+  - 这是 regalloc clobber 模型 bug, 非 mixed-quant handler 设计缺陷
+- **★BCE 类横扫★**: regalloc clobber 模型忽略 Shl/Shr rcx clobber 影响所有用变量移位 (GprBinOp Shl/Shr + VReg 操作数) 的路径, 不只 mixed-quant. KV-cache copy 的 pos_off 计算用 Shl (gen_counter 移位) 破坏了同在 rcx 的 fresh counter 副本.
+- **修复方向 (待实施)**:
+  - 方案 1 (regalloc 根治): `referenced_vregs` 给 `GprBinOp{Shl/Shr, VReg}` 加 rcx 到 clobber 集 (reg_alloc.rs). 让 regalloc 不把活跃跨 Shl/Shr 的 VReg 分配到 rcx.
+  - 方案 2 (规避): fresh 副本强制分配到非 rcx 寄存器 (pin). 但这是打补丁.
+  - 方案 3 (x86 lower 改): Shl/Shr VReg 用 imm 移位或保存恢复 rcx. 但影响性能.
+  - 推荐 方案 1 (regalloc clobber 模型根治, BCE 横扫同类).
+- **关键文件**:
+  - reg_alloc.rs referenced_vregs (GprBinOp Shl/Shr clobber 模型, 待修)
+  - x86_lower/lower_instr_dispatch.inc.rs (Shl/Shr lower, 确认用 cl)
+  - pipeline.inc.rs:1094 (fresh 副本 emit, 已修 58b37b41)
+  - lower_op.inc.rs:1538 (KV copy 读 fresh 副本, 已修 58b37b41)
+- **当前状态**: standard 路径正常 (KV counter 修复有效). mixed-quant 待修 regalloc clobber 模型.
