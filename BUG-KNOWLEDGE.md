@@ -4670,3 +4670,31 @@ regressionAssertion:
     4. **parity-fix ActivationSwap xchg**: lower_activation_swap_x86 用 resolve_gpr_read(slot1/2 scratch r10/r11) + xchg. spilled 时可能 regalloc 冲突.
   - **根因嫌疑**: mixed-quant handle_mixed_quant_layer_loop 的 parity-fix ActivationSwap + post-loop weight reload 可能污染 activation/kv 指针 VReg (与 standard 路径 LayerLoopConfig 的 parity-fix 行为不一致).
 - **待修**: SIGSEGV-2. k_ptr/v_ptr 应解析为 activation (k_proj/v_proj 输出 buffer), 非 weight. 需查 mixed-quant buffer_alloc 是否正确分配 k/v activation slot + parity-fix 是否污染 kv_cache_ptr.
+
+### 方向 53: ★SIGSEGV-2 架构级根因★ KV-cache offset 复用 loop-carried counter, spill 污染 (2026-07-15)
+- **architect(retrospect) 归因完成** (agentId arch-sigsegv2): 从架构层定位 SIGSEGV-2 根因 (非 regalloc 症状).
+- **★架构级根因★**: KV-cache 偏移计算直接复用 layer loop counter (loop-carried, regalloc-spillable). counter 的 spill slot 在循环体内被 gen-counter (VRegId(9), 迭代到 prompt_len≈30) 污染 → KV 写址越界 (counter≈30 而非≤2 → offset=30×335MB=10GB > 9.4GB mmap → SIGSEGV).
+- **VmProgram 字节级实证**:
+  - group3 layer loop: line 11005 LoopBegin{counter=VRegId(4696), bound=Const(3), step_bytes=0}
+  - KV-cache copy @line 11579: GprBinOp{dst=VRegId(4950), a=VRegId(4696), b=Imm(335544320), op=Mul} ← 直接复用 layer counter
+  - crash: r10 = kv_cache + ~10GB = kv_cache + (30 × 335MB), 但 bound=3 → counter 应 ∈{0,1,2}, max=2×335MB=670MB (在 9.4GB mmap 内). counter≈30 唯一来源: gen counter VRegId(9) (迭代到 prompt_len≈30), layer counter VRegId(4696) 被 spill 后 slot 与 gen counter spill 区冲突/覆盖.
+- **★standard 路径对比 (latent bug 揭示)★**: standard Q5_K_M N=3 line 688 `GprLoadImm{value:0}` ← KV counter 硬编码 0 (从 abi.layer_loop_counter 兜底走 GprLoadImm 0, lower_op.inc.rs:1538-1542). 后果: standard KV copy **永远只写 layer 0** (latent bug, 多层推理 KV cache 全错, 但 offset=0 永不越界 → 不崩). mixed-quant "更正确"用真实 counter 但暴露 spill 风险.
+- **架构归因 5 问题**:
+  1. step=0 vs weight_stride: 非根因 (step=0 只影响 byte_offset 不累加, counter 仍 inc/bound 检查正常)
+  2. KV counter 来源: 接近根因, VRegId(4696) 是 group3 layer counter (0..3 group-local), 应 ∈{0,1,2} 但崩在 ~30 = gen counter 污染
+  3. 3 融合组: 放大因素 (3 组各 emit layer loop, counter spill 风险×3), 但崩在 group3 是单组内 gen-counter 污染非跨组错乱
+  4. kv_layer_stride 335MB vs 2GB mmap: 非根因但暴露严重性 (kv_cache_bytes = num_layers(28) × 335MB = 9.4GB, N=3 truncate 只改 layer bound 不改 kv_cache_bytes, mmap=9.4GB 够大; 崩因 counter 污染到 30 > 28, offset=10GB 超 9.4GB mmap)
+  5. 设计缺陷 vs 实现 bug: **双重**. 设计缺陷 (KV offset 复用 loop-carried counter 无独立安全源, 违 ARCH-DATA-FLOW-CONTRACT) + 实现 bug (weight_ptr "每轮 reload from ABI" 范式 BCE-20260706-008 漏覆盖 KV 路径, layer counter 无 ABI 源无法直接套用)
+- **★修复方向 (architect 推荐)★**: 方案 A — fresh counter 副本 per-iteration re-materialize. 在 handle_mixed_quant_layer_loop LoopBegin 后, 把 layer counter 当前值复制到 fresh VReg (per-iteration, live-range 极短不易 spill), KV copy 读 fresh 副本而非 raw counter. 镜像 weight_ptr "fresh_weight = reload every iteration" 范式, 用于 counter 副本.
+  - 落地点: pipeline.inc.rs:1094 (handle_mixed_quant entry, LoopBegin 后) + lower_op.inc.rs:1538 (KV copy 读副本)
+  - 需把 fresh counter 副本经 EmitState.abi 传到 MHA lowering
+- **★standard 同类横扫 (必做)★**: standard 的 `GprLoadImm 0` (lower_op.inc.rs:1538 兜底) 是 latent bug (KV 永写 layer 0, 多层 KV cache 全错). BCE 横扫必覆盖. 修 mixed-quant 同时, standard KV counter 也改真实 layer counter + 安全源方案.
+- **关键文件**:
+  - pipeline.inc.rs:1025-1137 (handle_mixed_quant_layer_loop, 修点)
+  - lower_op.inc.rs:1538-1570 (KV copy counter 源, 修点 + standard latent bug)
+  - x86_lower/lower_instr_dispatch.inc.rs:2619-2745 (LoopBegin/End counter spill 机器码)
+  - executor_core.inc.rs:700 (kv_cache_bytes = num_layers×stride)
+- **验证方法**:
+  1. 直接实证 counter 污染: LoopEnd counter inc 后 + KV copy 点各插 eprintln 打印 counter VReg 物理寄存器/spill slot 值. N=3 跑, 预期崩点 counter≈30 而非≤2
+  2. 反向验证: 临时给 VRegKind::Counter 加 no-spill pin (r12-r15 callee-saved), 重跑 N=3. 若不崩 → 确认 counter spill 污染
+  3. 对照: standard N=3 KV copy 点 GprLoadImm 0 改读真实 layer counter, 预期 standard 也崩同样 KV offset 越界 → 证明 standard 硬编码 0 是靠掩盖逃过的同类
