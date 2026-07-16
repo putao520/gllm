@@ -4899,3 +4899,32 @@ regressionAssertion:
   - pipeline.inc.rs:399-416 (Plan C reset, layer loop 内 34 次重置 — 嫌疑3)
   - lower_op.inc.rs (Op::Add ffn_resid 写入, 是否经 materialize(out_tid))
   - context.inc.rs:323-367 (materialize ActivationPong → abi.activation_pong_ptr)
+
+### 方向 60: ★BUG-A 根治★ layer_bytes 计算漏 F32 norm weights → offset_table 偏小 → L0.down_proj 越界覆盖 L1.input_norm → NaN (2026-07-16)
+- **★真根因 (字节级确证)★**: build_graph.inc.rs:477-487 layer_bytes 计算遍历 `layer_sigs`（来自 weight_quant_types，只含量化 weight Q5K/Q6K），**漏了 F32 norm weights**（input_norm/post_attn_norm/q_norm/k_norm，是 F32 不在 weight_quant_types）。
+- **后果**: layer_bytes[i] 偏小 9216 字节/层（4 norm weights × {4096,4096,512,512}）。offset_table 是 layer_bytes running sum → offset_table[1]=11370496（应 11379712）。
+- **越界**: L0.down_proj 占 [234593280, 245972992)（实际 11379712B），但 offset_table[1]=11370496 让 L1.input_norm 从 245963776 开始 → L0.down_proj 越界 9216B 覆盖 L1.input_norm（245963776 在 [243392512, 245972992) 内）。
+- **pack 确证** (GLLM_DEBUG_PACK2): pack 写 L1.input_norm 到 245963776 src=[00,00,67,3e]（有效 RMSNorm 权重），但 L0.down_proj 也在 [243392512, 245972992) 覆盖该位置 → blob 读 245963776=[61,2f,67,9d]（L0.down_proj 的尾部字节，垃圾）。
+- **JIT 确证**: layer1 读 input_norm weight 从 blob+245963776，读到 L0.down_proj 尾部垃圾 → RMSNorm(有效input, 垃圾weight) = NaN → layer1 全 NaN。
+- **为何 N=1 正常**: N=1 只 layer0，L0.down_proj 覆盖的是 L1 区域（不跑 L1），L0 自己的 weight 不被覆盖。
+- **为何 N≥4 也 NaN**: N=2/3 全 Q6K 层，BUG-A（offset_table 偏小）让 L{i}.down_proj 覆盖 L{i+1}.input_norm。N≥4 还有 BUG-B（layer3+ Q5K decode）。
+- **修复** (build_graph.inc.rs:477-487): layer_bytes 计算改为遍历 `weight_shapes`（所有 per-layer weight 含 F32 norm），非 `layer_sigs`（只量化 weight）。
+  ```rust
+  for (cn, shape) in weight_shapes.iter() {
+      if let Some(rest) = cn.strip_prefix('L') {
+          if let Some((idx_str, _)) = rest.split_once('.') {
+              if idx_str.parse::<usize>() == Ok(i) {
+                  total += weight_physical_bytes(cn, shape);
+              }
+          }
+      }
+  }
+  ```
+- **验证 (全过)**:
+  - N=2 Q5_K_M: layer.normed |max|=17.4087, layer.v |max|=0.1177, **NaN=0/8** ✓（之前全 NaN）
+  - N=3 Q5_K_M: layer.v |max|=0.1848, **NaN=0/8** ✓（之前 SIGSEGV/NaN），layer.normed 有效
+  - N=4/N=5 Q5_K_M: 仍 NaN → **BUG-B** (decode template, layer3+ Q5K 用 Q6K decode，方向56)，如预期，需 task#6 per-group decode
+  - Q6K pure N=3/N=4: 无回归 ✓
+- **BCE 类**: build_graph layer_bytes 漏算非量化 weight（F32 norm），同类影响所有 mixed-quant 模型（Q4_K_M/Q3_K_M 等，凡有 F32 norm + 量化 q/k/v 的混合层）。横扫：所有走 mixed_quant_layer_loop_config 的模型都受益于此修复。
+- **教训**: 方向 57-59c 静态穷尽 VmProgram/RegAlloc/swap/body-entry 全对，真根因在 build_graph 的 layer_bytes 计算漏数据源（weight_quant_types vs weight_shapes）。用户方法论"内存布局也要验证"的价值——pack-level 字节对比（GLLM_DEBUG_PACK2）直接暴露 L0.down_proj 覆盖 L1.input_norm。
+- **当前状态**: BUG-A 根治。BUG-B (N≥4 decode template) 待 task#6。28 层 Q5_K_M E2E 仍需 BUG-B 修。

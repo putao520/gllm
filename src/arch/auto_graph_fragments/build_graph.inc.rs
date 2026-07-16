@@ -471,16 +471,27 @@ pub fn build_compiler_graph(
             });
 
             // 4. Per-layer actual weight bytes (file layer order).
-            //    For each layer i, sum weight_physical_bytes over all its
+            //    For each layer i, sum weight_physical_bytes over ALL its
             //    canonical weights (each computed with that layer's actual qt).
             //    This is NON-LINEAR because Q6K/Q5K layers have different byte sizes.
+            //    BCE-20260716-BUG-A: MUST iterate weight_shapes (all per-layer weights
+            //    incl. F32 norm weights: input_norm/post_attn_norm/q_norm/k_norm), NOT
+            //    layer_sigs (which only has quantized weights from weight_quant_types).
+            //    Previously used layer_sigs → missed F32 norm weights (9216B/layer) →
+            //    offset_table too small → L{i}.down_proj overflowed into L{i+1}.input_norm
+            //    → N≥2 layer1 read corrupted input_norm → NaN.
             let mut layer_bytes: Vec<usize> = vec![0; num_layers];
             for i in 0..num_layers {
                 let mut total = 0usize;
-                for (suffix, _) in layer_sigs.get(&i).cloned().unwrap_or_default() {
-                    let cn = cn_layer(i, &suffix);
-                    if let Some(shape) = weight_shapes.get(&cn) {
-                        total += weight_physical_bytes(&cn, shape);
+                // Sum ALL per-layer weights from weight_shapes (canonical L{i}.*),
+                // not just the quantized subset in layer_sigs.
+                for (cn, shape) in weight_shapes.iter() {
+                    if let Some(rest) = cn.strip_prefix('L') {
+                        if let Some((idx_str, _suffix)) = rest.split_once('.') {
+                            if idx_str.parse::<usize>() == Ok(i) {
+                                total += weight_physical_bytes(cn, shape);
+                            }
+                        }
                     }
                 }
                 layer_bytes[i] = total;
