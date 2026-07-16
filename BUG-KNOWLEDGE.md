@@ -4771,3 +4771,46 @@ regressionAssertion:
   - pack_observe.inc.rs:524-580 (pack 正确, copy per-layer actual bytes; 但 layout 预留模板 size — gap 零填充, JIT 读穿)
 - **当前状态**: SIGSEGV 已修 (方向 55). NaN 残留 = task #6 per-group decode template 未实施. 这是里程碑级多文件改动 (build_graph + pipeline codegen + 可能 abi layout), 需用户决策推进方式 (架构师归因 / 直接实施 task #6 / 评估工作量).
 - **已验证可用 (无回归)**: 标准 Q6K N=3/N=4 正常 (uniform quant, 单模板匹配). BF16 路径不受影响. 仅 mixed-quant (Q5_K_M per-layer Q6K/Q5K 交错) 路径 NaN.
+
+### 方向 57: ★BUG-A NaN 边界 + VmProgram/RegAlloc 静态对称性证实★ NaN 在 N=2 (全 Q6K 层) 触发, 非 decode template; bug 在运行时 pong 清零 (2026-07-16)
+- **NaN 边界测试 (N=1/2/3/4, dump layer.normed/v)**:
+  - N=1 (layer0=Q6K 模板匹配): layer.normed |max|=40.19, layer.v |max|=0.0478, **0 NaN 正常**
+  - N=2 (layer0,1 都=Q6K): **全 NaN** ← 矛盾! 两层都 Q6K 模板匹配, 不该 NaN
+  - N=3 (layer0,1,2 都=Q6K): 全 NaN
+  - N=4 (layer0,1,2=Q6K, layer3=Q5K): 全 NaN
+- **Q5_K_M 层→quant 映射 (GLLM_DEBUG_MIXED_GROUPS dump 证实)**:
+  - group1 Q6K: layers [0,1,2,5,8,11,14,17,20,23,24,25,26,27]
+  - group0 Q5K: layers [3,4,6,7,9,10,12,13,15,16,18,19,21,22]
+  - layer_bytes: Q6K 层=11370496, Q5K 层=10813440
+- **★BUG-A ≠ decode template (方向56)★**: N=2 全 Q6K 层也 NaN → decode template (Q5K 层用 Q6K decode) 不是 N=2 的根因 (N=2 无 Q5K 层运行). decode template 是独立 BUG-B (N≥4 触发).
+- **BUG-A 运行时确证 (test_diag_activation_runtime, 526s)**: Q5_K_M N=2 **pong buffer (offset 167772160) 全零** (nz=1024 全零), Q6_K N=2 pong 保留 layer0 输出 (cos=1.0). N=1 两者 pong 都有数据. → Q5_K_M 路径 layer1 执行**清零了 pong** (本应保留 layer0 输出供 layer1 读).
+- **architect 归因 (44 msgs, Occam 剃刀)**: 3 候选 (ActivationSwap 回边缺失/Plan C 组覆盖/activation_alias tuple 错). **全部静态证伪** (见下).
+- **★VmProgram 静态对称性证实 (GLLM_DUMP_MEGA 对比 Q5_K_M N=2 vs Q6_K N=2)★**:
+  - ActivationSwap 数量+位置**完全对称**: 两者都 6 个 (3 融合组 × (1 swap + 1 parity)), 逐条指令序列相同:
+    ```
+    LoopEnd (内层) → LoopEnd (group body)
+    AddPtr dst:25, base:17, offset:0          ← Plan C reset ping
+    AddPtr dst:26, base:17, offset:167772160   ← Plan C reset pong
+    ActivationSwap {25, 26}                    ← layer loop swap
+    LoopEnd                                    ← close bound=2 layer loop
+    ActivationSwap {25, 26}                    ← parity swap
+    ```
+  - VReg 编号对齐 (ping=VReg25, pong=VReg26)
+  - Plan C reset 次数/位置一致
+  - activation_alias tuple 一致 (build_graph.inc.rs:2795 用同一 _lc_layer_input/output)
+  - **唯一 VmProgram 差异**: layer loop `step_bytes`: Q5_K_M=0 (LoadLayerWeightOffset 非线性), Q6_K=12911616 (线性). 这是设计差异非 bug.
+- **★RegAlloc 静态对称性证实 (GLLM_REGALLOC_DEBUG)★**: ping/pong VReg25/26 物理分配:
+  - Q5_K_M: v25→Spilled(14) off=112, v26→Spilled(15) off=120
+  - Q6_K: v25→Spilled(13) off=104, v26→Spilled(14) off=112
+  - 两者都 spill (long-live def=50~last=5336), spill 槽无碰撞 (每 offset 唯一). 物理分配不同但都合法.
+- **★结论: 所有"规范性死东西"静态全对, 但运行时 pong 被清零★**: VmProgram 对称 + RegAlloc 对称 + spill 无碰撞 + activation_alias 正确 → 按"算法对+JIT代码对+布局对=结果对"应正常, 但 N=2 pong 全零. **矛盾** — bug 在 VmProgram/RegAlloc 之外的运行时交互:
+  - 嫌疑1: step_bytes=0 路径 (LoadLayerWeightOffset 引入 layer_offset/fresh_weight reload 额外 VReg) 改变寄存器压力 → ping/pong ptr 在某次 ActivationSwap 前后物理值被中间指令覆盖 (regalloc 未捕获的隐式 clobber, 类方向54 但非 Shl/Shr).
+  - 嫌疑2: LoopEnd 在 step_bytes=0 时的运行时回边行为 (counter inc + byte_offset 更新) 与 step_bytes≠0 不同, 影响下一迭代的 weight_ptr 但间接污染 ping/pong.
+  - 嫌疑3: ActivationSwap 的 xchg 实现 (lower_activation_swap_x86) 对 spill 的 ping/pong 处理 (reload-xchg-store) 在某路径有 bug.
+- **下一步**: 需运行时插桩 (JIT 机器码级或 ActivationSwap 前后 dump ping/pong 物理寄存器值) 定位 pong 何时被清零. 静态已穷尽对称性证明, 剩余是运行时值追踪. 这超出纯静态验证, 需用户决策 (插桩方案 / 接受 architect knowledgeGap 建库 regalloc-step0-runtime / 其他).
+- **BUG-B (decode template N≥4, 方向56)**: architect 确认方案A (IndirectJump + layer_bitset per-group decode dispatch) 正确. **但 BUG-A 先修** (N=2 通才能到 N=4 暴露 BUG-B).
+- **关键文件 (BUG-A 运行时嫌疑)**:
+  - pipeline.inc.rs:5191-5197 (ActivationSwap + LoopEnd 序列, VmProgram 对称但运行时值异常)
+  - reg_alloc.rs (ping/pong VReg25/26 spill, 物理分配不同但合法)
+  - x86_lower/lower_instr_dispatch.inc.rs:1170 (lower_activation_swap_x86 — xchg 对 spill ptr 的处理)
+  - x86_lower/lower_instr_dispatch.inc.rs:2747 (LoopEnd counter inc — step_bytes=0 时 byte_offset 更新)
