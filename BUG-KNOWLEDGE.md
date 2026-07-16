@@ -4835,3 +4835,28 @@ regressionAssertion:
   - buffer_alloc.rs (layer.ffn_resid 与 pong 同 offset 167772160 — 设计 alias, 但 N=2 时 layer1 输出 NaN 回灌)
   - x86_lower/lower_instr_dispatch.inc.rs:1171 (lower_activation_swap_x86 xchg, 待插桩)
   - VAM (virtual_activation.rs activation_alias layer_output→pong)
+
+### 方向 59: ★JIT 插桩决定性证据★ ActivationSwap 运行时正确 (ptr 正确翻转), BUG-A = layer.ffn_resid 与 pong 初始 offset 别名 (167772160), layer1 FFN 写 ffn_resid 覆盖 layer0 输出 (2026-07-16)
+- **JIT 插桩实施** (gllm-kernels commit 9cc62a4d + gllm telemetry wiring): env=GLLM_TRACE_SWAP=1 时, 每次 ActivationSwap 前后 dump ping/pong ptr 物理值到 telemetry_ptr+1024+idx*32 (32B/swap: ping-before/pong-before/ping-after/pong-after, u64). gllm 侧 diagnostic_prefill_scratchpad 分配 8KB telemetry buffer, DiagnosticScratchpad.telemetry 暴露.
+- **★Q5_K_M N=2 swap trace (决定性)****:
+  ```
+  swap[0]: before ping=0x7fc962010000 pong=0x7fc96c010000 | after ping=0x7fc96c010000 pong=0x7fc962010000
+  swap[1]: before ping=0x7fc96c010000 pong=0x7fc962010000 | after ping=0x7fc962010000 pong=0x7fc96c010000
+  ```
+  - ping/pong 是绝对指针 (scratchpad base + offset). diff = 0x7fc96c010000 - 0x7fc962010000 = 0xA000000 = 167772160 = pong offset ✓
+  - **swap 完全正确**: swap[0] [ping=base+0, pong=base+167M]→[ping=base+167M, pong=base+0]; swap[1] 翻回. ptr 翻转正确.
+- **★BUG-A 根因重新定位 (swap 非 bug)★**:
+  - swap 正确 → layer1 的 ActivationPong 指向 base+0 (swap 后). layer1 应写 pong=base+0.
+  - 但测试显示 ping(base+0) **未被覆盖** (N=1 同值 embedding). → layer1 **没写 pong=base+0**.
+  - layer1 的输出实际写到了 **layer.ffn_resid (offset 167772160 = base+167M, 固定 offset 不随 swap 翻转)**.
+  - ffn_resid 与 pong **初始 offset 别名** (都 167772160). swap 后 pong→base+0, 但 ffn_resid 固定 base+167M.
+  - layer1 FFN 写 ffn_resid(base+167M) = **覆盖 layer0 输出**(layer0 写在 base+167M). layer1 输出 NaN → 覆盖 layer0 有效输出为 NaN.
+- **为何 N=1 正常**: N=1 只 layer0, layer0 写 pong=base+167M=ffn_resid, 同址无冲突 (layer0 输出就是 ffn_resid). 测试读 167M=layer0 输出有效.
+- **为何 N=2 坏**: layer0 写 base+167M (有效). swap. layer1 读 ping=base+167M (layer0 输出, 应有效). layer1 FFN 写 ffn_resid=base+167M (**覆盖 layer0 输出**). 若 layer1 输入读 ping(base+167M) 在 FFN 写之前完成, layer1 计算应有效; 但若 FFN 写 ffn_resid 覆盖了 layer1 自己的输入 (residual = input + ffn_out, 若 input 从 base+167M 读但 ffn_out 也写 base+167M → 读改写冲突) → NaN.
+- **★核心嫌疑**: layer.ffn_resid 是 fixed-offset Intermediate tensor, 不应与 pong (swapped activation) 别名. buffer_alloc/VAM 把 ffn_resid 分配在 pong 初始 offset (167772160), 生命周期分析误判 ffn_resid 与 pong 不冲突 (但 N≥2 时 layer1 的 ffn_resid 写覆盖 layer0 的 pong 输出).
+- **下一步**: 查 buffer_alloc 为何把 layer.ffn_resid 分配在 167772160 (= pong offset). ffn_resid 应是独立 Intermediate (有自己的 offset), 或应跟随 pong swap (若它是 layer output). 这是 buffer_alloc 生命周期/VAM activation_alias 配置 bug.
+- **关键文件**:
+  - buffer_alloc.rs (ffn_resid offset 分配 = 167772160 = pong, 别名 bug)
+  - virtual_activation.rs (activation_alias: layer_output→pong, 但 ffn_resid 是 layer_output? 若是, 应 swap 跟随, 不该 fixed)
+  - build_graph.inc.rs (layer.ffn_resid tensor 创建 + 是否标为 layer output)
+- **注**: Q6_K N=2 swap trace 为空 (无记录) — Q6_K 标准路径的 ActivationSwap emit 可能走不同 idx 或路径, 待查. 但 Q5_K_M trace 已证 swap 正确, BUG-A 在 ffn_resid 别名.

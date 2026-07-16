@@ -560,6 +560,7 @@ impl<E: Element> BackendExecutor<E> {
                 hidden_size: 0,
                 compute_dtype: gllm_kernels::types::DType::F32,
                 named_offsets: Vec::new(),
+                        telemetry: Vec::new(),
             }
         }
         match self {
@@ -2193,6 +2194,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         // Request 5 f32s from offset 0 but only 4 available — OOB panics (NO-SILENT-FALLBACK)
         let _ = pad.read_f32_at(0, 5);
@@ -2215,6 +2217,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let result = pad.read_f32_at(0, 1);
         assert_eq!(result.len(), 1);
@@ -2237,6 +2240,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let result = pad.read_f32_at(12, 1);
         assert_eq!(result.len(), 1);
@@ -2812,6 +2816,7 @@ mod tests {
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let emb = pad.embedding();
         assert_eq!(emb.len(), 3);
@@ -2842,6 +2847,7 @@ mod tests {
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let logits = pad.last_token_logits();
         assert_eq!(logits.len(), 3);
@@ -3527,6 +3533,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         assert!(pad.embedding().is_empty());
     }
@@ -3543,6 +3550,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         // Offset at data boundary — OOB panics (NO-SILENT-FALLBACK)
         let _ = pad.read_f32_at(16, 1);
@@ -3559,6 +3567,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let result = pad.read_f32_at(0, 0);
         assert!(result.is_empty(), "Count=0 should return empty vec");
@@ -3580,6 +3589,7 @@ mod tests {
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let emb = pad.embedding();
         assert_eq!(emb.len(), 3);
@@ -5073,6 +5083,7 @@ mod tests {
             hidden_size: 3,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         let logits = pad.last_token_logits();
         assert_eq!(logits.len(), 3);
@@ -5099,6 +5110,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         // Request 2 f32s starting at byte offset 12, but only 1 fits — OOB panics (NO-SILENT-FALLBACK)
         let _ = pad.read_f32_at(12, 2);
@@ -5552,6 +5564,7 @@ mod tests {
             hidden_size: 0,
             compute_dtype: gllm_kernels::types::DType::F32,
             named_offsets: Vec::new(),
+                    telemetry: Vec::new(),
         };
         // Offset 32 is exactly at end, even count=0 returns empty
         let result = pad.read_f32_at(32, 0);

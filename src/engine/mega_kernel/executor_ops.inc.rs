@@ -142,6 +142,7 @@ impl MegaKernelExecutor {
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
             named_offsets: mega.named_offsets.clone(),
+                    telemetry: Vec::new(),
         };
         let logits = sp.read_dtype_aware(last_row_off, vocab);
 
@@ -190,12 +191,20 @@ impl MegaKernelExecutor {
             }
         }
 
+        // BCE-20260716-BUG-A: telemetry buffer for ActivationSwap runtime trace.
+        // Allocated unconditionally (small, 8KB); JIT only writes stores when
+        // GLLM_TRACE_SWAP=1 was set at compile time (else zero stores emitted).
+        // Declared before the match so it outlives the entry_fn/launcher call and
+        // can be returned in DiagnosticScratchpad.telemetry for harness inspection.
+        let mut telemetry_buf: Vec<u8> = vec![0u8; 8192];
+
         let _generated = match &mega.executable {
             CompiledExecutable::Cpu { entry_fn, .. } => unsafe {
                 // R1: Build KernelContext
                 let mut ctx = KernelContext::zeroed();
                 ctx.weight_blob_ptr = mega.weight_blob.as_ptr();
                 ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
+                ctx.telemetry_ptr = telemetry_buf.as_mut_ptr();
 
                 (entry_fn)(
                     input_ids.as_ptr(),
@@ -213,7 +222,7 @@ impl MegaKernelExecutor {
                     1,
                     self.eos_token_id as usize,
                     std::ptr::null(),
-                    std::ptr::null_mut(),
+                    ctx.telemetry_ptr,   // arg 15: telemetry (BUG-A swap trace)
                     0,
                     std::ptr::null(),
                     0,
@@ -239,7 +248,7 @@ impl MegaKernelExecutor {
                     max_new_tokens: 1,
                     eos_token_id: self.eos_token_id as usize,
                     hook_ctx_ptr: std::ptr::null(),
-                    telemetry_ptr: std::ptr::null_mut(),
+                    telemetry_ptr: telemetry_buf.as_mut_ptr(),
                     session_position: 0,
                     fused_hidden_ptr: std::ptr::null(),
                     num_mm_tokens: 0,
@@ -264,6 +273,7 @@ impl MegaKernelExecutor {
             // BCE-20260703-NaN-LOCATE: carry intermediate tensor (name,offset,dtype) so the
             // diagnostic harness can locate the first NaN-producing layer/op without hardcoding.
             named_offsets: mega.named_offsets.clone(),
+            telemetry: telemetry_buf,
         })
     }
 
@@ -398,6 +408,7 @@ impl MegaKernelExecutor {
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
             named_offsets: mega.named_offsets.clone(),
+                    telemetry: Vec::new(),
         };
         let output = sp.read_dtype_aware(mega.logits_scratch_offset, output_elems);
         Ok(output)
@@ -536,6 +547,7 @@ impl MegaKernelExecutor {
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
             named_offsets: mega.named_offsets.clone(),
+                    telemetry: Vec::new(),
         };
         let logits_off = mega.logits_scratch_offset;
 
@@ -675,6 +687,7 @@ impl MegaKernelExecutor {
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
             named_offsets: mega.named_offsets.clone(),
+                    telemetry: Vec::new(),
         };
 
         let mut scores = Vec::with_capacity(target_token_ids.len());
@@ -808,6 +821,7 @@ impl MegaKernelExecutor {
             hidden_size,
             compute_dtype: mega.compute_dtype,
             named_offsets: mega.named_offsets.clone(),
+                    telemetry: Vec::new(),
         };
         let output = sp.read_dtype_aware(0, output_elems);
 
@@ -1307,6 +1321,7 @@ impl MegaKernelExecutor {
             hidden_size: self.hidden_size,
             compute_dtype: mega.compute_dtype,
             named_offsets: mega.named_offsets.clone(),
+                    telemetry: Vec::new(),
         };
         let logits = sp.read_dtype_aware(last_row_off, vocab);
 

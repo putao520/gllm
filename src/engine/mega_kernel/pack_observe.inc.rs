@@ -807,6 +807,11 @@ pub struct DiagnosticScratchpad {
     /// first NaN-producing layer/op by reading each intermediate tensor from scratchpad.
     /// Empty for test fixtures / GPU-logits-only path (no intermediate inspection).
     pub named_offsets: Vec<(String, usize, gllm_kernels::types::DType)>,
+    /// BCE-20260716-BUG-A: ActivationSwap runtime trace buffer (telemetry_ptr region).
+    /// When GLLM_TRACE_SWAP=1, the JIT writes per-swap ping/pong physical pointer
+    /// values here (32B/swap at offset 1024+). Empty in production (env off → no
+    /// buffer). Read by swap-trace diagnostic tests to locate runtime ptr corruption.
+    pub telemetry: Vec<u8>,
 }
 
 impl DiagnosticScratchpad {
