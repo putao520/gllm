@@ -4814,3 +4814,24 @@ regressionAssertion:
   - reg_alloc.rs (ping/pong VReg25/26 spill, 物理分配不同但合法)
   - x86_lower/lower_instr_dispatch.inc.rs:1170 (lower_activation_swap_x86 — xchg 对 spill ptr 的处理)
   - x86_lower/lower_instr_dispatch.inc.rs:2747 (LoopEnd counter inc — step_bytes=0 时 byte_offset 更新)
+
+### 方向 58: ★ping/pong 内容运行时 dump★ N=2 ping(0) 保留 embedding 未被覆盖, pong(167M)=layer.ffn_resid=NaN — layer1 计算产 NaN 回灌 (2026-07-16)
+- **dump ping(0) + pong(167772160) 内容 (N=1/2/3)**:
+  - N=1: ping(0)=embedding(|max|0.097), pong(167M)=layer0输出(|max|0.987) ✓
+  - N=2: ping(0)=**仍是N=1的embedding(first8逐字节相同, 未被覆盖)**, pong(167M)=NaN=8/8
+  - N=3: ping(0)=同embedding, pong(167M)=NaN
+- **★关键: pong(167M) = layer.ffn_resid (scratchpad named_offset 同址)**:
+  - layer.ffn_resid (FFN 残差 = 层输出) offset = 167772160 = pong offset (设计 alias, VAM activation_alias layer_output→pong)
+  - N=1: ffn_resid=layer0输出(有效), 测试读 pong=ffn_resid 看到 layer0 输出
+  - N=2: ffn_resid=layer1输出(NaN, 因 layer1 输入 ping 被破坏), 测试读 pong=ffn_resid 看到 NaN
+- **★推断 (待插桩确证)**: N=2 时:
+  - ping(0) **未被 layer1 覆盖** (first8 与 N=1 完全相同) → layer1 没写 ping, 或 layer1 写了别处
+  - pong(167M)=layer1 的 ffn_resid 输出 = NaN → layer1 计算产 NaN
+  - layer1 输入应是 swap 后的 ping (= layer0 输出, 在 pong=167M 指向). 若 swap 正确, layer1 读 ping(指向167M=layer0输出) 应有效. 但 layer1 输出 NaN → 要么 swap 把 ping 指错(非167M), 要么 layer0 输出在 N=2 被破坏
+  - 矛盾: N=1 layer0 输出有效(0.987), N=2 layer0 应同样有效. 若 swap 对, layer1 读到有效输入, 输出不该 NaN. → **swap 可能把 ping 指错**, 或 layer1 读的 ping 物理值在运行时非 167M
+- **Plan C 禁用实验**: 临时禁用 Plan C reset (注释 AddPtr 25/26) → N=2 仍 NaN → Plan C reset 非 BUG-A 根因
+- **下一步**: JIT 插桩 dump 每次 ActivationSwap 前后 ping/pong 物理寄存器值, 确认 swap 是否把 ping 指向 167M (layer0 输出) 还是错地址. fix-bugA-instrument agent 实施中 (telemetry_ptr + 高偏移 swap-log buffer).
+- **关键文件 (方向58 嫌疑)**:
+  - buffer_alloc.rs (layer.ffn_resid 与 pong 同 offset 167772160 — 设计 alias, 但 N=2 时 layer1 输出 NaN 回灌)
+  - x86_lower/lower_instr_dispatch.inc.rs:1171 (lower_activation_swap_x86 xchg, 待插桩)
+  - VAM (virtual_activation.rs activation_alias layer_output→pong)
