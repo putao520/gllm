@@ -4860,3 +4860,14 @@ regressionAssertion:
   - virtual_activation.rs (activation_alias: layer_output→pong, 但 ffn_resid 是 layer_output? 若是, 应 swap 跟随, 不该 fixed)
   - build_graph.inc.rs (layer.ffn_resid tensor 创建 + 是否标为 layer output)
 - **注**: Q6_K N=2 swap trace 为空 (无记录) — Q6_K 标准路径的 ActivationSwap emit 可能走不同 idx 或路径, 待查. 但 Q5_K_M trace 已证 swap 正确, BUG-A 在 ffn_resid 别名.
+
+### 方向 59b: ★swap trace 误读修正 + Plan C 34次重测(设计非bug) + body-entry dump 待做 (2026-07-16)
+- **方向59 "swap 正确" 结论需修正**: swap trace 的 "before" 值=[0,167M] 实际是紧挨 swap 前的 Plan C reset (AddPtr 25/26 → offset 0/167772160) 的固定值, **不代表 layer body 执行期间的真实 ping/pong**. trace 只证 "swap 指令执行了 + Plan C reset 跑了", **未证 layer1 body 读到 layer0 输出**.
+- **决定性矛盾 (仍存)**: N=2 ping(base+0)=embedding 未被覆盖, pong(167M)=NaN. 若 swap 正确 (layer1 写 pong=base+0), slot 0 应被 layer1 输出覆盖. 但 slot 0 未动 → **layer1 body 期间 pong≠0** (swap 结果没传到 body). 中间有重置或 swap 时机错.
+- **Plan C 重测 (排除嫌疑)**: layer loop 内 Plan C AddPtr 25/26 重置次数 — Q5_K_M=34, Q6_K=30. 两者都在 layer loop 内多次重置 (设计: 每融合组前 reset, 3 串行组的 parity fix). Q6_K 30 次重置仍正常 → **Plan C 多次重置是设计非 bug**, 非 BUG-A 根因.
+- **layer loop 结构 (VmProgram)**: bound=2 LoopBegin@109, 内含 1 个 in-loop ActivationSwap@5195 (LoopEnd@5196 前) + 1 个 post-loop parity ActivationSwap@5197. Plan C reset (AddPtr 25/26) 在每融合组前 (group 循环 378 行), layer loop 内 34/30 次.
+- **★下一步: body-entry dump (待做, 需新 VmInstr)****: 在 handle_mixed_quant_layer_loop 的 LoopBegin 后、首个 layer op 前, dump layer1 body 入口的 ping/pong 物理值. 预期:
+  - 若 layer1 body 入口 ping=base+167M (layer0 输出) → swap 传对, bug 在别处
+  - 若 layer1 body 入口 ping=base+0 (embedding) → swap 没传, layer1 读错 input → 定位 swap 时机/重置 bug
+- **实现障碍**: 需新 VmInstr (如 TracePtrs{a,b,base_offset,idx}) 在 plan_lower emit + x86_lower lowering (复用 emit_swap_trace_store carrier 方案). 或复用现有 DebugProbe (写环形 buffer 非 telemetry). fix-bugA-instrument agent 评估 scope 卡住 (75 msgs 未出 diff), 已停. 需重派或主会话直接实施.
+- **当前结论**: BUG-A 仍未定位到单一修复点. 静态穷尽 (VmProgram 对称 + RegAlloc 对称 + Plan C 设计 + swap 指令正确) 全过, 但运行时 layer1 body 读到的 ping/pong 错. 需 body-entry 运行时 dump (用户已批准 JIT 插桩路线) 定位.
