@@ -60,6 +60,26 @@ fn dump_swaps(model_filter: &str, n: usize, label: &str, f: &mut std::fs::File) 
         idx += 1;
         if idx > 64 { break; } // safety cap
     }
+    // Body-entry dump (TracePtrs at layer body entry, base 4096, 16B/entry).
+    let body_base: usize = 4096;
+    let mut bidx = 0;
+    while body_base + (bidx + 1) * 16 <= sp.telemetry.len() {
+        let bb = body_base + bidx * 16;
+        let ping = read_u64(&sp.telemetry, bb);
+        let pong = read_u64(&sp.telemetry, bb + 8);
+        if ping == 0 && pong == 0 { break; }
+        let flag = |v: u64| -> &'static str {
+            match v {
+                PING_ADDR => "PING(0)",
+                PONG_ADDR => "PONG(167M)",
+                _ => "???",
+            }
+        };
+        let _ = writeln!(f, "  body[{}]: ping={:#x}{} pong={:#x}{}",
+            bidx, ping, flag(ping), pong, flag(pong));
+        bidx += 1;
+        if bidx > 64 { break; }
+    }
     let _ = f.flush();
 }
 

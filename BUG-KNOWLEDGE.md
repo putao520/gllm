@@ -4871,3 +4871,31 @@ regressionAssertion:
   - 若 layer1 body 入口 ping=base+0 (embedding) → swap 没传, layer1 读错 input → 定位 swap 时机/重置 bug
 - **实现障碍**: 需新 VmInstr (如 TracePtrs{a,b,base_offset,idx}) 在 plan_lower emit + x86_lower lowering (复用 emit_swap_trace_store carrier 方案). 或复用现有 DebugProbe (写环形 buffer 非 telemetry). fix-bugA-instrument agent 评估 scope 卡住 (75 msgs 未出 diff), 已停. 需重派或主会话直接实施.
 - **当前结论**: BUG-A 仍未定位到单一修复点. 静态穷尽 (VmProgram 对称 + RegAlloc 对称 + Plan C 设计 + swap 指令正确) 全过, 但运行时 layer1 body 读到的 ping/pong 错. 需 body-entry 运行时 dump (用户已批准 JIT 插桩路线) 定位.
+
+### 方向 59c: ★body-entry dump 决定性证据★ swap+body-entry 都正确, layer1 输出仍落 base+167M 非 base+0 — 矛盾指向 ffn_resid 写入指令未用 swapped pong VReg (2026-07-16)
+- **TracePtrs VmInstr 实施** (commit cf35ef56 gllm-kernels): 新 VmInstr TracePtrs{a,b,base_offset,idx} + x86_lower lowering (复用 emit_swap_trace_store) + pipeline.inc.rs handle_mixed_quant_layer_loop LoopBegin 后 emit TracePtrs(ping,pong) (env=GLLM_TRACE_SWAP). 测 body-entry layer1 的 ping/pong 物理值.
+- **★body-entry dump 结果 (Q5_K_M N=2, 决定性)**:
+  ```
+  swap[0]: before [ping=base+0, pong=base+167M] → after [ping=base+167M, pong=base+0]
+  body[0]: ping=base+167M  pong=base+0      ← layer1 body 入口
+  swap[1]: before [ping=base+167M, pong=base+0] → after [ping=base+0, pong=base+167M]
+  ```
+  - body-entry (layer1, 末次迭代): **ping=base+167M (layer0 输出, 正确!), pong=base+0 (swapped, 正确!)**
+  - **swap 完全正确**: layer1 body 入口读到 ping=layer0 输出, pong=base+0 (应写 layer1 输出到此)
+- **★但 layer1 输出仍落 base+167M 非 base+0★** (测试: ping base+0 未被覆盖, pong base+167M=NaN):
+  - body-entry 证明 pong VReg=base+0, materialize(ffn_resid=ActivationPong) 应返回 pong VReg → layer1 写 base+0
+  - 但实际 layer1 输出落 base+167M → **layer1 的 ffn_resid 写入指令未用 swapped pong VReg**, 或用了别的 ptr
+- **buffer_alloc out_tid force-override 修复** (commit cf35ef56, 749/758/766 or_insert→insert): 已改, 但 N=2 仍 NaN. 检查发现 build_tensor_sources 841/848/854 已有 force-override (此修是 redundant). 故 ffn_resid 的 TensorPtrSource 确实是 ActivationPong (swapped).
+- **★新矛盾点 (待查)**: materialize(ActivationPong) 返回 abi.activation_pong_ptr (body-entry 证 = base+0), 但 layer1 ffn_resid 写入落 base+167M. 嫌疑:
+  1. ffn_resid 的写入 (Op::Add 输出, lower_op) 不经 materialize(out_tid), 而经别的路径 (如 resolver 对 Add op 输出有特殊处理)
+  2. abi.activation_pong_ptr 在 layer1 body 内被某指令重置回 167M (Plan C reset 在组边界, body 内有多个组 → body 中途 pong 被重置)
+  3. body-entry dump 只在 LoopBegin 后 dump 一次, body 内组边界 Plan C reset 把 pong 重置回 167M → 后续组写错
+- **★嫌疑3 最可能 (Plan C 在 body 内重置)**: layer loop 内 34 次 Plan C reset (AddPtr 25/26 → 0/167M), 每融合组前重置. layer1 body 跨多组, 第2组前 Plan C reset 把 pong 从 base+0 重置回 base+167M → layer1 第2组写 base+167M 覆盖 layer0 输出.
+  - 但 Q6_K 也有 30 次 in-loop Plan C reset 且正常 → Plan C reset 本身是设计, Q5_K_M 34 次 vs Q6_K 30 次差异非根因
+  - 或 Q5_K_M 的 body 结构 (组边界 + 哪组写 output) 与 Q6_K 不同, 导致 Plan C reset 时机错
+- **下一步**: dump body 内每次 Plan C reset 后的 pong 值 (不只 body-entry), 定位 body 中途 pong 何时被重置回 167M. 或 dump ffn_resid 写入指令的实际 dst ptr.
+- **关键文件 (方向59c)**:
+  - buffer_alloc.rs:837-857 (activation_alias force-override, 已正确, ffn_resid=ActivationPong)
+  - pipeline.inc.rs:399-416 (Plan C reset, layer loop 内 34 次重置 — 嫌疑3)
+  - lower_op.inc.rs (Op::Add ffn_resid 写入, 是否经 materialize(out_tid))
+  - context.inc.rs:323-367 (materialize ActivationPong → abi.activation_pong_ptr)
