@@ -515,6 +515,61 @@ pub fn build_compiler_graph(
         }
     };
 
+    // ── BUG-B (BCE-20260716-001): mixed-quant per-group QuantGemm dispatch ──
+    // For a weight whose quant_type VARIES per layer (Q5_K_M: attn_v/ffn_down are
+    // Q6K in some layers, Q5K in others), a single QuantGemm bakes ONE quant_type
+    // (L0's) → Q5K layers mis-decode Q5K bytes as Q6K → NaN.
+    //
+    // Fix (ARCH-DTYPE-MIXED-PRECISION): emit ONE QuantGemm op PER GROUP, each
+    // baking that group's rep_qt at compile time, guarded by LayerInGroup(bitset)
+    // so only the matching layer's op executes at runtime. All groups share the
+    // SAME weight tensor (L0 template) because the intra-layer offset is uniform
+    // (shared weights input_norm/q/k/o/gate/up are identical Q5K across all
+    // layers, so v/down position is the same); only the QuantType differs.
+    //
+    // This is the "core-only" path of 方案 A (per-group template divergence): the
+    // per-group weight tensor divergence is unnecessary when shared weights are
+    // uniform, because the byte offset within the layer is identical. The
+    // LayerInGroup guard (production-proven via Gemma-4 SharedKvRef) handles
+    // runtime dispatch. IndirectJump optimization deferred.
+    // @trace REQ-ARCH-DTYPE-MIXED-PRECISION per-group quant_type baked at compile time
+    let add_mixed_quant_gemm = |g: &mut CompilerGraph,
+                                 weight_name: &str,
+                                 m: SymDim, n: usize, k: usize,
+                                 inputs: Vec<TensorId>,
+                                 outputs: Vec<TensorId>,
+                                 label: &str,
+                                 kv_guard: gllm_kernels::compiler::graph::LayerCondition| {
+        let qt_opt = weight_quant_types.get(weight_name).copied();
+        if let Some(qt) = qt_opt {
+            let emitted = if let Some(ref plan) = mixed_quant_plan {
+                if plan.groups.len() > 1 {
+                    for (rep_qt, layer_indices) in plan.groups.iter() {
+                        let mut bitset: u64 = 0;
+                        for &li in layer_indices {
+                            if li < 64 { bitset |= 1u64 << li; }
+                        }
+                        g.add_op_guarded(
+                            Op::QuantGemm(QuantGemmSpec { m: m.clone(), n, k, quant_type: *rep_qt }),
+                            inputs.clone(), outputs.clone(), label,
+                            gllm_kernels::compiler::graph::LayerCondition::LayerInGroup(bitset));
+                    }
+                    true
+                } else { false }
+            } else { false };
+            if !emitted {
+                g.add_op_guarded(
+                    Op::QuantGemm(QuantGemmSpec { m, n, k, quant_type: qt }),
+                    inputs, outputs, label, kv_guard);
+            }
+        } else {
+            let weight_dtype = tdt(weight_name);
+            g.add_op_guarded(
+                Op::Gemm(GemmSpec { m, n, k, dtype: weight_dtype, trans_b: true, has_bias: false }),
+                inputs, outputs, label, kv_guard);
+        }
+    };
+
     // ── Layer template (single copy, JIT loops at runtime via layer_loop_config) ──
     //
     // ARCH-LAYER-LOOP: Instead of emitting N separate op sets (L0_*, L1_*, ..., L27_*),
@@ -1578,7 +1633,9 @@ pub fn build_compiler_graph(
                     g.add_op_guarded(Op::GemmBias(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: tdt(&v_cn), trans_b: true, has_bias: true }),
                         vec![normed, v_w, v_bias], vec![v_out], "layer.v_proj", kv_guard);
                 } else if let Some(&qt) = weight_quant_types.get(&v_cn) {
-                    g.add_op_guarded(Op::QuantGemm(QuantGemmSpec { m: s.clone(), n: v_n, k: v_k, quant_type: qt }),  vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
+                    let _ = qt;
+                    add_mixed_quant_gemm(&mut g, &v_cn, s.clone(), v_n, v_k,
+                        vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
                 } else {
                     g.add_op_guarded(Op::Gemm(GemmSpec { m: s.clone(), n: v_n, k: v_k, dtype: tdt(&v_cn), trans_b: true, has_bias: false }),  vec![normed, v_w], vec![v_out], "layer.v_proj", kv_guard);
                 }
@@ -1878,8 +1935,9 @@ pub fn build_compiler_graph(
                 layer_weight_byte_cursor += weight_physical_bytes(&down_cn, &[hidden, down_k]);
 
                 let down_out = g.add_tensor("layer.down", vec![s.clone(), SymDim::Concrete(hidden)], act_dt);
-                add_gemm_or_quant(&mut g, &down_cn, s.clone(), hidden, down_k,
-                    vec![ffn_act_out, down_w], vec![down_out], "layer.down_proj");
+                add_mixed_quant_gemm(&mut g, &down_cn, s.clone(), hidden, down_k,
+                    vec![ffn_act_out, down_w], vec![down_out], "layer.down_proj",
+                    gllm_kernels::compiler::graph::LayerCondition::Always);
 
                 let ffn_resid = g.add_tensor("layer.ffn_resid", vec![s.clone(), SymDim::Concrete(hidden)], act_dt);
                 g.add_op(Op::Add, vec![ffn_resid_src, down_out], vec![ffn_resid], "layer.ffn_resid");
@@ -2738,78 +2796,59 @@ pub fn build_compiler_graph(
         // ── Mixed-quant dispatch (ARCH-DTYPE-MIXED-PRECISION) ──
         // If per-layer dtype varies (e.g. Q5_K_M interleaves Q6K/Q5K across
         // attn_v/ffn_down), the uniform weight_stride assumption is wrong.
-        // Assemble a MixedQuantLayerLoopConfig instead of the standard
-        // LayerLoopConfig. The single emitted "layer." template still serves
-        // as the L0-referenced template; task #6 (pipeline handle_mixed_quant)
-        // will later branch per-group templates. For uniform models this branch
-        // is skipped (mixed_quant_plan is None) and the standard path applies.
+        // Mixed-quant (e.g. Q5_K_M) per-layer dtype grouping.
+        //
+        // BUG-C 根治 (BCE-20260716-001, 2026-07-18): 原设计是 per-layer 紧凑布局
+        // (non-linear offset_table + JIT per-group intra-offset)，但 JIT 侧 per-group
+        // offset 解析复杂且易错（executor 实施失败：custom layout 把 per-group
+        // offset 重置为 0，忽略 v 前共享权重 → L3.v_proj 与 L3.input_norm 重叠）。
+        //
+        // 第一性原理：QuantGemm 按维度 (n, k) + quant_type 解码（derive_row_stride_bytes
+        // = (k/block_size)*block_bytes），不读槽位 padding。所以 Q5K 数据(720896B)
+        // 放在 Q6K 槽位(2580480B) 前段，JIT 用 Q5K quant_type 算 stride=720896 只读
+        // 前段，padding 被忽略。
+        //
+        // Design 2 (统一模板 + padding): 所有层用 L0(Q6K) 模板布局槽位
+        // (uniform stride = _lc_weight_stride = L0 Q6K layer_bytes = max)，较小权重
+        // (Q5K v/down) 补零。复用标准 LayerLoopConfig + handle_standard_layer_loop
+        // (production-proven via Q6_K/Q4_K 等均匀模型) + 标准 pack 分支(已有
+        // layer_copy = min(layer_size, copy_size) 自动 padding)。
+        //
+        // 代价: 14 Q5K 层 × ~440KB padding = ~6MB（0.6B 模型可接受）。
+        // 收益: 避免 per-group intra-offset 复杂性，BUG-B (per-group QuantGemm +
+        // LayerInGroup guard) 在标准 handle_layer_loop 下直接工作（标准路径
+        // 提供 state.abi.layer_loop_counter，guard 用之 dispatch）。
+        //
+        // @trace REQ-ARCH-DTYPE-MIXED-PRECISION per-group QuantGemm bakes quant_type
+        // @trace ARCH-ROOT-CAUSE 治本：用统一布局避免 per-group offset 复杂性
         if let Some(plan) = &mixed_quant_plan {
             let num_layers_eff = std::env::var("GLLM_TRUNCATE_LAYERS").ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n <= features.num_layers)
                 .unwrap_or(features.num_layers);
-            let num_groups = plan.groups.len();
+            let _num_groups = plan.groups.len();
 
-            // offset_table: per-layer absolute byte offset in weight blob,
-            // computed as a running sum of each layer's actual weight bytes in
-            // file layer order (NON-LINEAR because per-layer dtype varies).
-            // layer_weight = layer_blob_base_offset + offset_table[layer_idx].
-            let mut offset_table = vec![0usize; features.num_layers];
-            let mut acc: usize = 0;
-            for i in 0..features.num_layers {
-                offset_table[i] = acc;
-                if i < plan.layer_bytes.len() {
-                    acc += plan.layer_bytes[i];
-                }
-            }
-
-            // Per-group config. Group prefix is data-driven from the group's
-            // representative quant type (Debug name lowercased), not hardcoded
-            // to Q6K/Q5K (ARCH-NO-PRECISION-ASSUMPTION).
-            let groups: Vec<gllm_kernels::compiler::graph::MixedQuantGroup> = plan.groups.iter()
-                .enumerate()
-                .map(|(g_idx, (rep_qt, layer_indices))| {
-                    let prefix = format!("layer_{:?}_g{}.", rep_qt, g_idx).to_ascii_lowercase();
-                    // weight_stride = intra-group stride = this group's uniform
-                    // per-layer byte size (all layers in a group share the same
-                    // quant dtype, so per-layer bytes are uniform within a group).
-                    let weight_stride = layer_indices.first()
-                        .and_then(|&li| plan.layer_bytes.get(li).copied())
-                        .unwrap_or(0);
-                    // layer_bitset: bit i set iff layer i belongs to this group.
-                    let mut layer_bitset: u64 = 0;
-                    for &li in layer_indices {
-                        if li < 64 {
-                            layer_bitset |= 1u64 << li;
-                        }
-                    }
-                    // weight_input_indices: the single template's weight input
-                    // indices (shared until per-group templates land in task #6).
-                    let weight_input_indices = layer_weight_input_indices.clone();
-                    gllm_kernels::compiler::graph::MixedQuantGroup {
-                        prefix,
-                        weight_stride,
-                        layer_indices: layer_indices.clone(),
-                        layer_bitset,
-                        weight_input_indices,
-                    }
-                })
-                .collect();
-
-            g.mixed_quant_layer_loop_config = Some(gllm_kernels::compiler::graph::MixedQuantLayerLoopConfig {
+            // BUG-C 根治 (Design 2): 用标准 LayerLoopConfig (uniform stride = L0
+            // 模板大小 = max layer_bytes) 替代 MixedQuantLayerLoopConfig。
+            // _lc_weight_stride 已是 layer_weight_byte_cursor = L0(Q6K) 模板层总字节数
+            // = max（Q6K 层比 Q5K 层大，v/down 是 Q6K 时更大）。所有层用此 stride
+            // → 线性 offset_table = layer_idx * stride，JIT 标准路径自动处理。
+            // layer_weight_input_indices 已在前面收集（L0 模板权重 input indices）。
+            g.layer_loop_config = Some(gllm_kernels::compiler::graph::LayerLoopConfig {
                 num_layers: num_layers_eff,
-                num_groups,
+                weight_stride: _lc_weight_stride,
                 layer_blob_base_offset: global_weight_bytes,
-                groups,
-                offset_table,
-                group_of: plan.group_of.clone(),
+                layer_weight_input_indices,
                 activation_alias: Some((_lc_layer_input.unwrap(), _lc_layer_output.unwrap())),
+                per_layer_input_stride: _ple_stride,
             });
-            // Suppress unused warning for _ple_stride when mixed-quant path is taken
-            // (per_layer_input_stride is not part of MixedQuantLayerLoopConfig yet —
-            // PLE stride applies to AltUp per-layer-input which is orthogonal to
-            // weight-quant grouping). Kept computed for the standard-path branch below.
-            let _ = _ple_stride;
+
+            // BUG-C 根治 (Design 2): 不再构建 MixedQuantLayerLoopConfig —
+            // per-group dispatch 由 BUG-B 的 add_mixed_quant_gemm helper
+            // (per-group QuantGemm + LayerInGroup guard) 在图层面处理，
+            // 运行时走标准 handle_standard_layer_loop（提供 layer_loop_counter
+            // 供 guard 用）。per-group quant_type 已 bake 进各自的 QuantGemm op。
+            // mixed_quant_plan 本身仍用于 helper（检测分组 + rep_qt），不进 config。
         } else {
             g.layer_loop_config = Some(gllm_kernels::compiler::graph::LayerLoopConfig {
                 num_layers: std::env::var("GLLM_TRUNCATE_LAYERS").ok()

@@ -4928,3 +4928,46 @@ regressionAssertion:
 - **BCE 类**: build_graph layer_bytes 漏算非量化 weight（F32 norm），同类影响所有 mixed-quant 模型（Q4_K_M/Q3_K_M 等，凡有 F32 norm + 量化 q/k/v 的混合层）。横扫：所有走 mixed_quant_layer_loop_config 的模型都受益于此修复。
 - **教训**: 方向 57-59c 静态穷尽 VmProgram/RegAlloc/swap/body-entry 全对，真根因在 build_graph 的 layer_bytes 计算漏数据源（weight_quant_types vs weight_shapes）。用户方法论"内存布局也要验证"的价值——pack-level 字节对比（GLLM_DEBUG_PACK2）直接暴露 L0.down_proj 覆盖 L1.input_norm。
 - **当前状态**: BUG-A 根治。BUG-B (N≥4 decode template) 待 task#6。28 层 Q5_K_M E2E 仍需 BUG-B 修。
+
+### 方向 61: BUG-C — pack 用模板(L0=Q6K) rel_within 打包 Q5K 层 → down_proj 越界 139264B 进下一层 input_norm (2026-07-18)
+- **★真根因 (字节级确证)★**: pack_observe.inc.rs:532 mixed-quant 分支 `rel_within = (*offset).saturating_sub(mcfg.layer_blob_base_offset)` 用 **模板(L0=Q6K)布局偏移** 打包所有层。Q5K 层(L3)的 attn_v 是 Q5K(176B/block) 比模板 Q6K(210B/block) 小，导致 down_proj 应在更早位置，但用模板 rel_within 让 L3.down_proj 落在 Q6K 布局位置 → 越出 L3 层槽(Q5K layer_bytes=10822656) 139264B 进 L4.input_norm。
+- **字节确证** (GLLM_DEBUG_PACK6/7/8):
+  - L3.down_proj abs_off=277531648 copy_size=2162688 end=279694336，**覆盖 279555072**(L4.input_norm 起点)，溢出 139264B
+  - PACK5 post-write read L4.input_norm=[00,00,8e,3f]有效，但 PACK6-END(函数末尾)=[59,1c,7e,0e]垃圾 → pack 后续 L3.down_proj 覆盖
+  - 139264 = Q6K down_proj(2580480) - Q5K down_proj(2162688) 的层内位置差
+- **pack 侧修复** (pack_observe.inc.rs mixed-quant 分支): rel_within 改为 per-layer 累加该层实际 weight_sizes 的前序权重字节数（named_offsets 按模板序，layer 0 复现模板偏移）。
+- **★JIT 侧矛盾★**: pack 用 per-layer rel_within（紧凑布局）但 JIT (pipeline.inc.rs handle_mixed_quant_layer_loop) 仍用模板 rel_within（WeightLayout.offset_of(tid) 是 L0 模板偏移）。pack 移动 blob 位置，JIT 读模板偏移 → 读错位置 → NaN。
+  - 仅 BUG-B(无 BUG-C): N=4 logits|max|=22.3 非 NaN，但 blob L4.input_norm 被溢出 → N=5 NaN
+  - BUG-B+BUG-C: N=4 logits|max|=0.0000 NaN（JIT 读错位置）
+- **架构确认** (types.inc.rs:285-297 MixedQuantLayerLoopConfig 设计注释): 正确设计是 **IndirectJump(group_of[layer_idx]) per-group 模板分化**（每组独立 weight_input_indices + 独立 QuantDecode），非 BUG-B 当前的 LayerInGroup per-op guard。BUG-B 当前"每组 QuantGemm 引用同一 weight tensor + guard"是简化版，缺 per-group weight tensor 分化。
+- **待决**: architect(consult) 确认算法（per-layer 紧凑布局 vs 统一模板槽位+padding）+ JIT 根治方案（IndirectJump per-group 模板 = task#6 正式实施）。pack 侧 BUG-C 修复正确但必须与 JIT 侧同步落地。
+- **BCE 类**: 与 BUG-A 同类（weight blob layout），但层级更深——BUG-A 是 layer_bytes 漏数据源，BUG-C 是 intra-layer 布局用模板而非 per-layer。同类影响所有 mixed-quant 模型（凡有 per-layer dtype 变化且非首层权重位置依赖前序权重大小的）。
+
+### 方向 62: BUG-B + BUG-C 清晰化 — per-group QuantGemm 解 N=4, per-group intra-offset 解 N≥5 (2026-07-18 续)
+- **基线偏移一致性确证** (GLLM_DEBUG_PACK9): WeightLayout offset = layer_blob_base + intra_offset（绝对，含 embed+globals 前缀）。JIT 读 `weights_base + offset_table[layer_idx] + wl_off`，pack 写 `layer_blob_base + offset_table[layer_idx] + rel_within`，二者一致（rel_within = wl_off - layer_blob_base = intra）。**N=1/2/3 工作 = 偏移匹配正确**。
+- **N=4 NaN 真根因 (BUG-B)**: 单个 QuantGemm bakes L0 的 quant_type(Q6K)。L3 是 Q5K 层，v_proj 字节是 Q5K 但 JIT 用 Q6K 解码 → 垃圾 → NaN。**修复**: add_mixed_quant_gemm 每组发一个 QuantGemm（quant_type=组 rep_qt）+ LayerInGroup(bitset) guard。所有组共享同一 L0 weight tensor（因 v_proj 的 intra_offset 跨组一致——v 前的 input_norm/q/k 是共享 Q5K，大小相同）。
+  - **N=4 验证 (BUG-B only)**: logits|max|=22.3，argmax=47220（非 NaN，非零，真实数值）✓
+- **N=5 NaN 真根因 (BUG-C, 仅 BUG-B 不够)**: L3.down_proj 的模板 intra_offset=8799232（含 Q6K v_proj 大小）。L3(Q5K) 的 v_proj 更小(720896 vs Q6K 2580480)，所以 L3 的 down_proj 真实 intra 应=6939648（少 1859584）。但 pack 用模板 intra=8799232 → L3.down_proj end=8799232+2162688=10961920 > L3 layer_bytes(10822656) → 溢出 139264B 进 L4.input_norm → L4 读垃圾 → N=5 NaN。
+  - **关键**: v_proj 的 intra_offset 跨组一致（v 前共享），所以 BUG-B 的单 L0 tensor 对 v_proj 正确。但 **down_proj 的 intra_offset 跨组不一致**（v 之后，受 v 大小影响），所以 down_proj 需要 per-group 偏移。
+- **N≥5 正解 (task#6 核心)**: down_proj 必须 per-group 化——Q5K 组用独立 down_proj weight tensor（L3.down_proj），其 WeightLayout offset = layer_blob_base + Q5K-aware intra(6939648)。Q5K QuantGemm 引用 L3.down_proj。pack 按 Q5K 组布局写 L3.down_proj。
+  - 之前 executor 实施失败原因：custom layout 把 per-group offset 重置为 0（组相对），忽略了 v_proj 之前的共享权重（input_norm/q/k）→ L3.v_proj 与 L3.input_norm 重叠。正确做法：per-group offset = layer_blob_base + 按组权重大小累加的 intra（共享权重用 L0 大小，v/down 用组大小）。
+- **当前状态**: BUG-A 根治(commit aca69821)。BUG-B (per-group QuantGemm + LayerInGroup guard) 已实施未 commit，解 N=4。N≥5 需 per-group down_proj tensor + per-group intra-offset（task#6 正式实施，pack+JIT 同步）。
+
+### 方向 63: ★BUG-C 根治 Design 2★ 统一模板+padding 替代 per-group 紧凑布局 (2026-07-18)
+- **第一性原理重审**: QuantGemm 按维度(n,k)+quant_type 解码（quant_offset_dsl.rs:194 `derive_row_stride_bytes = (k/block_size)*block_bytes`），不读槽位 padding。所以 Q5K 数据(720896B)放 Q6K 槽位(2580480B)前段，JIT 用 Q5K quant_type 算 stride=720896 只读前段，padding 被忽略。
+- **Design 2 (统一模板+padding)**: 所有层用 L0(Q6K) 模板布局槽位（uniform stride = `_lc_weight_stride` = L0 Q6K layer_bytes = max = 11379712），较小权重(Q5K v/down)补零。复用：
+  - 标准 `LayerLoopConfig` + `handle_standard_layer_loop`（production-proven via Q6_K/Q4_K 等均匀模型）
+  - 标准 pack 分支（pack_observe.inc.rs:596+ 已有 `layer_copy = min(layer_size, copy_size)` 自动 padding）
+  - 标准 `compute_total_weight_bytes` 分支（uniform stride × num_layers）
+  - geometry num_layers 从 layer_loop_config 读
+- **关键改动** (build_graph.inc.rs:2804): 当 `mixed_quant_plan Some` 时设 `layer_loop_config`（uniform stride=`_lc_weight_stride`）**而非** `mixed_quant_layer_loop_config`。BUG-B helper (add_mixed_quant_gemm) 保留——per-group QuantGemm + LayerInGroup guard 在标准 handle_layer_loop 下工作（标准路径提供 state.abi.layer_loop_counter）。
+- **fusion marker 修复** (gllm-kernels fusion/pass.rs:797): `assign_homogeneous_markers` 强制用 fallback (label starts_with "layer.") path 而非 iso path。BUG-B 的 per-group QuantGemm (v_proj/down_proj 各 2 个 op) 破坏 iso 同构检测，iso path 漏标记 MHA group → layer loop counter 未设 → MHA kv_source=FromCache 报错。fallback 用 label 前缀标记所有 layer.* group（含 MHA）。
+- **验证 (全不 NaN/崩溃)**:
+  - N=1 cosine=0.9998 MATCH ✓（Paris=1172）
+  - N=2 cosine=0.9924 MATCH ✓
+  - N=4 cosine=0.5259, argmax=38940（非 NaN，真实数值）
+  - N=5 cosine=0.0635（异常低，待查）
+  - N=6 cosine=0.6008
+  - N=28 cosine=0.4279, top10_overlap=10/10（argmax=100622 vs BF16 101888）
+- **残留问题 (独立, 非 BUG-B/C 引入)**: N=3+ cosine 下降（0.67→0.43）。逐层诊断 (test_diag_n3_perlayer): layer.attn cos=0.863 ✗ 发散起点。N=1/2 正确, N=3 发散。BUG-A 基线 N=3 cosine=0.6723（与 BUG-B 后相同）→ **N=3 发散是独立问题, 非 BUG-B/C 引入**。怀疑 KV cache layer counter 在第 3 层（历史 BCE-20260715-KV-COUNTER-SPILL 方向 53）。待续查。
+- **BCE 类**: BUG-C 根治用 Design 2（统一布局）替代 per-group 紧凑布局，避免 per-group intra-offset 复杂性（executor 失败的方案 A custom layout）。同类影响所有 mixed-quant 模型（Q4_K_M/Q3_K_M 等），复用标准路径 = 自动受益。
