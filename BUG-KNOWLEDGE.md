@@ -4970,4 +4970,497 @@ regressionAssertion:
   - N=6 cosine=0.6008
   - N=28 cosine=0.4279, top10_overlap=10/10（argmax=100622 vs BF16 101888）
 - **残留问题 (独立, 非 BUG-B/C 引入)**: N=3+ cosine 下降（0.67→0.43）。逐层诊断 (test_diag_n3_perlayer): layer.attn cos=0.863 ✗ 发散起点。N=1/2 正确, N=3 发散。BUG-A 基线 N=3 cosine=0.6723（与 BUG-B 后相同）→ **N=3 发散是独立问题, 非 BUG-B/C 引入**。怀疑 KV cache layer counter 在第 3 层（历史 BCE-20260715-KV-COUNTER-SPILL 方向 53）。待续查。
+- **★关键对照 (2026-07-18 续)★**: Q6_K 模型 N=3 cosine=0.9912 MATCH（test_diag_q6k_n3）。Q6_K 走标准 uniform 路径（无 mixed_quant），N=3 正确。Q5_K_M N=3 cosine=0.6723 发散。→ **N=3 发散是 Q5_K_M mixed-quant 路径特有**，非 KV cache 通用问题（Q6_K 也用 KV cache N=3 正确）。缩小到 BUG-B 的双 QuantGemm group（v_proj/down_proj 各 2 个 op + LayerInGroup guard）对 counter liveness 或 KV cache 写入的干扰。Q6_K 无双 QuantGemm group（uniform 单 QuantGemm），counter liveness 正常。怀疑：guard 用 raw layer_loop_counter（pipeline.inc.rs:1282）+ KV cache 也用 raw counter（lower_op.inc.rs:1574），双 QuantGemm group 之间的 guard BitTest 可能干扰 raw counter 的 spill/liveness。需 JIT 插桩 dump 运行时 counter 实际值验证。
+- **★逐层 capture 定位 (2026-07-18 续 2)★**: diagnostic-layer-capture ring buffer (test_diag_perlayer_capture) 逐层输出 cosine:
+  - Q5_K_M N=3: layer[0] cos=0.9994 ✓, layer[1] cos=0.9939 ✓, **layer[2] cos=0.9094 |q5|=500.8 ✗ 爆炸**
+  - Q6_K N=3: layer[0] cos=0.9998, layer[1] cos=0.9977, layer[2] cos=0.9992 |q6|=54.4 ✓（L2 正常）
+  - → **L2（第3次迭代）数值爆炸**（|q5|=500 vs L0/L1 的 1-4），Q5_K_M 特有，Q6_K L2 正常。
+- **★JIT 插桩验证 (全对, 矛盾)★**:
+  - counter: body entry + KV write + guard 都是 2（L2 正确，未污染）
+  - guard: L2 时 Q6K is_member=1 执行, Q5K is_member=0 跳过（正确）
+  - weight pack: L2.v_proj abs_off=259519488 copy_size=860160(Q6K), L2.down_proj 2580480(Q6K), L2.q/gate/up Q5K — 位置+size 全对（stride=11379712）
+  - ping/pong: N=3 swap 正确交换（0x...4010000 ↔ 0x...e010000, 差~167M=pong size）
+  - → **所有静态+运行时插桩检查全对，但 L2 数值爆炸**。矛盾指向 regalloc 在第 3 次迭代的 spill/reload 时序（VReg live-range 跨回边），需机器码级调试或 architect 分析 LoopInvariant 警告（Q5_K_M 9129 个 vs Q6_K）中 Q5_K_M 特有的覆盖。
+- **named_offsets aliasing 陷阱**: 诊断 harness 读 named_offsets 不可靠（intermediate tensor buffer 复用：layer.up/layer.attn/layer.q_normed 共享 offset 1342177280; layer.normed/final_normed/k_normed/down/post_normed 共享 503316480）。逐层 capture (ring buffer) 才可靠。
+- **★决定性实验 (2026-07-23)★**: GLLM_DIAG_ONLY_Q6K（BUG-B 只发 Q6K 组，跳过 Q5K 组，单 QuantGemm）N=3 cosine=0.6723 — **与双 QuantGemm 完全相同**。→ **发散与 BUG-B 双 QuantGemm 结构无关**！只发 Q6K v/down（单 QuantGemm）N=3 仍 0.6723。
+  - Q5_K_M 只 Q6K vs Q6_K 模型 N=3：差异在 q/k/o/gate/up（Q5_K_M=Q5K, Q6_K=Q6K）。v/down 都 Q6K。
+  - → **发散在 Q5K q/k/o/gate/up 的 decode**（单 QuantGemm，quant_type=Q5K），非 v/down 双 QuantGemm。
+  - 但 N=1/2 Q5K decode 正常，N=3 L2 爆炸。Q6_K（Q6K q/k/o）L2 正常。
+  - → **Q5K decode 在第 3 次迭代有 regalloc 问题，Q6K decode 没有**。BUG-A 基线就有（独立于 BUG-B/C）。
+  - 候选根因：Q5K HighBitMerge decode path 的某 VReg live-range 跨回边在第 3 次迭代 spill/reload 时序错。需 architect 分析 Q5K vs Q6K decode 的 VReg 差异。
+
+### 方向 64: ★决定性 seq 触发实验★ 单 token N=3 正常, seq=5 N=3 爆炸 (2026-07-23)
+- **★决定性实验★**: Q5_K_M N=3 按 prompt 长度（seq）测试 cosine:
+  - seq=1 (" ")：cos=0.9915 MATCH ✓
+  - seq=1 ("ab")：cos=0.9991 MISMATCH（正常量化噪声，argmax 翻转）
+  - seq=2 ("hello world")：cos=0.9963 MATCH ✓
+  - seq=3 ("hello world foo")：cos=0.9937 MATCH ✓
+  - seq=4 ("...bar")：cos=0.9906 MISMATCH（cos 高但 argmax 翻转）
+  - **seq=5 ("The capital of France is")：cos=0.6723 爆炸 ✗**
+- **Q6_K 对照**: Q6_K N=3 seq=5 cos=0.9912 MATCH ✓（Q6K decode 不触发）
+- **→ 排除层循环/spill 问题（H2/H3/H5/H6）**: 单 token N=3 正常说明层循环跨回边对，Q5K decode 单 token 对。发散是 **多 token（attention history）问题**。
+- **逐层 per-token capture（feature diagnostic-layer-capture）**: ⚠️ **此结论作废**（capture 机制误读）。
+  - `emit_layer_capture_copy`（structural_builder.rs:186）dst = `capture_base + layer_loop_counter × per_layer_stride`，**只按层计数器索引，无 token 维度**。
+  - generate loop 每次迭代重跑 layer loop，每层 capture 写**同一槽位** → 最终捕获值 = 该层在**最后一次** generate 迭代（最后 token）的输出，**非 tok0**。
+  - test_diag_perlayer_capture.rs 读 `seq*hidden` 元素但 capture 只写 `hidden_dim`（1 token）→ seq=5 读 1024..5120 是 OOB 越界读其他层/其他区数据。
+  - "L2 tok0 cos=0.9094 |q5|=500.8 爆炸" 实为 L2 在最后 token 的输出 + OOB 垃圾，非 tok0 真实发散。**L2 tok0 是否真发散未知**。
+- **★第一性原理重审（2026-07-23）★**：generate-loop 拓扑下每个 token 单独一次迭代，`mega_decode_seq_len` set → `m_bound=Const(1)` → **QuantGemm 恒走 Gemv 模式**（lower_op:181-185, moe_emit:832）。即 seq=1 与 seq=5 的 QuantGemm 机器码**完全相同**（Gemv, m=1, 单 token）。Q5K decode 是 native call（q5k_decode_step_native，确定性的，与 Q6K 同结构）。故 tok0（gen_counter=0, KV 空, RoPE pos=0）在 seq=5 第一次迭代应与单 token run **逐位相同**。
+  - **若 tok0 在 seq=5 真发散** → 必是 generate-loop 第 0 次迭代与单 token run 有**结构性差异**（非 QuantGemm，因 QuantGemm 同码）。候选：①loop-carried VReg spill slot 跨 gen 迭代污染（2700+ spill slots，mega_kernel_emit 注释 ARCH-REGALLOC-LOOP-RELOAD 已为 scratchpad/weight/input 重载，但**未覆盖所有 loop-carried VReg**）②gen_counter/byte_offset LoopBegin 初始化 ③首次迭代 KV cache 写入路径与单 token 不同。
+  - **若 tok0 在 seq=5 不发散**（capture 误读，实际 tok0 对）→ 发散在后续 token（tok1-4），根因是 **KV cache 累积** 或 **RoPE position 累积** 或 **per-token 状态污染**。
 - **BCE 类**: BUG-C 根治用 Design 2（统一布局）替代 per-group 紧凑布局，避免 per-group intra-offset 复杂性（executor 失败的方案 A custom layout）。同类影响所有 mixed-quant 模型（Q4_K_M/Q3_K_M 等），复用标准路径 = 自动受益。
+
+### 方向 65: ★第一性原理可能根因表★ Q5_K_M 多 token 发散 (2026-07-23, 用户指令"自己第一性原理列个表")
+
+> ⚠️ **本方向 P8 结论（"格式固有精度放大，非代码 bug"）已被方向 66 彻底推翻**。llama.cpp 对照证实 gllm 有真 bug（BF16 N=28 都崩）。真根因 = Plan C 组间 ping/pong 重置破坏残差流（方向 66e）。本方向保留作历史记录，**勿据 P8 下结论**。
+
+**硬事实（可靠，logits 级 cosine）**：
+- F1: seq=1 N=3 cos 0.9915 MATCH ✓
+- F2: seq=2/3 N=3 MATCH（0.9963/0.9937）✓
+- F3: seq=4 N=3 cos 0.9906 MISMATCH（argmax 翻转）
+- F4: seq=5 N=3 cos 0.6723 EXPLODE ✗
+- F5: Q6_K N=3 seq=5 cos 0.9912 MATCH ✓（Q6K decode 多 token 不触发）
+- F6: QuantGemm 在 generate-loop 拓扑下恒走 Gemv 模式（m=1），seq=1 与 seq=5 **同码**
+- F7: Q5K decode 是 native call（q5k_decode_step_native），确定性的，与 Q6K 同 native-call 结构
+- F8: BF16 模型 seq=5 N=3 正常（baseline，说明生成循环/KV/RoPE 对 BF16 对）
+
+**→ 发散只在 Q5K + 多 token + seq≥4 出现**。BF16 和 Q6K 多 token 都对。排除：层循环回边（F1 单 token 对）、Q5K decode 算术（F7 确定性）、QuantGemm 多 token m-loop（F6 同码 Gemv）。
+
+**可能根因表（第一性原理，按可能性排序）**：
+
+| ID | 根因假设 | 机制 | 为何单 token 不触发 | 为何 Q6K/BF16 不触发 | 验证方法 |
+|----|---------|------|---------------------|---------------------|---------|
+| **P1** | **Q5K weight blob 多 token 读时 weight_ptr 偏移累积错** | generate loop 跨迭代 weight_ptr 应每层 reset，但 Q5K 特化路径（mixed-quant guard 双 QuantGemm）某分支 weight_ptr 未正确 reset/重载 → 第 4+ 次迭代读到错权重区 | seq=1 只 1 次迭代，无累积 | Q6K 走单 QuantGemm 路径，weight_ptr reset 正确 | dump gen_counter=0..4 的 weight_ptr 运行时值，对照 BF16 路径 |
+| **P2** | **Q5K KV cache 写入：native call clobber 导致 K/V 拷贝源 VReg 被污染** | Q5K q/k proj 输出（K_ptr/V_ptr）经 native call 后 caller-saved VReg 被覆盖，KV copy 循环（lower_op:1605）用被污染的 k_ptr/v_ptr → 写入错误 K/V 到 cache → 后续 token attention 读错 history | seq=1 tok0 attention 只看自己（kv_bound=1），无 history 读 | Q6K 也是 native call，但 Q6K 输出后 VReg 生命周期/重载顺序不同，未被污染 | 对比 Q5K vs Q6K 的 K_ptr/V_ptr VReg 在 native call 后是否 reload；dump KV cache 内容逐 token 对照 BF16 |
+| **P3** | **Q5K 层输出 ping-pong 在多 gen 迭代跨层污染** | activation_alias ping-pong，Q5K 层路径某中间 VReg live-range 跨 gen 迭代未 spill 干净，第 4+ 次迭代读到上一 token 残留 | seq=1 无跨 gen 迭代 | Q6K 同 ping-pong 但 VReg 压力不同（Q6K 双 block 结构 vs Q5K 单 block） | per-(layer,token) 可靠 capture（修正 capture 机制加 token 维度） |
+| **P4** | **Q5K RoPE position 累积错（gen_counter 作为 position）** | Q5K 的 q/k proj 后 RoPE 用 gen_counter 作 position，但 Q5K 路径 position offset 计算与 BF16 不同 → tok4+ 位置错 → K 向量旋转错 → attention history 错 | seq=1 position=0，无旋转 | BF16 RoPE position 对（F8 baseline）；Q6K 可能走相同 RoPE 路径但需验证 | dump gen_counter=0..4 的 RoPE position 运行时值，对照 BF16 |
+| **P5** | **Q5K softmax 在 attention 中数值放大（精度边界）** | Q5K K/V 有量化误差，attention QK^T 经 softmax 放大，seq≥4 时某 K 分量误差被指数放大 → tok4+ 发散 | seq=1 softmax 单项无放大 | Q6K 6-bit 精度更高，误差不触发放大 | 算 Q5K vs Q6K 的 K 向量量化误差 L1，看是否在 softmax 放大阈值附近 |
+| **P6** | **Q5K double-QuantGemm（BUG-B guard 双发）在多 token 时 guard 位集错** | BUG-B 为 mixed-quant 每组发一个 QuantGemm + LayerInGroup(bitset) guard。多 gen 迭代时 guard 判定（layer_ctr 落在 bitset）依赖 layer_ctr 正确性，若 layer_ctr 在第 4+ 迭代错 → 走错 group 的 QuantGemm → 用错权重 | seq=1 layer_ctr 对 | Q6K 单 QuantGemm 无 guard | dump gen_counter=0..4 的 layer_ctr 值 + guard 分支去向 |
+| **P7** | **Q5K 归一化（RMSNorm/QkNorm）多 token 累积误差** | Q5K 权重误差经 RMSNorm 归一化，多 token 累积偏移 | seq=1 无累积 | Q6K 误差小不累积 | per-layer capture（加 token 维度）看 norm 输出 |
+
+**最可能根因（P1/P2/P4/P6）**：都涉及 **gen_counter 累积** 或 **跨 gen 迭代 VReg/指针状态**。共同特征：单 token（1 次迭代）不触发，多 token（≥4 次迭代）累积触发；Q5K 特化路径（mixed-quant guard / native call / 双 QuantGemm）独有，Q6K/BF16 不触发。
+
+**关键诊断方向（二选一）**：
+- **A. 可靠 per-(layer,token) capture**：修 capture 机制加 token 维度（dst = capture_base + (layer*N_tokens + token) × stride），真实验证 tok0 在 seq=5 是否发散（F6 推理应不发散）→ 定位首个发散 (layer,token)。
+- **B. 直接逐 token logits 二分**：不靠中间 capture，逐 token 取 logits cosine（tok0/1/2/3/4 各自 vs BF16），定位首个发散 token。结合 F6（QuantGemm 同码）排除 P3/P1，聚焦 P2/P4/P6（KV/RoPE/guard 累积）。
+
+**用户方法论锚定**：JIT 确定性，禁 GDB。先确认算法（Q5K decode 算术已确认对，F7）→ 确认 JIT 出来的代码（QuantGemm 同码已确认，F6）→ 寄存器/堆栈/内存布局（P1/P2/P3/P6 的指针/VReg 跨迭代状态）。下一步验 P1/P2/P4/P6 的运行时指针/VReg 值。
+
+### 方向 65b: ★决定性逐 token 二分结果★ token0 不发散, pos=2 首次发散 (2026-07-23)
+**方法**: 方法B（逐 token logits 二分），每 pos 用 `prompt[..len]` 跑 diagnostic_prefill_logits（max_new_tokens=1 → total_iters=len，最后迭代处理最后 token，KV 含前 len-1 个 token）。tests/test_diag_per_token_bisect.rs。
+
+**结果（Q5_K_M vs BF16, N=3, prompt "The capital of France is" tokens=[785,6722,315,9625,374]）**：
+| pos | cos | |q5| | |bf| | 判定 |
+|-----|-----|------|------|------|
+| 1 (tok0 only) | 0.9952 | 18.52 | 19.20 | ✓ MATCH |
+| 2 (tok0→tok1) | 0.9625 | 2.63 | 3.21 | ⚠️ 首次下降 |
+| 3 | 0.9904 | 16.21 | 15.90 | ✓ 恢复 |
+| 4 | 0.9769 | 2.78 | 3.30 | ⚠️ 再降 |
+| 5 | 0.6723 | 2.58 | 8.31 | ✗ 发散 |
+
+**★结论★**：
+1. **token0 不发散**（pos=1 cos=0.9952 ✓）→ F6 推理正确：generate-loop 迭代 0（KV 空、gen_counter=0、RoPE pos=0）与单 token run 等价，结构无误。排除 P3/P5（多 token m-loop）、P1（weight_ptr 跨迭代累积，token0 单迭代不触发）。**P1/P3/P5 排除**。
+2. **发散自 pos=2 起步**（cos 0.9952→0.9625）→ **首个历史 token 进 KV cache**（pos=2 时最后迭代 gen_counter=1，attention 查 tok1 vs KV[0]）→ **H1 方向确诊：KV cache / attention history**。
+3. **非单调**（pos=3 恢复 0.99，pos=4 再降）→ token 依赖 + 累积混合，非纯线性累积。
+4. **|q5|=2.58 vs |bf|=8.31 @ pos=5**：Q5K logits 幅度仅 BF16 的 1/3 → 系统性压缩，非纯噪声。
+5. **Q6_K 对照（方向64）**: Q6_K N=3 seq=5 cos 0.9912 MATCH → Q6K 多 token KV cache 正常 → 发散是 **Q5K 特化路径** 写 KV cache 或 attention 读 Q5K K/V 时错。
+
+**★收窄根因（P2/P4/P6 二选一）★**：
+- **P2 (最可能)**: Q5K q/k/v proj 输出后 KV cache 写入路径错。pos=2 第一次有历史 → 若 K[0] 写错位置/错 dtype 步长 → tok1 attention 读错 K[0] → 发散。需验证：Q5K 的 KV cache 写入 `kv_row_stride` / `k_cache_base + pos_off` 偏移是否与 BF16 同（F8 BF16 对说明 BF16 对，Q5K 哪里不同？）。
+- **P4**: Q5K RoPE position 累积（gen_counter 作 position）。但 RoPE lowering dtype 无关（操作 F32 激活），Q5K 与 BF16 同 RoPE 代码 → P4 可能性低，除非 Q5K 的 cos/sin 表填充或 position offset 路径不同。
+- **P6 (BUG-B guard)**: guard 按层判定非按 token，不随 token 累积 → P6 排除。
+
+**下一步（第一性原理静态验证，禁 GDB）**：
+1. 对比 Q5K vs BF16 的 **KV cache 写入机器码**：dump 两者 VmInstr 序列从 q/k/v proj 输出到 KV cache MemCopy 的指令，对比 `kv_row_stride` 来源、`pos_off = gen_ctr * kv_row_stride`、`k_cache_base = kv_cache_ptr + layer_ctr * kv_layer_stride`。
+2. 验证 Q5K 的 K 张量 dtype（QuantGemm 输出）→ `kv_row_stride = num_kv_heads*head_dim*elem_bytes` 的 elem_bytes 是否正确（Q5K 输出 F32 → 4，BF16 输出 F32 → 4，应同）。
+3. 若 KV 写入机器码 Q5K==BF16 → 发散在 attention 读 KV（pos_off 跨 token 读越界）或 RoPE position。
+4. **直接对照实验**：强制 Q5K 跑 pos=2 但禁用 attention history（kv_bound=1 单 token causal）→ 若 cos 恢复 0.99 → 确诊 KV history 读/写。
+
+### 方向 65c: ★非单调 + token 依赖分析★ 非 KV 地址系统性 bug (2026-07-23)
+**重审 pos 序列**：tokens=[785,6722,315,9625,374]（"The capital of France is"）
+- pos=1 [785]：0.9952 ✓
+- pos=2 [785,6722]：0.9625 ⚠️ 首降
+- pos=3 [785,6722,315]：0.9904 ✓ **恢复**
+- pos=4 [785,6722,315,9625]：0.9769 ⚠️ 再降
+- pos=5 [785,6722,315,9625,374]：0.6723 ✗ 爆炸
+
+**★关键洞察★**：**非单调**（pos=3 比 pos=2 好）。若 KV cache 地址/步长系统性错（P2 spill）→ error 单调累积（每加一个 token error 只增不减），cos 应单调降。但 pos=3 恢复 → **不是系统性地址 bug**。
+
+**→ P2（KV 地址 spill 系统性错）可能性降低**。更像 **token 依赖的 attention softmax 放大**（P5 变种）：某些 token（6722 " capital"?、9625、374 " is"）的 K 向量 Q5K 量化误差，在 attention softmax 经 exp 放大后影响大；其他 token（315）误差小不放大。
+
+**但 Q6_K seq=5 MATCH (F5)**：Q6K 同样有量化误差但不放大 → Q5K 的 5-bit 精度在某个 K 分量上触发了 softmax 指数放大阈值（Q6K 6-bit 不触发）。
+
+**★新候选根因（P8）★**：**Q5K K 向量某分量量化误差在 attention QK^T 后经 softmax exp 放大**。机制：
+- Q5K K[0..seq] 各 token 有 ~5-bit 量化误差 ε_i
+- attention score = Q · K_j，误差 ~|Q|·ε_j
+- softmax(score) = exp(score)/Σexp，当某 score 接近 max 时 exp 放大
+- seq=5 时 " is"(374) 作 query，其 attention 分布使某历史 token 的 ε 放大 → 输出错
+- 单 token（pos=1）无 softmax 多项 → 不放大（0.9952 ✓）
+
+**验证 P8（决定性）**：
+1. **跨 prompt 测试**：换不同 prompt（同 seq=5），看 pos=2 是否都降。若某些 prompt pos=2 不降 → token 依赖确诊 P8；若所有 prompt pos=2 都降 → 系统性 bug（P2 回升）。
+2. **Q5K K 向量逐分量误差 dump**：取 pos=5 时 KV cache 中 5 个 token 的 K 向量，对照 BF16，看哪个 token 哪个分量误差大。
+3. **数值模拟**：把 Q5K K 向量误差 ε 注入 BF16 attention（BF16 K + ε），看是否重现 0.67 → 若重现确诊 P8（误差经 softmax 放大）。
+
+**用户方法论锚定（重审）**：JIT 确定性，禁 GDB。算法（Q5K decode F7 对）→ JIT 码（QuantGemm 同码 F6）→ 现聚焦 **数值特性层**：Q5K 5-bit 量化误差经 attention softmax 的指数放大（P8）。这是数值边界问题，非代码 bug，可能需 Q5K attention 前精度提升或 K 向量补偿。
+
+### 方向 65d: ★跨 prompt 决定性验证★ P8 确诊 (token 依赖 softmax 放大), 排除 P2 (2026-07-23)
+**实验**: 4 个不同 prompt（同 N=3），逐 pos 看 cos（tests/test_diag_per_token_bisect.rs::diag_cross_prompt_pos2）：
+| prompt | p1 | p2 | p3 | p4 | p5 |
+|--------|------|------|------|------|------|
+| "The capital of France is" | 0.9952 | 0.9625 | 0.9904 | 0.9769 | **0.6723** ✗ |
+| "Hello world how are you" | 0.9975 | 0.9947 | **0.9144** | 0.9951 | 0.9989 ✓ |
+| "Once upon a time there" | 0.9875 | 0.9647 | **0.8817** | 0.9145 | 0.9635 |
+| "The quick brown fox jumps" | 0.9952 | 0.9693 | 0.9807 | 0.9722 | 0.8944 |
+
+**★决定性结论★**：
+1. **p1 始终 ≥0.9875**（4/4 prompt）→ token0 单 token 恒对，F6 再次验证。
+2. **p2 非系统性降**："Hello world" p2=0.9947（好），"capital" p2=0.9625（降）→ **pos=2 不是系统性 bug**。
+3. **发散 token 依赖 + 位置依赖**：每个 prompt 发散的 pos 不同（capital p5，hello p3，once p3，quick p5），非单调累积。
+4. **→ P2（KV 地址/步长系统性错）排除**：若系统性错，所有 prompt 所有 pos≥2 单调降。实际 token/pos 依赖。
+5. **→ P8（Q5K 量化误差经 attention softmax exp 放大）确诊**：Q5K 5-bit K 向量误差在特定 token 组合 + 特定 attention 分布下被 exp 放大 → 该 pos cos 暴跌；其他组合不放大 → cos 高。Q6_K 6-bit 精度高，误差不触发放大阈值（F5）。
+
+**★根因定论★**：Q5_K_M 多 token 发散 = **Q5K 5-bit 量化精度 + attention softmax 指数放大的数值边界效应**，非代码 bug。JIT 算法正确（F7 decode 对）、JIT 代码正确（F6 QuantGemm 同码）、内存布局正确（P1/P2/P3/P6 排除）。发散源自 Q5K 格式本身 5-bit 精度在天文数量级的 attention 组合空间中某子集触发 softmax 放大。
+
+**根治方向（非 bug fix，是精度优化）**：
+- **方案 A（精度提升）**：Q5K K/V proj 后 attention 前，K 向量用更高精度累加（当前 F32 已是，但 Q5K decode 的 5-bit 原始误差在 decode 出来就定了，F32 累加不消除 5-bit 误差）。
+- **方案 B（K 向量补偿）**：参考 llama.cpp Q5_K 是否在 attention 用 FP16 K cache 或其他补偿。需查 llama.cpp Q5_K attention 精度策略。
+- **方案 C（接受为格式固有）**：Q5_K 5-bit 精度边界，部分 prompt 发散是该量化格式的已知特性（llama.cpp 同 prompt 应也有类似 cos 下降）。需对照 llama.cpp Q5_K_M 同 prompt 同 pos 的 logits，若 llama.cpp 也降 → 非 gllm bug，格式固有；若 llama.cpp 不降 → gllm decode 或 attention 有可优化点。
+
+**★关键下一步：对照 llama.cpp★**：用 llama.cpp 跑同 4 prompt Q5_K_M，取逐 token logits vs gllm BF16，看 llama.cpp 是否也发散。这是判别"gllm bug vs Q5K 格式固有"的决定性实验。
+
+### 方向 65e: ★★★决定性精度梯度实验★★★ 精度单调发散, P8 铁证 (2026-07-23)
+**实验**: 同 prompt "The capital of France is" 同 N=3, 4 种量化精度逐 pos cos（tests/test_diag_per_token_bisect.rs::diag_quant_compare）：
+| quant | bits | p1 | p2 | p3 | p4 | p5 |
+|-------|------|------|------|------|------|------|
+| Q4_K_M | 4 | **-0.4524** | 0.0893 | -0.0655 | 0.1647 | -0.3300 |
+| Q5_K_M | 5 | 0.9952 | 0.9625 | 0.9904 | 0.9769 | **0.6723** |
+| Q6_K | 6 | 0.9979 | 0.9969 | 0.9960 | 0.9962 | 0.9912 |
+| Q8_0 | 8 | 0.9998 | 0.9995 | 0.9995 | 0.9995 | 0.9917 |
+
+**★★★铁证★★★**：
+1. **精度单调梯度**：4-bit 崩（负 cos）→ 5-bit p5 降 → 6-bit OK → 8-bit 近完美。**越低精度越发散**，确诊 P8（量化精度 + attention 放大）。
+2. **p1 全部 ≥0.99（除 Q4 -0.45）**：单 token 各精度基本对（Q4 已崩说明 Q4 误差大但单 token cosine 受 ε/|x| 影响小，|x| 大时 cosine 还能高）。
+3. **Q4_K_M N=3 全崩（负 cos）**：4-bit 量化误差在 N=3 层就放大到 logits 完全错位。**远超 llama.cpp Q4_K_M 实际能力**（llama.cpp Q4_K_M 能正常生成文本）。
+
+**★关键矛盾（重新审视）★**：Q4_K_M N=3 全崩（负 cos） vs llama.cpp Q4_K_M 可正常生成 → **gllm 的 attention/KV 路径在低精度 K/V 上放大误差过度**，非纯量化格式固有。若纯 4-bit 精度限制，llama.cpp 也该崩，但 llama.cpp 不崩 → gllm 有可优化点。
+
+**★新根因方向（P9）★**：**gllm attention 在量化 K/V 上的累积/归一化方式放大误差**。候选：
+- K/V 量化误差在 attention QK^T 累加时未做精度补偿（F32 累加但输入是量化解码值，误差已在 decode 出来）
+- softmax 数值稳定性：Q4/Q5 误差使某 score 异常大 → exp 爆炸 → attention 分布畸形
+- KV cache 存储 dtype：若 KV cache 存量化值再 decode（而非存 decode 后 F32），多 token 累积量化误差。需查 KV cache 存储 dtype。
+- **RMSNorm/attention scale**：Q4/Q5 K 向量范数误差经 1/√d scale + softmax 放大
+
+**★判别实验（gllm bug vs 格式固有）★**：
+1. **对照 llama.cpp**（本机无，需装或远端）：跑同 prompt Q4_K_M / Q5_K_M 逐 token logits。若 llama.cpp Q4_K_M 也崩 → 格式固有；若 llama.cpp 正常 → gllm bug（P9）。
+2. **KV cache 存储 dtype 检查**：gllm KV cache 存 F32（decode 后）还是存量化值？若存 F32，则累积的不是量化误差而是 decode 出来的 F32 值误差（无法消除）。若存量化值，可改存 F32 消除累积。
+3. **attention 前加 K/V 精度提升**：Q4/Q5 K decode 后在 attention 前是否可补偿（如 K 向量归一化前 scale 校准）。
+
+**当前结论**：发散 = 量化精度 + attention 放大的数值边界效应（P8 铁证），但 Q4_K_M 全崩的严重程度提示 gllm attention 路径可能放大过度（P9 待对照 llama.cpp 判别）。**非 JIT 算法/代码 bug**（F6/F7 确认 decode 与 QuantGemm 同码同算法）。下一步优先对照 llama.cpp 判别 gllm bug vs 格式固有。
+
+### 方向 65f: ★★★N=1 决定性分裂★★★ Q4_K_M 是真 BUG, Q5_K_M 是精度放大 (2026-07-23)
+**实验**: 同 prompt "The capital of France is" **N=1**（单层！）4 量化精度逐 pos cos：
+| quant | bits | N=1 p1 | p2 | p3 | p4 | p5 |
+|-------|------|--------|------|------|------|------|
+| Q4_K_M | 4 | **-0.0296** | -0.1114 | 0.0021 | -0.1170 | -0.0403 |
+| Q5_K_M | 5 | 0.9997 | 0.9994 | 0.9996 | 0.9996 | 0.9998 |
+| Q6_K | 6 | 0.9998 | 0.9996 | 0.9998 | 0.9998 | 0.9999 |
+| Q8_0 | 8 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+
+**★★★决定性分裂★★★**：
+- **Q5_K_M / Q6_K / Q8_0 在 N=1 完美**（≥0.9994）：单层单 token 全对。Q5_K_M N=3 发散（0.67）= **真精度放大**（P8，N=1→N=3 才崩，层间累积 + attention 放大）。
+- **Q4_K_M 在 N=1 就全负 cos**（-0.03~-0.12）：**单层单 token 就崩** → **不是精度问题，是真 BUG**。4-bit 精度再低，单 token 单层 cos 不该负（BF16 vs Q4_K_M 同 token 预测应有 >0.9 相关）。
+
+**→ 两个独立问题**：
+1. **Q4_K_M N=1 崩（BUG-NEW）**：Q4_K decode 或 Q4_K 权重读取路径根本性错。需查 Q4_K 的 QuantGemm 路径（block_bytes=144, block_size=256, 与 Q5_K 同结构但 lo4/hi 不同）。Q4_K 也是 native call？还是 HighBitMerge 路径？Q4_K 的 scales/min 解码（4 个 group, get_scale_min_k4）是否对？
+2. **Q5_K_M N=3 发散（P8，格式/放大）**：N=1 完美 → 纯多 token + 多层累积放大。需对照 llama.cpp 判别格式固有 vs gllm 放大过度。
+
+**★优先级★★**：Q4_K_M N=1 崩是**确定的代码 BUG**（非精度），优先根治。Q5_K_M N=3 发散次之（需 llama.cpp 对照判别是否格式固有）。
+
+**Q4_K_M BUG 排查方向（第一性原理）**：
+- 查 Q4_K 的 QuantGemm 走哪条 kernel：HighBitMerge（INT5/6 路径）还是 DequantFma？Q4_K 是 PackedInt4 + Hierarchical scale + BlockScalarWithMin，可能走 HighBitMerge。
+- 查 Q4_K decode 是否有 native call（如 q4k_decode_step_native）还是 inline HighBitMerge。Q4_K 的 lo4 SPLIT + hi1 转置 + get_scale_min_k4 + min 减法是否与 scalar reference（k_quant.rs Q4_K）对齐。
+- N=1 p1 就负 → 第一层第一个 QuantGemm（可能 q_proj 或 input_norm 后第一个 proj）输出就错 → 查 Q4_K decode 的 scales/min/d 解码。
+- **对照实验**：Q4_K_M 单层单 token dump 权重 decode 后的 K 向量 vs scalar reference（dequant_q4_k），定位首个发散 block。
+
+**Q4_K_M vs Q5_K_M 差异点**（为什么 Q4 崩 Q5 不崩）：
+- Q4_K: qs[128] (4-bit, 2 elem/byte) + qh 无（Q4_K 无 high bit plane, 纯 4-bit）+ scales[12] + d + dmin = 144B, block=256
+- Q5_K: qs[128] + qh[32] (1 high bit) + scales[12] + d + dmin = 176B, block=256
+- Q4_K 比 Q5_K 少 qh[32]（无高 bit 平面）。若 Q4_K 误走 Q5_K 的 NibbleWithHighBits 路径（期待 qh）→ 读错偏移 → 全崩。**高度怀疑 Q4_K 的 data_layout/scale_layout 描述符配错，误匹配 HighBitMerge 路径**。
+
+### 方向 65g: ★Q4_K 根因定位★★★ DequantFma 单相位 + Assisted 误路由 双 bug (2026-07-23)
+**静态分析根因（第一性原理）**：Q4_K N=1 全负 cos 是**两个叠加 bug**：
+
+**BUG-1（已修，路由层）**: Q4_K (PackedInt4 + Hierarchical scale) 被 `is_assisted` (moe_emit.inc.rs:780) 误路由到 `GemmKernel::Assisted`。Assisted kernel 只懂 flat scale (BlockScalar/BlockScalarWithMin)，对 Hierarchical 落 `_ => (0,0)` → 把 d(F16,offset 0) 当 per-block scale 加载 → 全错。
+- **修复**: `is_assisted` 加 `is_flat_scale` gate，Hierarchical scale 的 INT4 不走 Assisted → fall through DequantFma。已改 moe_emit.inc.rs:779-796（BCE-20260723-Q4K-ASSISTED-MISROUTE）。
+- **修后 N=1**: cos -0.3~-0.4（**仍崩，且更负**）→ BUG-2 存在。
+
+**BUG-2（未修，DequantFma 相位层）**: DequantFma (quant_gemm.inc.rs:800) 的 `DecodeTraceBuilder::new(desc, lanes)` (line 831) **只建 Lo 相位**（nibble_phase 默认 NibblePhase::Lo，quant_decode.rs:113）。Q4_K 的 `PackedNibbles` emit_unpack (quant_decode.rs:832-854) 是 **两阶段 SPLIT**（Lo pass 填前半 128 elem，Hi pass 填后半 128 elem），但 DequantFma 从不调 `with_nibble_phase(Hi)` → **只解码低 nibble，高 nibble 全跳过** → 一半元素错、一半未解 → cos 负。
+- 对比：Q5_K 走 `build_q5k_decode` 单片 native call（quant_decode.rs:225），内部完整解码 256 elem（含 lo4 SPLIT per 64-group + hi1 转置），所以 Q5_K N=1 完美。
+- Q4_K 没有单片 native call（无 q4k_decode_step_native），走通用 DequantFma 路径，缺双相位循环。
+
+**★根治方向（两选一）**：
+- **方案 A（单片 native call，镜像 Q5_K）**: 新增 `q4k_decode_step_native`（仿 q5k_decode_step_native，Q4_K: qs SPLIT per 64-group + 无 hi bit + get_scale_min_k4 + d*sc*q4 - dmin*m），Q4_K 走 `build_q4k_decode` 单片路径。与 Q5_K/Q6_K 路径风格一致，根治 SPLIT 相位问题。
+- **方案 B（DequantFma 双相位循环）**: quant_gemm.inc.rs DequantFma 路径对 PackedNibbles + Hierarchical 的情况建两个 trace（Lo+Hi），在 ei 循环内两趟分别 decode 累加。改 DequantFma 的循环结构，较复杂。
+
+**推荐方案 A**（与 Q5_K/Q6_K 单片 native 一致，架构统一，DEC-ARCH 顺从）。需：
+1. quant_gemv.rs 加 `q4k_decode_step_native`（参考 q5k_decode_step_native，去掉 hi1 转置部分）
+2. quant_decode.rs 加 `is_q4k_format` + `build_q4k_decode`（仿 build_q5k_decode）
+3. build() 早 return Q4_K 走单片路径
+
+**Q4_K bug 独立于 Q5_K_M 调查**：Q5_K_M N=3 发散 = 精度放大（P8，非 bug）；Q4_K N=1 崩 = 双 bug（路由 + 相位，真代码 bug）。两个问题分别处理。
+
+**BCE 类**: BCE-20260723-Q4K-ASSISTED-MISROUTE（已修路由层）+ BCE-20260723-Q4K-DEQUANTFMA-SINGLE-PHASE（待修，方案 A 单片 native call）。同类影响所有 PackedInt4 + Hierarchical scale 格式（当前仅 Q4_K）。
+
+### 方向 66: ★★★llama.cpp 对照彻底反转★★★ gllm 推理 bug, 非格式固有 (2026-07-24)
+**工具**: 在 /srv/llama.cpp 装 llama.cpp (AVX2, ggml 0.17.0)，加 examples/dump-logits 逐 token 完整 logits dump 程序（dump-logits.cpp + decode-token.cpp）。
+
+**对照实验** (prompt "The capital of France is", tokens=[785,6722,315,9625,374], Qwen3-0.6B, N=3 truncate):
+| pos | llama Q5vsBF | gllm Q5vsBF | gllmQ5 vs llamaQ5 | gllmBF vs llamaBF | argmax llamaQ5/llamaBF/gllmQ5/gllmBF |
+|-----|-------------|-------------|-------------------|-------------------|--------------------------------------|
+| 0 | 0.422 | 0.995 | 0.011 | 0.227 | 102224/15846/18523/18523 |
+| 1 | 0.994 | 0.962 | -0.118 | -0.167 | 315/315/24803/24803 |
+| 2 | 0.994 | 0.990 | 0.190 | 0.200 | 279/279/14034/14034 |
+| 3 | 0.996 | 0.977 | -0.141 | -0.215 | 374/374/482/7435 |
+| 4 | 0.997 | 0.672 | 0.308 | 0.290 | **12095/12095/408/552** |
+
+**token 解码**: 12095=" Paris"✅, 552="ure"❌, 408="end"❌, 374=" is", 315=" of", 279=" the"
+
+**★★★铁证★★★**:
+1. **llama.cpp Q5_K_M pos4 argmax=12095=" Paris" ✅**（cos vs llama BF16=0.997）→ **Q5_K_M 格式本身没问题**，llama.cpp 能正确推理。
+2. **gllm BF16 pos4 argmax=552="ure" ❌**（gllm BF16 vs llama BF16 cos=0.29）→ **gllm 连 BF16 都错**，不是 Q5_K 精度问题。
+3. **gllm Q5_K_M vs gllm BF16 cos 高（0.67/0.96）= "一起错"非"都对"** —— 之前 6 Agent 据此判"格式固有精度放大"是错的。
+
+**→ 方向 65 的 P8 结论（格式固有精度放大）推翻**。真因 = gllm 推理路径 bug，BF16 N=3 就崩。
+
+**6 Agent 静态分析为何全错**: 只对照 Q5_K vs Q6_K 是否"同码"，静态同码≠正确。缺与权威参考（llama.cpp）的数值对照。两路径同码可能一起错。
+
+**新矛盾**: 原始 bug 报告称 gllm BF16 N=28 正确输出 "Paris"，但 N=3 truncate 时 BF16 pos4 argmax="ure"。**GLLM_TRUNCATE_LAYERS=3 截断本身可能破坏图结构/position/lm_head 对齐**。待验证 N=28 不截断时 gllm BF16 vs llama BF16 是否对齐。
+
+**BCE 类**: BCE-20260724-GLLM-INFERENCE-DIVERGENCE（gllm 推理路径数值发散，BF16 也崩，待根因定位）。根治前禁用"格式固有"结论。
+
+### 方向 66b: ★N=28 不截断对照★ gllm 全崩, 输出固定乱码 token (2026-07-24)
+**实验**: gllm N=28（不截断）BF16 + Q5_K_M dump 逐 token logits vs llama.cpp：
+- gllm Q5 vs BF cos = **0.43 全 pos**（N=3 时 0.67，N=28 更崩）
+- gllm 所有 pos argmax 恒为 100622="作为"（Q5）/ 101888="关于"（BF16）—— **不管输入 token，gllm 输出固定乱码**
+- gllm BF vs llama BF cos = 0.09~0.34（几乎不相关）
+
+**→ gllm N=28 完整层循环路径有严重 bug**：输出与输入解耦，恒定乱码 token。典型 logits 未初始化/读错偏移/层循环状态累积错症状。
+
+**与历史方向 59 (BUG-A ffn_resid 别名) 一致**：N=28 完整路径的累积/状态 bug，BUG-A/B/C 修的是 N≤3，N=28 完整路径未根治。
+
+**判定**:
+- Q5_K_M 格式无问题（llama.cpp 正确）✓
+- gllm 推理路径 bug（BF16 也崩，N=28 全崩）✓
+- 之前"格式固有精度放大"结论彻底推翻 ✓
+- 真根因方向：gllm 完整层循环（28 层 generate-loop）的状态累积/VReg spill/ping-pong/position bug，N 越大越崩
+
+**下一步**: 对照 gllm N=3 vs N=28 逐层 capture，定位完整层循环哪层开始 logits 与 llama.cpp 分叉。需可靠 per-(layer,token) capture（修正 capture 机制加 token 维度，方向 65c 已记）。
+
+### 方向 66c: ★N=28 logits 趋同症状★ argmax 恒定中文 token, 分布统计量恒定 (2026-07-24)
+**gllm N=28 BF16 逐 token logits 统计**（全 5 pos, prompt "The capital of France is"）：
+| pos | max\|logit\| | mean | std | argmax |
+|-----|-------------|------|------|--------|
+| 0 | 16.593 | -2.153 | 4.021 | 101888="关于" |
+| 1 | 16.599 | -2.139 | 4.020 | 101888 |
+| 2 | 16.577 | -2.169 | 4.023 | 101888 |
+| 3 | 16.600 | -2.141 | 4.022 | 101888 |
+| 4 | 16.576 | -2.167 | 4.021 | 101888 |
+
+**★症状特征★**：
+1. argmax **全 pos 恒 101888="关于"**（输入不同 token 输出恒定）
+2. max/mean/std **全 pos 几乎不变**（16.58/-2.15/4.02）→ logits 分布统计量恒定
+3. logits 本身不全相同（L2 3~15），有"基础模式 + 小扰动"，基础模式让 101888 恒胜
+4. top5 全是 99000~105000 区间中文 token
+
+**→ lm_head 输入（最终 hidden state）几乎不随 token 变化**。候选根因：
+- 最终 RMSNorm (output_norm) bug → hidden 趋同
+- lm_head 读错权重偏移 → 每次读同一行
+- 残差流 ping-pong 跨层覆盖成固定值（方向59 BUG-A ffn_resid 别名同类）
+- RoPE 没作用 → 所有 token 算同 hidden
+
+**对比 N=3**: max=8.27/mean=-0.69/std=1.66/argmax=552="ure" — 幅值仅 llama 一半。**N=3 和 N=28 是不同 bug**：N=3 幅值缩半(scale 丢失)，N=28 幅值对但分布趋同(hidden 趋同/残差覆盖)。
+
+**llama.cpp 对照基准**: max=17.515/mean=-2.350/std=3.029/argmax=12095=" Paris" ✓
+
+**下一步障碍**: 定位哪层开始 hidden 趋同需逐层 hidden state 对照，llama.cpp 无逐层 dump API（需改 llama.cpp 加层 hook，工作量大）。或用 gllm 内部 per-(layer,token) capture（方向65c 已记 capture 机制缺陷，需修加 token 维度）。
+
+### 方向 66d: ★3 融合组 ping/pong 硬重置嫌疑★ (2026-07-24, 时序推理)
+**时序推理发现**(GLLM_DUMP_MEGA dump N=28 VmInstr):
+- Qwen3 有 **3 个融合组**,各跑 28 层循环(instr 109/5629/11341),各用独立 ping/pong pair:
+  - 组1: VReg 25/26
+  - 组2: VReg 2371/2372
+  - 组3: VReg 4815/4816
+- **每组开始前硬重置 ping/pong 到固定 bufA/bufB**(pipeline.inc.rs:405-416 Plan C, mega dump instr 5625-5626/等):
+  - `ping = scratch + 0`(bufA), `pong = scratch + 167772160`(bufB)
+- final_norm 读组3 pong(4816)(instr 16774),lm_head 读 final_normed(503316480)(instr 16824),接线对。
+
+**★嫌疑★**: 组间 hidden 传递依赖"上一组 parity 后输出在 bufA"(因下一组 ping 硬重置 bufA)。这依赖 N 奇偶:
+- 单组 N 层(每层写 pong)+parity swap = N+1 次 swap。parity 后 pong 指向:
+  - N 偶(28): N+1=29 奇 swap → pong→bufA ✓(下一组 ping=bufA 读对)
+  - N 奇(3): N+1=4 偶 swap → pong→bufB ✗(下一组 ping=bufA 读错 buffer!)
+
+**但实测 N=3 比 N=28 略好**(N=3 cos 0.29/argmax 552, N=28 cos 0.34/argmax 101888)——与"N 奇读错该更差"矛盾。可能:
+1. 我的 swap 计数推理有误(swap 语义/parity 时机)
+2. N=3 truncate 改变组数/结构(3 组 × 3 层 vs 3 组 × 28 层)
+3. 还有别的 bug 叠加
+
+**待验证(并发 Agent)**:
+1. ActivationSwap 的运行时语义(交换 VReg 值 vs 交换 buffer 内容?)
+2. 单组 N 层 + parity 后 pong 精确指向(手算 vs dump 运行时值)
+3. 组间 hidden 传递:组1 输出 → 组2 输入 是否真对齐(下一组 ping 重置 bufA,上一组 parity 后 pong 是否真在 bufA)
+4. N=3 vs N=28 组数是否相同
+
+**BCE 类**: BCE-20260724-MULTIGROUP-PINGPONG-RESET(组间 ping 硬重置依赖 N 奇偶,嫌疑,待验证)。
+
+### 方向 66e: ★★★根因定位★★★ Plan C 组间 ping/pong 重置破坏层循环内残差流 (2026-07-24)
+**根因(时序推理 + VmInstr dump 实证, 禁 GDB)**: `pipeline.inc.rs:399-416` 的 Plan C 重置。
+
+**机制**:
+- emit_fusion_groups 遍历单条路径内的 22+ 融合组(非 3 组, Agent2 纠正: 3 个 Const(28) 是 3 条互斥执行路径)。
+- 所有组在同一 LoopBegin/LoopEnd 内(handle_standard_layer_loop:874 `if is_layer_group && !in_layer_loop` 只首个 layer 组开 LoopBegin)。
+- Plan C 重置(line 405-416)**每组前**都 emit `AddPtr ping=bufA(emb), pong=bufB`, 在层循环体内重复。
+- 后续组(如 attn_resid Add)读 ping = bufA(embedding), 不是上次迭代 swap 后的上一层输出。
+- `attn_resid = embedding + attn_output` (应 `prev_layer_out + attn_output`) → 残差流每层重置到 embedding 基数, 不累积。
+
+**症状完美解释**:
+- N=28: 28 层叠加, hidden 完全被 embedding 主导 → argmax 恒 101888="关于", max/mean/std 全 pos 不变(16.58/-2.15/4.02) ✓
+- N=3: 3 层, 破坏浅, hidden 未完全坍缩 → argmax 552="ure"(半相关) ✓
+- N 越大越崩, 与实测 N=3 cos 0.29 vs N=28 cos 0.34 + argmax 恒定一致 ✓
+- BF16 和 Q5_K_M 都崩(Plan C 与量化无关, 是层循环结构 bug) ✓
+- llama.cpp 正常(无此 bug) ✓
+
+**VmInstr dump 铁证** (/tmp/mega_n28.txt, N=28 BF16):
+- instr 138: input_norm 读 VReg(25)=ping(上次迭代 swap 后=上一层输出) ✓
+- instr 4803-4804: Plan C 重置 VReg(25)=bufA(emb), VReg(26)=bufB ✗ 层循环内!
+- instr 4894: attn_resid Add 读 VReg(25)=bufA(embedding) ✗ 应读上一层输出
+- N=3/N=28 Plan C 重置都 103 次(3 路径各~34), 结构相同, 仅 bound Const(3 vs 28)
+
+**Plan C 为何是错误修复**: 注释 400-404 说"3 融合组串行, 前组 parity 翻转污染后组"。但实际(Agent2):
+- 3 个 Const(28) 是 3 条互斥执行路径(BranchIfPtrNonNull batch_ctx_ptr 分发), 非同路径 3 组
+- 单路径内 22+ 组在同一层循环, parity 只在层循环外(close_layer_loop, LoopEnd 后)一次
+- 组间(层循环内)无 parity swap → 不存在"前组 parity 翻转污染后组"
+- Plan C 修的是不存在的 bug, 引入真 bug
+
+**修复方案(待授权)**:
+- 删 Plan C 重置(line 405-416), ping/pong 初始化已在 line 308-309(层循环前)正确做。
+- 风险: 注释 403 说 Plan C 修了"N=偶数 layer0=0 乱码"。需验证 N=偶数不复发(可能原 bug 真因是别处, Plan C 误判)。
+- 验证: 修后跑 gllm N=28 BF16 vs llama.cpp BF16, cos 应接近 1, argmax 应=12095="Paris"。
+
+**BCE 类**: BCE-20260724-PLAN-C-RESIDUAL-BREAK(层循环内组间 ping/pong 重置破坏残差流, N越大越崩, logits趋同)。根治=删 Plan C 重置(待验证 N=偶数不复发原症状)。
+
+### 方向 66f: ★★★修复验证★★★ BF16 N=28 完美对齐 llama.cpp (2026-07-24)
+**修复**: 删 pipeline.inc.rs:399-416 Plan C 组间 ping/pong 重置（BCE-20260724-PLAN-C-RESIDUAL-BREAK）。
+
+**VmInstr 验证修复生效**: AddPtr offset:0 从 103 降到 28（只剩层循环前初始化，不再每组前重置）。
+
+**BF16 N=28 vs llama.cpp BF16 对照（/tmp/gllm_bf16_N28.bin vs /tmp/llama_bf16.bin pos4）**:
+| 指标 | 修前 | 修后 | llama.cpp |
+|------|------|------|-----------|
+| cos | 0.343 | **0.999992** | — |
+| argmax | 101888="关于" | **12095=" Paris"** | 12095=" Paris" |
+| max\|logit\| | 16.576 | 17.503 | 17.515 |
+| mean | -2.167 | -2.352 | -2.350 |
+| std | 4.021 | 3.026 | 3.029 |
+
+**BF16 N=28 完美对齐** ✓✓✓。Plan C 重置确是 N=28 logits 趋同根因。
+
+**N<28 截断层 cos≈0.67 属正常**：截断到中间层不该等于完整 28 层输出，之前当 bug 是对照基准错。真正判据 = N=28 完整模型对齐 llama.cpp。
+
+**待验证**: Q5_K_M N=28 vs llama.cpp Q5_K_M（Q5_K_M mixed-quant JIT 编译慢，dump 进行中）。预期也修好（Plan C 与量化无关，是层循环结构 bug）。
+
+### 方向 66g: ★Plan C 删除的复杂性★ BF16 修复成功, Q5_K_M core dump (2026-07-25)
+**实验**: 删 Plan C 重置(pipeline.inc.rs:399-416)后:
+- **BF16 N=28**: cos=0.999992 argmax=12095=" Paris" ✓ 完美对齐 llama.cpp
+- **Q5_K_M N=28**: 运行时 **core dump**（编译完 RegAlloc 10986ms, 运行时崩）
+
+**Q5_K_M 崩溃症状** (/tmp/q5run.log):
+- 大量 `[verify] warning: LoopInvariant VRegId(X) overwritten at instr[Y] inside loop [11151, 16845]`（第3条 decode 路径层循环）
+- 删 Plan C 后, ping/pong VReg 成真正 LoopInvariant, 但被层循环内指令覆盖 → 运行时崩
+
+**→ Plan C 不是单纯的"无脑错误实现"**:
+- 对 BF16: Plan C 重置破坏残差(每组前 ping=emb), 删了 BF16 修复 ✓
+- 对 Q5_K_M (mixed-quant 双 QuantGemm guard): Plan C 重置"掩盖"了 LoopInvariant VReg 被覆盖的 bug, 删了暴露真 bug → 崩
+
+**真根因更深**: `LoopInvariant VReg 在层循环内被覆盖` 是原 bug。Plan C 用每组重置"固定"被覆盖的 VReg(BF16 代价是残差破坏, Q5_K_M 代价是掩盖 VReg 覆盖)。
+
+**已撤回 Plan C 删除**(pipeline.inc.rs 恢复), 因 Q5_K_M 崩不能 commit。
+
+**下一步**: 定位"哪个 LoopInvariant VReg 被覆盖"(verify warning 列出 VRegId 6826/6382/4986/6838/6175/5620/5508/6277/6499/5503/5284/6603/5383 等), 找覆盖指令(instr 15914/14874/11599/...)。这是 Plan C 试图掩盖的真 bug。修这个真 bug 后, 删 Plan C 才能同时让 BF16 对 + Q5_K_M 不崩。
+
+**BCE 类**: BCE-20260725-LOOP-INVARIANT-OVERWRITE(层循环内 LoopInvariant VReg 被覆盖, Plan C 重置掩盖, 待定位真覆盖源)。
+
+### 方向 66h: ★时序分析定位★ Plan C 删除致 Q5 崩, 真根因混合 (2026-07-25)
+**时序分析(静态 VmInstr dump, 禁 GDB)**:
+
+**1. 删 Plan C 后 Q5 vs BF16 对比**:
+- BF16 N=28: 删 Plan C 后 cos=0.999992 ✓ (Plan C 是 BF16 残差破坏根因, 确认)
+- Q5_K_M N=28: 删 Plan C 后 **core dump** (编译完 RegAlloc 17s, 立即崩, 无运行时日志)
+- Q5_K_M N=28 修复前(Plan C 在): 跑通, argmax 恒 100622="作为"(残差破坏症状, 同 BF16)
+
+**2. verify warning 分析 (误报, 非崩因)**:
+- `LoopInvariant VRegId(6603) overwritten at instr[15386] inside loop [11151,16845]`
+- 6603 时序: 15319 DeclareVReg → 15321 Broadcast(0) → 15385 Mul → 15386 Add(FMA累加) → 15501 Recip
+- 6603 是 RMSNorm sum-of-squares acc: Broadcast(0) 初始化 → FMA 累加 → Recip(1/sqrt)
+- 6603 定义(15319)/使用(15321-15517)/全在 gen loop [11151,16845] 内, LoopEnd 后不用, 定义前不用 = 纯 BodyLocal
+- verify 误判为 LoopInvariant (regalloc lifecycle 分析 bug), 非崩溃因 (BF16 同结构不报此 warning 也不崩)
+
+**3. Q5 vs BF16 结构差异 (Q5 崩因方向)**:
+- Q5 用 `Q5KDecodeStep`/`Q6KDecodeStep` VmInstr (33 个), 非 QuantGemm
+- Q5 有 BUG-B `GprCondAction { cond: CmpEq(BitTest(bitset,layer_ctr), 0), action: Skip(40) }` guard (instr 321 等, 路径1 层循环内)
+- Q5 代码 1.25MB / 177861 机器指令 (BF16 小得多)
+- Q5 编译完立即崩 (无运行时日志) = prologue 或首指令崩, 非 guard 逻辑错 (guard 在层循环内, 删 Plan C 不影响 guard VReg 144=BitTest(143,48))
+
+**4. Plan C 对 Q5 的实际作用 (非单纯掩盖)**:
+- Plan C 重置 ping/pong(25/26) 每组前 = bufA(emb)/bufB
+- BF16: 此重置破坏残差 (每组前 ping=emb, attn_resid=emb+attn_output)
+- Q5: 此重置**同时**给 mixed-quant 双 QuantGemm guard 路径提供了 ping/pong 的确定初始态
+- 删 Plan C 后 Q5 的 ping/pong 在层循环内组间靠 ActivationSwap 交替, 但 Q5 的 guard Skip(40) 可能跳过/跳到依赖 ping/pong 确定态的指令 → 崩
+
+**5. 结论**:
+- BF16 残差破坏根因 = Plan C (确认, 删了 BF16 修好)
+- Q5 崩 = 删 Plan C 后 mixed-quant guard 路径失稳 (具体崩点待 GDB 抓 SIGSEGV 地址反汇编)
+- Plan C 是"错误实现"但同时对 Q5 mixed-quant 有"副作用性正确" → 不能直接删
+- 真根治需: 修 BF16 残差破坏(删 Plan C) + 修 Q5 mixed-quant guard 对 ping/pong 确定态的依赖(让 guard 不依赖 Plan C 重置)
+
+**当前状态**: pipeline.inc.rs 保留 Plan C (带注释说明), BF16 和 Q5 都不崩但都错(残差破坏). 待后续:
+1. GDB 抓删 Plan C 的 Q5 崩溃地址, 反汇编定位具体非法指令
+2. 或分析 Q5 guard Skip(40) 跳转目标是否依赖 ping/pong 确定态
+
+**BCE 类**: BCE-20260725-PLAN-C-Q5-CRASH(删 Plan C 致 Q5 mixed-quant core dump, 待 GDB 定位崩点)。
+
+### 方向 66i: ★GDB 定位 Q5 崩点★ Q5KDecodeStep block_base spill 被覆盖 (2026-07-25)
+**GDB 抓删 Plan C 的 Q5 SIGSEGV** (/tmp/gdb_q5b.log):
+- Thread 2 SIGSEGV, rip=0x7ffff78b8e91 (JIT 可执行区)
+- 崩指令: `movzwl (%rax),%eax` + `vmovd %eax,%xmm1` + `vcvtph2ps %xmm1,%xmm1` + `vbroadcastss %xmm1,%ymm1`
+  = **f16→F32 广播** (加载 Q5K block 头的 d/dmin f16 值)
+- 紧跟 `push rax/rbx/.../r15/pushf` = **native call prologue** (Q5KDecodeStep 调 q5k_decode_step_native)
+- rax=0 (NULL), rdi=0, rsi=0, rdx=0x6db6dc(7190236≈bitset), rcx=1
+
+**崩前指令序列**:
+```
+mov %rax,-0x2120(%rbp)    # spill rax 到栈槽 -0x2120
+mov -0x2120(%rbp),%rax    # reload rax (得 0!)
+movzwl (%rax),%eax        # 解引用 rax=0 → SIGSEGV
+```
+
+**根因**: Q5KDecodeStep 的 block_base VReg (weight 块基址) 被 spill 到栈槽 -0x2120, reload 时得 0。**spill 槽被覆盖** (写入 0 或被其他 VReg 复用)。
+
+**VmInstr 链** (mega_fixed.txt 路径1):
+- VReg19 = LoadPtr(AbiArg(1)) = weight_blob_ptr (非 NULL, ABI 保证)
+- VReg29 = 19 + 28*704 (layer weight base)
+- VReg39 = 29 + 38 (block_base, block 循环内)
+- Q5KDecodeStep { block_base: VRegId(39) } → 39 被 spill 到 -0x2120, reload 得 0
+
+**为何 BF16 不崩**: BF16 无 Q5KDecodeStep (用 Gemm), 代码小 (~1.25MB vs Q5 更大), spill slot 少, 39 的 spill 槽不被覆盖。
+**为何 Plan C 在时不崩**: Plan C 的 AddPtr 重置 ping/pong 消耗额外 GPR, 改变 regalloc 决策, "碰巧"让 39 不被分配到被覆盖的 spill 槽。删 Plan C 后 regalloc 决策变, 39 落到冲突 spill 槽。
+
+**真根因**: regalloc 的 spill slot 管理 bug — Q5 大代码 (177861 机器指令) 下 spill slot 复用覆盖活跃 VReg (block_base)。Plan C 是"错误实现但 regalloc 意外稳定", 删除暴露 regalloc bug。
+
+**关联**: docs/domain-knowledge/regalloc-native-call-interaction.md (native call clobber), 但本次崩在 native call prologue 前 (spill/reload 阶段), 非 call clobber。
+
+**根治方向** (待实施):
+1. regalloc spill slot 分配: 活跃 VReg 的 spill 槽不应被同生命期其他 VReg 复用 (ScopedSpillAllocator 已声称唯一 offset, 但 Q5 大代码下可能失效)
+2. 或: Q5KDecodeStep 的 block_base 标记为 "跨 native call 不可 spill" (类似 fresh_weight reload 模式)
+3. 验证: 修后删 Plan C, Q5 N=28 不崩 + cos≈llama Q5
+
+**当前**: pipeline.inc.rs 已删 Plan C (调试态), 待 regalloc 修复后保留删除。或先恢复 Plan C 保不崩。

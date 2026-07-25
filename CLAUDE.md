@@ -213,6 +213,7 @@
 20. [环境变量](#-铁律-禁止擅自添加环境变量)
 21. [并发 Agent 上限](#-铁律-agent-concurrency-limit--并发子-agent-上限-6)
 22. [治本不治标](#-铁律-arch-root-cause--治本不治标永不接受简单方案)
+23. [JIT 数值发散优先时序推理](#-铁律-arch-timing-reasoning--jit-数值发散优先时序推理禁验证驱动找-bug)
 
 ---
 
@@ -351,6 +352,38 @@ JIT 编译器在编译时看到什么数据（权重 dtype/布局/shape、KV cac
 - ❌ 禁止 "先能跑起来" 的降级思维 — 架构正确性 > 短期可用性
 - ✅ 治本路径: 发现问题 → 追溯到架构根因 → 重构架构消除整类问题 → 验证
 - ✅ 一步到位: 每次触碰一个模块，必须把该模块的架构做到位，不留技术债
+
+---
+
+## 🚨 铁律 ARCH-TIMING-REASONING — JIT 数值发散优先时序推理，禁"验证驱动找 bug"
+
+> 来源：BCE-20260724-PLAN-C-RESIDUAL-BREAK。Q5_K_M/BF16 多 token logits 趋同(argmax 恒定)案，前几轮 AI 误判为"格式固有精度放大"(6 个并发 Agent 静态对照 Q5_K vs Q6_K "同码"就下结论)，实际是 Plan C 组间 ping/pong 重置破坏残差流(前几轮 AI 的无脑错误实现)。靠时序推理 + VmInstr dump 定位，llama.cpp 仅最终对照确认。
+
+**JIT 是确定性的**：相同输入 → 相同机器码 → 相同输出。数值发散 = 代码 bug（自己写的），不是"精度固有"或"需 GDB"。先静态推理，不要跳到"验证驱动找 bug"。
+
+### 禁止的反模式
+- ❌ **"验证驱动找 bug"**：一发现发散就装外部参考(llama.cpp/PyTorch)逐数值对照，靠对照差异倒推 bug 位置。慢、且外部参考只给"最终值不同"，不给"哪条指令错"，易误判方向。
+- ❌ **"内部同码对照就下结论"**：对照 A 路径 vs B 路径"同码"就判"非代码 bug = 格式固有/精度"。两路径可能**一起错**(同码同 bug)。6 个 Agent 静态对照全错过 Plan C 案。
+- ❌ **"精度放大"兜底结论**：找不到 bug 就归"量化精度 + softmax 放大，格式固有"。这是合理化降级，掩盖真 bug。精度梯度(Q4崩/Q5降/Q6OK)不等于"格式固有"，可能所有量化同受一个结构 bug 影响(Plan C 对所有量化都崩)。
+- ❌ **GDB 依赖**：JIT 确定性意味着静态读 VmInstr dump + 时序推理即可定位，无需运行时断点。
+- ❌ **加"无脑修复"掩盖症状**：发现某现象(如 N=偶数 layer0=0)就加 reset/重置硬抹平，不查真因。Plan C 正是这种——修了不存在的 bug，引入真 bug。删修复前先理解它当初"修"的是什么(可能也是误判)。
+
+### 强制流程（JIT 数值发散调试）
+1. **先 dump VmInstr**：`GLLM_DUMP_MEGA=<dir>` 导出 mega kernel 指令序列，静态读。
+2. **时序推理 buffer/指针演化**：对 ping-pong/残差流/KV cache/weight_ptr 等跨循环状态，手画时序表（初始→每迭代读什么写什么→swap→N 次后谁持有最终值）。Plan C 案就是靠"层循环内每组前重置 ping=embedding"时序推理定位。
+3. **核对"修复"的真前提**：每段带 BCE 注释的"修复"代码，核对其假设是否成立。Plan C 注释说"3 融合组串行"，实际是 3 条互斥执行路径——前提错，修复就是 bug。
+4. **再对照权威参考**：时序推理定位候选后，**才**用 llama.cpp(/srv/llama.cpp，examples/dump-logits)或 PyTorch reference 做最终数值确认（cos≈1 / argmax 一致）。参考是**确认**不是**驱动**。
+5. **禁止跳过 1-3 直接 4**。
+
+### 判别"格式固有 vs 代码 bug"的红线
+- 只有在**时序推理 + VmInstr dump 排查完所有跨循环状态、且对照权威参考确认 gllm 数值=参考数值**后，剩余的"量化精度噪声"才可归"格式固有"。
+- 若 gllm 数值 ≠ 权威参考 → 必有代码 bug，继续时序推理，禁归"格式固有"。
+- 精度梯度(Q4/Q5/Q6/Q8 发散程度不同)不能单独作"格式固有"证据——结构 bug 对不同量化影响程度不同(Plan C 对 BF16 和 Q5_K_M 都崩，但 N 越大越崩)。
+
+### 工具
+- `GLLM_DUMP_MEGA=<dir>`：dump 完整 mega kernel VmInstr 到 `<dir>/mega_kernel_vm.txt`
+- `/srv/llama.cpp/build/bin/llama-dump-logits`：对照参考，逐 token 完整 logits dump（自写，examples/dump-logits/）
+- `/srv/llama.cpp/build/bin/decode-token`：token id → piece 解码
 
 ---
 
