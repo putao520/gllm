@@ -17,6 +17,33 @@ fn st_available() -> bool {
     std::path::Path::new(ST_PATH).exists()
 }
 
+const BACKBONE_MODEL: &str = "Qwen/Qwen3-0.6B";
+
+/// @trace REQ-QGUARD-003
+/// @trace REQ-QGUARD-004
+#[test]
+fn qwen3_guard_backbone_e2e_moderate() {
+    if !st_available() {
+        eprintln!("skipped: {ST_PATH} not present");
+        return;
+    }
+    let client = gllm::Client::new_chat(BACKBONE_MODEL).expect("load Qwen3 backbone");
+    let result = client
+        .guard_moderate("Hello, how are you?", ST_PATH)
+        .expect("backbone hidden moderation");
+    assert_eq!(result.risk_level_logits.len(), 3);
+    assert_eq!(result.category_logits.len(), 8);
+    assert_eq!(result.query_risk_level_logits.len(), 3);
+    assert_eq!(result.query_category_logits.len(), 9);
+    assert!(result
+        .risk_level_logits
+        .iter()
+        .chain(result.category_logits.iter())
+        .chain(result.query_risk_level_logits.iter())
+        .chain(result.query_category_logits.iter())
+        .all(|value| value.is_finite()));
+}
+
 #[test]
 fn qwen3_guard_loads_real_head() {
     if !st_available() {

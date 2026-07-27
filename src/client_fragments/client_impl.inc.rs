@@ -145,6 +145,11 @@ pub struct Client {
     /// When set, `generate()` classifies the prompt's intent before generation
     /// and includes the result in the response. When unset, no intent tracking.
     intent_tracker: Arc<std::sync::Mutex<Option<crate::intent_tracker::IntentTracker>>>,
+    /// Cached Qwen3Guard head loaded from safetensors.
+    ///
+    /// Keyed by the path supplied to `guard_moderate`; the head is stateless,
+    /// so clones of `Client` can safely reuse the same loaded probe.
+    qwen3_guard_head: Arc<std::sync::Mutex<Option<(String, crate::qwen3_guard::Qwen3GuardHead)>>>,
 }
 
 /// Internal storage for a registered Guardrail (kept inside the Client).
@@ -193,6 +198,7 @@ impl Client {
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             sg_callback: Arc::new(std::sync::Mutex::new(None)),
             intent_tracker: Arc::new(std::sync::Mutex::new(None)),
+            qwen3_guard_head: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -205,6 +211,7 @@ impl Client {
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             sg_callback: Arc::new(std::sync::Mutex::new(None)),
             intent_tracker: Arc::new(std::sync::Mutex::new(None)),
+            qwen3_guard_head: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -643,6 +650,58 @@ impl Client {
         })
     }
 
+    /// Run the embedding backbone and feed its 768-dimensional turn embedding
+    /// into the caller-managed c1 DialogueGate state (REQ-C1-001~003).
+    // @trace REQ-C1-001 [api:Client::c1_track_intent] granite backbone → tracker
+    // @trace REQ-C1-002 [api:Client::c1_track_intent] encoder output feeds MultiFeatureHead
+    // @trace REQ-C1-003 [api:Client::c1_track_intent] caller-managed state transition
+    pub fn c1_track_intent(
+        &self,
+        text: &str,
+        tracker: &mut crate::arch::c1_v2_tracker::C1V2Tracker,
+        state: &mut Vec<Vec<f32>>,
+    ) -> Result<crate::arch::c1_v2_tracker::C1V2StepResult, ClientError> {
+        let response = self.embed([text])?;
+        let embedding = response
+            .embeddings
+            .first()
+            .ok_or_else(|| ClientError::RuntimeError("c1 backbone returned no embedding".into()))?;
+        if embedding.embedding.len() != tracker.config().hidden_dim {
+            return Err(ClientError::RuntimeError(format!(
+                "c1 backbone embedding dimension {} != tracker hidden dimension {}",
+                embedding.embedding.len(),
+                tracker.config().hidden_dim
+            )));
+        }
+        let result = tracker
+            .step(&embedding.embedding, state)
+            .map_err(|error| ClientError::RuntimeError(format!("c1 tracker step failed: {error}")))?;
+        *state = result.h_next.clone();
+        Ok(result)
+    }
+
+    /// Qwen3Guard backbone-to-head moderation.
+    ///
+    /// Runs the loaded Qwen3 backbone through the last layer, pools the final
+    /// token hidden state, and evaluates the independently loaded guard head.
+    ///
+    /// @trace REQ-QGUARD-003 [api:stream_moderate] Client::guard_moderate — backbone forward produces real hidden
+    /// @trace REQ-QGUARD-004 [api:moderate_token] Client::guard_moderate — guard head consumes last-layer hidden
+    pub fn guard_moderate(
+        &self,
+        text: &str,
+        guard_head_path: &str,
+    ) -> Result<crate::qwen3_guard::GuardModerationResult, ClientError> {
+        let hidden = self.encode_to_layer(
+            text,
+            crate::head_routing::LayerAnchor::Relative(1.0),
+            crate::head_routing::PoolMode::LastToken,
+        )?;
+        let head = self.cached_qwen3_guard_head(guard_head_path)?;
+        head.moderate_token(&hidden)
+            .map_err(|e| ClientError::RuntimeError(format!("qwen3guard moderate: {e}")))
+    }
+
     // -----------------------------------------------------------------
     // Intent Tracker SDK (SPEC/INTENT-TRACKER.md, REQ-SIT-001~009)
     // -----------------------------------------------------------------
@@ -850,6 +909,24 @@ impl Client {
 
     pub(crate) fn require_state(&self) -> Result<Arc<ClientState>, ClientError> {
         self.state.load_full().ok_or(ClientError::NoModelLoaded)
+    }
+
+    fn cached_qwen3_guard_head(
+        &self,
+        guard_head_path: &str,
+    ) -> Result<crate::qwen3_guard::Qwen3GuardHead, ClientError> {
+        let mut guard = self.qwen3_guard_head.lock().map_err(|e| {
+            ClientError::RuntimeError(format!("qwen3guard head mutex poisoned: {e}"))
+        })?;
+        if let Some((cached_path, head)) = guard.as_ref() {
+            if cached_path == guard_head_path {
+                return Ok(head.clone());
+            }
+        }
+        let head = crate::qwen3_guard::Qwen3GuardHead::from_safetensors(guard_head_path)
+            .map_err(|e| ClientError::RuntimeError(format!("qwen3guard load: {e}")))?;
+        *guard = Some((guard_head_path.to_string(), head.clone()));
+        Ok(head)
     }
 
     pub(crate) fn execute_generation(

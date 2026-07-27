@@ -319,6 +319,7 @@ impl ClientBuilder {
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             sg_callback: Arc::new(std::sync::Mutex::new(None)),
             intent_tracker: Arc::new(std::sync::Mutex::new(self.intent_tracker)),
+            qwen3_guard_head: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 

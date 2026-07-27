@@ -53,7 +53,35 @@ fn c1_v2_step_real_checkpoint_output_dims() {
 }
 
 #[test]
-fn c1_v2_multi_turn_state_propagates_real_checkpoint() {
+fn c1_backbone_e2e_track_intent() {
+    if !pt_available() {
+        eprintln!("skipped: {PT_PATH} not present");
+        return;
+    }
+
+    // The model id may be overridden for a local mirror/cache. This must be
+    // an embedding backbone that produces the 768-dimensional granite turn
+    // embedding; synthetic vectors are intentionally not accepted here.
+    let backbone_model = std::env::var("C1_BACKBONE_MODEL")
+        .unwrap_or_else(|_| "granite-embedding-311m".to_string());
+    let client = gllm::Client::new_embedding(&backbone_model)
+        .unwrap_or_else(|error| panic!("load c1 backbone {backbone_model}: {error}"));
+    let mut tracker = C1V2Tracker::from_pt(PT_PATH).expect("load tracker");
+    let mut state = tracker.initial_state();
+
+    let result = client
+        .c1_track_intent("Hello world", &mut tracker, &mut state)
+        .expect("backbone forward and tracker step");
+
+    assert_eq!(result.intent_logits.len(), 7);
+    assert_eq!(result.diff_logits.len(), 3);
+    assert_eq!(result.h_next.len(), 3);
+    assert_eq!(state, result.h_next, "API must commit the next state");
+    assert!(result.intent_logits.iter().all(|value| value.is_finite()));
+    assert!(result.diff_logits.iter().all(|value| value.is_finite()));
+}
+
+
     if !pt_available() {
         eprintln!("skipped: {PT_PATH} not present");
         return;
