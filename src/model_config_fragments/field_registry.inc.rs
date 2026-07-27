@@ -496,7 +496,7 @@ static FIELD_DEFS: &[FieldDef] = &[
     },
     FieldDef {
         canonical: "vocab_size",
-        kind: FieldKind::Alias { json_keys: &["vocab_size"], gguf_keys: &[], gguf_reader: None },
+        kind: FieldKind::Alias { json_keys: &["vocab_size"], gguf_keys: &[], gguf_reader: Some(|r: &GgufLoader| r.get_metadata_array("tokenizer.ggml.tokens").map(|a| MetaValue::Usize(a.len()))) },
         required: true,
         default: None,
     },
