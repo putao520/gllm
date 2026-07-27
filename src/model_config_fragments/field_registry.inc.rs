@@ -490,7 +490,7 @@ static FIELD_DEFS: &[FieldDef] = &[
     },
     FieldDef {
         canonical: "num_hidden_layers",
-        kind: FieldKind::Alias { json_keys: &["num_hidden_layers", "n_layer", "num_layers"], gguf_keys: &[], gguf_reader: None },
+        kind: FieldKind::Alias { json_keys: &["num_hidden_layers", "n_layer", "num_layers"], gguf_keys: &[], gguf_reader: Some(|r: &GgufLoader| r.block_count().and_then(|v| usize::try_from(v).ok()).map(MetaValue::Usize)) },
         required: true,
         default: None,
     },
