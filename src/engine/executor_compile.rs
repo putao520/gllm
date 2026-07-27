@@ -649,6 +649,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if let Err(e) = mega.dump_source_map(std::path::Path::new("/tmp/jit_sourcemap.txt")) {
             log::debug!("executor: source map dump skipped: {e}");
         }
+        // BCE-20260724-PLAN-C-RESIDUAL-BREAK: Dump VmInstr offset map + const_pool audit
+        // for GDB-free SIGSEGV diagnosis (崩溃 RIP → VmInstr 反查)。
+        // @trace REQ-DUMP-003 [entity:ENT-COMPILER-GRAPH] dump_offset_map 调用点
+        if let Err(e) = mega.dump_offset_map(std::path::Path::new("/tmp/jit_offsetmap.txt")) {
+            log::debug!("executor: offset map dump skipped: {e}");
+        }
         Ok(mega)
     }
 

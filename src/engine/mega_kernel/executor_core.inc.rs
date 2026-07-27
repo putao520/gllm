@@ -21,6 +21,14 @@ struct CompileMeta {
     >,
     /// JIT source map(VmInstr → 机器码偏移 → Op 标签) — 仅 debug_jit=true 时生成, GPU 路径为 None。
     source_map: Option<gllm_kernels::compiler::codegen::vm::debug_map::JitSourceMap>,
+    /// VmInstr → 机器码字节偏移区间映射 (BCE-20260724-PLAN-C-RESIDUAL-BREAK)。
+    /// 仅 X86_64 + debug 路径生成 (finalize_with_diag)；GPU/非 debug 路径为 None。
+    /// @trace REQ-DUMP-003 [entity:ENT-COMPILER-GRAPH] VmInstr offset map 透传
+    vm_instr_map: Option<gllm_kernels::compiler::codegen::vm::debug_map::VmInstrOffsetMap>,
+    /// const_pool / data_tables 布局审计 (BCE-20260724-PLAN-C-RESIDUAL-BREAK)。
+    /// 仅 X86_64 + debug 路径生成；GPU/非 debug 路径为 None。
+    /// @trace REQ-DUMP-003 [entity:ENT-COMPILER-GRAPH] const_pool 审计透传
+    const_pool_audit: Option<gllm_kernels::compiler::codegen::vm::debug_map::ConstPoolAudit>,
     /// RoPE cos/sin 表需求(caller 必须在每次调用前填充 scratchpad) — CPU/GPU 共享。
     rope_cache: Option<gllm_kernels::compiler::codegen::RopeCacheRequirement>,
     /// Logits 区域在 scratchpad 中的偏移 — CPU/GPU 共享。
@@ -50,6 +58,14 @@ pub struct MegaKernelExecutor {
     weight_page_table: std::sync::Mutex<Option<crate::scheduler::fault_recovery::WeightPageTable>>,
     /// Fault recovery handler (REQ-WP-009).
     fault_handler: std::sync::Mutex<Option<crate::scheduler::fault_recovery::FaultRecoveryHandler>>,
+    /// VmInstr → 机器码字节偏移区间映射 (BCE-20260724-PLAN-C-RESIDUAL-BREAK)。
+    /// 仅 X86_64 + debug 路径生成；非 debug 编译为 None (生产零开销)。
+    /// @trace REQ-DUMP-003 [entity:ENT-COMPILER-GRAPH] VmInstr offset map 持有
+    vm_instr_map: Option<gllm_kernels::compiler::codegen::vm::debug_map::VmInstrOffsetMap>,
+    /// const_pool / data_tables 布局审计 (BCE-20260724-PLAN-C-RESIDUAL-BREAK)。
+    /// 仅 X86_64 + debug 路径生成；非 debug 编译为 None (生产零开销)。
+    /// @trace REQ-DUMP-003 [entity:ENT-COMPILER-GRAPH] const_pool 审计持有
+    const_pool_audit: Option<gllm_kernels::compiler::codegen::vm::debug_map::ConstPoolAudit>,
 }
 
 // SAFETY: MegaKernelExecutor contains JIT-compiled function pointers and weight blobs
@@ -192,6 +208,8 @@ impl MegaKernelExecutor {
                     buffer_layout,
                     tensor_sources,
                     source_map,
+                    vm_instr_map,
+                    const_pool_audit,
                     rope_cache,
                     logits_scratch_offset,
                     vocab_size,
@@ -212,6 +230,8 @@ impl MegaKernelExecutor {
                     buffer_layout,
                     tensor_sources,
                     source_map,
+                    vm_instr_map,
+                    const_pool_audit,
                     rope_cache,
                     logits_scratch_offset,
                     vocab_size,
@@ -272,6 +292,9 @@ impl MegaKernelExecutor {
                     buffer_layout,
                     tensor_sources: std::collections::HashMap::new(),
                     source_map: None,
+                    // GPU 路径无 VmInstr offset map / const_pool 审计 (CPU JIT 专属)。
+                    vm_instr_map: None,
+                    const_pool_audit: None,
                     rope_cache,
                     logits_scratch_offset,
                     vocab_size,
@@ -430,6 +453,10 @@ impl MegaKernelExecutor {
             decompress_inject: KvPageDecompressConfig::default(),
             weight_page_table: std::sync::Mutex::new(None),
             fault_handler: std::sync::Mutex::new(None),
+            // BCE-20260724-PLAN-C-RESIDUAL-BREAK: 透传诊断 map 到 executor 供 dump_offset_map。
+            // 非 debug 编译时 meta.vm_instr_map / meta.const_pool_audit 均为 None (生产零开销)。
+            vm_instr_map: meta.vm_instr_map,
+            const_pool_audit: meta.const_pool_audit,
         })
     }
 

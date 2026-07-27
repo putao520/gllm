@@ -1040,6 +1040,36 @@ impl MegaKernelExecutor {
         Ok(())
     }
 
+    /// BCE-20260724-PLAN-C-RESIDUAL-BREAK: 将 VmInstr offset map + const_pool 审计
+    /// 写入文本文件。用于不依赖 GDB 的 SIGSEGV 静态诊断 (崩溃 RIP → VmInstr 反查)。
+    ///
+    /// 仅当 `GLLM_DUMP_OFFSETMAP=1` (或 `GLLM_DUMP_MEGA` set) 且 debug 编译路径
+    /// 生成了 map 时有内容。非 debug 编译时 vm_instr_map / const_pool_audit 均为 None
+    /// → 此函数写入空文件或跳过。
+    ///
+    // @trace REQ-DUMP-003 [entity:ENT-COMPILER-GRAPH] VmInstr offset map + const_pool 审计 dump
+    pub fn dump_offset_map(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let dump = std::env::var("GLLM_DUMP_OFFSETMAP").is_ok()
+            || std::env::var("GLLM_DUMP_MEGA").is_ok();
+        if !dump {
+            return Ok(());
+        }
+        let mut f = std::fs::File::create(path)?;
+        if let Some(ref vm_map) = self.vm_instr_map {
+            writeln!(f, "=== VmInstr Offset Map ({} entries) ===", vm_map.entries.len())?;
+            write!(f, "{}", vm_map.to_text())?;
+        } else {
+            writeln!(f, "=== VmInstr Offset Map: None (non-debug compile) ===")?;
+        }
+        if let Some(ref audit) = self.const_pool_audit {
+            write!(f, "{}", audit.to_text())?;
+        } else {
+            writeln!(f, "=== ConstPool Audit: None (non-debug compile) ===")?;
+        }
+        Ok(())
+    }
+
     /// §19 KV-OPT-009: 查询当前 batch 属性对应的最优 Variant。
     ///
     /// 在 build_batch() 阶段调用，根据 KV tier / MoE / Guardrail 等属性
