@@ -1,3 +1,85 @@
+// @trace REQ-E2E-007
+/// mmap-backed scratchpad with page-aligned storage and an optional guard page.
+///
+/// ARCH-MEMORY-FIRST: the JIT receives a raw, page-aligned memory region. In
+/// debug builds (or when GLLM_GUARD_SCRATCH=1), the page after the usable
+/// allocation is made inaccessible so an overrun faults at the write site.
+struct MmapScratchpad {
+    ptr: *mut u8,
+    len: usize,
+    mapped_len: usize,
+}
+
+impl MmapScratchpad {
+    fn new(usable_len: usize) -> Result<Self, MegaKernelError> {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return Err(MegaKernelError::Execution("invalid system page size".into()));
+        }
+        let page_size = page_size as usize;
+        let aligned_len = usable_len
+            .checked_add(page_size - 1)
+            .ok_or_else(|| MegaKernelError::Execution("scratchpad size overflow".into()))?
+            & !(page_size - 1);
+        let mapped_len = aligned_len
+            .checked_add(page_size)
+            .ok_or_else(|| MegaKernelError::Execution("scratchpad mapping size overflow".into()))?;
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mapped_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapping == libc::MAP_FAILED {
+            return Err(MegaKernelError::Execution(format!(
+                "mmap scratchpad failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let ptr = mapping as *mut u8;
+        let guard_enabled = cfg!(debug_assertions)
+            || std::env::var_os("GLLM_GUARD_SCRATCH").is_some_and(|value| value != "0");
+        if guard_enabled {
+            let guard = unsafe { ptr.add(aligned_len) as *mut libc::c_void };
+            if unsafe { libc::mprotect(guard, page_size, libc::PROT_NONE) } != 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe { libc::munmap(mapping, mapped_len); }
+                return Err(MegaKernelError::Execution(format!(
+                    "mprotect scratchpad guard page failed: {error}"
+                )));
+            }
+        }
+        Ok(Self { ptr, len: usable_len, mapped_len })
+    }
+
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut u8 { self.ptr }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // The slice is limited to the requested size; the aligned tail remains
+        // mapped only to keep the guard page page-aligned.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    #[inline]
+    fn len(&self) -> usize { self.len }
+
+    fn to_vec(&self) -> Vec<u8> {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len).to_vec() }
+    }
+}
+
+impl Drop for MmapScratchpad {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.mapped_len); }
+    }
+}
+
 impl MegaKernelExecutor {
 
     /// Diagnostic: run prefill only (max_new_tokens=0) and return logits from scratchpad.
@@ -18,7 +100,7 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..(prompt_len + 1) as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapScratchpad::new(mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?)?;
 
         // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
         // Previously passed NULL causing SIGSEGV after tied-embeddings fix enabled KV cache path.
@@ -38,7 +120,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -135,7 +217,7 @@ impl MegaKernelExecutor {
 
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: logits_off,
             vocab_size: vocab,
             prompt_len,
@@ -164,7 +246,7 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..(prompt_len + 1) as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapScratchpad::new(mega.runtime_scratchpad_bytes(prompt_len + 1).map_err(|e| MegaKernelError::Execution(e))?)?;
 
         // BCE-KV-DIAG: allocate KV cache for FromCache attention (avoid SIGSEGV on NULL).
         let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
@@ -176,7 +258,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -264,7 +346,7 @@ impl MegaKernelExecutor {
         };
 
         Ok(DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: mega.logits_scratch_offset,
             vocab_size: self.vocab_size,
             prompt_len,
@@ -300,7 +382,7 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..prompt_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapScratchpad::new(mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?)?;
 
         // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
         // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
@@ -318,7 +400,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -401,7 +483,7 @@ impl MegaKernelExecutor {
         // at scratchpad + logits_scratch_offset (same mechanism as logits-producer output for 含 Argmax 的图).
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: mega.logits_scratch_offset,
             vocab_size: self.vocab_size,
             prompt_len,
@@ -436,7 +518,7 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..prompt_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapScratchpad::new(mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?)?;
 
         // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
         // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
@@ -454,7 +536,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -540,7 +622,7 @@ impl MegaKernelExecutor {
         // which is sufficient for reranking discrimination.
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: mega.logits_scratch_offset,
             vocab_size: self.vocab_size,
             prompt_len,
@@ -584,7 +666,7 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapScratchpad::new(mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?)?;
 
         // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
         // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
@@ -600,7 +682,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -680,7 +762,7 @@ impl MegaKernelExecutor {
 
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: logits_off,
             vocab_size: vocab,
             prompt_len: seq_len,
@@ -720,7 +802,39 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..seq_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(seq_len).map_err(|e| MegaKernelError::Execution(e))?];
+        let runtime_scratchpad_bytes = mega.runtime_scratchpad_bytes(seq_len)
+            .map_err(|e| MegaKernelError::Execution(e))?;
+        // @trace REQ-E2E-007
+        // Compare runtime allocation against compile-time intermediate/RoPE layout before
+        // changing sizing semantics. The layout is max_seq_len-derived by the compiler.
+        if std::env::var("GLLM_DEBUG_RESOURCE").is_ok() {
+            eprintln!(
+                "[SCRATCHPAD-COMPARE] encode_at_layer seq_len={} runtime={} base={} logits_offset={} compiled_layout_total={} runtime_lt_layout={}",
+                seq_len,
+                runtime_scratchpad_bytes,
+                mega.scratchpad_base_bytes,
+                mega.logits_scratch_offset,
+                mega.buffer_layout.total_scratchpad_bytes,
+                runtime_scratchpad_bytes < mega.buffer_layout.total_scratchpad_bytes,
+            );
+        }
+        // The compiler sizes activation ping/pong and RoPE offsets for max_seq_len.
+        // Keep the runtime logits row count at seq_len, but reserve the compiled
+        // intermediate region whenever a short encode request is used.
+        let compiled_intermediate_bytes = mega
+            .scratchpad_base_bytes
+            .max(mega.buffer_layout.total_scratchpad_bytes);
+        let scratchpad_bytes = runtime_scratchpad_bytes.max(compiled_intermediate_bytes);
+        if std::env::var("GLLM_DEBUG_RESOURCE").is_ok() {
+            eprintln!(
+                "[SCRATCHPAD-COMPARE] encode_at_layer final_alloc={} runtime={} compiled_intermediate={} mismatch_fixed={}",
+                scratchpad_bytes,
+                runtime_scratchpad_bytes,
+                compiled_intermediate_bytes,
+                scratchpad_bytes > runtime_scratchpad_bytes,
+            );
+        }
+        let mut scratchpad = MmapScratchpad::new(scratchpad_bytes)?;
 
         // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
         // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
@@ -739,7 +853,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_elems * std::mem::size_of::<f32>() <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -814,7 +928,7 @@ impl MegaKernelExecutor {
         let output_elems = seq_len * hidden_size;
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: 0,
             vocab_size: self.vocab_size,
             prompt_len: seq_len,
@@ -1234,7 +1348,7 @@ impl MegaKernelExecutor {
 
         let positions: Vec<u32> = (0..prompt_len as u32).collect();
         let mut output_tokens = vec![0u32; 1];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapScratchpad::new(mega.runtime_scratchpad_bytes(prompt_len).map_err(|e| MegaKernelError::Execution(e))?)?;
 
         // BCE-KV-DIAG: Allocate KV cache buffer when graph has FromCache attention.
         // Previously passed NULL causing SIGSEGV when graph contains MHA (FromCache) ops.
@@ -1252,7 +1366,7 @@ impl MegaKernelExecutor {
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
                 let rope_slice = unsafe {
                     std::slice::from_raw_parts_mut(
-                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        scratchpad.as_mut_slice()[rc.cache_offset..].as_mut_ptr() as *mut f32,
                         rope_elems,
                     )
                 };
@@ -1344,7 +1458,7 @@ impl MegaKernelExecutor {
 
         // ARCH-JIT-DATA-YIELDS: dtype-aware read, NO-SILENT-FALLBACK
         let sp = DiagnosticScratchpad {
-            data: scratchpad,
+            data: scratchpad.to_vec(),
             logits_offset: logits_off,
             vocab_size: vocab,
             prompt_len,
