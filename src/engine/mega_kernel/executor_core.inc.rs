@@ -405,7 +405,7 @@ impl MegaKernelExecutor {
             source_map: meta.source_map,
             num_kv_heads: geometry.num_kv_heads,
             head_dim: geometry.head_dim,
-            max_seq_len,
+            max_seq_len: max_seq_len.min(gllm_kernels::compiler::buffer_alloc::ALLOC_SEQ_CAP),
             mtp_depth: mtp_depth_extracted,
         };
 
