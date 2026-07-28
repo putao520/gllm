@@ -41,8 +41,9 @@ impl MmapScratchpad {
             )));
         }
         let ptr = mapping as *mut u8;
-        let guard_enabled = cfg!(debug_assertions)
-            || std::env::var_os("GLLM_GUARD_SCRATCH").is_some_and(|value| value != "0");
+        let guard_enabled = true; // BCE-20260728: always enable guard page (release too)
+            // || cfg!(debug_assertions)
+            // || std::env::var_os("GLLM_GUARD_SCRATCH").is_some_and(|value| value != "0");
         if guard_enabled {
             let guard = unsafe { ptr.add(aligned_len) as *mut libc::c_void };
             if unsafe { libc::mprotect(guard, page_size, libc::PROT_NONE) } != 0 {
