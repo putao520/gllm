@@ -825,7 +825,14 @@ impl MegaKernelExecutor {
         // uses max_seq_len → grossly oversized for large-context models (Gemma4 E2B:
         // 131072 * 262144 * 4 = 137GB). Only use scratchpad_base_bytes as upper bound.
         let compiled_intermediate_bytes = mega.scratchpad_base_bytes;
-        let scratchpad_bytes = runtime_scratchpad_bytes.max(compiled_intermediate_bytes);
+        // BCE-20260728-SCRATCHPAD-OOB: add 1-page safety margin. JIT codegen
+        // sizes intermediate tensors (activation ping/pong) using max_seq_len
+        // but runtime allocates using actual seq_len. The VAM alloc offset
+        // (scratchpad_base_bytes) should cover the intermediate, but edge cases
+        // (alignment padding, buffer tail) can touch the page boundary.
+        // Adding a 4KB margin prevents guard-page SIGSEGV on these edge writes.
+        let page_size = 4096;
+        let scratchpad_bytes = runtime_scratchpad_bytes.max(compiled_intermediate_bytes) + page_size;
         if std::env::var("GLLM_DEBUG_RESOURCE").is_ok() {
             eprintln!(
                 "[SCRATCHPAD-COMPARE] encode_at_layer final_alloc={} runtime={} compiled_intermediate={} mismatch_fixed={}",
