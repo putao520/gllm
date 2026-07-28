@@ -820,11 +820,11 @@ impl MegaKernelExecutor {
             );
         }
         // The compiler sizes activation ping/pong and RoPE offsets for max_seq_len.
-        // Keep the runtime logits row count at seq_len, but reserve the compiled
-        // intermediate region whenever a short encode request is used.
-        let compiled_intermediate_bytes = mega
-            .scratchpad_base_bytes
-            .max(mega.buffer_layout.total_scratchpad_bytes);
+        // scratchpad_base_bytes = VAM alloc intermediate (activation ping/pong + RoPE)
+        // already accounts for the runtime seq_len. buffer_layout.total_scratchpad_bytes
+        // uses max_seq_len → grossly oversized for large-context models (Gemma4 E2B:
+        // 131072 * 262144 * 4 = 137GB). Only use scratchpad_base_bytes as upper bound.
+        let compiled_intermediate_bytes = mega.scratchpad_base_bytes;
         let scratchpad_bytes = runtime_scratchpad_bytes.max(compiled_intermediate_bytes);
         if std::env::var("GLLM_DEBUG_RESOURCE").is_ok() {
             eprintln!(
