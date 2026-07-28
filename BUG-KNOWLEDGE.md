@@ -5464,3 +5464,277 @@ movzwl (%rax),%eax        # 解引用 rax=0 → SIGSEGV
 3. 验证: 修后删 Plan C, Q5 N=28 不崩 + cos≈llama Q5
 
 **当前**: pipeline.inc.rs 已删 Plan C (调试态), 待 regalloc 修复后保留删除。或先恢复 Plan C 保不崩。
+
+---
+
+### 方向 67: ★★★真根因根治★★★ Skip(N) 计数越界 + 方案C JumpToLabel 根治 (2026-07-27)
+
+> ⚠️ **本方向修正方向 66i 的全部错误结论**。66i 的"spill 槽被覆盖 / VReg39 / regalloc 决策变"均被三件套诊断工具证伪。真根因是 guard 的 Skip(N) 计数越界，与 regalloc 无关。
+
+#### 三件套诊断工具系统性证伪（commit 96520614 + 11346c44 in gllm-kernels）
+
+| 假设（来源） | 验证工具 + env | 结果 |
+|---|---|---|
+| spill slot 复用覆盖活跃 VReg（66i） | 方案② GLLM_VERIFY_SPILL=1 Q5 编译 | ❌ 0 violations（4309 spills/7254 intervals，offset 全唯一） |
+| const_pool RIP 偏移溢出（中期推断） | 方案③ GLLM_DUMP_OFFSETMAP=1 ON/OFF 对比 | ❌ disp32 均最大 +91，结构一致 |
+| regalloc ON/OFF 不同（66i） | GLLM_REGALLOC_DEBUG 对比 VReg51/149/163/166/173 | ❌ 映射完全一致 |
+| embed_ptr 活跃区间断裂（中期推断） | 诊断 Agent def/use 追踪 | ❌ 根因不在 regalloc |
+
+#### 真根因（Skip(N) 计数越界）
+
+`close_pending_guard_run`（pipeline.inc.rs:467-479）/ `close_guard_run`（:1433-1445）的 `GprBranchAction::Skip(N)` patch-back：
+```rust
+let skip_n = prog.instrs[patch_idx + 1..].iter().filter(|i| !i.is_meta()).count();
+```
+**算到程序末尾而非 guard 块末尾**。Plan C 的 AddPtr 在每个 group 开头 emit（guard emit 之前），后续 group 的 AddPtr 落入 `[patch_idx+1..]` 计数范围。
+
+- **Plan C ON**：每个后续 group 多 2 条 AddPtr → Skip(42) → 落地恰好跳过 Q5K block（碰巧正确）
+- **Plan C OFF**：Skip(40) → 落地偏移 → Q5K block 的 VReg149/163/166/173 def 被跳过 → reload 读 prologue 零初始化的 0 → NULL 解引用 SIGSEGV
+
+#### 崩溃现场（GDB 一次性 RIP + offset map）
+
+```
+崩溃指令: movzwl (%rax),%eax + vcvtph2ps  ← Q5_K block 的 d(f16) 读取
+rax = 0x0 (NULL)  ← block_base 是 NULL
+崩溃 VReg: VReg173（spill slot [rbp-0x2120], offset=8384, Spilled(1048)）
+         ← VReg166 ← VReg163 ← VReg149 ← VReg51 ← weight_ptr(AbiArg(1))
+         全链 def 被 Skip(40) 跳过 → spill 槽保留 prologue 零初始化
+```
+**修正 66i**：崩溃 VReg 是 VReg173（[rbp-0x2120]），非 VReg39（[rbp-0x110]）。66i 把 -0x2120 错配到 VReg39。
+
+#### 根治（方案 C，commit 3ff3f6aa in gllm-kernels）
+
+用 `GprBranchAction::JumpToLabel(end_label)` + `VmInstr::MarkLabel { label_id }` 替换 `Skip(N)` 计数机制：
+- EmitState：`guard_skip_patch: Option<usize>` → `guard_end_label: Option<usize>`（vm_state.rs:388-398）
+- guard emit：2 处 `Skip(0)` → `JumpToLabel(end_label)`（pipeline.inc.rs:1294-1301, 1375-1382）
+- close 函数：2 处不再 patch-back Skip 计数，改 emit `MarkLabel`（:466-477, 1425-1435）
+- **Plan C 删除**（:399-411，同时根治 BF16 残差破坏）
+- 基础设施 pre-existing：JumpToLabel + MarkLabel + x86 lowering（lower_instr_dispatch.inc.rs:2920+ / 3249-3265）全有
+
+**消除指令计数机制，跳转目标由显式 label 决定，与代码量无关**。
+
+#### V 验证决定性通过
+
+```
+cargo test --test test_e2e_q5km_capital e2e_q5km_capital_france -- --ignored
+[Q5_K_M E2E] output="Paris. The capital of France is also the capital"
+test result: ok. 1 passed; 0 failed; finished in 369.85s
+```
+- Q5_K_M N=28 不再 SIGSEGV（之前 OFF 必崩）
+- 输出正确 "Paris"
+- BF16 残差破坏同时修复（Plan C 删除根治）
+- Plan C 这个"错误实现但碰巧掩盖"的 hack 已删除
+
+#### 待办（aarch64 回归，方案C 引入）
+
+aarch64 `lower_gpr_cond_action_aarch64`（lower_instr_dispatch.inc.rs:2553-2554）对 JumpToLabel 报错。guard 在平台无关的 pipeline.inc.rs emit，aarch64 路径（如 Gemma4 SharedKvRef）会触发。
+**深挖发现**：aarch64 的 `self.labels` 回填机制本身不完整（BranchIfPtrNonNull 等也 pre-existing 坏，finalize 只回填 data_tables 不回填 labels）——需先完善 aarch64 label 回填机制，再补 JumpToLabel。本机 x86_64 无法验证 aarch64。
+
+#### 方法论沉淀（ARCH-TIMING-REASONING 铁律 rule 23 完整实践）
+
+dump VmInstr → 时序推理 def/use → 三件套工具系统性证伪 → 精确定位 Skip 计数缺陷。未靠 GDB 盲猜，未归"格式固有精度"。三件套工具在其中证伪了 3 个被记录为"真根因"的错误假设（含 66i）。
+
+**反模式（66i 犯的错）**：GDB 看到 -0x2120 → grep regalloc dump 找到 VReg39 offset=176 → 错配（实际 VReg39 在 [rbp-0x110]，VReg173 才在 -0x2120）。**教训：GDB 的 rbp 偏移必须用 spill_base_off - offset - size 精确反算，不能 grep offset 数值匹配**。
+
+**BCE 模式签名**：
+```yaml
+patternId: BCE-20260727-SKIP-COUNT-OVERREACH
+title: GprCondAction::Skip(N) 计数越界到程序末尾
+layer: 设计缺陷
+codePattern:
+  - "close_*_guard_run 用 prog.instrs[patch_idx+1..].filter(!is_meta).count() 算 Skip 计数"
+  - "计数范围 = patch_idx 到程序末尾，而非 guard 块末尾"
+triggerCondition:
+  - guard emit 后有后续 group 的指令（如 Plan C AddPtr）落入计数范围
+  - 计数膨胀/缩水 → 跳转落地偏移 → 受保护块 VReg def 被跳过 → reload 读 0
+detectionSignatures:
+  literal: "prog.instrs[patch_idx + 1..].iter().filter(|i| !i.is_meta()).count()"
+sameClassCriterion:
+  - "任何基于指令计数而非显式 label 的条件跳转"
+fixTemplate:
+  - "用 GprBranchAction::JumpToLabel(label) + VmInstr::MarkLabel 替换 Skip(N) 计数"
+regressionAssertion:
+  - "guard 块的跳转目标由显式 label 决定，与代码量/指令数无关"
+```
+
+**BCE 确认报告**：
+```yaml
+confirmReport:
+  patternId: BCE-20260727-SKIP-COUNT-OVERREACH
+  sweepScope: gllm-kernels/src/compiler/codegen/vm/plan_lower/
+  instancesFound: 2 (close_pending_guard_run + close_guard_run)
+  truePositives: 2
+  falsePositives: 0
+  instancesFixed: 2
+  residual: 0
+  residualEvidence:
+    - "重扫 grep 'Skip(0)' / 'guard_skip_patch' / '.filter(!is_meta).count()': 0 命中"
+    - "cargo check gllm-kernels: 通过"
+    - "7113 单测全过"
+    - "Q5_K_M E2E: test result ok, output 'Paris', 无 SIGSEGV"
+  releaseGateImpact: pass
+```
+
+#### BCE 全项目横扫（2026-07-27，grep + LSP literal scan + 逐项甄别）
+
+扩展横扫范围从 `plan_lower/` 到全 `src/compiler/codegen/vm/`，用 `grep "filter.*is_meta.*count\|Skip(0)\|skip_patch\|patch_idx"` + `search_code(literal, ["Skip(0)","skip_patch","patch_idx","filter(|i| !i.is_meta())"])` 找全部 Skip(N) 计数点：
+
+| # | 位置 | 模式 | 当前状态 | 处置 |
+|---|---|---|---|---|
+| 1 | pipeline.inc.rs:466 close_pending_guard_run | `[patch+1..]` 到末尾 | ✅ 已修（方案C） | — |
+| 2 | pipeline.inc.rs:1425 close_guard_run | `[patch+1..]` 到末尾 | ✅ 已修（方案C） | — |
+| 3 | **attention_emit.rs:416** | `[bpr_patch+1..]` 到末尾 | ⚠️ 当前范围正确（紧跟块后 patch） | 潜在脆弱，待根治 |
+| 4 | **attention_emit.rs:1024** | `[head_body_start..]` 到末尾 | ⚠️ 当前范围正确（循环后 patch） | 潜在脆弱，待根治 |
+| 5 | **attention_emit.rs:298** | 硬编码 `*sc = 2` | ⚠️ 当前正确但脆弱 | 潜在脆弱，待根治 |
+| 6 | mega_kernel_emit.rs:2204/2372/2685 | `len() - patch - 1` | ✅ 安全（emit 时立即算，不同模式） | 无需改 |
+| 7 | dispatch_emit.rs:383/1746 | `Skip(5)`/`Skip(4)` 测试 | ✅ 测试 fixture | 无需改 |
+| 8 | aarch64 lower_instr.inc.rs:321 | `patch32` offset 回填 | ✅ 安全（直接 offset 回填，非计数） | 无需改 |
+
+**结论**：真阳性 2 处已根治；潜在脆弱点 3 处（attention_emit.rs:416/1024/298）待迁移到 JumpToLabel+MarkLabel 根治。
+
+**LSP patterns scan 局限**：`search_code(scan patterns)` 返回 66 个通用 code_smell/anti_pattern（God Function/高复杂度/长参数），**未命中 Skip(N) 计数越界这个语义 bug**。证实 BCE-20260727-SKIP-COUNT-OVERREACH 这种语义 bug 必须靠字面层 grep + 人工甄别，LSP 结构扫描检测不到（它不是代码结构异味，是逻辑错误）。
+
+#### BCE 横扫根治完成（2026-07-27，residual=0）
+
+横扫根治分 3 轮 Executor 实施：
+1. **真阳性 2 处**（pipeline.inc.rs close_guard_run ×2）：commit 3ff3f6aa（方案C，Skip(N)→JumpToLabel+MarkLabel，删 Plan C）
+2. **潜在脆弱点 3 处**（attention_emit.rs:416/1024/298）：commit c04a12b5（bpr_label/sparse head body/sparse_masked_load 迁移）
+3. **tier dispatch 6 处**（attention_emit.rs emit_tier_dispatch_k_load/v_load）：commit（收尾，迁移 6 处 + 删除 patch_skip_count/count_non_meta_between 两个失效 helper + 6 个失效测试）
+
+**残留确认（residual=0）**：
+- `grep "patch_skip_count\|count_non_meta_between" src/` → 0 命中（函数已删）
+- 生产代码 `Skip(0)` 占位仅剩 mega_kernel_emit.rs:178/229/263（安全模式：`len()-patch-1` emit 时立即算，patch-back 紧跟受保护块，不越界——与 close_guard_run 的 `[patch+1..]` 到末尾本质不同，无需迁移）
+- attention_emit.rs 的 `filter(!is_meta).count()` 仅剩测试代码（:3698/:4971）
+
+**V 验证**：
+- gllm-kernels cargo check 通过（6 pre-existing warnings）
+- attention_emit 110 单测全过（删 6 失效测试后）
+- Q5_K_M N=28 E2E：output "Paris"，无 SIGSEGV（attention 路径迁移后回归通过）
+
+**BCE 确认报告（最终）**：
+```yaml
+confirmReport:
+  patternId: BCE-20260727-SKIP-COUNT-OVERREACH
+  sweepScope: gllm-kernels/src/compiler/codegen/vm/ 全量
+  layersScanned: [literal grep, LSP literal scan, 人工甄别]
+  instancesFound: 11 (2 真阳性 + 3 潜在脆弱 + 6 tier dispatch)
+  truePositives: 11
+  falsePositives: 0
+  instancesFixed: 11
+  residual: 0
+  residualEvidence:
+    - "grep patch_skip_count/count_non_meta_between: 0 命中（函数已删）"
+    - "生产代码 Skip(0) 仅剩 mega_kernel_emit 安全模式（len()-patch-1）"
+    - "cargo check gllm-kernels: 通过"
+    - "attention_emit 110 单测全过"
+    - "Q5_K_M E2E: output 'Paris', 无 SIGSEGV"
+  releaseGateImpact: pass
+```
+
+---
+
+## BCE-20260728-MAXSEQLEN-OFFSET-LEAK — max_seq_len 多路径未 cap 致 278GB/17GB scratchpad offset 越界（Gemma4/Qwen3Guard crash）
+
+```yaml
+patternId: BCE-20260728-MAXSEQLEN-OFFSET-LEAK
+title: max_seq_len 从 SymDim/config 取出后多路径（alloc/offset/resource/logits）未 cap 到 ALLOC_SEQ_CAP，产生 278GB/17GB scratchpad offset 致 Gemma4 SIGSEGV + Qwen3Guard SIGABRT
+layer: 范式缺陷（多路径 cap 不一致）
+codePattern:
+  - "context.inc.rs:514 从 SymDim::Symbolic{max_value} 取 raw max_seq(131072) 未 .min(ALLOC_SEQ_CAP)"
+  - "max_for_allocation(default) 的 default 是 fallback 语义（无 max_value 时用），非 cap —— 有 max_value 时忽略 default"
+  - "compile_cpu mod.rs:626 activation_bytes/kv_bytes/logits_bytes 用 raw config.max_seq_len"
+  - "buffer_alloc.rs:275 consumer_is_logits_sink 只检测直接消费者是 Argmax，Gemm→LogitSoftcap→Argmax 链漏 skip logits head"
+  - "MegaKernelAbi.max_seq_len 字段存 raw config.max_seq_len 未 cap"
+triggerCondition:
+  - "Gemma4 E2B max_position_embeddings=131072 + vocab=262144"
+  - "Qwen3-0.6B max_seq_len=32768"
+  - "5070Ti (AMD 9950X3D AVX-512) GPU E2E"
+detectionSignatures:
+  structural:
+    - "VRegPlusConst(_, 278233350144) (278GB) — max_seq=131072 残留"
+    - "VRegPlusConst(_, 17381195776) (17GB) — logits 链 TensorId134/135 各 8GB"
+    - "memory allocation of 278127443968 bytes failed (Rust Vec alloc)"
+    - "corrupted size vs. prev_size (glibc 堆损坏 SIGABRT)"
+  literal:
+    - "SIGSEGV RBP=0x0 CRASH_OFFSET=0x179506 (超出 JIT code size 41万字节)"
+    - "QuantGemm op OpId(78): output 无法 materialize (skip 链但未 override)"
+  antipattern:
+    - "multi-path-cap-inconsistency"
+    - "direct-consumer-only-sink-check"
+sameClassCriterion:
+  - "任何 max_seq_len 用于编译时 buffer size/offset 计算但未 .min(ALLOC_SEQ_CAP) 的路径"
+  - "logits 链 skip 只检测直接消费者而非传递闭包到 Argmax/WriteLogits"
+fixTemplate:
+  - "buffer_alloc.rs:24 pub const ALLOC_SEQ_CAP: usize = 8192 (SSOT 常量)"
+  - "context.inc.rs:516 max_seq 取出点 .min(ALLOC_SEQ_CAP) (DRY: 下游全受限)"
+  - "types.inc.rs:81 max_for_allocation_capped(cap): max_value.unwrap_or(cap).min(cap) (真 cap 非 fallback)"
+  - "compile_cpu/GPU: alloc_max_seq = config.max_seq_len.min(ALLOC_SEQ_CAP) 用于 activation/kv/logits/BufferLayout"
+  - "buffer_alloc.rs:261 logits_chain_tensors(graph) 反向遍历 Argmax→LogitSoftcap→GEMM 全链 skip"
+  - "topology.rs:137 logits_chain_tids: HashSet + mega_kernel_emit override 整链 Output{0}"
+  - "mega_kernel_abi.rs single-sequence logits one row (非 seq×vocab)"
+regressionAssertion:
+  - "Gemma4 VmInstr dump: 278GB/17GB VRegPlusConst 命中=0"
+  - "Gemma4 runtime 不 crash（23s 完整推理）"
+  - "Qwen3Guard E2E: test ok (27.15s)"
+  - "logits_chain_tensors test: Gemm→LogitSoftcap→Argmax 链含 head+softcap，排除普通 GEMM"
+归因时间: 2026-07-28
+根因:
+  layer: 范式缺陷（多路径 cap 不一致 + logits 链直接消费者检测）
+  why: "max_for_allocation 的 default 参数语义是 fallback（无 max_value 时用），被误当 cap 传入——有 max_value 时完全忽略。加上 alloc/offset/resource/logits 四个层面各自用 raw max_seq_len，逐层暴露。logits 链 consumer_is_logits_sink 只检测直接消费者，Gemm→LogitSoftcap→Argmax 让 logits head 漏 skip。"
+  evidence:
+    - "Gemma4 SIGSEGV RBP=0 CRASH_OFFSET=0x179506 超 code 41万字节"
+    - "VmInstr dump 7处 VRegPlusConst(_, 278233350144)"
+    - "GLLM_DEBUG_BUFFER_ALLOC: TensorId134/135 各 8GB"
+    - "Qwen3Guard SIGABRT corrupted size vs prev_size (堆损坏)"
+根治:
+  strategy: "4 阶段多 commit 配套：alloc cap + max_for_allocation_capped + resource planner cap + logits 链 skip+override+单行"
+  files:
+    - "gllm-kernels/src/compiler/buffer_alloc.rs (ALLOC_SEQ_CAP + logits_chain_tensors + skip)"
+    - "gllm-kernels/src/compiler/graph_fragments/types.inc.rs (max_for_allocation_capped)"
+    - "gllm-kernels/src/compiler/mod.rs (compile_cpu/GPU alloc_max_seq)"
+    - "gllm-kernels/src/compiler/codegen/vm/topology.rs (logits_chain_tids)"
+    - "gllm-kernels/src/compiler/codegen/vm/mega_kernel_emit.rs (override 整链)"
+    - "gllm-kernels/src/compiler/mega_kernel_abi.rs (single-seq logits one row)"
+    - "gllm-kernels/src/compiler/codegen/vm/plan_lower/context.inc.rs (RoPE/DWC cap)"
+    - "gllm/src/engine/mega_kernel/executor_core.inc.rs (abi max_seq_len cap)"
+  commits: [f0c4a12d, 3af2c223, 95bf26eb, f8fd53b3, 499f7a25, 4191f64d, 7ba65cae, 81ba857a, c316cb54, fcd81d39]
+  status: 根治 ✅ | residual: 0 (crash class)
+  根治记录:
+    - "f0c4a12d: max_seq 取出点 cap (Phase1) → Qwen3Guard 通过"
+    - "3af2c223: max_for_allocation_capped (Phase2) → Gemma4 不 crash"
+    - "95bf26eb: resource planner cap (Phase3)"
+    - "f8fd53b3: logits 链 skip (Phase4a, 单独破坏 materialize)"
+    - "499f7a25+7ba65cae: single-seq logits one row"
+    - "4191f64d: resolver chain map (修复 materialize)"
+    - "81ba857a+c316cb54: topology logits_chain_tids + override 整链"
+    - "fcd81d39: abi max_seq_len cap (gllm 仓)"
+    - "Gemma4: 17GB→0, 不 crash, 但 output 仍 pad (SharedKvRef 缺失，见下)"
+note: "crash 类根治完成。Gemma4 output <pad> 是次生根因 SharedKvRef 未实现（config_impl.inc.rs:412 显式丢弃 num_kv_shared_layers=20，gllm-kernels 零实现 donor KV remap），需 architect 设计，非本 BCE 范围。"
+```
+
+---
+
+## BCE-20260728-LOGITS-CHAIN-ALLOC — logits 链直接消费者检测漏 skip（BCE-20260728-MAXSEQLEN-OFFSET-LEAK 子条目）
+
+```yaml
+patternId: BCE-20260728-LOGITS-CHAIN-ALLOC
+title: buffer_alloc consumer_is_logits_sink 只检测直接消费者是 Argmax/WriteLogits，Gemm→LogitSoftcap→Argmax 链漏 skip logits head → 8GB×2=17GB
+layer: 范式缺陷
+codePattern:
+  - "buffer_alloc.rs:275 graph.ops.iter().any(op.inputs.contains(&tid) && matches!(Argmax|WriteLogits))"
+  - "Gemma4 图 QuantGemm→LogitSoftcap→Argmax: TensorId134(logits) 直接消费者是 LogitSoftcap 非 Argmax"
+triggerCondition:
+  - "logits 后有 epilogue 算子（LogitSoftcap/TemperatureScale）再接 Argmax"
+  - "vocab 大（Gemma4 262144）× max_seq → 8GB+ 分配"
+sameClassCriterion:
+  - "logits 链 skip 用直接消费者检测而非从 Argmax 反向传递闭包"
+fixTemplate:
+  - "logits_chain_tensors(graph): 从 Argmax/WriteLogits 反向遍历生产者链，穿过 LogitSoftcap 等 unary output-preserving post-op，到 GEMM producer，全链 skip + override Output{0}"
+  - "DRY: helper 共享 buffer_alloc + topology"
+  - "topology.logits_chain_tids: HashSet + mega_kernel_emit override 整链"
+regressionAssertion:
+  - "Gemm→LogitSoftcap→Argmax: chain 含 head+softcap，排除普通 GEMM"
+  - "Gemma4 17GB VRegPlusConst=0"
+归因时间: 2026-07-28
+status: 根治 ✅ (81ba857a + c316cb54)
+```
