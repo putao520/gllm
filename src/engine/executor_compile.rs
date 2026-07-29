@@ -382,9 +382,24 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // because K/V projections may use different dtypes (F16 vs F32).
         let head_dim = geometry.head_dim;
         let sliding_head_dim = head_dim;
-        let full_head_dim = head_dim;
-        let sliding_num_q_heads = if head_dim > 0 { ref_q_dim / head_dim } else { geometry.num_heads };
-        let full_num_q_heads = if head_dim > 0 { q_dim_full_val / head_dim } else { geometry.num_heads };
+        // Gemma4 hetero: full/global layers use key_length while sliding layers use
+        // key_length_swa. Non-hetero models leave global_head_dim at zero, so retain
+        // the shared head_dim behavior.
+        let full_head_dim = if geometry.global_head_dim > 0 {
+            geometry.global_head_dim
+        } else {
+            geometry.head_dim
+        };
+        let sliding_num_q_heads = if sliding_head_dim > 0 {
+            ref_q_dim / sliding_head_dim
+        } else {
+            geometry.num_heads
+        };
+        let full_num_q_heads = if full_head_dim > 0 {
+            q_dim_full_val / full_head_dim
+        } else {
+            geometry.num_heads
+        };
         let full_num_kv_heads = if full_head_dim > 0 {
             kv_dim_full / full_head_dim
         } else {
@@ -1141,6 +1156,31 @@ mod tests {
             &find_size, 1024, None, vec![1], 4, 2, false, &geo,
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_hetero_config_uses_global_head_dim_for_full_layers() {
+        let mut geo = make_geometry();
+        geo.global_head_dim = 64;
+        let sizes: HashMap<String, usize> = HashMap::new();
+        let find_size = |c: &str| -> Option<usize> { sizes.get(c).copied() };
+
+        // [1 sliding + 1 full] x 3 = 6; full geometry has head_dim=64.
+        let result = TestExec::build_hetero_config(
+            &find_size,
+            32_768, // ref_q_dim = 32_768 / (256 * 4) = 32
+            None,
+            vec![1, 3, 5],
+            512, // full_num_q_heads = 512 / 64 = 8
+            128, // full_num_kv_heads = 128 / 64 = 2
+            false,
+            &geo,
+        );
+        let cfg = result.expect("valid heterogeneous geometry");
+        assert_eq!(cfg.sliding_head_dim, 32);
+        assert_eq!(cfg.full_head_dim, 64);
+        assert_eq!(cfg.full_num_q_heads, 8);
+        assert_eq!(cfg.full_num_kv_heads, 2);
     }
 
     #[test]
