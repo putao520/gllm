@@ -81,7 +81,8 @@ fn c1_backbone_e2e_track_intent() {
     assert!(result.diff_logits.iter().all(|value| value.is_finite()));
 }
 
-
+#[test]
+fn c1_v2_multiturn_state_is_path_dependent() {
     if !pt_available() {
         eprintln!("skipped: {PT_PATH} not present");
         return;
