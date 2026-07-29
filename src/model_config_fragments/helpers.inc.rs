@@ -645,15 +645,20 @@ fn gguf_arch_array_usize(reader: &GgufLoader, arch: &str, suffix: &str) -> Optio
 /// This function is used only when neither source provides the pattern.
 ///
 /// Gemma 4 fallback: derive per-layer attention pattern when GGUF metadata is
-/// absent. SPEC §Gemma4: every 6th layer (1-indexed) is global, others are
-/// sliding-window. I.e. `(i + 1) % 6 == 0 → 1 (global)`, else `0 (sliding)`.
+/// absent. SPEC §Gemma4: every 5th layer (1-indexed) is global, others are
+/// sliding-window. I.e. `(i + 1) % 5 == 0 → 1 (global)`, else `0 (sliding)`.
 ///
 /// This is the ONLY place the default pattern is synthesised. Loader paths,
 /// executor fixtures and tests must all go through this helper so the fallback
 /// stays centralised (per CLAUDE.md: fallback 逻辑集中在一个函数).
+///
+/// BCE-20260729-ATTENTION-PATTERN-OFFBYONE: GGUF does not carry Gemma 4's
+/// `layer_types`; the previous every-sixth default disagreed with config.json's
+/// repeating `['sliding'] * 4 + ['full']` pattern and paired shared-KV layers
+/// with donors using the wrong RoPE type.
 pub fn derive_default_attention_pattern(num_layers: usize) -> Vec<u8> {
     (0..num_layers)
-        .map(|i| if (i + 1) % 6 == 0 { 1u8 } else { 0u8 })
+        .map(|i| if (i + 1) % 5 == 0 { 1u8 } else { 0u8 })
         .collect()
 }
 
@@ -693,7 +698,7 @@ fn apply_gguf_dual_rope_correction(canonical: &mut CanonicalConfig) {
 ///
 /// When `attention_pattern` metadata is absent but Gemma 4 family signals are
 /// present (PLE / global-rope / sliding_window), synthesise the default
-/// "every 6th layer is global" pattern. Other arches keep `None` to avoid
+/// "every 5th layer is global" pattern. Other arches keep `None` to avoid
 /// polluting non-Gemma-4 models.
 ///
 /// Requires `num_hidden_layers` to be resolved first (tensor-derived injection).
