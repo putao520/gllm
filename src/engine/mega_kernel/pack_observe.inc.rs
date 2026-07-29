@@ -274,7 +274,19 @@ fn pack_weights_from_graph(
         }
     }
     for (canonical_name, offset, _dtype) in named_offsets {
-        let ext_name = name_map.resolve_external_to_string(canonical_name);
+        // ModernBERT reserves a uniform L0.input_norm slot even though the
+        // checkpoint starts that weight at L1. Resolve the synthetic template
+        // through L1 before raw-float lookup; the guarded L0 identity never reads it.
+        let reserved_l0_norm = (canonical_name == "L0.input_norm"
+            || canonical_name == "L0.input_norm.bias")
+            && weight_ptrs.get(canonical_name).map_or(true, |p| p.is_null())
+            && weight_ptrs.contains_key(&canonical_name.replacen("L0.", "L1.", 1));
+        let lookup_name = if reserved_l0_norm {
+            canonical_name.replacen("L0.", "L1.", 1)
+        } else {
+            canonical_name.to_string()
+        };
+        let ext_name = name_map.resolve_external_to_string(&lookup_name);
         if let Some(raw) = raw_floats.get(&ext_name) {
             // @trace REQ-DTYPE-CHAIN-001 REQ-DTYPE-CHAIN-003
 
@@ -485,15 +497,29 @@ fn pack_weights_from_graph(
             }
         }
 
-        // Standard weight: direct lookup by canonical name.
-        let ptr = match weight_ptrs.get(canonical_name) {
+        // Standard weight: direct lookup by canonical name. ModernBERT's L0
+        // input norm is absent, but its graph slot is physically reserved from
+        // L1 metadata; use L1 as the template source and keep L0 offsets intact.
+        let l0_missing_norm_template = canonical_name == "L0.input_norm"
+            || canonical_name == "L0.input_norm.bias";
+        let template_name = if l0_missing_norm_template
+            && weight_ptrs.get(canonical_name).map_or(true, |p| p.is_null())
+            && weight_ptrs.contains_key(&canonical_name.replacen("L0.", "L1.", 1))
+        {
+            canonical_name.replacen("L0.", "L1.", 1)
+        } else {
+            canonical_name.to_string()
+        };
+        let ptr = match weight_ptrs.get(&template_name) {
             Some(&p) if !p.is_null() => p,
             _ => {
                 missing_count += 1;
                 continue;
             }
         };
-        let size = *weight_sizes.get(canonical_name).unwrap_or(&0);
+        let size = *weight_sizes.get(&template_name)
+            .or_else(|| weight_sizes.get(canonical_name))
+            .unwrap_or(&0);
         if size == 0 {
             continue;
         }

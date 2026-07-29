@@ -1222,6 +1222,20 @@ pub fn build_compiler_graph(
         let original_hidden = *tensor_map.get("hidden_0")
             .ok_or_else(|| GraphBuildError::InvalidDimension("no hidden_0".into()))?;
 
+        // ModernBERT's first layer intentionally omits the attention/input norm,
+        // while later layers retain it. Keep a physical L0 slot (sized from L1)
+        // so the single-template layer stride remains uniform; the post-attention
+        // norm op is guarded below for layer 0. Other post-norm families still
+        // fail closed on a missing weight.
+        let is_modernbert_topology = features.is_post_norm
+            && weight_shapes.contains_key(&cn_layer(0, "qkv_proj"))
+            && weight_shapes.contains_key(&cn_layer(0, "post_attn_norm"))
+            && weight_shapes.contains_key(&cn_layer(0, "gate_proj"))
+            && weight_shapes.contains_key(&cn_layer(0, "down_proj"));
+        let l0_missing_input_norm = is_modernbert_topology
+            && weight_shapes.get(&cn_layer(0, "input_norm")).is_none()
+            && weight_shapes.get(&cn_layer(1, "input_norm")).is_some();
+
         // ── Track per-layer weight layout for WeightLayout + stride calculation ──
         let mut layer_weight_tids: Vec<(TensorId, usize)> = Vec::new(); // (tid, bytes)
         let mut layer_weight_byte_cursor: usize = 0;
@@ -1316,17 +1330,31 @@ pub fn build_compiler_graph(
 
         // ── Input norm ──
         // Pre-norm (decoder): norm BEFORE attention. Post-norm (encoder/BERT): norm AFTER attn residual.
+        // ModernBERT L0 has no input_norm; reserve an equal-sized template slot
+        // using L1 metadata so all layer offsets remain stride-stable.
         let in_norm_cn = cn_layer(0, "input_norm");
-        let norm_shape = get_shape(weight_shapes, &in_norm_cn)?;
-        let norm_w_tid = g.add_tensor_concrete(&in_norm_cn, &norm_shape, tdt(&in_norm_cn));
+        let in_norm_ref_cn = if l0_missing_input_norm {
+            cn_layer(1, "input_norm")
+        } else {
+            in_norm_cn.clone()
+        };
+        let norm_shape = get_shape(weight_shapes, &in_norm_ref_cn)?;
+        let norm_dtype = weight_dtypes.get(&in_norm_ref_cn).copied().unwrap_or(DType::F32);
+        let norm_w_tid = g.add_tensor_concrete(&in_norm_cn, &norm_shape, norm_dtype);
         layer_weight_tids.push((norm_w_tid, layer_weight_byte_cursor));
-        layer_weight_byte_cursor += weight_physical_bytes(&in_norm_cn, &norm_shape);
+        layer_weight_byte_cursor += weight_physical_bytes(&in_norm_ref_cn, &norm_shape);
 
         let input_norm_bias_tid: Option<TensorId> = if !use_rms {
             let bias_cn = cn_layer_bias(0, "input_norm");
-            let bias_tid = g.add_tensor_concrete(&bias_cn, &[hidden], tdt(&bias_cn));
+            let bias_ref_cn = if l0_missing_input_norm {
+                cn_layer_bias(1, "input_norm")
+            } else {
+                bias_cn.clone()
+            };
+            let bias_dtype = weight_dtypes.get(&bias_ref_cn).copied().unwrap_or(DType::F32);
+            let bias_tid = g.add_tensor_concrete(&bias_cn, &[hidden], bias_dtype);
             layer_weight_tids.push((bias_tid, layer_weight_byte_cursor));
-            layer_weight_byte_cursor += weight_physical_bytes(&bias_cn, &[hidden]);
+            layer_weight_byte_cursor += weight_physical_bytes(&bias_ref_cn, &[hidden]);
             Some(bias_tid)
         } else {
             None
@@ -1848,10 +1876,25 @@ pub fn build_compiler_graph(
         if features.is_post_norm {
             // Post-norm: apply InputNorm (attention.output.LayerNorm) after attn residual → FFN input
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], act_dt);
-            if let Some(bias) = input_norm_bias_tid {
-                g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![resid, norm_w_tid, bias], vec![n], "layer.input_norm");
+            let input_norm_guard = if l0_missing_input_norm {
+                gllm_kernels::compiler::graph::LayerCondition::LayerIdxGe(1)
             } else {
-                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![resid, norm_w_tid], vec![n], "layer.input_norm");
+                gllm_kernels::compiler::graph::LayerCondition::Always
+            };
+            if l0_missing_input_norm {
+                // L0 has no attention norm: express the identity preamble as
+                // resid + (resid - resid). This uses only existing elementwise
+                // JIT ops (ScaleConst is not registered on all CPU profiles),
+                // and never reads the reserved norm slot.
+                let zero = g.add_tensor("layer.input_norm_identity_zero", vec![s.clone(), SymDim::Concrete(hidden)], act_dt);
+                let l0_guard = gllm_kernels::compiler::graph::LayerCondition::LayerIdxLt(1);
+                g.add_op_guarded(Op::Sub, vec![resid, resid], vec![zero], "layer.input_norm_identity_zero", l0_guard);
+                g.add_op_guarded(Op::Add, vec![resid, zero], vec![n], "layer.input_norm_identity", l0_guard);
+            }
+            if let Some(bias) = input_norm_bias_tid {
+                g.add_op_guarded(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![resid, norm_w_tid, bias], vec![n], "layer.input_norm", input_norm_guard);
+            } else {
+                g.add_op_guarded(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![resid, norm_w_tid], vec![n], "layer.input_norm", input_norm_guard);
             }
             post_normed = n;
         } else {
