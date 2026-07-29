@@ -48,6 +48,7 @@ impl GgufReader {
     }
 
     pub fn from_files(paths: &[PathBuf]) -> Result<Self, GgufError> {
+        eprintln!("[GGUF-DEBUG] from_files paths={:?}", paths);
         if paths.len() != 1 {
             return Err(GgufError::ParseError(
                 "gguf loader expects a single weight file".to_string(),
