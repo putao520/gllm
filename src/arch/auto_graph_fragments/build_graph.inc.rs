@@ -1224,11 +1224,10 @@ pub fn build_compiler_graph(
 
         // ModernBERT's first layer intentionally omits the attention/input norm,
         // while later layers retain it. Keep a physical L0 slot (sized from L1)
-        // so the single-template layer stride remains uniform; the post-attention
-        // norm op is guarded below for layer 0. Other post-norm families still
-        // fail closed on a missing weight.
-        let is_modernbert_topology = features.is_post_norm
-            && weight_shapes.contains_key(&cn_layer(0, "qkv_proj"))
+        // so the single-template layer stride remains uniform; the input-norm op
+        // is guarded below for layer 0. The check is topology-driven so it remains
+        // valid when Q3 switches ModernBERT to its true pre-norm path.
+        let is_modernbert_topology = weight_shapes.contains_key(&cn_layer(0, "qkv_proj"))
             && weight_shapes.contains_key(&cn_layer(0, "post_attn_norm"))
             && weight_shapes.contains_key(&cn_layer(0, "gate_proj"))
             && weight_shapes.contains_key(&cn_layer(0, "down_proj"));
@@ -1365,12 +1364,25 @@ pub fn build_compiler_graph(
             // Post-norm: attention uses raw hidden; InputNorm applied after attn residual
             normed = hidden_tid;
         } else {
-            // Pre-norm: InputNorm applied before attention
+            // Pre-norm: InputNorm applied before attention. ModernBERT L0's
+            // missing norm uses the same explicit guarded identity merge as the
+            // post-norm branch; L1+ executes the real norm op.
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], act_dt);
-            if let Some(bias) = input_norm_bias_tid {
-                g.add_op(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![hidden_tid, norm_w_tid, bias], vec![n], "layer.input_norm");
+            let input_norm_guard = if l0_missing_input_norm {
+                gllm_kernels::compiler::graph::LayerCondition::LayerIdxGe(1)
             } else {
-                g.add_op(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![hidden_tid, norm_w_tid], vec![n], "layer.input_norm");
+                gllm_kernels::compiler::graph::LayerCondition::Always
+            };
+            if l0_missing_input_norm {
+                let zero = g.add_tensor("layer.input_norm_identity_zero", vec![s.clone(), SymDim::Concrete(hidden)], act_dt);
+                let l0_guard = gllm_kernels::compiler::graph::LayerCondition::LayerIdxLt(1);
+                g.add_op_guarded(Op::Sub, vec![hidden_tid, hidden_tid], vec![zero], "layer.input_norm_identity_zero", l0_guard);
+                g.add_op_guarded(Op::Add, vec![hidden_tid, zero], vec![n], "layer.input_norm_identity", l0_guard);
+            }
+            if let Some(bias) = input_norm_bias_tid {
+                g.add_op_guarded(Op::LayerNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![hidden_tid, norm_w_tid, bias], vec![n], "layer.input_norm", input_norm_guard);
+            } else {
+                g.add_op_guarded(Op::RmsNorm(NormSpec { feature_dim: hidden, eps: eps, dtype: act_dt, has_weight: true }),  vec![hidden_tid, norm_w_tid], vec![n], "layer.input_norm", input_norm_guard);
             }
             normed = n;
         }
