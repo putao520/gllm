@@ -266,6 +266,9 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["output"],                           TensorRole::OutputHead,        true),
     (&["output_layer"],                     TensorRole::OutputHead,        true),
     (&["output_norm"],                      TensorRole::FinalNorm,         true),
+    // ModernBERT (granite-embedding) embedding norm must precede generic `norm`.
+    (&["embeddings", "norm"],              TensorRole::EmbedNorm,         true),
+    (&["final_norm"],                       TensorRole::FinalNorm,         true),
     (&["norm"],                             TensorRole::FinalNorm,         true),
     (&["final_layernorm"],                  TensorRole::FinalNorm,         true),
     (&["post_layernorm"],                   TensorRole::FinalNorm,         true),
@@ -312,6 +315,11 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["attn_k"],                           TensorRole::AttentionKey,      false),
     (&["attn_v"],                           TensorRole::AttentionValue,    false),
     (&["attn_output"],                      TensorRole::AttentionOutput,   false),
+    // ModernBERT (granite-embedding); keep multi-segment patterns before single `wo`.
+    (&["attn", "wqkv"],                     TensorRole::AttentionFusedQkv, false),
+    (&["attn", "wo"],                       TensorRole::AttentionOutput,   false),
+    (&["mlp", "wi"],                        TensorRole::FfnGate,           false),
+    (&["mlp", "wo"],                        TensorRole::FfnDown,           false),
     (&["wq"],                               TensorRole::AttentionQuery,    false),
     (&["wk"],                               TensorRole::AttentionKey,      false),
     (&["wv"],                               TensorRole::AttentionValue,    false),
@@ -341,6 +349,8 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["pre_feedforward_layernorm"],        TensorRole::InputNorm,         false),
     (&["post_feedforward_layernorm"],       TensorRole::PostAttnNorm,      false),
     (&["attn_norm"],                        TensorRole::InputNorm,         false),
+    // ModernBERT uses a post-attention MLP norm (`mlp_norm`) in each layer.
+    (&["mlp_norm"],                         TensorRole::PostAttnNorm,      false),
     (&["ffn_norm"],                         TensorRole::PostAttnNorm,      false),
     // Gemma 4 sandwich norms (GGUF names)
     (&["post_attention_norm"],              TensorRole::PostAttentionSandwichNorm, false),

@@ -603,6 +603,36 @@ mod tests {
         assert_eq!(layer, Some(0));
     }
 
+    // ── match_tensor_role: ModernBERT-style names ──
+
+    #[test]
+    fn match_tensor_role_modernbert_attention_and_ffn_roles() {
+        let cases = [
+            ("layers.0.attn.Wqkv.weight", TensorRole::AttentionFusedQkv),
+            ("layers.0.attn.Wo.weight", TensorRole::AttentionOutput),
+            ("layers.0.mlp.Wi.weight", TensorRole::FfnGate),
+            ("layers.0.mlp.Wo.weight", TensorRole::FfnDown),
+            ("layers.0.mlp_norm.weight", TensorRole::PostAttnNorm),
+        ];
+
+        for (name, expected_role) in cases {
+            let (role, layer) = match_tensor_role(name).unwrap();
+            assert_eq!(role, expected_role, "unexpected role for {name}");
+            assert_eq!(layer, Some(0), "unexpected layer for {name}");
+        }
+    }
+
+    #[test]
+    fn match_tensor_role_modernbert_global_norm_roles() {
+        let (role, layer) = match_tensor_role("embeddings.norm.weight").unwrap();
+        assert_eq!(role, TensorRole::EmbedNorm);
+        assert_eq!(layer, None);
+
+        let (role, layer) = match_tensor_role("final_norm.weight").unwrap();
+        assert_eq!(role, TensorRole::FinalNorm);
+        assert_eq!(layer, None);
+    }
+
     // ── match_tensor_role: GGUF-style names ──
 
     #[test]
