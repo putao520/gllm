@@ -587,7 +587,7 @@ mod tests {
                 mask: AttentionMask::Full,
                 kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
                 sinks: SinksSpec::None,
-                seq_len: SymDim::Concrete(seq),,
+                seq_len: SymDim::Concrete(seq),
                 kv_cache_layer: 0,
                 kv_write: false,
             }),
