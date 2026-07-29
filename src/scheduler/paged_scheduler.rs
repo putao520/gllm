@@ -1253,7 +1253,7 @@ mod tests {
         let num_kv_shared = 20;
         let mut pattern = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            pattern.push(if i % 6 == 5 { 1 } else { 0 });
+            pattern.push(if i % 5 == 4 { 1 } else { 0 });
         }
         let first_consumer = num_layers - num_kv_shared;
         let consumer = 15;

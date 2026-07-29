@@ -1505,7 +1505,7 @@ pub fn build_compiler_graph(
                 let rope_q = g.add_tensor("layer.q_rope",
                     vec![s.clone(), SymDim::Concrete(qb_n)], act_dt);
                 if use_dual_mla {
-                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
+                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 5, layer_remainder: 0 }),
                         vec![q_raw], vec![rope_q], "layer.rope_q_mla_unabs");
                 } else {
                     g.add_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
@@ -1515,7 +1515,7 @@ pub fn build_compiler_graph(
                 let rope_k = g.add_tensor("layer.k_rope",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], act_dt);
                 if use_dual_mla {
-                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
+                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 5, layer_remainder: 0 }),
                         vec![k_restored], vec![rope_k], "layer.rope_k_mla_unabs");
                 } else {
                     g.add_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
@@ -1704,11 +1704,11 @@ pub fn build_compiler_graph(
             if features.has_rope {
                 let theta = config.rope_theta;
                 // DualRoPE: when global_rope_theta > 0, use DualRoPE with runtime layer selection.
-                // Layer condition derived from attention_pattern: (layer_idx + 1) % 6 == 0 → global.
+                // Layer condition derived from attention_pattern: (layer_idx + 1) % 5 == 0 → global.
                 let use_dual = config.global_rope_theta > 0.0;
                 let rope_q = g.add_tensor("layer.q_rope", vec![s.clone(), SymDim::Concrete(q_n)], act_dt);
                 if use_dual {
-                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
+                    g.add_op(Op::DualRoPE(DualRopeSpec { num_heads: num_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 5, layer_remainder: 0 }),
                         vec![q_for_attn], vec![rope_q], "layer.rope_q");
                 } else {
                     g.add_op(Op::RoPE(RopeSpec { num_heads: num_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 
@@ -1720,7 +1720,7 @@ pub fn build_compiler_graph(
                     .map(|s| s[0]).unwrap_or(k_dim);
                 let rope_k = g.add_tensor("layer.k_rope", vec![s.clone(), SymDim::Concrete(k_n_for_rope)], act_dt);
                 if use_dual {
-                    g.add_op_guarded(Op::DualRoPE(DualRopeSpec { num_heads: num_kv_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 6, layer_remainder: 0 }), 
+                    g.add_op_guarded(Op::DualRoPE(DualRopeSpec { num_heads: num_kv_heads, head_dim: head_dim, sliding_theta: theta, sliding_partial: config.rope_partial_ratio, global_theta: config.global_rope_theta, global_partial: config.rope_partial_ratio_global, rope_scaling: config.rope_scaling, layer_offset: 1, layer_divisor: 5, layer_remainder: 0 }),
                         vec![k_for_attn], vec![rope_k], "layer.rope_k", kv_guard);
                 } else {
                     g.add_op_guarded(Op::RoPE(RopeSpec { num_heads: num_kv_heads, head_dim: head_dim, theta: theta, partial: config.rope_partial_ratio, rope_scaling: config.rope_scaling }), 

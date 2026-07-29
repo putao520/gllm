@@ -345,24 +345,24 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// TEST-GGUF-GEMMA4-001: derive_default_attention_pattern 每 6 层第 6 层 global
+    /// TEST-GGUF-GEMMA4-001: derive_default_attention_pattern 每 5 层第 5 层 global
     #[test]
     fn derive_default_attention_pattern_matches_gemma4_rule() {
-        // 26 层（Gemma 4 E2B）: idx 5, 11, 17, 23 为 global (即第 6/12/18/24 层)
+        // 26 层（Gemma 4 E2B）: idx 4, 9, 14, 19, 24 为 global (即第 5/10/15/20/25 层)
         let pattern = derive_default_attention_pattern(26);
         assert_eq!(pattern.len(), 26);
         for (i, &v) in pattern.iter().enumerate() {
-            let expect = if (i + 1) % 6 == 0 { 1u8 } else { 0u8 };
+            let expect = if (i + 1) % 5 == 0 { 1u8 } else { 0u8 };
             assert_eq!(v, expect, "layer {i} expected {expect} got {v}");
         }
-        // 少于 6 层 → 全部 sliding
-        let small = derive_default_attention_pattern(5);
-        assert_eq!(small, vec![0, 0, 0, 0, 0]);
+        // 少于 5 层 → 全部 sliding
+        let small = derive_default_attention_pattern(4);
+        assert_eq!(small, vec![0, 0, 0, 0]);
         // 边界: 0 层 → 空 Vec
         assert!(derive_default_attention_pattern(0).is_empty());
-        // 恰好 6 层 → 最后一层 global
-        let six = derive_default_attention_pattern(6);
-        assert_eq!(six, vec![0, 0, 0, 0, 0, 1]);
+        // 恰好 5 层 → 最后一层 global
+        let five = derive_default_attention_pattern(5);
+        assert_eq!(five, vec![0, 0, 0, 0, 1]);
     }
 
     #[test]
@@ -1992,10 +1992,10 @@ mod tests {
     fn derive_default_attention_pattern_large_layers() {
         let pattern = derive_default_attention_pattern(1000);
         assert_eq!(pattern.len(), 1000);
-        // Every 6th layer is global
+        // Every 5th layer is global
         let global_count = pattern.iter().filter(|&v| *v == 1).count();
-        assert_eq!(global_count, 166,
-            "1000 layers with every-6th-global pattern → 166 global layers");
+        assert_eq!(global_count, 200,
+            "1000 layers with every-5th-global pattern → 200 global layers");
     }
 
     /// Boundary: derive_dtype with mixed dtypes (majority-vote logic).

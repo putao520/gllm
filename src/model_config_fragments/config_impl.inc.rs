@@ -248,7 +248,7 @@ impl ModelConfig {
         // ── Step 4: GGUF-specific post-processing ──
         // 4a: Gemma 4 dual-RoPE correction (reinterprets freq_base=1M as global theta)
         apply_gguf_dual_rope_correction(&mut canonical);
-        // 4b: attention_pattern default derivation (Gemma 4 "every 6th layer global")
+        // 4b: attention_pattern default derivation (Gemma 4 "every 5th layer global")
         apply_gguf_attention_pattern_default(&mut canonical);
 
         // ── Step 5: validate GGUF-specific invariants (NO-SILENT-FALLBACK) ──
