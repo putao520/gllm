@@ -902,7 +902,7 @@ pub fn build_compiler_graph(
             // Attention
             let causal = features.causal;
             let attn = g.add_tensor(&ptname("attn"), vec![s.clone(), SymDim::Concrete(q_n)], act_dt);
-            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone()  }), 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: this_num_q_heads, num_kv_heads: num_kv_heads, head_dim: this_head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), kv_cache_layer: 0, kv_write: matches!(kv_source, gllm_kernels::compiler::graph::KvSource::FromCache)  }),
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 &ptname("mha"),
@@ -1525,7 +1525,7 @@ pub fn build_compiler_graph(
                 // Standard MHA (not MLA attention)
                 let attn = g.add_tensor("layer.attn",
                     vec![s.clone(), SymDim::Concrete(num_heads * head_dim)], act_dt);
-                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone()  }), 
+                g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if false { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), kv_cache_layer: 0, kv_write: matches!(kv_source, gllm_kernels::compiler::graph::KvSource::FromCache)  }),
                     vec![rope_q, rope_k, v_restored],
                     vec![attn],
                     "layer.mha_mla_unabs",
@@ -1734,7 +1734,7 @@ pub fn build_compiler_graph(
             // ── Attention ──
             let causal = features.causal;
             let attn = g.add_tensor("layer.attn", vec![s.clone(), SymDim::Concrete(q_n)], act_dt);
-            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone()  }), 
+            g.add_op(Op::MultiHeadAttention(AttentionSpec { geometry: AttentionGeometry { num_q_heads: num_heads, num_kv_heads: num_kv_heads, head_dim: head_dim }, mask: if causal { AttentionMask::Causal } else { AttentionMask::Full }, kv_source: kv_source, sinks: if features.attention_sinks { SinksSpec::Learnable } else { SinksSpec::None }, seq_len: s.clone(), kv_cache_layer: 0, kv_write: matches!(kv_source, gllm_kernels::compiler::graph::KvSource::FromCache)  }),
                 vec![q_for_attn, k_for_attn, v_out],
                 vec![attn],
                 "layer.mha",
@@ -2931,6 +2931,26 @@ pub fn build_compiler_graph(
     }
 
     g.max_seq_len = max_seq_len;
+    // SharedKvRef donor map is built once from ResolvedConfig and carried as
+    // immutable graph metadata into JIT lowering. Identity entries own slots.
+    if config.num_kv_shared_layers > 0 {
+        if config.attention_pattern.len() != features.num_layers {
+            return Err(GraphBuildError::InvalidDimension(format!(
+                "SharedKvRef attention_pattern length {} != num_layers {}",
+                config.attention_pattern.len(), features.num_layers,
+            )));
+        }
+        let mut donor_map = Vec::with_capacity(features.num_layers);
+        for layer in 0..features.num_layers {
+            donor_map.push(config.donor_layer(layer).map_err(|e| {
+                GraphBuildError::InvalidDimension(format!("SharedKvRef donor map layer {layer}: {e}"))
+            })?.unwrap_or(layer));
+        }
+        debug_assert!(donor_map.iter().enumerate().all(|(layer, &donor)| {
+            donor < features.num_layers && donor <= layer
+        }));
+        g.kv_donor_map = donor_map;
+    }
     g.embedding_scale = if features.has_embedding_scale {
         Some((hidden as f32).sqrt())
     } else {

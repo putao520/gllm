@@ -409,9 +409,9 @@ impl ModelConfig {
             }
         }).unwrap_or(weight_dtype);
 
-        // num_kv_shared_layers: TEMP disabled (JIT MHA lowering needs donor-layer KV remap)
-        let _ = c.num_kv_shared_layers;
-        let num_kv_shared_layers = None;
+        // SharedKvRef metadata is preserved through ModelGeometry so graph construction,
+        // buffer allocation, and JIT KV addressing share one donor-map source.
+        let num_kv_shared_layers = c.num_kv_shared_layers;
 
         Ok(ModelConfig {
             hidden_size,

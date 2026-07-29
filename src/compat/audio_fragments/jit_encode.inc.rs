@@ -160,6 +160,8 @@ fn build_conformer_block_graph(
             kv_source: gllm_kernels::compiler::graph::KvSource::FromTensor,
             sinks: SinksSpec::None,
             seq_len: s_dim.clone(),
+            kv_cache_layer: 0,
+            kv_write: false,
         }),
         vec![q, k, v],
         vec![attn_out],

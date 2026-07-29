@@ -170,7 +170,6 @@ impl KvCacheBuffer {
 
     /// 获取层 i 的 KV 存储偏移 (字节)。
     /// 共享层返回 donor 层的偏移。
-    #[allow(dead_code)]
     pub fn layer_kv_offset(&self, layer_i: usize) -> usize {
         let effective_layer = match self.kv_donor_map.get(layer_i).copied().flatten() {
             Some(donor) => donor,
@@ -186,7 +185,6 @@ impl KvCacheBuffer {
     }
 
     /// 层 i 是否是共享层 (不计算自己的 KV)
-    #[allow(dead_code)]
     pub fn is_shared_kv_layer(&self, layer_i: usize) -> bool {
         self.kv_donor_map.get(layer_i).copied().flatten().is_some()
     }
