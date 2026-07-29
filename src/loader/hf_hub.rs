@@ -519,6 +519,7 @@ impl HfHubClient {
                 .filter(|name| name.ends_with(".gguf"))
                 .collect();
             if !gguf_files.is_empty() {
+                eprintln!("[GGUF-CANDS] api files: {:?}", gguf_files);
                 gguf_files.sort_by(|a, b| {
                     let a_model = a == "model.gguf";
                     let b_model = b == "model.gguf";
@@ -528,12 +529,14 @@ impl HfHubClient {
                         .then_with(|| gguf_preferred_rank(a).cmp(&gguf_preferred_rank(b)))
                         .then_with(|| a.cmp(b))
                 });
+                eprintln!("[GGUF-CANDS] sorted: {:?}", gguf_files);
                 return gguf_files;
             }
         }
 
         // API 失败时扫描本地缓存目录
         if let Some(cached) = self.scan_local_gguf_cache(repo) {
+            eprintln!("[GGUF-CANDS] scan_local_gguf_cache: {:?}", cached);
             return cached;
         }
 
