@@ -413,7 +413,7 @@ impl ModelConfig {
         // buffer allocation, and JIT KV addressing share one donor-map source.
         let num_kv_shared_layers = c.num_kv_shared_layers;
 
-        Ok(ModelConfig {
+        let mut config = ModelConfig {
             hidden_size,
             num_attention_heads,
             num_key_value_heads,
@@ -462,7 +462,27 @@ impl ModelConfig {
             embedding_scale_factor: c.embedding_scale_factor,
             rope_partial_ratio_global: c.rope_partial_ratio_global,
             mla_use_unabsorbed: c.mla_use_unabsorbed,
-        })
+        };
+
+        // Arch-specific norm defaults that are NOT in GGUF/config metadata.
+        // Gemma4 (E2B/E4B) mandates v_norm = RMSNorm(no scale) on every non-shared
+        // V projection (upstream modeling_gemma4.py), and Q/K use HeadRmsNorm
+        // (learned scale) — NOT QkNorm (pure L2). The GGUF has no
+        // `attention.value_norm`/`attention.qk_norm` flags, so derive from arch.
+        // Without this, has_value_norm defaults false → ValueNorm op never emitted
+        // → V vectors unnormalized → attention scores explode → logits saturate
+        // at softcap (BCE-20260729-GEMMA4-VALUENORM-ABSENT).
+        if manifest.arch == "gemma4" {
+            if config.value_norm.is_none() {
+                config.value_norm = Some(true);
+            }
+            // Gemma4 Q/K use HeadRmsNorm (learned q_norm/k_norm weights), not
+            // QkNorm (L2). HeadRmsNorm is detected from AttentionQNorm/KNorm
+            // tensor presence (has_head_rms_norm); keep qk_norm false.
+            config.qk_norm = Some(false);
+        }
+
+        Ok(config)
     }
 
     /// Build MoEConfig from extracted metadata, if this is a MoE model.
