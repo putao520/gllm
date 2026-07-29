@@ -466,6 +466,15 @@ mod builder_and_client_tests {
         assert_eq!(result.unwrap(), "my-model");
     }
 
+    #[test]
+    fn client_normalize_model_id_resolves_granite_backbone_alias() {
+        let result = Client::normalize_model_id("granite-embedding-311m");
+        assert_eq!(
+            result.unwrap(),
+            "ibm-granite/granite-embedding-311m-multilingual-r2"
+        );
+    }
+
     // ── REQ-API-1: ClientBuilder 链式配置 API 验收 ──
 
     /// Verify Client::builder() returns a fresh ClientBuilder (REQ-API-1).

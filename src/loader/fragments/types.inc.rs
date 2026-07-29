@@ -260,6 +260,7 @@ pub fn normalize_gguf_key(key: &str) -> &str {
 const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     // ── Global tensors (is_global = true) ──
     (&["embed_tokens"],                     TensorRole::Embedding,         true),
+    (&["tok_embeddings"],                   TensorRole::Embedding,         true), // ModernBERT: embeddings.tok_embeddings
     (&["word_embeddings"],                  TensorRole::Embedding,         true),
     (&["token_embd"],                       TensorRole::Embedding,         true),
     (&["lm_head"],                          TensorRole::OutputHead,        true),

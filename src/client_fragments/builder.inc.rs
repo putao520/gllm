@@ -232,6 +232,7 @@ impl ClientBuilder {
         let model_id = self
             .model_id
             .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
+        let model_id = Client::normalize_model_id(&model_id)?;
         let kind = self.kind.unwrap_or(ModelKind::Chat);
 
         // REQ-DIST-002: pass distributed config to build_state (full propagation chain)

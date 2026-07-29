@@ -190,7 +190,8 @@ impl Client {
 
     /// Create a new client with the specified model and kind (sync, blocking).
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
-        let state = ClientBuilder::build_state(model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), Default::default())?;
+        let model_id = Self::normalize_model_id(model_id)?;
+        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency, None, None, false, &crate::engine::intent_bias::IntentBias::default(), Default::default())?;
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
@@ -895,7 +896,17 @@ impl Client {
         if trimmed.is_empty() {
             return Err(ClientError::ModelNotFound(model_id.to_string()));
         }
-        Ok(trimmed.to_string())
+
+        // REQ-C1-001 names the frozen backbone by its short product name.
+        // Keep the public alias here, before the loader sees the model ID, so
+        // both `new_embedding` and `load_model` address the same HF repository.
+        let resolved = match trimmed {
+            "granite-embedding-311m" => {
+                "ibm-granite/granite-embedding-311m-multilingual-r2"
+            }
+            _ => trimmed,
+        };
+        Ok(resolved.to_string())
     }
 
     /// Load state from model source (sync, blocking).

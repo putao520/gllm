@@ -825,31 +825,66 @@ impl HfHubClient {
     ///     snapshots/{hash}/  # {filename} → 软链接 → ../../blobs/{etag_sha256}
     ///     blobs/{etag_sha256} # 实际文件
     ///
+    /// Return cache roots in lookup order, preserving the application cache as
+    /// the primary location and allowing reuse of the standard HF cache.
+    ///
+    /// `hf_hub` receives the application cache root explicitly, so it does not
+    /// automatically see `HF_HUB_CACHE` or `~/.cache/huggingface/hub`.  Those
+    /// locations are read-only secondary sources here; downloads still go to
+    /// `self.cache_dir` through the configured `Api`.
+    fn cache_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.cache_dir.clone()];
+        let mut add_unique = |root: PathBuf| {
+            if !root.as_os_str().is_empty() && !roots.iter().any(|existing| existing == &root) {
+                roots.push(root);
+            }
+        };
+
+        if let Ok(root) = std::env::var("HF_HUB_CACHE") {
+            add_unique(PathBuf::from(root));
+        }
+        if let Ok(root) = std::env::var("HF_HOME") {
+            if !root.trim().is_empty() {
+                add_unique(PathBuf::from(root).join("hub"));
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            add_unique(home.join(".cache").join("huggingface").join("hub"));
+        }
+        roots
+    }
+
     /// 返回完整文件路径当且仅当 snapshot 软链接存在且指向的 blob 文件可读（大小 > 0）。
     /// 这是 BCE-20260627-032 的核心：在调用 hf_hub 的 download_with_progress（它从不
     /// 检查本地缓存）之前先跳过重下载。
     fn find_cached_snapshot(&self, repo: &str, filename: &str) -> Option<PathBuf> {
         // 构造 HF 标准缓存目录名：models--{org}--{model}
         let dir_name = format!("models--{}", repo.replace('/', "--"));
-        let repo_cache_dir = self.cache_dir.join(&dir_name);
+        for root in self.cache_roots() {
+            let repo_cache_dir = root.join(&dir_name);
 
-        // 读取 refs/main 获取当前 commit hash
-        let refs_main = repo_cache_dir.join("refs").join("main");
-        let commit_hash = fs::read_to_string(&refs_main).ok()?;
-        let commit_hash = commit_hash.trim();
+            // 读取 refs/main 获取当前 commit hash
+            let refs_main = repo_cache_dir.join("refs").join("main");
+            let Ok(commit_hash) = fs::read_to_string(&refs_main) else {
+                continue;
+            };
+            let commit_hash = commit_hash.trim();
 
-        // 构造 snapshot 路径：{cache_dir}/models--{...}/snapshots/{commit}/{filename}
-        let snapshot_path = repo_cache_dir
-            .join("snapshots")
-            .join(commit_hash)
-            .join(filename);
+            // 构造 snapshot 路径：{cache_dir}/models--{...}/snapshots/{commit}/{filename}
+            let snapshot_path = repo_cache_dir
+                .join("snapshots")
+                .join(commit_hash)
+                .join(filename);
 
-        // 验证文件存在且可读（snapshot 可能是软链接 → blobs/，用 fs::metadata
-        // follow symlinks 检查真实文件大小 > 0）
-        match std::fs::metadata(&snapshot_path) {
-            Ok(md) if md.len() > 0 => Some(snapshot_path),
-            _ => None,
+            // 验证文件存在且可读（snapshot 可能是软链接 → blobs/，用 fs::metadata
+            // follow symlinks 检查真实文件大小 > 0）
+            if let Ok(md) = std::fs::metadata(&snapshot_path) {
+                if md.len() > 0 {
+                    return Some(snapshot_path);
+                }
+            }
         }
+        None
     }
 
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
