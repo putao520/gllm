@@ -102,6 +102,9 @@ pub struct CanonicalConfig {
     pub rope_scale: Option<f32>,
     pub rope_interleaved: Option<bool>,
     pub global_rope_theta: Option<f32>,
+    /// ModernBERT periodic global-attention interval (config field only).
+    /// Propagated into architecture features by the Q3 graph work.
+    pub global_attn_every_n_layers: Option<usize>,
     pub rope_partial_ratio: Option<f32>,
     pub rope_partial_ratio_global: Option<f32>,
     pub rope_scaling: Option<RopeScalingConfig>,
@@ -208,6 +211,9 @@ fn parse_rope_theta(value: &Value) -> ModelConfigResult<Option<MetaValue>> {
     let theta = find_f32(value, &[
         "rope_theta", "rope_base", "rope_base_value",
     ])
+    // ModernBERT exposes the local/sliding RoPE base under its own name.
+    // This is the local attention theta; global_rope_theta is resolved separately.
+    .or_else(|| find_f32(value, &["local_rope_theta"]))
     .or_else(|| find_f32(value, &["rope_parameters.rope_theta"]))
     .or_else(|| find_f32(value, &["rope_parameters.sliding_attention.rope_theta"]))
     .unwrap_or_else(|| {
@@ -573,6 +579,16 @@ static FIELD_DEFS: &[FieldDef] = &[
         default: None,
     },
     FieldDef {
+        canonical: "global_attn_every_n_layers",
+        kind: FieldKind::Alias {
+            json_keys: &["global_attn_every_n_layers", "global_attention_every_n_layers"],
+            gguf_keys: &["attention.global_every_n_layers", "global_attn_every_n_layers"],
+            gguf_reader: None,
+        },
+        required: false,
+        default: None,
+    },
+    FieldDef {
         canonical: "rope_partial_ratio",
         kind: FieldKind::Alias { json_keys: &["rope_partial_ratio", "partial_rotary_factor", "rope_parameters.sliding_attention.partial_rotary_factor"], gguf_keys: &["rope.partial_ratio", "rope.global.partial_ratio"], gguf_reader: None },
         required: false,
@@ -929,6 +945,11 @@ fn set_canonical_field(
                 canonical.global_rope_theta = Some(v);
             }
         }
+        "global_attn_every_n_layers" => {
+            if let Some(v) = value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+                canonical.global_attn_every_n_layers = Some(v);
+            }
+        }
         "rope_partial_ratio" => {
             if let Some(v) = value.as_f64().map(|n| n as f32) {
                 canonical.rope_partial_ratio = Some(v);
@@ -1097,6 +1118,7 @@ fn set_canonical_from_meta(
         "rope_scale" => { if let MetaValue::F32(v) = meta { canonical.rope_scale = Some(v); } }
         "rope_interleaved" => { if let MetaValue::Bool(v) = meta { canonical.rope_interleaved = Some(v); } }
         "global_rope_theta" => { if let MetaValue::F32(v) = meta { canonical.global_rope_theta = Some(v); } }
+        "global_attn_every_n_layers" => { if let MetaValue::Usize(v) = meta { canonical.global_attn_every_n_layers = Some(v); } }
         "rope_partial_ratio" => { if let MetaValue::F32(v) = meta { canonical.rope_partial_ratio = Some(v); } }
         "rope_partial_ratio_global" => { if let MetaValue::F32(v) = meta { canonical.rope_partial_ratio_global = Some(v); } }
         "rope_scaling" => { if let MetaValue::RopeScaling(v) = meta { canonical.rope_scaling = v; } }
@@ -1229,7 +1251,8 @@ fn gguf_alias_lookup(
         match canonical {
             // usize-typed fields
             "head_dim" | "sliding_window" | "num_kv_shared_layers" | "global_head_dim"
-            | "hidden_size_per_layer_input" | "unabsorbed_threshold" => {
+            | "hidden_size_per_layer_input" | "unabsorbed_threshold"
+            | "global_attn_every_n_layers" => {
                 if let Some(v) = reader.get_metadata_u64(&full_key) {
                     if let Ok(u) = usize::try_from(v) {
                         return Some(MetaValue::Usize(u));

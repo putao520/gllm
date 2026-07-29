@@ -48,6 +48,12 @@ const ARCH_TABLE: &[(&str, &str, &str, Option<&str>)] = &[
     ("xlmroberta",      "xlmr",       "encoder", None),      // ForCausalLM suffix fix: normalized "xlmroberta" has own entry
     ("bert",            "xlmr",       "encoder", None),
     ("roberta",         "xlmr",       "encoder", None),
+    // ModernBERT encoder family (granite-embedding / modernbert_encoder).
+    // Keep a distinct canonical name so model-specific config fields remain
+    // identifiable while reusing the encoder graph family.
+    ("modernbert",       "modernbert", "encoder", None),
+    ("modernbert_encoder", "modernbert", "encoder", None),
+    ("modern_bert",      "modernbert", "encoder", None),
     // Embedding family (REQ-MODEL-9: encoder weight topology + MeanPool output)
     ("bge_m3",          "bge",        "embedding", None),
     // Reranker family (REQ-MODEL-10: encoder weight topology + Classify output)
@@ -153,6 +159,8 @@ mod tests {
         assert_eq!(resolve_template_name("llama4"), Some("llama4"));
         assert_eq!(resolve_template_name("xlmr"), Some("xlmr"));
         assert_eq!(resolve_template_name("xlmroberta"), Some("xlmr"));
+        assert_eq!(resolve_template_name("modernbert"), Some("modernbert"));
+        assert_eq!(resolve_template_name("ModernBertEncoder"), Some("modernbert"));
         assert_eq!(resolve_template_name("deepseek"), Some("deepseek"));
         assert_eq!(resolve_template_name("glm4"), Some("glm4"));
         assert_eq!(resolve_template_name("chatglm"), Some("glm4"));
@@ -165,6 +173,8 @@ mod tests {
     fn family_resolution() {
         assert_eq!(resolve_family("qwen3"), Some(ArchFamily::Decoder));
         assert_eq!(resolve_family("xlmr"), Some(ArchFamily::Encoder));
+        assert_eq!(resolve_family("modernbert"), Some(ArchFamily::Encoder));
+        assert_eq!(resolve_family("modern_bert"), Some(ArchFamily::Encoder));
         assert_eq!(resolve_family("siglip"), Some(ArchFamily::Encoder));
         assert_eq!(resolve_family("bge_m3"), Some(ArchFamily::Embedding));
         assert_eq!(resolve_family("bge_reranker"), Some(ArchFamily::Reranker));

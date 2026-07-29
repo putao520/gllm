@@ -2339,6 +2339,43 @@ mod tests {
         assert_eq!(config.qk_norm, Some(true), "text_config.qk_norm → root qk_norm");
     }
 
+    /// ModernBERT fields use local RoPE theta and periodic global attention aliases.
+    #[test]
+    fn apply_field_registry_modernbert_fields() {
+        let json = serde_json::json!({
+            "hidden_size": 768,
+            "num_attention_heads": 12,
+            "num_hidden_layers": 22,
+            "vocab_size": 50000,
+            "max_position_embeddings": 8192,
+            "model_type": "modernbert",
+            "local_rope_theta": 160000.0,
+            "global_rope_theta": 150000.0,
+            "global_attn_every_n_layers": 3,
+            "sliding_window": 128,
+        });
+        let config = apply_field_registry(&json, FIELD_DEFS).expect("ModernBERT fields");
+        assert_eq!(config.rope_theta, Some(160000.0));
+        assert_eq!(config.global_rope_theta, Some(150000.0));
+        assert_eq!(config.global_attn_every_n_layers, Some(3));
+        assert_eq!(config.sliding_window, Some(128));
+    }
+
+    /// ModernBERT accepts the alternate periodic global-attention key.
+    #[test]
+    fn apply_field_registry_modernbert_global_attention_alias() {
+        let json = serde_json::json!({
+            "hidden_size": 768,
+            "num_attention_heads": 12,
+            "num_hidden_layers": 22,
+            "vocab_size": 50000,
+            "max_position_embeddings": 8192,
+            "global_attention_every_n_layers": 3,
+        });
+        let config = apply_field_registry(&json, FIELD_DEFS).expect("ModernBERT alias");
+        assert_eq!(config.global_attn_every_n_layers, Some(3));
+    }
+
     /// apply_field_registry: Gemma 4 nested RoPE parameters extracted.
     #[test]
     fn apply_field_registry_gemma4_rope_parameters() {
