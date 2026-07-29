@@ -141,8 +141,13 @@ fn gguf_preferred_rank(name: &str) -> usize {
     let lower = name.to_ascii_lowercase();
     // Multi-token-prediction / assistant variants are never the main model; rank
     // them last so the primary weights file wins ties (BCE-20260729-MTP-RANK).
-    let is_aux_variant = lower.contains("/mtp/") || lower.starts_with("mtp-")
-        || lower.contains("-assistant") || lower.contains("mtp_gemma");
+    let is_aux_variant = lower.starts_with("mtp/")
+        || lower.contains("/mtp/")
+        || lower.starts_with("mtp-")
+        || lower.contains("/mtp-")
+        || lower.contains("-assistant")
+        || lower.contains("mtp_gemma")
+        || lower.starts_with("mmproj");
     if is_aux_variant { return 100; }
     if lower.ends_with("q4_0.gguf") { 0 }
     else if lower.ends_with("q8_0.gguf") { 1 }
