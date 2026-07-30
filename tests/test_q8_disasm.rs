@@ -10,7 +10,7 @@ fn q8_disasm_gemma4_w512() {
     let outdir = "/tmp/g4-disasm";
     let _ = std::fs::remove_dir_all(outdir);
     std::fs::create_dir_all(outdir).expect("create dump directory");
-    std::env::set_var("GLLM_TRUNCATE_LAYERS", "1");
+    std::env::set_var("GLLM_TRUNCATE_LAYERS", "2");
     std::env::set_var("GLLM_DUMP_MEGA", outdir);
     std::env::set_var("GLLM_DUMP_OFFSETMAP", "1");
 
