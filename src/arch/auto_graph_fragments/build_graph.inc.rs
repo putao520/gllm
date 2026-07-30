@@ -111,7 +111,6 @@ pub fn build_compiler_graph(
                               inputs: Vec<TensorId>,
                               outputs: Vec<TensorId>,
                               label: &str| {
-        eprintln!("[GEMM-DBG] {} qt_opt={:?}", weight_name, weight_quant_types.get(weight_name));
         if let Some(&qt) = weight_quant_types.get(weight_name) {
             let spec = QuantGemmSpec { m: m.clone(), n, k, quant_type: qt };
             g.add_op(Op::QuantGemm(spec), inputs, outputs, label);

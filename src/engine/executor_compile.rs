@@ -577,7 +577,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     }
                 }
             }
-            eprintln!("[WQT-DBG] weight_quant_types keys: {:?}", map.keys().collect::<Vec<_>>());
             map
         };
         (weight_dtypes, weight_quant_types)
