@@ -2,9 +2,9 @@ use gllm::loader::gguf::{GgufReader, GgufValue};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let gguf = GgufReader::open(&args[1])?;
-    println!("arch: {:?}", gguf.architecture()?);
+    eprintln!("arch: {:?}", gguf.architecture()?);
     let meta = gguf.metadata();
-    println!("kv count: {}", meta.len());
+    eprintln!("kv count: {}", meta.len());
     for (k, v) in meta.iter() {
         let kl = k.to_lowercase();
         if kl.contains("scale") || kl.contains("embed") || kl.contains("norm")
@@ -28,14 +28,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => format!("other"),
             };
-            println!("  {k} = {vs}");
+            eprintln!("  {k} = {vs}");
         }
     }
     // Dump tensor types for key tensors
-    println!("=== tensor types ===");
+    eeprintln!("=== tensor types ===");
     for t in gguf.tensors() {
         if t.name.contains("token_embd") || t.name.contains("output") || t.name.contains("L0.") {
-            println!("  {} dtype={:?} shape={:?}", t.name, t.dtype, t.shape);
+            eeprintln!("  {} dtype={:?} shape={:?}", t.name, t.dtype, t.shape);
         }
     }
     Ok(())
