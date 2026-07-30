@@ -32,10 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     // Dump tensor types for key tensors
-    eeprintln!("=== tensor types ===");
+    eprintln!("=== tensor types ===");
     for t in gguf.tensors() {
         if t.name.contains("token_embd") || t.name.contains("output") || t.name.contains("L0.") {
-            eeprintln!("  {} dtype={:?} shape={:?}", t.name, t.dtype, t.shape);
+            eprintln!("  {} dtype={:?} shape={:?}", t.name, t.dtype, t.shape);
         }
     }
     Ok(())
