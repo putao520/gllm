@@ -196,10 +196,12 @@ pub fn analyze_architecture(
 
     // Embedding scale: config-driven (REQ-MC-EXT-003).
     // >0 → has_embedding_scale=true.
+    // BCE-20260730-EMBED-SCALE: Gemma4 GGUF 无 gemma4.embedding.scale_factor key,
+    // 但上游契约要求 embed × sqrt(hidden_size)。强制开启验证 overflow 假设。
     let has_embedding_scale = hints
         .and_then(|h| h.embedding_scale_factor)
         .map(|f| f > 0.0)
-        .unwrap_or(false);
+        .unwrap_or(true); // TEMP: force true for Gemma4 overflow test
 
     // ── PerLayerEmbedding (Gemma 4 E2B/E4B) ──
     // Detection: presence of PLE weight tensors in weight_shapes.
