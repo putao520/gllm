@@ -26,9 +26,9 @@ fn diag_dump_vm_n1_n2() {
     let outdir = "/tmp/q5km_vm_dump";
     let _ = std::fs::remove_dir_all(outdir);
     let _ = std::fs::create_dir_all(outdir);
-    eprintln!("=== Dump VmProgram N=1 vs N=2 ===");
+    eprintln!("=== Dump VmProgram N=1 vs N=2 vs N=3 ===");
     dump_vm("q5km", "q5_k_m", 1, outdir);
     dump_vm("q5km", "q5_k_m", 2, outdir);
-    eprintln!("=== 对比 vm_q5km_N1.txt vs vm_q5km_N2.txt ===");
-    eprintln!("若仅 num_layers 行不同 → regalloc/lowering 问题; 若结构不同 → plan_lower");
+    dump_vm("q5km", "q5_k_m", 3, outdir);
+    eprintln!("=== 对比 layer loop body 大小 N=1 vs N=2 vs N=3 ===");
 }

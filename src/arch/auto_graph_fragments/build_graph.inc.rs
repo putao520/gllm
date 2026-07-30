@@ -112,11 +112,9 @@ pub fn build_compiler_graph(
                               outputs: Vec<TensorId>,
                               label: &str| {
         if let Some(&qt) = weight_quant_types.get(weight_name) {
-            eprintln!("[GEMM-DBG] {} → QuantGemm({:?}) n={} k={}", weight_name, qt, n, k);
             let spec = QuantGemmSpec { m: m.clone(), n, k, quant_type: qt };
             g.add_op(Op::QuantGemm(spec), inputs, outputs, label);
         } else {
-            eprintln!("[GEMM-DBG] {} → Gemm(F32) n={} k={} [NO quant_type in map!]", weight_name, n, k);
             let weight_dtype = tdt(weight_name);  // 从 weight_dtypes 推断，而非硬编码 dt
             let spec = GemmSpec { m: m.clone(), n, k, dtype: weight_dtype, trans_b: true, has_bias: false };
             g.add_op(Op::Gemm(spec),

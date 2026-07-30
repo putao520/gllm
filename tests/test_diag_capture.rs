@@ -10,7 +10,7 @@ fn dump_capture(label: &str, filter: &str, n: usize) {
     std::env::set_var("GLLM_TRUNCATE_LAYERS", n.to_string());
     let c = Client::builder().model("bartowski/Qwen_Qwen3-0.6B-GGUF").kind(ModelKind::Chat)
         .gguf_file_filter(filter).build().expect("client");
-    let t = c.encode("The capital of France is").expect("encode");
+    let t = c.encode(" ").expect("encode");  // 单 token: 纯 prefill 无 decode
     let sp = c.diagnostic_prefill_scratchpad(&t).expect("sp");
     std::env::remove_var("GLLM_TRUNCATE_LAYERS");
 
@@ -40,7 +40,6 @@ fn dump_capture(label: &str, filter: &str, n: usize) {
 #[ignore]
 fn diag_capture_per_layer() {
     let _ = std::fs::write("/tmp/q5km_capture.txt", "");
-    eprintln!("=== diagnostic-layer-capture N=2 vs N=4 对比 layer0 NaN ===");
-    dump_capture("Q5_K_M", "q5_k_m", 2);
+    eprintln!("=== diagnostic-layer-capture N=4 纯prefill 逐层 (找NaN起点) ===");
     dump_capture("Q5_K_M", "q5_k_m", 4);
 }

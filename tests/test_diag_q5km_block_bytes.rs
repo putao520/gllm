@@ -86,6 +86,19 @@ fn diag_q5km_gguf_block_decode() {
         eprintln!("[OK] q_proj 是 Q5_K, dtype 正确");
     }
 
+    // 读 GGUF embed (token_embedding) block0 d 值, 确认运行时 #0 是 embed
+    eprintln!("\n[GGUF 全部 embed/output 张量]:");
+    for t in r.tensors().iter() {
+        let n = t.name.as_ref();
+        if n.contains("embd") || n.contains("output") || n.contains("lm_head") {
+            let eb = &file_bytes[t.offset..t.offset + 4];
+            let ed = f16::from_le_bytes([eb[0], eb[1]]).to_f32();
+            let edmin = f16::from_le_bytes([eb[2], eb[3]]).to_f32();
+            eprintln!("  {}: dtype={:?} block0 d={:.6} dmin={:.6} (对比运行时 #0 d=0.000063)",
+                n, t.dtype, ed, edmin);
+        }
+    }
+
     // ★关键: 对比 blob 的 L0.q_proj block0 字节 vs GGUF block0 字节
     eprintln!("\n=== ★对比 blob L0.q_proj block0 vs GGUF block0 ===");
     std::env::set_var("GLLM_TRUNCATE_LAYERS", "2");  // N=2 让 blob 含 layer1
@@ -168,6 +181,26 @@ fn diag_q5km_gguf_block_decode() {
         }
     } else {
         eprintln!("[警告] L1.q_proj 推算 offset {} 超出 blob len {}", l1_q_proj_blob_off, blob.len());
+    }
+
+    // ★对比 blob 的 token_embd block0 vs GGUF token_embd block0
+    eprintln!("\n=== ★对比 blob token_embd vs GGUF token_embd ===");
+    let gguf_embd = r.tensors().iter().find(|t| t.name.as_ref() == "token_embd.weight")
+        .expect("find token_embd");
+    let gguf_embd_bytes = &file_bytes[gguf_embd.offset..gguf_embd.offset + 16];
+    let embd_off = woffs.iter().find(|(n, _, _)| n.contains("embed") || n.contains("embd"))
+        .or_else(|| woffs.iter().find(|(n, _, _)| n == "token_embd"));
+    if let Some((name, off, dt)) = embd_off {
+        let blob_embd = &blob[*off..*off + 16];
+        eprintln!("[BLOB] {} off={} dtype={:?} head 16B = {:02x?}", name, off, dt, blob_embd);
+        eprintln!("[GGUF] token_embd head 16B = {:02x?}", gguf_embd_bytes);
+        let m = blob_embd.iter().zip(gguf_embd_bytes.iter()).filter(|(a,b)| a != b).count();
+        eprintln!("[token_embd] {} 处不匹配 (0=pack 正确)", m);
+        let bd = f16::from_le_bytes([blob_embd[0], blob_embd[1]]).to_f32();
+        eprintln!("[BLOB] token_embd block0 d={:.6} (对比运行时 #0 d=0.000063)", bd);
+    } else {
+        eprintln!("[警告] blob 中找不到 embed/embd 张量, 已有 offsets:");
+        for (n, o, d) in woffs.iter().take(10) { eprintln!("  {} off={} dtype={:?}", n, o, d); }
     }
 
     eprintln!("\n=== 结论 ===");

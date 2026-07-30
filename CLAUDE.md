@@ -1039,3 +1039,20 @@ cd ../gllm-kernels && cargo test --test decision_audit
 - 多机多卡：需 2 台机器 + NCCL 运行时（本地 1060 不支持 NCCL，5070 Ti 单卡）
 - gllm-nccl `cargo test --lib` 需 `libnccl.so.2`
 - `cargo check --features nccl` 编译通过 ✅
+
+### ★ GPU E2E 测试路由铁律（ARCH-GPU-E2E-ROUTE）
+
+**需要 GPU 的模型 E2E 测试必须在 5070 Ti 服务器跑，禁止在本地 CPU 跑。**
+
+本地 pt-worker（i9-10900KF + GTX 1060 6GB）CPU JIT 跑不动需要 GPU 算力的模型。以下模型/场景的 E2E 测试必须 SSH 到 5070Ti 执行：
+
+| 模型/场景 | 原因 | 路由目标 |
+|---|---|---|
+| Gemma4（E2B/E4B，含 AltUp+PLE/Vision/Audio） | AltUp 矩阵运算 + 多模态算子需 GPU 算力 | 5070Ti |
+| 含 Vision（PatchEmbed/LearnedPos2D）/ Audio（DepthwiseConv1D）路径 | 多模态前向需 GPU | 5070Ti |
+| 大模型 GPU codegen 验证（PTX/HIP codegen） | 需实际 GPU 执行 | 5070Ti |
+| 任何标注 `needs_gpu` 或体积 >5GB 的模型 | 本地 1060 6GB OOM | 5070Ti |
+
+**执行方式**：`sshpass -p '123456' ssh -o StrictHostKeyChecking=no putao@192.168.1.200` → 在 5070Ti 上 `cd ~/code/rust/gllm && cargo test --test <test_name> -- --ignored --nocapture`
+
+**本地 CPU 可跑的**：小模型量化版 E2E（SmolLM2-Q4_0 74MB / Qwen3-0.6B-Q5_K_M 450MB 等，见 E2E-QUANT-FIRST 已验证可用表）、单测、cargo check。
