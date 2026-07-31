@@ -326,12 +326,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 if sz != ref_q {
                     full_indices.push(layer_idx);
                     if q_dim_full == 0 {
-                        let elem_bytes = geometry.compute_dtype.size_bytes();
-                        q_dim_full = sz / (geometry.hidden_size * elem_bytes);
-                        let k_canon = format!("L{}.k_proj", layer_idx);
-                        if let Some(k_sz) = find_size(&k_canon) {
-                            kv_dim_full = k_sz / (geometry.hidden_size * elem_bytes);
-                        }
+                        // BCE-20260731-HETERO-GEOM-BYTESIZE: quantized weight bytes
+                        // are not logical F32 element counts. Derive full-layer Q/KV
+                        // dimensions from ModelGeometry, the config SSOT, instead of
+                        // dividing raw storage bytes by compute_dtype.size_bytes().
+                        let full_head_dim = if geometry.global_head_dim > 0 {
+                            geometry.global_head_dim
+                        } else {
+                            geometry.head_dim
+                        };
+                        q_dim_full = full_head_dim * geometry.num_heads;
+                        kv_dim_full = full_head_dim * geometry.num_kv_heads;
                     }
                 }
             }
@@ -374,37 +379,31 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return None;
         }
 
-        let elem_bytes = geometry.compute_dtype.size_bytes();
-        let ref_q_dim = ref_q / (geometry.hidden_size * elem_bytes);
-        let q_dim_full_val = q_dim_full;
+        // `_q_dim_full` and `_kv_dim_full` are retained in the helper signature for
+        // scan/test compatibility, but all logical attention dimensions come from
+        // ModelGeometry. They must not be reconstructed from quantized byte counts.
+        let _ = (q_dim_full, kv_dim_full, ref_q);
 
-        // Use head_dim from model config (SSOT). Weight-size derivation is unreliable
-        // because K/V projections may use different dtypes (F16 vs F32).
+        // NOTE: large_intermediate 仍用字节数推导（FFN 维度，非 attention 几何）。
+        // gemma4.feed_forward_length 是 per-layer arr[35]，config.intermediate_size
+        // 仅 small 值；large 需从字节数或 arr 推导。此处 elem_bytes 用 compute_dtype
+        // 近似（Q4_0 权重字节数 / F32 elem_bytes 会低估，但 large_intermediate 仅影响
+        // FFN buffer 大小，不直接致 attention overflow；后续按 feed_forward_length arr 精修）。
+        let elem_bytes = geometry.compute_dtype.size_bytes();
+
+        // Use ModelGeometry as the sole attention-geometry SSOT. Gemma4 hetero
+        // layers use global_head_dim for full attention and head_dim for sliding
+        // attention; both layer types retain the configured Q/KV head counts.
         let head_dim = geometry.head_dim;
         let sliding_head_dim = head_dim;
-        // Gemma4 hetero: full/global layers use key_length while sliding layers use
-        // key_length_swa. Non-hetero models leave global_head_dim at zero, so retain
-        // the shared head_dim behavior.
         let full_head_dim = if geometry.global_head_dim > 0 {
             geometry.global_head_dim
         } else {
             geometry.head_dim
         };
-        let sliding_num_q_heads = if sliding_head_dim > 0 {
-            ref_q_dim / sliding_head_dim
-        } else {
-            geometry.num_heads
-        };
-        let full_num_q_heads = if full_head_dim > 0 {
-            q_dim_full_val / full_head_dim
-        } else {
-            geometry.num_heads
-        };
-        let full_num_kv_heads = if full_head_dim > 0 {
-            kv_dim_full / full_head_dim
-        } else {
-            geometry.num_kv_heads
-        };
+        let sliding_num_q_heads = geometry.num_heads;
+        let full_num_q_heads = geometry.num_heads;
+        let full_num_kv_heads = geometry.num_kv_heads;
 
         let ref_gate_val = ref_gate.unwrap_or(0);
         let small_intermediate = geometry.intermediate_size;
@@ -413,9 +412,24 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         if intermediate_differs && ref_gate_val > 0 {
             if let Some(fl) = Self::find_first_large_layer(find_size, ref_gate_val, geometry) {
-                let gk = format!("L{}.gate_proj", fl);
-                let large_gate = find_size(&gk).unwrap_or(ref_gate_val);
-                large_intermediate = large_gate / (geometry.hidden_size * elem_bytes);
+                // Gemma4's config has one base `intermediate_size` (6144), while
+                // `use_double_wide_mlp` makes KV-shared layers twice as wide
+                // (12288). The per-layer gate bytes are quantized storage bytes,
+                // so they cannot be divided by compute dtype bytes to recover N.
+                let is_wide_kv_shared_layer = geometry.global_head_dim > 0
+                    && geometry.num_kv_shared_layers > 0
+                    && fl >= geometry.num_layers.saturating_sub(geometry.num_kv_shared_layers);
+                large_intermediate = if is_wide_kv_shared_layer {
+                    geometry.intermediate_size.saturating_mul(2)
+                } else if geometry.global_head_dim > 0 {
+                    geometry.intermediate_size
+                } else {
+                    // Legacy non-Gemma hetero configs have no per-layer FFN
+                    // geometry in ModelGeometry; retain their established
+                    // compute-dtype byte derivation until that metadata is added.
+                    let elem_bytes = geometry.compute_dtype.size_bytes();
+                    large_gate / (geometry.hidden_size * elem_bytes)
+                };
                 large_ffn_start_segment = fl / (sliding_per_segment + 1);
             }
         }
