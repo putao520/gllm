@@ -251,6 +251,78 @@ grep -rn 'cwd.*=.*GSC\|cwd.*=.*"/home\|default.*=.*"/' --include='*.mjs'
 
 ---
 
+## ⚡ P0 跨硬件验证范式级归因（2026-07-31，BCE 阶段 2 泛化沉淀）
+
+> **触发**：P0 三硬件验证（AMD CPU AVX-512 / Intel CPU AVX2 / NVIDIA GPU PTX）暴露 3 类反复出现的 BUG 范式。
+> **元根因**：BCE 闭环卡在第 3 步「泛化」——每次归因到具体 patternId（如 Q4K-MIN-SIGN）就停，没上升到范式层级，导致同类 bug 换格式/换算子/换寄存器又冒头。本段是补做的范式级泛化，供后续「修前必查」强制流程使用。
+
+### ⚠️ 范式：NATIVE-CALL-CLOBBER（归因撤销 2026-07-31 — 错误聚类）
+
+> **撤销说明**：本段最初将 5 个 commit 聚类为「RegAlloc 不建模 native call clobber 边界」范式。
+> explore 只读验证（2026-07-31）**证伪此归因**：
+> 1. RegAlloc 确实能分配 VReg 到 r15，resolve_gpr_read 确实能返回 r15
+> 2. 但 3 个 decode lowering 的调用顺序是「先 `mov rdi/rsi, block_base/lane_offset`（复制到 ABI 寄存器）→ 后 `mov r15, rsp`（覆写）」——args 在 r15 覆写前已复制，native 收到正确指针
+> 3. 通用 lower_native_call_x86（6025）无 r15 动态栈锚，不受影响
+> 4. commit 1e3bfd89 明确「save-order 改动对 Q5_K_M N=2 行为零影响，真根因未定位」
+>
+> **这 5 个 commit 是 B C E 阶段 2 泛化的第二种失效——错误聚类**（把不同根因的修复归为同类范式）。其中：
+> - edd4cc9e/6558480e/bc2f2ea0 是真实寄存器保存修复（不同位点），但不是同一范式
+> - 0c6c7c50/ff62d58a 是 SysV ABI 参数槽（float slot）错误，属 ABI 而非 clobber
+>
+> **真实状态**：P0-A/A' CPU 小模型 crash/乱码的根因**仍未定位**。explore 给出更可能的方向：
+> - ABI/argument-slot mismatch（ff62d58a/0c6c7c50 系列：wrong SysV slots 致 out=0x8 SIGSEGV 的强先验）
+> - spill/stack-frame offset corruption
+> - loop/plan offset/count
+> - 其他运行时 dataflow
+>
+> **下一步**：需对 SmolLM2 AVX-512 crash（munmap_chunk SIGABRT）做 VmInstr dump + 时序推理（ARCH-TIMING-REASONING），定位首个发散/越界点，而非预设范式。下方原归因保留作历史记录。
+
+**定义（已撤销）**：~~JIT 生成 native call 时 caller-saved 被破坏但 RegAlloc 不建模 clobber 边界~~
+
+**宪法依据**：`docs/domain-knowledge/regalloc-native-call-interaction.md`（库已建，代码未按它根治）。
+
+**反复实例（≥5 次，每次修一个具体寄存器，从未修根因）**：
+
+| commit | 具体修法 | 未触及的根因 |
+|--------|---------|------------|
+| edd4cc9e | regalloc clobber 模型（Q5_K_M） | 未建 call 边界 |
+| 6558480e | save_ymm_block→save_zmm_block（YMM 32B 不够，ZMM 高 32B 丢） | 仍手动枚举寄存器 |
+| bc2f2ea0 | r10(caller-saved)→r15(callee-saved) 动态栈指针 | 换寄存器非建模 |
+| 0c6c7c50 | Q4KDecodeStep XMM0 float slot | ABI 参数槽 |
+| ff62d58a | Q4KDecodeStep arg misalignment（0c6c7c50 修法又错） | 同上 |
+
+**检测签名**：
+1. JIT 代码含 `call` 指令后，caller-saved 寄存器（rax/rcx/rdx/rsi/rdi/r8-r11/r10/xmm0-15）持有跨 call 值
+2. 动态栈指针/循环计数器用 caller-saved 寄存器（r10/r11）跨 call 存活
+3. ZMM 高 32B 跨 call 用 `vmovups ymmword`（32B）保存而非 `zmmword`（64B）
+
+**根治模板（未实施，待授权）**：RegAlloc 增加 `call_boundary` 建模——native call 点自动 spill 所有 caller-saved 活跃值，call 后 reload； callee-saved 用于跨 call 长存活值。禁手动枚举 save_gprs/save_ymm_block/save_zmm_block。
+
+### 范式：SILENT-FALLBACK-RETURN-OK（上传/准备失败 warn 后返回 Ok）
+
+**定义**：GPU artifact 上传 / 资源准备失败时仅 `log::warn!` 后继续返回 `Ok`，把错误推迟到首次执行才暴露，且诊断 API 用 `.ok()` 吞底层错误 → 测试只见 generic "unavailable"。
+
+**宪法依据**：CLAUDE.md `NO-SILENT-FALLBACK` 铁律 + 全局硬门⑤（禁止静默 fallback）。
+
+**实例**：
+- `src/engine/executor_compile.rs:675-677`：`prepare_gpu_mega_kernel()` 返回 Err → `log::warn!` → 继续 `Ok(mega)` → 真执行时 `cuda_backend.rs:541-545` 才 `weight_blob_gpu not uploaded` Err（P0-B 6/6 fail 根因）
+- `src/engine/executor_api.rs:595-607`：`diagnostic_prefill_logits/scratchpad` 用 `.ok()` 吞 `MegaKernelError`→`Option` → test panic 只显 "GPU unavailable" 不显底层
+
+**检测签名**：
+1. `if let Err(e) = prepare/upload/alloc(...) { log::warn!(...); }` 后无 return Err
+2. 诊断/获取结果 API 用 `.ok()` 把 Result→Option，丢失底层错误分类
+3. 准备阶段失败但执行入口仍被调用（fail-late 非 fail-closed）
+
+**根治模板（未实施，待授权）**：准备失败必须 `return Err(...)`（fail-closed）；诊断 API 保留 `Result<_, MegaKernelError>` 不用 `.ok()`；GPU 分支补 BufferLayout（executor_core.inc.rs:270-303 当前 zero）。
+
+### 范式：DTYPE-HARDCODE-ASSUME-SINGLE（derive_compute_dtype 已重构，KB 过时纠正）
+
+**状态更正**：`docs/domain-knowledge/derive-compute-dtype-unconstitution.md` 记的是历史状态（`BF16=>F32` 硬编码）。源码 `gllm-kernels/src/compiler/dtype_chain.rs:205-217` **已重构**为 `DotProductCap` 驱动的组合判定（NativeBf16→保留 BF16；无原生累加→F32 兜底），不再简单硬编码。KB 文件需更新「最后验证」+ 状态。
+
+**但仍残留的同类**：单个算子 lowering 内仍有 `ctx.dtype`/`F32` 假设单一 dtype 覆盖多输入的位点（见 ARCH-DTYPE-MIXED-PRECISION 违宪形态表）。P0-A/A' CPU 小模型 crash 嫌疑与此范式或 NATIVE-CALL-CLOBBER 相关，待定位。
+
+---
+
 ## BCE-20260622-001: WF SDK "exists but failed to launch" — cwd 指向不存在目录
 
 ### BUG 模式签名

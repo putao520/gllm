@@ -29,7 +29,7 @@
 //! - `kv_optimizer/epilogue_config.inc.rs` — EpilogueSparse + KvOptimization Config/Status (SPEC §8, §9)
 //! - `kv_optimizer/tests.inc.rs`          — 测试模块
 
-use super::{KvPageHeader, PrecisionTier};
+use super::{KvPageHeader, KvPageLayout, KvPageLayoutError, PrecisionTier};
 
 include!("kv_optimizer/kivi_mustafar.inc.rs");
 include!("kv_optimizer/kvtuner_chunk.inc.rs");

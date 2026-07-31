@@ -429,6 +429,259 @@ impl KvPageHeader {
 }
 
 // ============================================================================
+// KIVI page layout and scale packing (SPEC 19 §2.3 / REQ-KV-OPT-004)
+// ============================================================================
+
+/// Errors returned while writing page-local f16 scale metadata.
+/// @trace REQ-KV-OPT-004
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum KvPageLayoutError {
+    #[error("KIVI scale count mismatch: expected {expected}, got {actual}")]
+    ScaleCount { expected: usize, actual: usize },
+    #[error("KIVI K scales for layer {layer} are not available")]
+    MissingKScales { layer: usize },
+    #[error("KIVI page buffer too small: required {required} bytes, got {actual}")]
+    BufferTooSmall { required: usize, actual: usize },
+    #[error("KIVI scale buffer size overflow for {count} values")]
+    SizeOverflow { count: usize },
+}
+
+/// Page-local KIVI layout shared by the scheduler write path and JIT lowering.
+/// @trace REQ-KV-OPT-004
+///
+/// A KIVI page is one physical page containing all KV heads for `page_size`
+/// tokens.  Its payload is laid out as:
+///
+/// ```text
+/// [K_data packed | K_scales f16[head_dim] |
+///  V_data packed | V_scales f16[page_size]]
+/// ```
+///
+/// K scales are page-level per-channel scales (one scale per head dimension,
+/// shared across KV heads and tokens), matching `requantize_kivi4`.  The
+/// `k_scale_offset` field mirrors `KvPageHeader.k_scale_offset`; V scale offset
+/// is deliberately derived, preserving the fixed 64-byte header ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvPageLayout {
+    pub num_kv_heads: usize,
+    pub page_size: usize,
+    pub head_dim: usize,
+    pub bits: u8,
+    /// Byte offset of K_scales from the page base.
+    pub k_scale_offset: usize,
+}
+
+impl KvPageLayout {
+    /// Build a KIVI page layout for 2-bit or 4-bit packed payloads.
+    pub fn new(num_kv_heads: usize, page_size: usize, head_dim: usize, bits: u8) -> Self {
+        assert!(bits == 2 || bits == 4, "KIVI page layout requires 2-bit or 4-bit data");
+        let k_scale_offset = Self::packed_bytes(Self::data_elements(num_kv_heads, page_size, head_dim), bits);
+        Self {
+            num_kv_heads,
+            page_size,
+            head_dim,
+            bits,
+            k_scale_offset,
+        }
+    }
+
+    /// Build a layout using the offset recorded in a page header.
+    pub fn from_header(
+        header: &KvPageHeader,
+        num_kv_heads: usize,
+        page_size: usize,
+        head_dim: usize,
+        bits: u8,
+    ) -> Self {
+        Self {
+            k_scale_offset: header.k_scale_offset as usize,
+            ..Self::new(num_kv_heads, page_size, head_dim, bits)
+        }
+    }
+
+    /// Override the K scale offset while preserving the rest of the layout.
+    #[must_use]
+    pub fn with_k_scale_offset(mut self, offset: usize) -> Self {
+        self.k_scale_offset = offset;
+        self
+    }
+
+    #[inline]
+    fn data_elements(num_kv_heads: usize, page_size: usize, head_dim: usize) -> usize {
+        num_kv_heads
+            .checked_mul(page_size)
+            .and_then(|v| v.checked_mul(head_dim))
+            .expect("KIVI page element count overflow")
+    }
+
+    #[inline]
+    fn packed_bytes(elements: usize, bits: u8) -> usize {
+        match bits {
+            2 => elements.div_ceil(4),
+            4 => elements.div_ceil(2),
+            _ => unreachable!("KIVI page layout validates bit width in new"),
+        }
+    }
+
+    /// Number of packed K bytes.
+    #[inline]
+    pub fn k_packed_len(&self) -> usize {
+        Self::packed_bytes(Self::data_elements(self.num_kv_heads, self.page_size, self.head_dim), self.bits)
+    }
+
+    /// Number of f16 bytes in the page-level K scale section.
+    #[inline]
+    pub fn k_scales_len(&self) -> usize {
+        self.head_dim * 2
+    }
+
+    /// Number of packed V bytes.
+    #[inline]
+    pub fn v_packed_len(&self) -> usize {
+        self.k_packed_len()
+    }
+
+    /// Number of f16 bytes in the per-token V scale section.
+    #[inline]
+    pub fn v_scales_len(&self) -> usize {
+        self.page_size * 2
+    }
+
+    /// Byte offset of K_scales from an absolute page base.
+    #[inline]
+    pub fn k_scales_offset(&self, page_base: usize) -> usize {
+        page_base + self.k_scale_offset
+    }
+
+    /// Byte offset of V_scales from an absolute page base.
+    #[inline]
+    pub fn v_scales_offset(&self, page_base: usize) -> usize {
+        self.k_scales_offset(page_base) + self.k_scales_len() + self.v_packed_len()
+    }
+
+    /// Total bytes required by the packed page payload.
+    #[inline]
+    pub fn total_bytes(&self) -> usize {
+        self.k_scale_offset + self.k_scales_len() + self.v_packed_len() + self.v_scales_len()
+    }
+
+    /// Record the K scale offset in the fixed-size page header.
+    ///
+    /// V scale offset is derived by [`Self::v_scales_offset`] and is not stored
+    /// separately because `KvPageHeader` is a 64-byte ABI contract.
+    pub fn apply_to_header(&self, header: &mut KvPageHeader) {
+        header.k_scale_offset = u16::try_from(self.k_scale_offset)
+            .expect("KIVI K scale offset exceeds KvPageHeader u16 field");
+    }
+
+    /// Pack f32 scales into a page-local f16 section.
+    pub fn pack_k_scales(&self, page: &mut [u8], scales: &[f32]) -> Result<(), KvPageLayoutError> {
+        if scales.len() != self.head_dim {
+            return Err(KvPageLayoutError::ScaleCount {
+                expected: self.head_dim,
+                actual: scales.len(),
+            });
+        }
+        let end = self.k_scale_offset + self.k_scales_len();
+        if end > page.len() {
+            return Err(KvPageLayoutError::BufferTooSmall {
+                required: end,
+                actual: page.len(),
+            });
+        }
+        pack_f32_scales_f16_into(scales, &mut page[self.k_scale_offset..end])
+    }
+
+    /// Pack K scales supplied either per head/channel or already reduced to
+    /// page-level channels. When per-head scales are supplied, the page scale
+    /// is the maximum across heads, matching the page-level KIVI contract.
+    pub fn pack_k_scales_per_head(
+        &self,
+        page: &mut [u8],
+        scales: &[f32],
+        num_kv_heads: usize,
+    ) -> Result<(), KvPageLayoutError> {
+        if num_kv_heads != self.num_kv_heads {
+            return Err(KvPageLayoutError::ScaleCount {
+                expected: self.num_kv_heads,
+                actual: num_kv_heads,
+            });
+        }
+        if scales.len() == self.head_dim {
+            return self.pack_k_scales(page, scales);
+        }
+        let expected = num_kv_heads
+            .checked_mul(self.head_dim)
+            .ok_or(KvPageLayoutError::SizeOverflow { count: num_kv_heads })?;
+        if scales.len() != expected {
+            return Err(KvPageLayoutError::ScaleCount {
+                expected: self.head_dim,
+                actual: scales.len(),
+            });
+        }
+        let mut page_scales = vec![0.0f32; self.head_dim];
+        for head_scales in scales.chunks_exact(self.head_dim) {
+            for (page_scale, &head_scale) in page_scales.iter_mut().zip(head_scales) {
+                *page_scale = page_scale.max(head_scale);
+            }
+        }
+        self.pack_k_scales(page, &page_scales)
+    }
+
+    /// Pack per-token f32 V scales into a page-local f16 section.
+    pub fn pack_v_scales(&self, page: &mut [u8], scales: &[f32]) -> Result<(), KvPageLayoutError> {
+        if scales.len() != self.page_size {
+            return Err(KvPageLayoutError::ScaleCount {
+                expected: self.page_size,
+                actual: scales.len(),
+            });
+        }
+        let start = self.k_scale_offset + self.k_scales_len() + self.v_packed_len();
+        let end = start + self.v_scales_len();
+        if end > page.len() {
+            return Err(KvPageLayoutError::BufferTooSmall {
+                required: end,
+                actual: page.len(),
+            });
+        }
+        pack_f32_scales_f16_into(scales, &mut page[start..end])
+    }
+}
+
+/// Pack f32 scale values as little-endian IEEE f16 bytes.
+/// @trace REQ-KV-OPT-004
+pub fn pack_f32_scales_f16(scales: &[f32]) -> Vec<u8> {
+    let mut packed = vec![0u8; scales.len().saturating_mul(2)];
+    // The allocation above is derived from a slice length, so this cannot fail
+    // on supported targets without an allocation panic before this function.
+    let _ = pack_f32_scales_f16_into(scales, &mut packed);
+    packed
+}
+
+/// Pack f32 scale values into an existing little-endian f16 byte slice.
+pub fn pack_f32_scales_f16_into(
+    scales: &[f32],
+    dst: &mut [u8],
+) -> Result<(), KvPageLayoutError> {
+    let required = scales
+        .len()
+        .checked_mul(2)
+        .ok_or(KvPageLayoutError::SizeOverflow { count: scales.len() })?;
+    if dst.len() < required {
+        return Err(KvPageLayoutError::BufferTooSmall {
+            required,
+            actual: dst.len(),
+        });
+    }
+    for (idx, &scale) in scales.iter().enumerate() {
+        let bits = f32_to_f16_bits(scale).to_le_bytes();
+        let offset = idx * 2;
+        dst[offset..offset + 2].copy_from_slice(&bits);
+    }
+    Ok(())
+}
+
+// ============================================================================
 // f16 conversion helpers (IEEE 754 half-precision, no external dependency)
 // ============================================================================
 

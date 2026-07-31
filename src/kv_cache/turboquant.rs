@@ -15,6 +15,7 @@
 //! ```
 
 use super::dual_track::{DualTrackMemoryPool, TrackConfig};
+use super::{KvPageLayout, KvPageLayoutError};
 use super::quant::{
     apply_rabitq_correction, dequantize_k_per_channel, dequantize_v_per_token,
     quantize_k_per_channel_with_config,    quantize_v_per_token_with_config, KvQuantConfig, QuantMode, QuantResult, RabitqCorrection,
@@ -191,6 +192,25 @@ impl TurboQuantRuntime {
         self.k_scales.get(&layer).map(|s| s.as_slice())
     }
 
+    /// Pack the stored K scales into the page-local f16 K_scales section.
+    /// @trace REQ-KV-OPT-004
+    ///
+    /// This keeps the runtime scale registry as a source of f32 values while
+    /// making the page payload the single contiguous scale representation used
+    /// by the native lowering path.
+    pub fn pack_k_scales_into_page(
+        &self,
+        layer: usize,
+        layout: &KvPageLayout,
+        page: &mut [u8],
+    ) -> Result<(), KvPageLayoutError> {
+        let scales = self
+            .k_scales
+            .get(&layer)
+            .ok_or(KvPageLayoutError::MissingKScales { layer })?;
+        layout.pack_k_scales_per_head(page, scales, layout.num_kv_heads)
+    }
+
     /// Quantize K cache with per-channel granularity (§11.2).
     ///
     /// # Arguments
@@ -248,6 +268,17 @@ impl TurboQuantRuntime {
         let kv_config = self.config.to_kv_quant_config();
         let mut rng = rand::thread_rng();
         quantize_v_per_token_with_config(v, self.config.bits, seq_len, kv_dim, &kv_config, &mut rng)
+    }
+
+    /// Pack per-token V scales into the page-local f16 V_scales section.
+    /// @trace REQ-KV-OPT-004
+    pub fn pack_v_scales_into_page(
+        &self,
+        layout: &KvPageLayout,
+        page: &mut [u8],
+        scales: &[f32],
+    ) -> Result<(), KvPageLayoutError> {
+        layout.pack_v_scales(page, scales)
     }
 
     /// Dequantize K cache (§11.2).

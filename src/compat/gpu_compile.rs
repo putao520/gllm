@@ -305,6 +305,8 @@ pub(crate) struct GpuKernelLaunchConfig {
     pub page_table_ptr: u64,
     /// Device pointer to batch context.
     pub batch_ctx_ptr: u64,
+    /// Device pointer to the KV page-header array (0 = no page headers).
+    pub kv_page_header_ptr: u64,
 }
 
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
@@ -333,11 +335,11 @@ impl GpuKernelLaunchConfig {
         Ok(())
     }
 
-    /// Build the 22-parameter ABI array for mega-kernel launch.
+    /// Build the 23-parameter ABI array for mega-kernel launch.
     ///
     /// The ABI order matches the CPU mega-kernel ABI (SPEC/40).
     /// All pointer values must be valid device pointers.
-    pub fn to_mega_kernel_args(&self) -> [usize; 22] {
+    pub fn to_mega_kernel_args(&self) -> [usize; 23] {
         [
             self.input_ids_gpu as usize,
             self.weight_blob_gpu as usize,
@@ -361,6 +363,7 @@ impl GpuKernelLaunchConfig {
             self.callback_table_ptr as usize,
             self.page_table_ptr as usize,
             self.batch_ctx_ptr as usize,
+            self.kv_page_header_ptr as usize,
         ]
     }
 }

@@ -1,5 +1,4 @@
-use crate::kv_cache::KvCacheDoubleBuffer;
-use crate::kv_cache::KvCacheSlot;
+use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheSlot, KvPageHeader};
 use crate::scheduler::kv_optimizer::KvOptimizer;
 
 use super::super::executor::KvCacheConfig;
@@ -9,6 +8,9 @@ pub struct KvCoordinator {
     pub kv_cache_slot: KvCacheSlot,
     pub kv_cache_config: KvCacheConfig,
     pub paged_kv_pool: Option<crate::compat::cpu_backend::PagedKvPool>,
+    /// Persistent headers for the contiguous KV cache path.
+    // @trace REQ-KV-OPT-004 [entity:ENT-KV-PAGE-HEADER]
+    pub continuous_page_headers: Vec<KvPageHeader>,
     pub kv_optimizer: KvOptimizer,
     pub majority_kv_tier: Option<String>,
     /// KV distribution config from DistributedConfig (REQ-DIST-002).

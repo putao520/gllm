@@ -4,9 +4,11 @@
     "REQ": {
       "domains": {
         "AIS": {
-          "nextN": 2,
+          "nextN": 8,
           "allocated": [
-            1
+            1,
+            2,
+            7
           ],
           "deleted": []
         },
@@ -1194,14 +1196,15 @@
           "deleted": []
         },
         "DTYPE": {
-          "nextN": 7,
+          "nextN": 10,
           "allocated": [
             1,
             2,
             3,
             4,
             5,
-            6
+            6,
+            9
           ],
           "deleted": []
         },
@@ -1308,6 +1311,41 @@
             627,
             628,
             629
+          ],
+          "deleted": []
+        },
+        "TIER-SOVEREIGNTY": {
+          "nextN": 3,
+          "allocated": [
+            1,
+            2
+          ],
+          "deleted": []
+        },
+        "C1": {
+          "nextN": 4,
+          "allocated": [
+            1,
+            2,
+            3
+          ],
+          "deleted": []
+        },
+        "QGUARD": {
+          "nextN": 5,
+          "allocated": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "deleted": []
+        },
+        "SCHED": {
+          "nextN": 11,
+          "allocated": [
+            4,
+            10
           ],
           "deleted": []
         }
@@ -2644,6 +2682,14 @@
             629
           ],
           "deleted": []
+        },
+        "SCHED": {
+          "nextN": 11,
+          "allocated": [
+            4,
+            10
+          ],
+          "deleted": []
         }
       }
     },
@@ -2717,6 +2763,20 @@
           "allocated": [
             1,
             2
+          ],
+          "deleted": []
+        },
+        "MKEMIT": {
+          "nextN": 2,
+          "allocated": [
+            1
+          ],
+          "deleted": []
+        },
+        "DTYPE-SPEC-F32": {
+          "nextN": 2,
+          "allocated": [
+            1
           ],
           "deleted": []
         }

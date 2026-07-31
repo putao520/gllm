@@ -7,7 +7,7 @@
 //! - Sink Token 动态保护 (REQ-KV-OPT-006)
 
 use crate::kv_cache::{
-    f16_bits_to_f32, KvPageHeader, PrecisionTier,
+    f16_bits_to_f32, KvPageHeader, KvPageLayout, PrecisionTier,
 };
 
 /// Sink token 检测阈值 (softmax_max_avg 的 f16 解码值)
@@ -453,6 +453,59 @@ pub fn requantize_page(
     page_size: usize,
     head_dim: usize,
 ) -> usize {
+    requantize_page_inner(
+        page_data,
+        elem_size,
+        current_tier,
+        target_tier,
+        quant_buffer,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        None,
+    )
+}
+
+/// Requantize a page and publish the page-local K scale offset in its header.
+/// @trace REQ-KV-OPT-004
+///
+/// The V scale offset remains derived from [`KvPageLayout`] so the fixed 64-byte
+/// `KvPageHeader` ABI is unchanged.
+pub fn requantize_page_with_header(
+    page_data: &mut [u8],
+    elem_size: usize,
+    current_tier: PrecisionTier,
+    target_tier: PrecisionTier,
+    quant_buffer: &mut Vec<u8>,
+    num_kv_heads: usize,
+    page_size: usize,
+    head_dim: usize,
+    header: &mut KvPageHeader,
+) -> usize {
+    requantize_page_inner(
+        page_data,
+        elem_size,
+        current_tier,
+        target_tier,
+        quant_buffer,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        Some(header),
+    )
+}
+
+fn requantize_page_inner(
+    page_data: &mut [u8],
+    elem_size: usize,
+    current_tier: PrecisionTier,
+    target_tier: PrecisionTier,
+    quant_buffer: &mut Vec<u8>,
+    num_kv_heads: usize,
+    page_size: usize,
+    head_dim: usize,
+    mut header: Option<&mut KvPageHeader>,
+) -> usize {
     if current_tier == target_tier {
         return 0;
     }
@@ -476,7 +529,7 @@ pub fn requantize_page(
         return 0;
     };
 
-    match target_tier {
+    let saved = match target_tier {
         PrecisionTier::FP16 | PrecisionTier::FP8 => {
             // Upgrading precision — no data conversion, just update header tier marker.
             0
@@ -498,7 +551,22 @@ pub fn requantize_page(
             // Evicted: mark page as free
             0
         }
+    };
+
+    if saved > 0 {
+        if let Some(header) = header.as_deref_mut() {
+            let bits = match target_tier {
+                PrecisionTier::KIVI2 => 2,
+                PrecisionTier::KIVI4 => 4,
+                _ => 0,
+            };
+            if bits != 0 {
+                KvPageLayout::new(num_kv_heads, page_size, head_dim, bits)
+                    .apply_to_header(header);
+            }
+        }
     }
+    saved
 }
 
 // ── REQ-KV-OPT-004: KIVI4/2 量化写回实现 ──
@@ -533,11 +601,10 @@ fn requantize_kivi4(
     }
     let (k_vals, v_vals) = f32_values.split_at(n_per_kv);
 
-    let k_packed_len = n_per_kv.div_ceil(2);
-    let k_scales_len = head_dim * 2;
-    let v_packed_len = n_per_kv.div_ceil(2);
-    let v_scales_len = page_size * 2;
-    let total_out = k_packed_len + k_scales_len + v_packed_len + v_scales_len;
+    let layout = KvPageLayout::new(num_kv_heads, page_size, head_dim, 4);
+    let k_scales_len = layout.k_scales_len();
+    let v_scales_len = layout.v_scales_len();
+    let total_out = layout.total_bytes();
 
     quant_buffer.resize(total_out, 0);
     let qbuf = quant_buffer.as_mut_slice();
@@ -580,14 +647,13 @@ fn requantize_kivi4(
         }
     }
 
-    // Write K scales as f16
-    let k_scales_off = k_packed_len;
-    for (c, &s) in scale_k.iter().enumerate() {
-        let off = k_scales_off + c * 2;
-        let bits = crate::kv_cache::f32_to_f16_bits(s);
-        qbuf[off] = (bits & 0xFF) as u8;
-        qbuf[off + 1] = ((bits >> 8) & 0xFF) as u8;
-    }
+    // Write K scales as f16. The header stores this offset; V scales are
+    // derived from the same layout so the fixed 64-byte header remains intact.
+    let k_scales_off = layout.k_scale_offset;
+    crate::kv_cache::pack_f32_scales_f16_into(
+        &scale_k,
+        &mut qbuf[k_scales_off..k_scales_off + k_scales_len],
+    ).expect("KIVI layout allocated the complete K scale section");
 
     // Step 3: Compute per-token scale_v[t] = max_{h,c}(|V[h][t][c]|)
     let mut scale_v = vec![0.0f32; page_size];
@@ -627,14 +693,12 @@ fn requantize_kivi4(
         }
     }
 
-    // Write V scales as f16
-    let v_scales_off = v_packed_off + v_packed_len;
-    for (t, &s) in scale_v.iter().enumerate() {
-        let off = v_scales_off + t * 2;
-        let bits = crate::kv_cache::f32_to_f16_bits(s);
-        qbuf[off] = (bits & 0xFF) as u8;
-        qbuf[off + 1] = ((bits >> 8) & 0xFF) as u8;
-    }
+    // Write V scales as f16 at the layout-derived page-local offset.
+    let v_scales_off = layout.v_scales_offset(0);
+    crate::kv_cache::pack_f32_scales_f16_into(
+        &scale_v,
+        &mut qbuf[v_scales_off..v_scales_off + v_scales_len],
+    ).expect("KIVI layout allocated the complete V scale section");
 
     // Write back quantized data to page_data
     let bytes_to_copy = total_out.min(page_data.len());
@@ -661,11 +725,10 @@ fn requantize_kivi2(
     }
     let (k_vals, v_vals) = f32_values.split_at(n_per_kv);
 
-    let k_packed_len = n_per_kv.div_ceil(4);
-    let k_scales_len = head_dim * 2;
-    let v_packed_len = n_per_kv.div_ceil(4);
-    let v_scales_len = page_size * 2;
-    let total_out = k_packed_len + k_scales_len + v_packed_len + v_scales_len;
+    let layout = KvPageLayout::new(num_kv_heads, page_size, head_dim, 2);
+    let k_scales_len = layout.k_scales_len();
+    let v_scales_len = layout.v_scales_len();
+    let total_out = layout.total_bytes();
 
     quant_buffer.resize(total_out, 0);
     let qbuf = quant_buffer.as_mut_slice();
@@ -705,14 +768,12 @@ fn requantize_kivi2(
         }
     }
 
-    // Write K scales as f16
-    let k_scales_off = k_packed_len;
-    for (c, &s) in scale_k.iter().enumerate() {
-        let off = k_scales_off + c * 2;
-        let bits = crate::kv_cache::f32_to_f16_bits(s);
-        qbuf[off] = (bits & 0xFF) as u8;
-        qbuf[off + 1] = ((bits >> 8) & 0xFF) as u8;
-    }
+    // Write K scales as f16. V scale offset remains layout-derived.
+    let k_scales_off = layout.k_scale_offset;
+    crate::kv_cache::pack_f32_scales_f16_into(
+        &scale_k,
+        &mut qbuf[k_scales_off..k_scales_off + k_scales_len],
+    ).expect("KIVI layout allocated the complete K scale section");
 
     // V per-token scales
     let mut scale_v = vec![0.0f32; page_size];
@@ -749,14 +810,12 @@ fn requantize_kivi2(
         }
     }
 
-    // Write V scales as f16
-    let v_scales_off = v_packed_off + v_packed_len;
-    for (t, &s) in scale_v.iter().enumerate() {
-        let off = v_scales_off + t * 2;
-        let bits = crate::kv_cache::f32_to_f16_bits(s);
-        qbuf[off] = (bits & 0xFF) as u8;
-        qbuf[off + 1] = ((bits >> 8) & 0xFF) as u8;
-    }
+    // Write V scales as f16 at the layout-derived page-local offset.
+    let v_scales_off = layout.v_scales_offset(0);
+    crate::kv_cache::pack_f32_scales_f16_into(
+        &scale_v,
+        &mut qbuf[v_scales_off..v_scales_off + v_scales_len],
+    ).expect("KIVI layout allocated the complete V scale section");
 
     // Write back
     let bytes_to_copy = total_out.min(page_data.len());

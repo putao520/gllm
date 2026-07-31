@@ -719,6 +719,21 @@ impl KiviStrategy {
         &self.v_token_scales
     }
 
+    /// Pack the computed page-level K and per-token V scales into KIVI page
+    /// payload sections. The K scale offset is recorded in the fixed header;
+    /// @trace REQ-KV-OPT-004
+    /// V offset remains derivable from the layout.
+    pub fn pack_scales_into_page(
+        &self,
+        layout: &KvPageLayout,
+        page: &mut [u8],
+        header: &mut KvPageHeader,
+    ) -> Result<(), KvPageLayoutError> {
+        layout.apply_to_header(header);
+        layout.pack_k_scales(page, &self.k_channel_scales)?;
+        layout.pack_v_scales(page, &self.v_token_scales)
+    }
+
     /// Estimated compression ratio for V cache vs FP16 baseline.
     ///
     /// FP16 baseline: 2 bytes per element.

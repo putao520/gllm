@@ -196,6 +196,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             kv_cache_slot: KvCacheSlot::Front,
             kv_cache_config: ctx.kv_cache_config.clone(),
             paged_kv_pool: Some(pool),
+            continuous_page_headers: (0..g.num_layers)
+                .map(|page_id| crate::kv_cache::KvPageHeader::new(page_id as u32))
+                .collect(),
             kv_optimizer: crate::scheduler::kv_optimizer::KvOptimizer::new(g.num_layers),
             majority_kv_tier: None,
             // REQ-DIST-002: kv_distribution_config is set later by init_distributed()
@@ -4312,6 +4315,7 @@ mod tests {
                     swap_config: None,
                 },
                 paged_kv_pool: None,
+                continuous_page_headers: vec![crate::kv_cache::KvPageHeader::default(); 4],
                 kv_optimizer: crate::scheduler::kv_optimizer::KvOptimizer::new(4),
                 majority_kv_tier: None,
                 kv_distribution_config: None,

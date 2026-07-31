@@ -213,7 +213,7 @@ impl<E: Element> HipBackend<E> {
         &self,
         gpu_code: &[u8],
         kernel_name: &str,
-        args: &[usize; 22],
+        args: &[usize; 23],
     ) -> Result<(), String> {
         use gllm_kernels::gpu::GpuDevice;
         let module = self.device.load_hsaco(gpu_code)
@@ -225,9 +225,9 @@ impl<E: Element> HipBackend<E> {
         let block = (wave_size, 1u32, 1u32);
         let grid = (1u32, 1u32, 1u32);
 
-        // BCE-20260702-GPU-ABI: 22 kernelParams aligned to CPU MegaKernelFn 22-param SSOT.
-        // (was [*mut c_void; 21] — HIP arity drift fixed alongside cuda/metal.)
-        let kernel_args: [*mut std::ffi::c_void; 22] = std::array::from_fn(|i| {
+        // BCE-20260702-GPU-ABI: 23 kernelParams aligned to CPU MegaKernelFn 23-param SSOT.
+        // (was [*mut c_void; 22] — HIP arity drift fixed alongside cuda/metal.)
+        let kernel_args: [*mut std::ffi::c_void; 23] = std::array::from_fn(|i| {
             &args[i] as *const usize as *mut std::ffi::c_void
         });
 

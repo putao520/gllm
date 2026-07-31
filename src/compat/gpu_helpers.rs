@@ -371,10 +371,10 @@ pub(super) fn build_kernel_context(
     )
 }
 
-/// Build the 22-parameter ABI array for mega-kernel launch (legacy GPU path).
+/// Build the 23-parameter ABI array for mega-kernel launch (legacy GPU path).
 ///
 /// All pointer arguments must already be device pointers.
-/// R1 transitional: retained for GPU backends that still use the 22-param kernel launch.
+/// R1 transitional: retained for GPU backends that still use the 23-param kernel launch.
 /// Internally delegates to GpuKernelLaunchConfig for unified parameter handling (REQ-KERNELS-GPU-001).
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 #[allow(clippy::too_many_arguments)]
@@ -401,7 +401,7 @@ pub(super) fn build_mega_kernel_args(
     callback_table_ptr: u64,
     page_table_ptr_gpu: u64,
     batch_ctx_ptr: u64,
-) -> [usize; 22] {
+) -> [usize; 23] {
     let config = super::gpu_compile::GpuKernelLaunchConfig {
         input_ids_gpu,
         weight_blob_gpu,
@@ -425,6 +425,7 @@ pub(super) fn build_mega_kernel_args(
         callback_table_ptr,
         page_table_ptr: page_table_ptr_gpu,
         batch_ctx_ptr,
+        kv_page_header_ptr: 0,
     };
     config.to_mega_kernel_args()
 }

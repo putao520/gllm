@@ -370,7 +370,7 @@ impl<E: Element> CudaBackend<E> {
         let block = (warp_size, 1u32, 1u32);
         let grid = (1u32, 1u32, 1u32);
 
-        // Prepare 22 parameter array (cuLaunchKernel takes **void = array of pointers-to-arguments)
+        // Prepare 23 parameter array (cuLaunchKernel takes **void = array of pointers-to-arguments)
         let mut positions: Vec<u32> = (0..(prompt_len + max_new_tokens) as u32).collect();
         let batch_size: usize = 1;
         let temperature_u32 = temperature.to_bits();
@@ -379,7 +379,7 @@ impl<E: Element> CudaBackend<E> {
         // page_table_ptr: device pointer to u32 page table array, or NULL for contiguous KV
         let pt_ptr = page_table_device.unwrap_or(0);
 
-        let args: [*mut std::ffi::c_void; 22] = [
+        let args: [*mut std::ffi::c_void; 23] = [
             &input_ids.as_ptr() as *const _ as *mut std::ffi::c_void,             // 0: input_ids_ptr
             &weight_blob_device as *const _ as *mut std::ffi::c_void,              // 1: weight_blob_ptr
             &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 2: kv_cache_ptr
@@ -402,6 +402,7 @@ impl<E: Element> CudaBackend<E> {
             &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 19: callback_table_ptr
             &pt_ptr as *const _ as *mut std::ffi::c_void,                          // 20: page_table_ptr (0 = contiguous KV)
             &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 21: batch_ctx_ptr (NULL = single-seq legacy)
+            &std::ptr::null::<u8>() as *const _ as *mut std::ffi::c_void,          // 22: kv_page_header_ptr (NULL = no page headers)
         ];
 
         let stream = self.device.default_stream();
@@ -457,7 +458,7 @@ impl<E: Element> CudaBackend<E> {
         &self,
         ptx_code: &[u8],
         kernel_name: &str,
-        args: &[usize; 22],
+        args: &[usize; 23],
     ) -> Result<(), String> {
         use gllm_kernels::gpu::GpuDevice;
         let module = self.device.load_ptx(ptx_code)
@@ -469,8 +470,8 @@ impl<E: Element> CudaBackend<E> {
         let block = (warp_size, 1u32, 1u32);
         let grid = (1u32, 1u32, 1u32);
 
-        // BCE-20260702-GPU-ABI: 22 kernelParams aligned to CPU MegaKernelFn 22-param SSOT.
-        let kernel_args: [*mut std::ffi::c_void; 22] = std::array::from_fn(|i| {
+        // BCE-20260702-GPU-ABI: 23 kernelParams aligned to CPU MegaKernelFn 23-param SSOT.
+        let kernel_args: [*mut std::ffi::c_void; 23] = std::array::from_fn(|i| {
             &args[i] as *const usize as *mut std::ffi::c_void
         });
 
@@ -564,7 +565,7 @@ impl<E: Element> CudaBackend<E> {
         };
 
         // Step 2: build device argv (replace host ptrs with device ptrs)
-        let raw: [usize; 22] = [
+        let raw: [usize; 23] = [
             input_dev as usize,                           // 0: input_ids (device)
             weight_dev as usize,                          // 1: weight_blob (device)
             kv_cache_dev as usize,                        // 2: kv_cache (device, SEPARATE from scratchpad — BCE-20260705-GPUPTR-002)
@@ -587,6 +588,7 @@ impl<E: Element> CudaBackend<E> {
             args.callback_table_ptr as usize,             // 19: callback_table (host)
             args.page_table_ptr as usize,                 // 20: page_table (host)
             args.batch_ctx_ptr as usize,                  // 21: batch_ctx (host)
+            args.kv_page_header_ptr as usize,              // 22: KV page-header array (host/device as configured)
         ];
 
         // Step 3: launch

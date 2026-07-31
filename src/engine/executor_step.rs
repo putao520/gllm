@@ -294,7 +294,23 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // aggregator and apply the optimizer's tier decision + requantize.
         for &page_id in &decode_page_ids {
             for layer_idx in 0..num_layers {
-                let mut header = crate::kv_cache::KvPageHeader::new(page_id);
+                // @trace REQ-KV-OPT-004
+                // Start from the persistent physical-page header so KIVI metadata
+                // (including k_scale_offset) survives across decode steps.
+                let mut header = self
+                    .kv
+                    .continuous_page_headers
+                    .get(page_id as usize)
+                    .copied()
+                    .or_else(|| {
+                        self.kv
+                            .paged_kv_pool
+                            .as_ref()
+                            .and_then(|pool| pool.page_headers().get(page_id as usize))
+                            .copied()
+                    })
+                    .unwrap_or_else(|| crate::kv_cache::KvPageHeader::new(page_id));
+                header.page_id = page_id;
                 header.ref_count = 1;
                 // Populate telemetry fields from the aggregator (per-layer decay).
                 let depth_ratio = layer_idx as f32 / num_layers.max(1) as f32;
@@ -336,7 +352,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                     layer_bytes,
                                 )
                             };
-                            let saved = kv_optimizer::requantize_page(
+                            // @trace REQ-KV-OPT-004
+                            let saved = kv_optimizer::requantize_page_with_header(
                                 kv_data,
                                 elem_bytes,
                                 current_tier,
@@ -345,11 +362,22 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 num_kv_heads,
                                 page_size,
                                 head_dim,
+                                &mut header,
                             );
                             if saved > 0 {
                                 total_requantized += 1;
                             }
                         }
+                    }
+                }
+                // Publish all updated metadata, including telemetry/tier decisions
+                // that did not trigger a data conversion, to the long-lived array.
+                if let Some(persisted) = self.kv.continuous_page_headers.get_mut(page_id as usize) {
+                    *persisted = header;
+                }
+                if let Some(ref mut pool) = self.kv.paged_kv_pool {
+                    if let Some(persisted) = pool.page_headers_mut().get_mut(page_id as usize) {
+                        *persisted = header;
                     }
                 }
             }

@@ -42,6 +42,11 @@ struct CompileMeta {
 pub struct MegaKernelExecutor {
     /// Mega-kernel 编译产物 (唯一路径 — SPEC/39 统一架构)
     mega_compiled: Option<MegaKernelCompiled>,
+    /// Runtime-owned paged-KV header array address and length.
+    /// The owner (Executor::kv.paged_kv_pool) keeps the allocation alive; atomics
+    /// let the call path publish the address without changing the public generate ABI.
+    kv_page_headers_ptr: std::sync::atomic::AtomicUsize,
+    kv_page_headers_len: std::sync::atomic::AtomicUsize,
     /// 模型配置
     num_layers: usize,
     hidden_size: usize,
@@ -411,6 +416,8 @@ impl MegaKernelExecutor {
 
         Ok(Self {
             mega_compiled: Some(mega_compiled),
+            kv_page_headers_ptr: std::sync::atomic::AtomicUsize::new(0),
+            kv_page_headers_len: std::sync::atomic::AtomicUsize::new(0),
             num_layers: geometry.num_layers,
             hidden_size: geometry.hidden,
             vocab_size: geometry.vocab_size,
@@ -458,6 +465,15 @@ impl MegaKernelExecutor {
             vm_instr_map: meta.vm_instr_map,
             const_pool_audit: meta.const_pool_audit,
         })
+    }
+
+    /// Publish the long-lived paged-KV header array used by subsequent calls.
+    // @trace REQ-KV-OPT-004
+    pub fn set_kv_page_headers(&self, headers: &[crate::kv_cache::KvPageHeader]) {
+        self.kv_page_headers_ptr
+            .store(headers.as_ptr() as usize, std::sync::atomic::Ordering::Release);
+        self.kv_page_headers_len
+            .store(headers.len(), std::sync::atomic::Ordering::Release);
     }
 
     /// Returns total scratchpad bytes needed for execution.
@@ -730,6 +746,26 @@ impl MegaKernelExecutor {
         } else {
             Vec::new()
         };
+        // @trace REQ-KV-OPT-004
+        // The Executor publishes its long-lived header array before every call.
+        // Keep a call-local fallback only for direct MegaKernelExecutor users.
+        let header_page_size = mega.max_seq_len.max(1);
+        let header_pages_per_layer = max_total.div_ceil(header_page_size);
+        let header_count = self
+            .num_layers
+            .checked_mul(header_pages_per_layer)
+            .ok_or_else(|| MegaKernelError::Execution("KV page-header count overflow".into()))?;
+        let local_headers: Vec<crate::kv_cache::KvPageHeader> = (0..header_count)
+            .map(|page_id| crate::kv_cache::KvPageHeader::new(page_id as u32))
+            .collect();
+        let configured_headers = self
+            .kv_page_headers_ptr
+            .load(std::sync::atomic::Ordering::Acquire);
+        let header_ptr = if configured_headers != 0 {
+            configured_headers as *const u8
+        } else {
+            local_headers.as_ptr() as *const u8
+        };
         let effective_pool_base = if !kv_cache.is_empty() {
             kv_cache.as_mut_ptr() as *const u8
         } else {
@@ -752,6 +788,11 @@ impl MegaKernelExecutor {
             ctx.scratch_buffer_ptr = scratchpad.as_mut_ptr();
             ctx.batch_ctx_ptr = std::ptr::null();
             ctx.telemetry_ptr = std::ptr::null_mut();
+            ctx.kv_page_header_ptr = header_ptr;
+            ctx.kv_page_size = header_page_size as u32;
+            ctx.kv_num_layers = self.num_layers as u32;
+            ctx.kv_num_heads = mega.num_kv_heads as u32;
+            ctx.kv_head_dim = mega.head_dim as u32;
 
             // REQ-COMP11: Wire KV page decompress injection.
             // When decompress_inject is enabled, the JIT reads KvPageHeader.codec
@@ -799,6 +840,7 @@ impl MegaKernelExecutor {
                         ctx.callback_table_ptr as *const u8,
                         page_table_ptr,     // page_table_ptr: NULL = contiguous KV, u32[] = paged KV
                         ctx.batch_ctx_ptr,
+                        ctx.kv_page_header_ptr,
                     )
                 },
                 CompiledExecutable::Gpu { launcher, .. } => {
@@ -825,6 +867,7 @@ impl MegaKernelExecutor {
                         callback_table_ptr: ctx.callback_table_ptr as *const u8,
                         page_table_ptr,
                         batch_ctx_ptr: ctx.batch_ctx_ptr,
+                        kv_page_header_ptr: ctx.kv_page_header_ptr,
                         scratchpad_bytes: scratchpad.len(),
                         output_tokens_bytes: output_tokens.len() * 4,
                     };
@@ -1030,6 +1073,7 @@ impl MegaKernelExecutor {
                         std::ptr::null(),               // callback_table (from batch_ctx)
                         std::ptr::null(),               // page_table (from batch_ctx)
                         ctx.batch_ctx_ptr,              // batch_ctx_ptr — triggers JIT batch path
+                        ctx.kv_page_header_ptr,         // kv_page_header_ptr
                     )
                 },
                 CompiledExecutable::Gpu { launcher, .. } => {
@@ -1056,6 +1100,7 @@ impl MegaKernelExecutor {
                         callback_table_ptr: std::ptr::null(),
                         page_table_ptr: std::ptr::null(),
                         batch_ctx_ptr: ctx.batch_ctx_ptr,
+                        kv_page_header_ptr: ctx.kv_page_header_ptr,
                         scratchpad_bytes: scratchpad.len(),
                         output_tokens_bytes: output_tokens.len() * 4,
                     };

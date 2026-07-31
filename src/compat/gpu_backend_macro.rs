@@ -16,7 +16,7 @@
 /// - `get_cached_ptx(&str) -> Option<Vec<u8>>`
 /// - `get_weight_gpu_ptr() -> Option<u64>`
 /// - `get_cached_scratchpad_bytes() -> usize`
-/// - `gpu_launch_mega_kernel(&[u8], &str, &[usize; 22]) -> Result<(), String>`
+/// - `gpu_launch_mega_kernel(&[u8], &str, &[usize; 23]) -> Result<(), String>`
 macro_rules! impl_gpu_backend {
     (
         backend = $backend_ty:ident,
@@ -153,7 +153,7 @@ macro_rules! impl_gpu_backend {
                             0, 1, seq_len, sp_gpu, out_gpu,
                             0, 0, 0, 1, 0, 0,
                             0, seq.position, 0, 0, 0, page_table_gpu,
-                            0,
+                            0, 0,
                         );
                         bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                             .map_err(|e| BE::$upload_err_variant(e))?;
@@ -282,7 +282,7 @@ macro_rules! impl_gpu_backend {
                         0, 1, seq_len, sp_gpu, out_gpu,
                         0, 0, 0, 1, 0, 0,
                         0, 0, 0, 0, 0, 0,
-                        0,
+                        0, 0,
                     );
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
@@ -348,7 +348,7 @@ macro_rules! impl_gpu_backend {
                         0, 0, 0, 1, 0,
                         0, 0, 0, 0, 0, 0,
                         0,
-                        0,
+                        0, 0,
                     );
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
@@ -403,7 +403,7 @@ macro_rules! impl_gpu_backend {
                         0, 0, 0, 1, 0,
                         0, 0, 0, 0, 0, 0,
                         0,
-                        0,
+                        0, 0,
                     );
                     bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                         .map_err(|e| BE::$upload_err_variant(e))?;
@@ -686,7 +686,7 @@ impl GpuEncoderOps for super::cuda_backend::CudaBackend<f32> {
             0, 1, seq_len, sp_gpu, out_gpu,
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
-            0,
+            0, 0,
         );
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
@@ -723,7 +723,7 @@ impl GpuEncoderOps for super::hip_backend::HipBackend<f32> {
             0, 1, seq_len, sp_gpu, out_gpu,
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
-            0,
+            0, 0,
         );
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 
@@ -760,7 +760,7 @@ impl GpuEncoderOps for super::metal_backend::MetalBackend<f32> {
             0, 1, seq_len, sp_gpu, out_gpu,
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
-            0,
+            0, 0,
         );
         self.gpu_launch_mega_kernel(&ptx, "forward_kernel", &args)?;
 

@@ -6,6 +6,7 @@ use crate::engine::executor::{
     KvCacheHandle, LogitsHandle, SamplingConfig,
 };
 use crate::engine::mega_kernel::KernelContext;
+use crate::kv_cache::KvPageHeader;
 use crate::scheduler::types::{PageId, PageState, StorageKey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -272,6 +273,10 @@ struct SwapPageData {
 pub struct PagedKvPool {
     /// Physical backing memory: `num_pages * page_stride` bytes.
     pool: Vec<u8>,
+    /// Persistent metadata backing memory, one fixed-size header per physical page.
+    /// The JIT receives this stable address through `KernelContext.kv_page_header_ptr`.
+    // @trace REQ-PA-006 [entity:ENT-KV-PAGE-HEADER]
+    page_headers: Vec<KvPageHeader>,
     /// Bytes per page.
     /// Standard: num_layers * 2 * num_kv_heads * page_size * head_dim * elem_bytes.
     /// MLA: num_layers * page_size * kv_dim * elem_bytes.
@@ -324,6 +329,9 @@ impl PagedKvPool {
         let total_bytes = num_pages * page_stride;
         Self {
             pool: vec![0u8; total_bytes],
+            page_headers: (0..num_pages)
+                .map(|page_id| KvPageHeader::new(page_id as u32))
+                .collect(),
             page_stride,
             num_pages,
             page_size,
@@ -345,6 +353,26 @@ impl PagedKvPool {
     /// Returns a mutable raw pointer to the pool's base address.
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.pool.as_mut_ptr()
+    }
+
+    /// Returns the persistent page-header array for host-side metadata updates.
+    pub fn page_headers(&self) -> &[KvPageHeader] {
+        &self.page_headers
+    }
+
+    /// Returns a mutable persistent page-header array.
+    pub fn page_headers_mut(&mut self) -> &mut [KvPageHeader] {
+        &mut self.page_headers
+    }
+
+    /// Returns the stable header-array address consumed by JIT page metadata loads.
+    pub fn page_headers_ptr(&self) -> *const u8 {
+        self.page_headers.as_ptr() as *const u8
+    }
+
+    /// Returns the number of persistent page headers.
+    pub fn page_headers_len(&self) -> usize {
+        self.page_headers.len()
     }
 
     /// Returns the page stride in bytes.

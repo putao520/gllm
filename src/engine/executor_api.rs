@@ -90,6 +90,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         )))
     }
 
+    // @trace REQ-KV-OPT-004
+    /// Publish the executor-owned paged KV headers to the compiled mega-kernel.
+    /// The pool owns the allocation; this only publishes its stable address before
+    /// a call, preserving the public generate API and the header lifetime invariant.
+    fn sync_kv_page_headers(&self) {
+        if let Some(mega) = self.compute.mega_kernel.as_ref() {
+            mega.set_kv_page_headers(&self.kv.continuous_page_headers);
+        }
+    }
+
     fn generate_with_sampling_mega(
         &mut self,
         prompt: &str,
@@ -114,6 +124,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let has_guardrail = self.model_ctx.hooks.read().map(|h| !h.is_empty()).unwrap_or(false);
         let kv_tier_ref = self.kv.majority_kv_tier.as_deref();
         let mega = self.compute.mega_kernel.as_ref().unwrap();
+        self.sync_kv_page_headers();
         let variant = mega.select_variant_for_batch(
             kv_tier_ref, moe_brief, has_guardrail,
             self.inference.rag_system.is_some(), None,
@@ -371,6 +382,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mega = self.compute.mega_kernel.as_ref().ok_or_else(|| {
             ExecutorError::Backend(BackendError::Other("no mega-kernel available".into()))
         })?;
+        self.sync_kv_page_headers();
         let num_mm_tokens = fused_hidden.len() / self.model_ctx.geometry.hidden_size;
         if fused_hidden.len() != num_mm_tokens * self.model_ctx.geometry.hidden_size {
             return Err(ExecutorError::Backend(BackendError::Other(format!(
@@ -436,6 +448,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             else { std::ptr::null() };
 
         let mega = self.compute.mega_kernel.as_ref().unwrap();
+        self.sync_kv_page_headers();
         let output_tokens = if let Some((start, end)) = position_agnostic_range {
             mega.generate_single_sequence_with_position_agnostic(
                 &prompt_tokens, max_tokens, temperature, top_k, top_p, sg_hook_ptr,
@@ -536,6 +549,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mega = self.compute.mega_kernel.as_ref().ok_or_else(|| {
             ExecutorError::Backend(BackendError::Other("mega-kernel not compiled".into()))
         })?;
+        self.sync_kv_page_headers();
         let pool_base = self.kv.paged_kv_pool.as_ref().map(|p| p.as_ptr()).unwrap_or(std::ptr::null());
 
         for req in requests {

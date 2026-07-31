@@ -287,11 +287,11 @@ pub type MegaKernelFn = unsafe extern "C" fn(ctx: *const u8) -> u32;
 /// GPU 变体留空待阶段3B launcher 注入 — execute_* 对 `Gpu` 返回
 /// `Err(MegaKernelError::Execution("GPU launcher not yet wired"))`。
 pub enum CompiledExecutable {
-    /// CPU x86/aarch64 JIT 机器码 + 函数指针（22-param flat ABI via KernelContext）。
+    /// CPU x86/aarch64 JIT 机器码 + 函数指针（23-param flat ABI via KernelContext）。
     Cpu {
         /// mmap'd JIT 机器码（generate loop + embedded forward code）。
         code: gllm_kernels::compiler::CompiledLayer,
-        /// 22-param 函数指针 — 单次 CALL 完成推理。
+        /// 23-param 函数指针 — 单次 CALL 完成推理。
         entry_fn: gllm_kernels::compiler::MegaKernelFn,
     },
     /// GPU PTX/HIP/MSL 字节码 + launcher 闭包。
@@ -497,10 +497,10 @@ impl MegaKernelCompiled {
 }
 
 // ============================================================================
-// MegaKernelArgs — 22-param 统一参数包 (ARCH-UNIFIED-EXEC)
+// MegaKernelArgs — 23-param 统一参数包 (ARCH-UNIFIED-EXEC)
 // ============================================================================
 
-/// Mega-Kernel 22-param 统一参数包 (SSOT: 对齐 gllm-kernels MegaKernelFn 22-param ABI)。
+/// Mega-Kernel 23-param 统一参数包 (SSOT: 对齐 gllm-kernels MegaKernelFn 23-param ABI)。
 /// CPU entry_fn 和 GPU cuLaunchKernel 各自从此结构展开参数，类型系统保证字段不遗漏。
 /// 参考: gllm-kernels/src/compiler/mega_kernel_abi.rs:159 + gpu_generate_single_sequence cuda_backend.rs:306。
 ///
@@ -529,7 +529,8 @@ pub struct MegaKernelArgs {
     pub callback_table_ptr: *const u8,
     pub page_table_ptr: *const u32,  // SSOT arg 20: *const u32 (u32[] paged KV table, NULL=contiguous)
     pub batch_ctx_ptr: *const u8,    // SSOT arg 21: *const u8 (NULL=single-seq legacy)
-    // ARCH-UNIFIED-EXEC 阶段3C: host-side size metadata (NOT part of 22-param GPU ABI).
+    pub kv_page_header_ptr: *const u8, // SSOT arg 22: *const u8 (NULL=no page headers)
+    // ARCH-UNIFIED-EXEC 阶段3C: host-side size metadata (NOT part of 23-param GPU ABI).
     // GPU launcher uses these to size H2D/D2H copies. CPU arm ignores (fills 0).
     pub scratchpad_bytes: usize,
     pub output_tokens_bytes: usize,

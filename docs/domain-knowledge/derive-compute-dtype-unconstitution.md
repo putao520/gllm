@@ -3,7 +3,8 @@
 > 来源：gllm-kernels dtype_chain.rs:195-210 + architect 裁决（sessionId 401396fe）+ 用户宪法 -1 指令
 > 建库触发：运行时钉死 SmolLM2 compute_dtype=F32（config 是 BF16）→ 追出 derive_compute_dtype 硬编码 BF16→F32
 > 重大修正：architect 裁决指出 "blob 保留 BF16" 但这本身预设 BF16 立场 → 用户宪法 -1：禁止任何精度预设
-> 最后验证：2026-07-06
+> 最后验证：2026-07-31
+> **状态更正（2026-07-31）**：层2 描述的 `BF16|F16 => F32` 硬编码**已重构**。dtype_chain.rs:205-217 现为 `derive_compute_dtype(storage_dtype, device)` 的 `DotProductCap` 驱动组合判定（NativeBf16→保留 BF16；无原生累加→F32 兜底）。不再简单硬编码。本文件层2 段落保留作历史归因，但「当前仍违宪」表述已过时——见 BUG-KNOWLEDGE.md「DTYPE-HARDCODE-ASSUME-SINGLE」范式段。残留：单个算子 lowering 内仍有 ctx.dtype/F32 单一 dtype 假设位点。
 
 ## 两层事实（必须区分）
 

@@ -167,6 +167,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // callback_table_ptr
                     std::ptr::null(),     // page_table_ptr
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                    std::ptr::null(),     // kv_page_header_ptr: NULL = no page headers
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -193,6 +194,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
@@ -312,6 +314,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                     std::ptr::null(),
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                    std::ptr::null(),     // kv_page_header_ptr: NULL = no page headers
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -338,6 +341,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
@@ -446,6 +450,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),     // callback_table_ptr: null
                     std::ptr::null(),     // page_table_ptr: null (contiguous KV)
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                    std::ptr::null(),     // kv_page_header_ptr: NULL = no page headers
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -472,6 +477,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
@@ -582,6 +588,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                     std::ptr::null(),
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                    std::ptr::null(),     // kv_page_header_ptr: NULL = no page headers
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -608,6 +615,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
@@ -721,6 +729,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                     std::ptr::null(),
                     std::ptr::null(),
+                    std::ptr::null(),
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -747,6 +756,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
@@ -899,6 +909,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                     std::ptr::null(),
                     std::ptr::null(),
+                    std::ptr::null(),
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -925,6 +936,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
@@ -1420,6 +1432,7 @@ impl MegaKernelExecutor {
                     std::ptr::null(),
                     std::ptr::null(),
                     std::ptr::null(),     // batch_ctx_ptr: NULL = single-seq legacy mode
+                    std::ptr::null(),     // kv_page_header_ptr: NULL = no page headers
                 )
             },
             CompiledExecutable::Gpu { launcher, .. } => {
@@ -1449,6 +1462,7 @@ impl MegaKernelExecutor {
                     callback_table_ptr: std::ptr::null(),
                     page_table_ptr: std::ptr::null(),
                     batch_ctx_ptr: std::ptr::null(),
+                    kv_page_header_ptr: std::ptr::null(),
                     scratchpad_bytes: scratchpad.len(),
                     output_tokens_bytes: output_tokens.len() * 4,
                 };
