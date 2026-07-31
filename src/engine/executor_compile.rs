@@ -412,6 +412,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         if intermediate_differs && ref_gate_val > 0 {
             if let Some(fl) = Self::find_first_large_layer(find_size, ref_gate_val, geometry) {
+                let gk = format!("L{}.gate_proj", fl);
+                let large_gate = find_size(&gk).unwrap_or(ref_gate_val);
                 // Gemma4's config has one base `intermediate_size` (6144), while
                 // `use_double_wide_mlp` makes KV-shared layers twice as wide
                 // (12288). The per-layer gate bytes are quantized storage bytes,
