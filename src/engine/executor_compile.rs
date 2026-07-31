@@ -673,7 +673,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // ARCH-UNIFIED-EXEC 阶段3C-2: kv_cache needs separate device buffer (BCE-20260705-GPUPTR-002).
         let kv_cb = mega.kv_cache_bytes(geometry.num_layers);
         if let Err(e) = backend.prepare_gpu_mega_kernel(wb.unwrap_or(&[]), decoder_gc, sb, kv_cb) {
-            log::warn!("executor: GPU mega-kernel artifact upload failed: {e}");
+            log::error!("executor: GPU mega-kernel artifact upload failed: {e}");
+            return Err(ExecutorError::Backend(BackendError::Other(format!(
+                "GPU mega-kernel artifact upload failed: {e}"
+            ))));
         }
 
         // Dump source map for DAP debugging
