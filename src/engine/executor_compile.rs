@@ -923,10 +923,9 @@ mod tests {
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
 
         assert_eq!(full_indices, vec![2, 4, 5]);
-        // q_dim_full = 4096 / (256 * 4) = 4
-        assert_eq!(q_dim_full, 4);
-        // kv_dim_full = 2048 / (256 * 4) = 2
-        assert_eq!(kv_dim_full, 2);
+        // Quantized byte sizes are ignored; dimensions come from geometry.
+        assert_eq!(q_dim_full, 256);
+        assert_eq!(kv_dim_full, 128);
     }
 
     #[test]
@@ -996,10 +995,9 @@ mod tests {
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
 
         assert_eq!(full_indices, vec![1, 2, 3]);
-        // q_dim_full = 2048 / (256 * 4) = 2 (from first diff layer L1)
-        assert_eq!(q_dim_full, 2);
-        // kv_dim_full = 1024 / (256 * 4) = 1 (from first diff layer L1)
-        assert_eq!(kv_dim_full, 1);
+        // Dimensions are independent of which differing layer is first.
+        assert_eq!(q_dim_full, 256);
+        assert_eq!(kv_dim_full, 128);
     }
 
     // ======================================================================
@@ -1151,10 +1149,9 @@ mod tests {
         // head_dim from geometry (SSOT): geo.head_dim=32
         assert_eq!(cfg.sliding_head_dim, 32);
         assert_eq!(cfg.full_head_dim, 32);
-        // ref_q_dim = 1024/(256*4) = 1, sliding_num_q_heads = 1/32 = 0
-        assert_eq!(cfg.sliding_num_q_heads, 0);
-        // q_dim_full = 4096/(256*4) = 4, full_num_q_heads = 4/32 = 0
-        assert_eq!(cfg.full_num_q_heads, 0);
+        // Head counts come directly from ModelGeometry.
+        assert_eq!(cfg.sliding_num_q_heads, 8);
+        assert_eq!(cfg.full_num_q_heads, 8);
         assert_eq!(cfg.sliding_num_kv_heads, 4);
     }
 
@@ -1187,8 +1184,8 @@ mod tests {
             32_768, // ref_q_dim = 32_768 / (256 * 4) = 32
             None,
             vec![1, 3, 5],
-            512, // full_num_q_heads = 512 / 64 = 8
-            128, // full_num_kv_heads = 128 / 64 = 2
+            512, // ignored: full Q dimension comes from geometry
+            128, // ignored: full KV dimension comes from geometry
             false,
             &geo,
         );
@@ -1196,7 +1193,7 @@ mod tests {
         assert_eq!(cfg.sliding_head_dim, 32);
         assert_eq!(cfg.full_head_dim, 64);
         assert_eq!(cfg.full_num_q_heads, 8);
-        assert_eq!(cfg.full_num_kv_heads, 2);
+        assert_eq!(cfg.full_num_kv_heads, 4);
     }
 
     #[test]
@@ -1228,12 +1225,9 @@ mod tests {
         // head_dim from geometry (SSOT): geo.head_dim=32
         assert_eq!(cfg.sliding_head_dim, 32);
         assert_eq!(cfg.full_head_dim, 32);
-        // ref_q_dim = 1024/(256*4) = 1, sliding_num_q_heads = 1/32 = 0
-        assert_eq!(cfg.sliding_num_q_heads, 0);
-        // full_num_q_heads = 4/32 = 0
-        assert_eq!(cfg.full_num_q_heads, 0);
-        // full_num_kv_heads: full_head_dim=32, kv_dim_full/32 = 2/32 = 0
-        assert_eq!(cfg.full_num_kv_heads, 0);
+        assert_eq!(cfg.sliding_num_q_heads, 8);
+        assert_eq!(cfg.full_num_q_heads, 8);
+        assert_eq!(cfg.full_num_kv_heads, 4);
         assert_eq!(cfg.full_layer_indices, vec![1, 3, 5]);
         assert_eq!(cfg.small_intermediate, 512);
         assert_eq!(cfg.large_intermediate, 512);
@@ -1501,8 +1495,8 @@ mod tests {
         let (full_indices, q_dim, kv_dim, _) =
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
         assert_eq!(full_indices, vec![1]);
-        assert_eq!(q_dim, 4); // 4096 / (256*4) = 4
-        assert_eq!(kv_dim, 2); // 2048 / (256*4) = 2
+        assert_eq!(q_dim, 256); // geometry.num_heads * geometry.head_dim
+        assert_eq!(kv_dim, 128); // geometry.num_kv_heads * geometry.head_dim
     }
 
     #[test]
@@ -1518,8 +1512,8 @@ mod tests {
         let (full_indices, q_dim, kv_dim, _) =
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
         assert_eq!(full_indices, vec![1, 2]);
-        assert_eq!(q_dim, 4);
-        assert_eq!(kv_dim, 0); // L1 has no k_proj, so kv_dim stays 0
+        assert_eq!(q_dim, 256);
+        assert_eq!(kv_dim, 128); // geometry SSOT remains available without k_proj
     }
 
     // ======================================================================
@@ -1587,8 +1581,7 @@ mod tests {
         // ref_q = hidden_size * q_dim * elem_bytes = 1024 * 1024 * 4 = 4194304
         // ref_q_dim = ref_q / (hidden_size * elem_bytes) = 1024
         // sliding_num_q_heads = ref_q_dim / head_dim = 1024 / 64 = 16
-        // full_num_q_heads = q_dim_full / head_dim = 512 / 64 = 8
-        // full_num_kv_heads = kv_dim_full / head_dim = 128 / 64 = 2
+        // Both full-layer head counts come from ModelGeometry, not byte-shaped args.
 
         let ref_q = 4194304usize;
         let q_dim_full_val = 2097152usize; // 1024 * 512 * 4
@@ -1614,9 +1607,8 @@ mod tests {
         assert_eq!(cfg.full_head_dim, 64);
         // Per-type Q heads: sliding=1024/64=16, full=512/64=8
         assert_eq!(cfg.sliding_num_q_heads, 16);
-        assert_eq!(cfg.full_num_q_heads, 8);
-        // full_num_kv_heads = kv_dim_full / head_dim = 128 / 64 = 2
-        assert_eq!(cfg.full_num_kv_heads, 2);
+        assert_eq!(cfg.full_num_q_heads, 16);
+        assert_eq!(cfg.full_num_kv_heads, 4);
     }
 
     // ======================================================================
@@ -1744,10 +1736,9 @@ mod tests {
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
         // Both L1 and L2 differ from ref (1024)
         assert_eq!(full_indices, vec![1, 2]);
-        // q_dim set from L1 (first diff): 2048/(256*4) = 2
-        assert_eq!(q_dim, 2);
-        // kv_dim set from L1: 1024/(256*4) = 1
-        assert_eq!(kv_dim, 1);
+        // Both dimensions come from ModelGeometry, independent of first diff layer.
+        assert_eq!(q_dim, 256);
+        assert_eq!(kv_dim, 128);
     }
 
     // ======================================================================
@@ -1813,8 +1804,8 @@ mod tests {
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
 
         assert_eq!(full_indices.len(), 39); // layers 2,4,6,...,78 = 39 even layers in 1..80
-        assert_eq!(q_dim, 4); // 4096/(256*4) = 4
-        assert_eq!(kv_dim, 2); // 2048/(256*4) = 2
+        assert_eq!(q_dim, 256);
+        assert_eq!(kv_dim, 128);
     }
 
     // ======================================================================
@@ -2500,8 +2491,8 @@ mod tests {
 
         // Only L1 and L3 have q_proj that differs from ref
         assert_eq!(full_indices, vec![1, 3]);
-        assert_eq!(q_dim, 4); // from L1
-        assert_eq!(kv_dim, 2); // from L1
+        assert_eq!(q_dim, 256); // from ModelGeometry
+        assert_eq!(kv_dim, 128); // from ModelGeometry
     }
 
     // ======================================================================
@@ -2548,8 +2539,7 @@ mod tests {
         // head_dim = 64 (from geometry SSOT)
         // sliding_num_q_heads = ref_q_dim / head_dim = 2/64 = 0
         // full_head_dim = 64 (same as sliding)
-        // full_num_q_heads = q_dim_full / head_dim = 16/64 = 0
-        // full_num_kv_heads = kv_dim_full / head_dim = 8/64 = 0
+        // Head counts come from ModelGeometry, regardless of byte-shaped args.
         let result = TestExec::build_hetero_config(
             &find_size,
             4096, // ref_q
@@ -2564,7 +2554,7 @@ mod tests {
         let cfg = result.unwrap();
         assert_eq!(cfg.sliding_head_dim, 64);
         assert_eq!(cfg.full_head_dim, 64);
-        assert_eq!(cfg.full_num_kv_heads, 0);
+        assert_eq!(cfg.full_num_kv_heads, 4);
     }
 
     // ======================================================================
@@ -3260,8 +3250,8 @@ mod tests {
             TestExec::scan_hetero_layer_diffs(&find_size, 1024, None, &geo);
 
         assert_eq!(full_indices, vec![1, 2, 3]);
-        assert_eq!(q_dim, 4);
-        assert_eq!(kv_dim, 2);
+        assert_eq!(q_dim, 256);
+        assert_eq!(kv_dim, 128);
     }
 
     // ======================================================================
@@ -4650,8 +4640,8 @@ mod tests {
         let (full_indices, q_dim, kv_dim, _) =
             TestExec::scan_hetero_layer_diffs(&find_size, 0, None, &geo);
         assert_eq!(full_indices, vec![1, 2, 3]);
-        assert_eq!(q_dim, 1); // 1024/(256*4) = 1
-        assert_eq!(kv_dim, 0); // 512/(256*4) = 0 (kv stays 0 from first diff)
+        assert_eq!(q_dim, 256);
+        assert_eq!(kv_dim, 128);
     }
 
     // ======================================================================
