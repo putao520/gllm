@@ -66,7 +66,7 @@
 
 前置条件：SymExec trace 提取完成
 后置条件：TraceOp dump 可回溯到源 OpKind
-违规检测：TraceOp dump 缺少映射关系 = dump BUG</li><li>前置条件满足: SymExec trace 提取完成</li><li>后置条件验证: TraceOp dump 可回溯到源 OpKind</li><li>违规可检测: TraceOp dump 缺少映射关系 = dump BUG</li></ol></div></section><section id="req-dump-003" data-req="REQ-DUMP-003" data-req-status="approved" data-req-domain="dump" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-DUMP-003 Dump 格式 — VmInstr 序列完整 codegen 结果 dump</h3><p>Dump 格式规范：VmInstr 序列 dump 必须包含完整 codegen 结果：
+违规检测：TraceOp dump 缺少映射关系 = dump BUG</li><li>前置条件满足: SymExec trace 提取完成</li><li>后置条件验证: TraceOp dump 可回溯到源 OpKind</li><li>违规可检测: TraceOp dump 缺少映射关系 = dump BUG</li></ol></div></section><section id="req-dump-003" data-req="REQ-DUMP-003" data-req-status="implemented" data-req-domain="dump" data-req-category="architecture" data-req-entity="ENT-COMPILER-GRAPH" data-req-api="POST /compile"><h3>REQ-DUMP-003 Dump 格式 — VmInstr 序列完整 codegen 结果 dump</h3><p>Dump 格式规范：VmInstr 序列 dump 必须包含完整 codegen 结果：
 1. VmInstr 序列（包含 emit_loop 边界）
 2. 寄存器分配结果
 3. ABI 参数绑定信息
