@@ -140,6 +140,28 @@ impl MegaKernelExecutor {
             )
         });
 
+        // Derive persistent KV storage dtype from the K projection tensor before
+        // moving the graph into the compiler. The compiler's attention lowering
+        // uses this same TensorMeta (lower_op.inc.rs:1503), so allocation and
+        // emitted MemCopy strides share one source of truth. Graphs without a
+        // persistent cache never consume kv_dtype; use the compute dtype only
+        // as the inert value carried by the compiled metadata.
+        let kv_dtype = graph.ops.iter()
+            .find_map(|op| {
+                let is_cached_attention = matches!(
+                    &op.op,
+                    gllm_kernels::compiler::graph::Op::MultiHeadAttention(spec)
+                        if spec.kv_source == gllm_kernels::compiler::graph::KvSource::FromCache
+                );
+                if !is_cached_attention {
+                    return None;
+                }
+                op.inputs.get(1)
+                    .and_then(|&tid| graph.tensor(tid))
+                    .map(|tensor| tensor.dtype)
+            })
+            .unwrap_or(geometry.compute_dtype);
+
         // Pre-resolve weight layout before moving graph into compiler.
         // Also save layer_loop_config for weight packing (needed even without GPU).
         let layer_loop_cfg = graph.layer_loop_config.clone();
@@ -406,6 +428,7 @@ impl MegaKernelExecutor {
             vocab_size: meta.vocab_size,
             hidden: meta.hidden,
             compute_dtype: geometry.compute_dtype,
+            kv_dtype,
 
             source_map: meta.source_map,
             num_kv_heads: geometry.num_kv_heads,

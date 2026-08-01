@@ -351,6 +351,12 @@ struct MegaKernelCompiled {
     /// ARCH-JIT-DATA-YIELDS: dtype stored as DType (not just elem_bytes) so that
     /// BF16 vs F16 bit patterns are decoded correctly (exponent bias differs).
     compute_dtype: gllm_kernels::types::DType,
+    /// Dtype physically written to/read from the persistent KV cache.
+    ///
+    /// This is derived from the K projection tensor in the CompilerGraph rather
+    /// than from `compute_dtype`: the latter is the scratchpad/accumulator dtype,
+    /// while KV cache geometry must follow the bytes emitted by attention.
+    kv_dtype: gllm_kernels::types::DType,
     /// Layer 6: JIT source map — VmInstr → 机器码偏移 → Op 标签映射。
     /// 仅当 debug_jit=true 时生成，供 DAP 调试器使用。
     source_map: Option<gllm_kernels::compiler::codegen::vm::debug_map::JitSourceMap>,
@@ -472,11 +478,14 @@ impl MegaKernelCompiled {
         Ok(total)
     }
 
-    /// Bytes per row of K or V data (num_kv_heads * head_dim * elem_bytes).
+    /// Bytes per row of K or V data (num_kv_heads * head_dim * KV elem_bytes).
+    ///
+    /// KV storage is independent from scratchpad accumulator storage: attention
+    /// writes the K/V projection tensor's dtype, not `compute_dtype`.
     fn kv_row_stride(&self) -> usize {
         self.num_kv_heads
             .checked_mul(self.head_dim)
-            .and_then(|v| v.checked_mul(self.elem_bytes()))
+            .and_then(|v| v.checked_mul(self.kv_dtype.size_bytes()))
             .unwrap_or(usize::MAX)
     }
 
