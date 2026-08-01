@@ -59,8 +59,9 @@ pub struct CudaBackend<E: Element = f32> {
     #[cfg(feature = "cuda")]
     pub(super) kv_meta: super::gpu_compile::GpuKvMetaStore,
     /// Uploaded weight blob on GPU: (device_ptr, bytes). Uploaded once, reused.
+    /// Arc-shared so the launcher clone observes the pointer uploaded during prepare.
     #[cfg(feature = "cuda")]
-    weight_blob_gpu: std::sync::Mutex<Option<(u64, usize)>>,
+    weight_blob_gpu: std::sync::Arc<std::sync::Mutex<Option<(u64, usize)>>>,
     /// ARCH-UNIFIED-EXEC 阶段3C: GPU mega-kernel device buffers (scratchpad/output/input).
     /// Arc<Mutex> (NOT plain Mutex) so launcher closure's cloned backend sees the
     /// SAME physical GPU memory prepared on the original backend — time-independent.
@@ -134,7 +135,7 @@ impl<E: Element> Clone for CudaBackend<E> {
             #[cfg(feature = "cuda")]
             kv_meta: self.kv_meta.clone(),
             #[cfg(feature = "cuda")]
-            weight_blob_gpu: std::sync::Mutex::new(None),
+            weight_blob_gpu: std::sync::Arc::clone(&self.weight_blob_gpu),
             #[cfg(feature = "cuda")]
             gpu_mega_buffers: std::sync::Arc::clone(&self.gpu_mega_buffers),
 
@@ -228,7 +229,7 @@ impl<E: Element> CudaBackend<E> {
             compiled_ptx: std::sync::Mutex::new(std::collections::HashMap::new()),
             swap_store: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            weight_blob_gpu: std::sync::Mutex::new(None),
+            weight_blob_gpu: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(feature = "cuda")]
             gpu_mega_buffers: std::sync::Arc::new(std::sync::Mutex::new(None)),
 
