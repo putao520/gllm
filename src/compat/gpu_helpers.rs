@@ -401,6 +401,7 @@ pub(super) fn build_mega_kernel_args(
     callback_table_ptr: u64,
     page_table_ptr_gpu: u64,
     batch_ctx_ptr: u64,
+    kv_page_header_ptr: u64,
 ) -> [usize; 23] {
     let config = super::gpu_compile::GpuKernelLaunchConfig {
         input_ids_gpu,
@@ -425,7 +426,7 @@ pub(super) fn build_mega_kernel_args(
         callback_table_ptr,
         page_table_ptr: page_table_ptr_gpu,
         batch_ctx_ptr,
-        kv_page_header_ptr: 0,
+        kv_page_header_ptr,
     };
     config.to_mega_kernel_args()
 }
