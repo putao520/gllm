@@ -39,6 +39,126 @@ struct CompileMeta {
     hidden: usize,
 }
 
+/// Anonymous mmap allocation with inaccessible pages on both sides.
+///
+/// The JIT receives the interior page-aligned pointer while accesses just beyond
+/// either end fault at the offending instruction instead of corrupting allocator
+/// metadata. The mapping is intentionally local to this diagnostic execution path.
+struct MmapGuardedBuffer {
+    ptr: *mut u8,
+    len: usize,
+    mapped_ptr: *mut libc::c_void,
+    mapped_len: usize,
+}
+
+impl MmapGuardedBuffer {
+    fn new(usable_len: usize) -> Result<Self, MegaKernelError> {
+        if usable_len == 0 {
+            return Ok(Self {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                mapped_ptr: std::ptr::null_mut(),
+                mapped_len: 0,
+            });
+        }
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return Err(MegaKernelError::Execution("invalid system page size".into()));
+        }
+        let page_size = page_size as usize;
+        let aligned_len = usable_len
+            .checked_add(page_size - 1)
+            .ok_or_else(|| MegaKernelError::Execution("guarded buffer size overflow".into()))?
+            / page_size
+            * page_size;
+        let mapped_len = aligned_len
+            .checked_add(page_size)
+            .and_then(|len| len.checked_add(page_size))
+            .ok_or_else(|| MegaKernelError::Execution("guarded mapping size overflow".into()))?;
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mapped_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapping == libc::MAP_FAILED {
+            return Err(MegaKernelError::Execution(format!(
+                "mmap guarded buffer failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let map_ptr = mapping as *mut u8;
+        let front_guard = mapping;
+        let back_guard = unsafe { map_ptr.add(page_size + aligned_len) as *mut libc::c_void };
+        if unsafe { libc::mprotect(front_guard, page_size, libc::PROT_NONE) } != 0
+            || unsafe { libc::mprotect(back_guard, page_size, libc::PROT_NONE) } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            unsafe { libc::munmap(mapping, mapped_len); }
+            return Err(MegaKernelError::Execution(format!(
+                "mprotect guarded buffer failed: {error}"
+            )));
+        }
+        Ok(Self {
+            ptr: unsafe { map_ptr.add(page_size) },
+            len: usable_len,
+            mapped_ptr: mapping,
+            mapped_len,
+        })
+    }
+
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: ptr points to the writable interior mapping and len never crosses
+        // either PROT_NONE guard page.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl std::ops::Deref for MmapGuardedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: ptr points to the writable interior mapping and len never crosses
+        // either PROT_NONE guard page.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl std::ops::DerefMut for MmapGuardedBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+impl Drop for MmapGuardedBuffer {
+    fn drop(&mut self) {
+        if self.mapped_len != 0 {
+            // SAFETY: mapped_ptr/mapped_len are the exact successful mmap pair.
+            unsafe { libc::munmap(self.mapped_ptr, self.mapped_len); }
+        }
+    }
+}
+
 pub struct MegaKernelExecutor {
     /// Mega-kernel 编译产物 (唯一路径 — SPEC/39 统一架构)
     mega_compiled: Option<MegaKernelCompiled>,
@@ -652,7 +772,10 @@ impl MegaKernelExecutor {
         // [max_new_tokens..max_new_tokens + max_new_tokens * mtp_depth) = MTP candidates.
         let output_size = max_new_tokens * (1 + mtp_depth);
         let mut output_tokens = vec![0u32; output_size];
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapGuardedBuffer::new(
+            mega.runtime_scratchpad_bytes(max_total)
+                .map_err(MegaKernelError::Execution)?,
+        )?;
 
         // Pre-fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
@@ -764,11 +887,16 @@ impl MegaKernelExecutor {
         // The mega-kernel writes K/V data here after each layer's GEMM and reads
         // from it during attention, enabling the model to attend to all previous tokens.
         let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
-        let mut kv_cache = if kv_cache_bytes > 0 {
-            vec![0u8; kv_cache_bytes]
-        } else {
-            Vec::new()
-        };
+        let kv_cache = MmapGuardedBuffer::new(kv_cache_bytes)?;
+        if std::env::var_os("GLLM_DEBUG_RESOURCE").is_some() {
+            eprintln!(
+                "[GUARD-ALLOC] sequence scratch={:p} len={} kv={:p} len={}",
+                scratchpad.as_mut_ptr(),
+                scratchpad.len(),
+                kv_cache.as_mut_ptr(),
+                kv_cache.len(),
+            );
+        }
         // @trace REQ-KV-OPT-004
         // The Executor publishes its long-lived header array before every call.
         // Keep a call-local fallback only for direct MegaKernelExecutor users.
@@ -1003,7 +1131,10 @@ impl MegaKernelExecutor {
         let num_seqs = batch_ctx.num_seqs;
         let max_decode_tokens = max_decode_steps.max(1) * num_seqs;
         let max_total = total_prefill_tokens + max_decode_tokens;
-        let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total).map_err(|e| MegaKernelError::Execution(e))?];
+        let mut scratchpad = MmapGuardedBuffer::new(
+            mega.runtime_scratchpad_bytes(max_total)
+                .map_err(MegaKernelError::Execution)?,
+        )?;
 
         // Fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
@@ -1052,11 +1183,16 @@ impl MegaKernelExecutor {
 
         // Allocate KV cache buffer
         let kv_cache_bytes = mega.kv_cache_bytes(self.num_layers);
-        let mut kv_cache = if kv_cache_bytes > 0 {
-            vec![0u8; kv_cache_bytes]
-        } else {
-            Vec::new()
-        };
+        let kv_cache = MmapGuardedBuffer::new(kv_cache_bytes)?;
+        if std::env::var_os("GLLM_DEBUG_RESOURCE").is_some() {
+            eprintln!(
+                "[GUARD-ALLOC] batch scratch={:p} len={} kv={:p} len={}",
+                scratchpad.as_mut_ptr(),
+                scratchpad.len(),
+                kv_cache.as_mut_ptr(),
+                kv_cache.len(),
+            );
+        }
         let effective_pool_base = if !kv_cache.is_empty() {
             kv_cache.as_mut_ptr() as *const u8
         } else {
