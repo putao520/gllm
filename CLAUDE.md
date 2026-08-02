@@ -969,6 +969,18 @@ cd ../gllm-kernels && cargo test --lib
 cd ../gllm-kernels && cargo test --test decision_audit
 ```
 
+## JIT 诊断工具（crash/数值发散定位基建）
+
+| 工具 | 位置 | 用途 | 用法 |
+|------|------|------|------|
+| MmapGuardedBuffer | `src/engine/mega_kernel/executor_core.inc.rs` | mprotect 在 scratchpad/KV 两侧设 PROT_NONE guard page，JIT 越界写触发 SIGSEGV 精确落在越界指令（vs munmap 黑盒） | 自动生效（诊断执行路径），SIGSEGV 时 fault_addr 落在 guard page 即越界 |
+| NaN layer probe | `tests/test_cpu_smollm2_nan_layer.rs` | 定位首个 NaN tensor + 精确 token/dim 位置 | `cargo test --test test_cpu_smollm2_nan_layer -- --nocapture`；GLLM_SINGLE_LAYER=1 看单层（embedding 不被 ping-pong 覆盖） |
+| DIAG-F32-REAL 强制 F32 读 | 同上测试内 | 绕过 DiagnosticScratchpad.compute_dtype=BF16 元数据 bug（scratchpad 实际存 F32 但元数据标 BF16 → read_dtype_aware 把 F32 当 BF16 读出垃圾） | 测试内 `f32::from_le_bytes` 直接读 scratchpad，勿用 read_dtype_aware |
+| 逐层二分 | `tests/test_diag_layer_bisect.rs` | 逐层 hidden state 对比找首个发散层 | encode_at_layer（注意 PoolMode::LastToken 在 M=1 GenerateLoop 返回全 0，用 ClsToken/MeanPool） |
+| golden 对比 | `tests/test_e2e_alignment_diagnostic.rs` | gllm logits/hidden vs PyTorch golden cosine similarity | diagnostic_prefill_logits_vs_golden（cosine_sim=NaN 提示 logits 全 0/Inf） |
+
+**关键经验**：DiagnosticScratchpad.compute_dtype 来自 derive_compute_dtype（BF16 native 硬件→BF16），但 scratchpad 实际存 F32（x86_elem_strategy 对 BF16 永远 WidenCompute→F32）。诊断 NaN/乱码时必须强制 F32 读，否则把 F32 高 16 位当 BF16 读出假 NaN/Inf。
+
 ---
 
 ## 🧪 E2E 测试约束
